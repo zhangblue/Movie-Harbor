@@ -1,4 +1,4 @@
-use super::{AttachmentTarget, LocalMediaStorage, MediaError, UploadPolicy, replace_attachment};
+use super::{AttachmentTarget, LocalMediaStorage, MediaError, UploadPolicy};
 use crate::{
     auth::{self, AuthState},
     entities::media_asset,
@@ -39,23 +39,34 @@ impl From<media_asset::Model> for MediaAssetResponse {
     }
 }
 
-pub fn router(auth_state: AuthState, storage: LocalMediaStorage, policy: UploadPolicy) -> Router {
+const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
+const MAX_FILE_NAME_BYTES: usize = 255;
+
+pub fn router(
+    auth_state: AuthState,
+    storage: LocalMediaStorage,
+    policy: UploadPolicy,
+) -> Result<Router, MediaError> {
+    let body_limit = usize::try_from(policy.max_bytes())
+        .ok()
+        .and_then(|limit| limit.checked_add(MULTIPART_OVERHEAD_BYTES))
+        .ok_or(MediaError::TooLarge)?;
     let state = MediaState {
         db: auth_state.db.clone(),
         storage,
         policy,
     };
-    Router::new()
+    Ok(Router::new()
         .route("/api/admin/media/movies/{id}/poster", post(movie_poster))
         .route("/api/admin/media/movies/{id}/video", post(movie_video))
         .route("/api/admin/media/series/{id}/poster", post(series_poster))
         .route("/api/admin/media/episodes/{id}/video", post(episode_video))
-        .route_layer(DefaultBodyLimit::disable())
+        .route_layer(DefaultBodyLimit::max(body_limit))
         .route_layer(middleware::from_fn_with_state(
             auth_state,
             auth::routes::require_session,
         ))
-        .with_state(state)
+        .with_state(state))
 }
 
 async fn movie_poster(
@@ -122,7 +133,7 @@ async fn upload(
     let field = multipart
         .next_field()
         .await
-        .map_err(|error| MediaError::Multipart(error.to_string()))?
+        .map_err(map_multipart_error)?
         .ok_or(MediaError::InvalidFileName)?;
     if field.name() != Some("file") {
         return Err(MediaError::InvalidFileName);
@@ -131,12 +142,14 @@ async fn upload(
         .file_name()
         .ok_or(MediaError::InvalidFileName)?
         .to_owned();
+    if original_name.len() > MAX_FILE_NAME_BYTES {
+        return Err(MediaError::InvalidFileName);
+    }
     let declared_mime = field
         .content_type()
         .ok_or(MediaError::UnsupportedType)?
         .to_owned();
-    let asset = replace_attachment(
-        &state.db,
+    let pending = super::upload::prepare_attachment(
         &state.storage,
         target,
         &original_name,
@@ -145,5 +158,24 @@ async fn upload(
         field,
     )
     .await?;
+    if multipart
+        .next_field()
+        .await
+        .map_err(map_multipart_error)?
+        .is_some()
+    {
+        return Err(MediaError::Multipart(
+            "exactly one file field is required".into(),
+        ));
+    }
+    let asset = super::upload::commit_attachment(&state.db, pending).await?;
     Ok(Json(asset.into()))
+}
+
+fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> MediaError {
+    if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
+        MediaError::TooLarge
+    } else {
+        MediaError::Multipart(error.to_string())
+    }
 }

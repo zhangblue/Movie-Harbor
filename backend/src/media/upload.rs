@@ -26,6 +26,14 @@ impl AttachmentTarget {
     }
 }
 
+pub(crate) struct PendingAttachment {
+    id: Uuid,
+    target: AttachmentTarget,
+    kind: MediaKind,
+    original_name: String,
+    stored: StoredFile,
+}
+
 pub async fn store_new_asset<S: ChunkSource + Send>(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -36,16 +44,12 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
     let id = Uuid::new_v4();
-    let stored = storage
+    let mut stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
-    match insert_asset(db, id, kind, original_name, stored.clone()).await {
-        Ok(asset) => Ok(asset),
-        Err(error) => {
-            let _ = storage.remove_registered(&stored.storage_key).await;
-            Err(error)
-        }
-    }
+    let asset = insert_asset(db, id, kind, original_name, &stored).await?;
+    stored.mark_registered()?;
+    Ok(asset)
 }
 
 pub async fn replace_attachment<S: ChunkSource + Send>(
@@ -57,16 +61,56 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
     policy: &UploadPolicy,
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
+    let pending = prepare_attachment(
+        storage,
+        target,
+        original_name,
+        declared_mime,
+        policy,
+        source,
+    )
+    .await?;
+    commit_attachment(db, pending).await
+}
+
+pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
+    storage: &LocalMediaStorage,
+    target: AttachmentTarget,
+    original_name: &str,
+    declared_mime: &str,
+    policy: &UploadPolicy,
+    source: S,
+) -> Result<PendingAttachment, MediaError> {
     let id = Uuid::new_v4();
     let kind = target.kind();
     let stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
-    let result = replace_in_transaction(db, target, id, kind, original_name, stored.clone()).await;
-    if result.is_err() {
-        let _ = storage.remove_registered(&stored.storage_key).await;
-    }
-    result
+    Ok(PendingAttachment {
+        id,
+        target,
+        kind,
+        original_name: original_name.to_owned(),
+        stored,
+    })
+}
+
+pub(crate) async fn commit_attachment(
+    db: &DatabaseConnection,
+    mut pending: PendingAttachment,
+) -> Result<media_asset::Model, MediaError> {
+    let asset = replace_in_transaction(
+        db,
+        pending.target,
+        pending.id,
+        pending.kind,
+        &pending.original_name,
+        &pending.stored,
+    )
+    .await?;
+    let stored = &mut pending.stored;
+    stored.mark_registered()?;
+    Ok(asset)
 }
 
 async fn replace_in_transaction(
@@ -75,7 +119,7 @@ async fn replace_in_transaction(
     id: Uuid,
     kind: MediaKind,
     original_name: &str,
-    stored: StoredFile,
+    stored: &StoredFile,
 ) -> Result<media_asset::Model, MediaError> {
     let tx = db.begin().await?;
     let asset = insert_asset(&tx, id, kind, original_name, stored).await?;
@@ -98,16 +142,16 @@ async fn insert_asset<C: sea_orm::ConnectionTrait>(
     id: Uuid,
     kind: MediaKind,
     original_name: &str,
-    stored: StoredFile,
+    stored: &StoredFile,
 ) -> Result<media_asset::Model, MediaError> {
     Ok(media_asset::ActiveModel {
         id: Set(id),
-        storage_key: Set(stored.storage_key),
+        storage_key: Set(stored.storage_key.clone()),
         original_name: Set(original_name.to_owned()),
-        mime_type: Set(stored.mime_type),
+        mime_type: Set(stored.mime_type.clone()),
         byte_size: Set(stored.byte_size),
         purpose: Set(kind.purpose().to_owned()),
-        checksum_sha256: Set(Some(stored.checksum_sha256)),
+        checksum_sha256: Set(Some(stored.checksum_sha256.clone())),
         ..Default::default()
     }
     .insert(db)

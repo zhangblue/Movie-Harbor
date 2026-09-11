@@ -11,7 +11,7 @@ use axum::{
 };
 use std::{fmt, io};
 
-pub use storage::{ChunkSource, LocalMediaStorage, StoredFile};
+pub use storage::{ChunkSource, LocalMediaStorage, StorageEvent, StorageHooks, StoredFile};
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
 

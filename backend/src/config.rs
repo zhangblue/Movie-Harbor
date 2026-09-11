@@ -66,7 +66,7 @@ impl Config {
                 .map_err(|_| ConfigError::Invalid("MAX_UPLOAD_BYTES"))
         })?;
 
-        if max_upload_bytes == 0 {
+        if max_upload_bytes == 0 || max_upload_bytes > i64::MAX as u64 {
             return Err(ConfigError::Invalid("MAX_UPLOAD_BYTES"));
         }
         let allowed_video_mime_types =
@@ -183,6 +183,21 @@ mod tests {
         values.insert("VIDEO_MIME_ALLOWLIST", "video/mp4, video/ogg");
         let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
         assert_eq!(config.allowed_video_mime_types, ["video/mp4", "video/ogg"]);
+    }
+
+    // Catches a value that cannot be represented in the persisted byte_size column.
+    #[test]
+    fn maximum_upload_size_must_fit_the_database_integer() {
+        let mut values = required_values();
+        values.insert("MAX_UPLOAD_BYTES", "9223372036854775808");
+        assert!(matches!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+            Err(ConfigError::Invalid("MAX_UPLOAD_BYTES"))
+        ));
+        assert!(matches!(
+            crate::media::UploadPolicy::new(i64::MAX as u64 + 1, ["video/mp4"]),
+            Err(crate::media::MediaError::TooLarge)
+        ));
     }
 
     #[test]

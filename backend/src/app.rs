@@ -1,5 +1,6 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
+use std::time::Duration;
 
 #[derive(Serialize)]
 struct HealthResponse {
@@ -31,11 +32,12 @@ pub async fn build(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
     )?;
-    crate::media::cleanup::spawn(db.clone(), storage.clone());
+    crate::media::cleanup::recover_uploads(&db, &storage, Duration::from_secs(3600)).await?;
+    let _cleanup_worker = crate::media::cleanup::spawn(db.clone(), storage.clone());
     Ok(router()
         .merge(crate::auth::routes::router(state.clone()))
         .merge(crate::genres::routes::router(state.clone()))
-        .merge(crate::media::routes::router(state, storage, policy)))
+        .merge(crate::media::routes::router(state, storage, policy)?))
 }
 
 async fn health() -> Json<HealthResponse> {

@@ -5,7 +5,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const BATCH_SIZE: u64 = 100;
@@ -29,44 +29,96 @@ pub async fn run_once(
         .await?;
     let mut outcome = CleanupOutcome::default();
     for job in jobs {
-        match process_job(db, storage, job.id).await {
-            Ok(()) => outcome.succeeded += 1,
-            Err(error) => {
-                record_failure(db, job.id, &error).await?;
-                outcome.failed += 1;
-            }
+        if process_job(db, storage, job.id).await? {
+            outcome.succeeded += 1;
+        } else {
+            outcome.failed += 1;
         }
     }
     Ok(outcome)
+}
+
+pub async fn recover_uploads(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    stale_age: Duration,
+) -> Result<(), MediaError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for entry in storage.incoming_entries()? {
+        let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
+        if now.saturating_sub(modified) < stale_age.as_secs() {
+            continue;
+        }
+        if entry.name.ends_with(".part") {
+            storage.remove_incoming(&entry.name)?;
+            continue;
+        }
+        if entry.name.ends_with(".pending") {
+            let storage_key = storage.read_pending_marker(&entry.name)?;
+            let registered = media_asset::Entity::find()
+                .filter(media_asset::Column::StorageKey.eq(storage_key.clone()))
+                .one(db)
+                .await?
+                .is_some();
+            if !registered {
+                storage.remove_registered(&storage_key).await?;
+            }
+            storage.remove_incoming(&entry.name)?;
+        }
+    }
+    Ok(())
 }
 
 async fn process_job(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
     job_id: Uuid,
-) -> Result<(), MediaError> {
+) -> Result<bool, MediaError> {
     let tx = db.begin().await?;
     let Some(job) = file_cleanup_job::Entity::find_by_id(job_id)
         .lock_exclusive()
         .one(&tx)
         .await?
     else {
-        return Ok(());
+        tx.commit().await?;
+        return Ok(true);
     };
+    let attempt = process_locked_job(&tx, storage, &job).await;
+    if let Err(error) = attempt {
+        if matches!(error, MediaError::Database(_)) {
+            return Err(error);
+        }
+        let mut active = job.into_active_model();
+        active.attempts = Set(active.attempts.as_ref().saturating_add(1));
+        active.last_error = Set(Some(sanitize_error(&error)));
+        active.next_attempt_at = Set((Utc::now() + ChronoDuration::minutes(5)).fixed_offset());
+        active.update(&tx).await?;
+        tx.commit().await?;
+        return Ok(false);
+    }
+    tx.commit().await?;
+    Ok(true)
+}
+
+async fn process_locked_job(
+    tx: &DatabaseTransaction,
+    storage: &LocalMediaStorage,
+    job: &file_cleanup_job::Model,
+) -> Result<(), MediaError> {
     let asset = media_asset::Entity::find_by_id(job.media_asset_id)
         .lock_exclusive()
-        .one(&tx)
+        .one(tx)
         .await?
         .ok_or(MediaError::InvalidStorageKey)?;
-    ensure_unreferenced(&tx, asset.id).await?;
+    ensure_unreferenced(tx, asset.id).await?;
     storage.remove_registered(&asset.storage_key).await?;
     file_cleanup_job::Entity::delete_by_id(job.id)
-        .exec(&tx)
+        .exec(tx)
         .await?;
-    media_asset::Entity::delete_by_id(asset.id)
-        .exec(&tx)
-        .await?;
-    tx.commit().await?;
+    media_asset::Entity::delete_by_id(asset.id).exec(tx).await?;
     Ok(())
 }
 
@@ -93,22 +145,6 @@ async fn ensure_unreferenced(tx: &DatabaseTransaction, asset_id: Uuid) -> Result
     Ok(())
 }
 
-async fn record_failure(
-    db: &DatabaseConnection,
-    job_id: Uuid,
-    error: &MediaError,
-) -> Result<(), MediaError> {
-    let Some(job) = file_cleanup_job::Entity::find_by_id(job_id).one(db).await? else {
-        return Ok(());
-    };
-    let mut active = job.into_active_model();
-    active.attempts = Set(active.attempts.as_ref().saturating_add(1));
-    active.last_error = Set(Some(sanitize_error(error)));
-    active.next_attempt_at = Set((Utc::now() + ChronoDuration::minutes(5)).fixed_offset());
-    active.update(db).await?;
-    Ok(())
-}
-
 fn sanitize_error(error: &MediaError) -> String {
     let mut result = String::new();
     for character in error
@@ -124,11 +160,13 @@ fn sanitize_error(error: &MediaError) -> String {
     result
 }
 
-pub fn spawn(db: DatabaseConnection, storage: LocalMediaStorage) {
+pub fn spawn(db: DatabaseConnection, storage: LocalMediaStorage) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
-            let _ = run_once(&db, &storage).await;
+            if let Err(error) = run_once(&db, &storage).await {
+                eprintln!("media cleanup worker failed: {error}");
+            }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
-    });
+    })
 }
