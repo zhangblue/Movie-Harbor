@@ -467,7 +467,7 @@ git commit -m "feat: build public catalog and details"
 - 创建：`frontend/admin-web/src/styles.css`
 - 修改：`frontend/admin-web/src/main.tsx`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 覆盖未登录跳转、登录失败提示、右上角管理员名称下拉菜单、修改密码后返回登录、内容形态/状态下拉查询、紧凑名称框、海报列、状态对应按钮和操作列右对齐。
 
@@ -475,15 +475,15 @@ git commit -m "feat: build public catalog and details"
 
 预期：FAIL，后台壳和内容列表不存在。
 
-- [ ] **步骤 2：实现认证壳和同源会话**
+- [x] **步骤 2：实现认证壳和同源会话**
 
 启动时读取 `/api/admin/session`；401 展示登录页；写请求使用会话返回的 CSRF token；账号菜单点击外部或按 Escape 关闭。
 
-- [ ] **步骤 3：实现内容列表**
+- [x] **步骤 3：实现内容列表**
 
 迁移审核通过的表格视觉，操作按钮右对齐并保持约 24–40px 右侧留白；不同状态只渲染服务端允许的动作；冲突响应提示刷新。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行：`npm test --workspace @movie-harbor/admin-web`
 
