@@ -48,6 +48,23 @@ pub struct VersionRequest {
     pub version: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct DeleteImpactResponse {
+    pub name: String,
+    pub version: i64,
+    pub season_count: u64,
+    pub episode_count: u64,
+    pub exclusive_media_count: u64,
+    pub shared_media_count: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteResultResponse {
+    pub cleanup_pending: bool,
+    pub job_count: usize,
+    pub warning: Option<&'static str>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AssociateMediaRequest {
     pub version: i64,

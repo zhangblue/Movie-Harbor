@@ -1,7 +1,7 @@
 import { apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
 import type {
   ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
-  MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
+  DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
 } from "./types";
 
@@ -68,8 +68,11 @@ export async function associateMovieMedia(id: string, slot: "poster" | "video", 
 export async function transitionMovie(id: string, action: LifecycleAction, version: number): Promise<MovieResponse> {
   return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id, action), { method: "POST", json: { version } }));
 }
-export async function deleteMovie(id: string, version: number): Promise<void> {
-  await apiRequest(apiPath("admin", "movies", id), { method: "DELETE", json: { version } });
+export async function getMovieDeleteImpact(id: string): Promise<DeleteImpactResponse> {
+  return required(await apiRequest<DeleteImpactResponse>(apiPath("admin", "movies", id, "delete-impact")));
+}
+export async function deleteMovie(id: string, version: number): Promise<DeleteResultResponse> {
+  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "movies", id), { method: "DELETE", json: { version } }));
 }
 
 export async function listSeries(query: ListQuery = {}): Promise<SeriesResponse[]> {
@@ -87,8 +90,11 @@ export async function updateSeries(id: string, input: UpdateSeriesRequest): Prom
 export async function transitionSeries(id: string, action: LifecycleAction, version: number): Promise<SeriesResponse> {
   return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", id, action), { method: "POST", json: { version } }));
 }
-export async function deleteSeries(id: string, version: number): Promise<void> {
-  await apiRequest(apiPath("admin", "series", id), { method: "DELETE", json: { version } });
+export async function getSeriesDeleteImpact(id: string): Promise<DeleteImpactResponse> {
+  return required(await apiRequest<DeleteImpactResponse>(apiPath("admin", "series", id, "delete-impact")));
+}
+export async function deleteSeries(id: string, version: number): Promise<DeleteResultResponse> {
+  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", id), { method: "DELETE", json: { version } }));
 }
 
 export async function createSeason(seriesId: string, number: number, version: number): Promise<SeriesResponse> {

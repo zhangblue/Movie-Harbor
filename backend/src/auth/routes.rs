@@ -64,30 +64,39 @@ async fn login(
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
     let window = state.limits.for_login(address.ip(), &input.name);
-    let mut window = window.lock().await;
-    if window.blocked(Instant::now()) {
+    if window.blocked(Instant::now()).await {
         return Err(AuthError(StatusCode::TOO_MANY_REQUESTS));
     }
-    let tx = state.db.begin().await?;
-    // Share this row lock with password changes so an old password cannot mint a session after revocation.
     let admin = admin_user::Entity::find()
-        .lock_exclusive()
-        .one(&tx)
+        .one(&state.db)
         .await?
         .ok_or(AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
     // Always run Argon2, including unknown names, to avoid account-dependent fast failures.
-    let password_ok = password::verify(input.password, admin.password_hash.clone()).await?;
+    let verified_hash = admin.password_hash.clone();
+    let password_ok =
+        password::verify_limited(&state.password_work, input.password, verified_hash.clone())
+            .await?;
     if !password_ok || input.name != admin.name {
-        let limited = window.failure(Instant::now());
+        let limited = window.failure(Instant::now()).await;
         return Err(AuthError(if limited {
             StatusCode::TOO_MANY_REQUESTS
         } else {
             StatusCode::UNAUTHORIZED
         }));
     }
+    let tx = state.db.begin().await?;
+    let admin = admin_user::Entity::find_by_id(admin.id)
+        .lock_exclusive()
+        .one(&tx)
+        .await?
+        .ok_or(AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
+    if admin.password_hash != verified_hash || input.name != admin.name {
+        window.failure(Instant::now()).await;
+        return Err(AuthError(StatusCode::UNAUTHORIZED));
+    }
     let raw = session::create(&tx, &admin).await?;
     tx.commit().await?;
-    window.success();
+    window.success().await;
     Ok((
         [
             (
@@ -137,18 +146,32 @@ async fn change_password(
     if input.new_password.trim().is_empty() {
         return Err(AuthError(StatusCode::BAD_REQUEST));
     }
+    let admin = admin_user::Entity::find_by_id(current.admin.id)
+        .one(&state.db)
+        .await?
+        .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
+    let verified_hash = admin.password_hash.clone();
+    if !password::verify_limited(
+        &state.password_work,
+        input.current_password,
+        verified_hash.clone(),
+    )
+    .await?
+    {
+        return Err(AuthError(StatusCode::UNAUTHORIZED));
+    }
+    let hash = password::hash_limited(&state.password_work, input.new_password).await?;
     let tx = state.db.begin().await?;
     let admin = admin_user::Entity::find_by_id(current.admin.id)
         .lock_exclusive()
         .one(&tx)
         .await?
         .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
-    // A preceding password change may have revoked this session while waiting for the row lock.
+    // A preceding password change may have revoked this session while work happened outside the transaction.
     session::authenticate(&tx, &headers).await?;
-    if !password::verify(input.current_password, admin.password_hash.clone()).await? {
+    if admin.password_hash != verified_hash {
         return Err(AuthError(StatusCode::UNAUTHORIZED));
     }
-    let hash = password::hash(input.new_password).await?;
     let mut model: admin_user::ActiveModel = admin.into();
     model.password_hash = Set(hash);
     model.updated_at = Set(chrono::Utc::now().fixed_offset());

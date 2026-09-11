@@ -2,10 +2,10 @@ use crate::{
     entities::{episode, season, series},
     genres,
     media::{
-        LocalMediaStorage, is_publishable_asset,
-        references::{lock_for_reference_removal, queue_locked_if_unreferenced},
+        LocalMediaStorage, cleanup, is_publishable_asset,
+        references::{lock_for_reference_removal, queue_locked_if_unreferenced, reference_count},
     },
-    movies::dto::Patch,
+    movies::dto::{DeleteImpactResponse, DeleteResultResponse, Patch},
 };
 use axum::{
     Json,
@@ -17,7 +17,7 @@ use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
     QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::{
@@ -527,9 +527,10 @@ pub async fn delete_episode(
 
 pub async fn delete_series(
     db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
     id: Uuid,
     expected_version: i64,
-) -> Result<(), SeriesError> {
+) -> Result<DeleteResultResponse, SeriesError> {
     valid_version(expected_version)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
@@ -557,9 +558,57 @@ pub async fn delete_series(
     }
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     repository::delete_series(&tx, id, expected_version).await?;
-    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
+    let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
-    Ok(())
+    let job_count = queued_assets.len();
+    let cleanup = cleanup::run_for_assets(db, storage, &queued_assets).await;
+    let cleanup_pending = match cleanup {
+        Ok(outcome) => outcome.failed > 0,
+        Err(_) => job_count > 0,
+    };
+    Ok(DeleteResultResponse {
+        cleanup_pending,
+        job_count,
+        warning: cleanup_pending.then_some("media cleanup pending retry"),
+    })
+}
+
+pub async fn delete_impact(
+    db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<DeleteImpactResponse, SeriesError> {
+    let model = repository::find(db, id).await?;
+    let seasons = repository::seasons(db, id).await?;
+    let mut episode_count = 0_u64;
+    let mut references = HashMap::<Uuid, u64>::new();
+    if let Some(asset_id) = model.poster_asset_id {
+        *references.entry(asset_id).or_default() += 1;
+    }
+    for season in &seasons {
+        for episode in repository::episodes(db, season.id).await? {
+            episode_count += 1;
+            if let Some(asset_id) = episode.video_asset_id {
+                *references.entry(asset_id).or_default() += 1;
+            }
+        }
+    }
+    let mut exclusive_media_count = 0;
+    let mut shared_media_count = 0;
+    for (asset_id, within) in references {
+        if reference_count(db, asset_id).await? > within {
+            shared_media_count += 1;
+        } else {
+            exclusive_media_count += 1;
+        }
+    }
+    Ok(DeleteImpactResponse {
+        name: model.name,
+        version: model.version,
+        season_count: seasons.len() as u64,
+        episode_count,
+        exclusive_media_count,
+        shared_media_count,
+    })
 }
 
 async fn response<C: ConnectionTrait>(

@@ -20,6 +20,7 @@ pub struct AuthState {
     pub cookie_secure: bool,
     pub public_origin: url::Url,
     pub limits: Arc<rate_limit::RateLimiter>,
+    pub password_work: Arc<tokio::sync::Semaphore>,
 }
 
 pub async fn initialize(

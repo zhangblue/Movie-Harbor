@@ -1,7 +1,7 @@
 use crate::entities::{episode, file_cleanup_job, media_asset, movie, series};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, QueryFilter, QuerySelect, Set,
-    sea_query::OnConflict,
+    ColumnTrait, ConnectionTrait, DbErr, EntityTrait, PaginatorTrait, QueryFilter, QuerySelect,
+    Set, sea_query::OnConflict,
 };
 use uuid::Uuid;
 
@@ -33,7 +33,8 @@ where
 pub(crate) async fn queue_locked_if_unreferenced<C: ConnectionTrait>(
     db: &C,
     locked_ids: &[Uuid],
-) -> Result<(), DbErr> {
+) -> Result<Vec<Uuid>, DbErr> {
+    let mut queued = Vec::new();
     for asset_id in locked_ids {
         if is_referenced(db, *asset_id).await? {
             continue;
@@ -50,8 +51,32 @@ pub(crate) async fn queue_locked_if_unreferenced<C: ConnectionTrait>(
         )
         .exec_without_returning(db)
         .await?;
+        queued.push(*asset_id);
     }
-    Ok(())
+    Ok(queued)
+}
+
+pub(crate) async fn reference_count<C: ConnectionTrait>(
+    db: &C,
+    asset_id: Uuid,
+) -> Result<u64, DbErr> {
+    let movie_posters = movie::Entity::find()
+        .filter(movie::Column::PosterAssetId.eq(asset_id))
+        .count(db)
+        .await?;
+    let movie_videos = movie::Entity::find()
+        .filter(movie::Column::VideoAssetId.eq(asset_id))
+        .count(db)
+        .await?;
+    let series_posters = series::Entity::find()
+        .filter(series::Column::PosterAssetId.eq(asset_id))
+        .count(db)
+        .await?;
+    let episode_videos = episode::Entity::find()
+        .filter(episode::Column::VideoAssetId.eq(asset_id))
+        .count(db)
+        .await?;
+    Ok(movie_posters + movie_videos + series_posters + episode_videos)
 }
 
 pub(crate) async fn is_referenced<C: ConnectionTrait>(

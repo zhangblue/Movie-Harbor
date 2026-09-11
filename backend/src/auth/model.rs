@@ -34,7 +34,12 @@ impl IntoResponse for AuthError {
             StatusCode::BAD_REQUEST => "invalid request",
             _ => "internal server error",
         };
-        (self.0, Json(serde_json::json!({"error": message}))).into_response()
+        (
+            self.0,
+            [("cache-control", "no-store")],
+            Json(serde_json::json!({"error": message})),
+        )
+            .into_response()
     }
 }
 

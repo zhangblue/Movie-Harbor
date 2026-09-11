@@ -52,6 +52,8 @@ docker compose -p movie-harbor up -d --build --wait
 
 首次启动时，API 自动执行数据库迁移。只有数据库内尚无管理员时，`ADMIN_NAME` 和 `ADMIN_INITIAL_PASSWORD` 才会创建初始账号；之后修改 `.env` 或重启容器都不会覆盖已有管理员名称和密码。首次登录并修改密码后，应从 `.env` 移除初始凭据或换成无意义的占位值，但其余必填变量仍须保留。
 
+数据库连接必须二选一：直接运行 API 时可只设置 `DATABASE_URL`；Compose 使用 `DATABASE_HOST`、`DATABASE_PORT`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 这组分项变量。为避免迁移和运行时误连不同数据库，两种方式同时出现时 API 会拒绝启动。
+
 示例配置使用纯 HTTP 入口，因此 `COOKIE_SECURE=false` 只允许 `localhost` 或环回地址测试。正式部署应把 `PUBLIC_ORIGIN` 设为实际的 `https://` 来源并保持 `COOKIE_SECURE=true`，再由部署者用域名、上游反向代理或自己的 Caddy TLS 配置启用 HTTPS。不要在公网以明文 HTTP 提供管理后台。
 
 常用运维命令：

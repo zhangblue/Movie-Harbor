@@ -1,6 +1,7 @@
 use crate::{
     auth::{self, AuthState},
     media::LocalMediaStorage,
+    movies::dto::{DeleteImpactResponse, DeleteResultResponse},
 };
 use axum::{
     Json, Router,
@@ -46,6 +47,10 @@ pub fn router(
         .route(
             "/api/admin/series/{series_id}",
             get(detail).patch(update).delete(delete_series),
+        )
+        .route(
+            "/api/admin/series/{series_id}/delete-impact",
+            get(delete_impact),
         )
         .route(
             "/api/admin/series/{series_id}/publish",
@@ -350,9 +355,25 @@ async fn delete_series(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
     Json(input): Json<VersionRequest>,
-) -> Result<StatusCode, SeriesError> {
-    service::delete_series(&state.db, parse_id(series_id)?, input.version).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<Json<DeleteResultResponse>, SeriesError> {
+    Ok(Json(
+        service::delete_series(
+            &state.db,
+            &state.storage,
+            parse_id(series_id)?,
+            input.version,
+        )
+        .await?,
+    ))
+}
+
+async fn delete_impact(
+    State(state): State<SeriesState>,
+    Path(series_id): Path<String>,
+) -> Result<Json<DeleteImpactResponse>, SeriesError> {
+    Ok(Json(
+        service::delete_impact(&state.db, parse_id(series_id)?).await?,
+    ))
 }
 
 fn parse_id(value: String) -> Result<Uuid, SeriesError> {

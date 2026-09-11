@@ -26,6 +26,7 @@ pub async fn build(
         cookie_secure: config.cookie_secure,
         public_origin,
         limits: Default::default(),
+        password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
     };
     let storage = crate::media::LocalMediaStorage::initialize(&config.media_dir).await?;
     let policy = crate::media::UploadPolicy::new(

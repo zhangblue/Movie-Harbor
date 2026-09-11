@@ -107,8 +107,10 @@ it("makes catalog pages after the first accessible and resets page when filterin
   const user = userEvent.setup();
   render(<App />);
   await screen.findByRole("link", { name: "查看远方来信详情" });
+  expect(screen.getByRole("heading", { name: "全部影片" })).not.toHaveFocus();
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
+  expect(screen.getByRole("heading", { name: "全部影片" })).toHaveFocus();
   expect(new URLSearchParams(location.search).get("page")).toBe("2");
   await user.click(screen.getByRole("button", { name: "电影" }));
   await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());

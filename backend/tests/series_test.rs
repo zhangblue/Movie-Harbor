@@ -20,6 +20,7 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
@@ -232,6 +233,7 @@ async fn create_asset(
     purpose: &str,
     mime_type: &str,
 ) -> media_asset::Model {
+    const CONTENT: &[u8] = b"registered media";
     let id = Uuid::new_v4();
     let simple = id.simple().to_string();
     let extension = match mime_type {
@@ -243,7 +245,7 @@ async fn create_asset(
     let key = format!("{purpose}/{}/{}.{}", &simple[..2], simple, extension);
     let path = root.join(&key);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, b"registered media").unwrap();
+    std::fs::write(path, CONTENT).unwrap();
     media_asset::ActiveModel {
         id: Set(id),
         storage_key: Set(key),
@@ -251,7 +253,7 @@ async fn create_asset(
         mime_type: Set(mime_type.into()),
         byte_size: Set(16),
         purpose: Set(purpose.into()),
-        checksum_sha256: Set(None),
+        checksum_sha256: Set(Some(format!("{:x}", Sha256::digest(CONTENT)))),
         ..Default::default()
     }
     .insert(db)
@@ -1118,7 +1120,7 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
         &csrf,
     )
     .await;
-    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(deleted.status(), StatusCode::OK);
     assert!(
         series::Entity::find_by_id(series_id.parse::<Uuid>().unwrap())
             .one(&db)
@@ -1142,8 +1144,8 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
         .into_iter()
         .map(|job| job.media_asset_id)
         .collect::<Vec<_>>();
-    assert!(cleanup_ids.contains(&poster.id));
-    assert!(cleanup_ids.contains(&exclusive_video.id));
+    assert!(!cleanup_ids.contains(&poster.id));
+    assert!(!cleanup_ids.contains(&exclusive_video.id));
     assert!(!cleanup_ids.contains(&shared_video.id));
 
     let rollback = create_series(&app, &cookie, &csrf, "Rollback tree").await;
@@ -1216,6 +1218,10 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
 #[tokio::test]
 async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job() {
     let db = database().await;
+    let root = TempRoot::new();
+    let storage = movie_harbor_api::media::LocalMediaStorage::initialize(root.as_ref())
+        .await
+        .unwrap();
     let asset = media_asset::ActiveModel {
         id: Set(Uuid::new_v4()),
         storage_key: Set("poster/concurrent-shared.png".into()),
@@ -1285,10 +1291,14 @@ async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job
         ConnectOptions::new(format!("{url}?application_name={second_application}"));
     second_options.set_schema_search_path(schema);
     let second_db = Database::connect(second_options).await.unwrap();
-    let first_delete =
-        tokio::spawn(async move { series_service::delete_series(&first_db, first.id, 1).await });
-    let second_delete =
-        tokio::spawn(async move { series_service::delete_series(&second_db, second.id, 1).await });
+    let first_storage = storage.clone();
+    let second_storage = storage;
+    let first_delete = tokio::spawn(async move {
+        series_service::delete_series(&first_db, &first_storage, first.id, 1).await
+    });
+    let second_delete = tokio::spawn(async move {
+        series_service::delete_series(&second_db, &second_storage, second.id, 1).await
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let waiting = db
@@ -1603,6 +1613,94 @@ async fn archived_series_preserves_independent_child_lifecycles() {
     );
 }
 
+// Catches delete confirmation flattening the hierarchy or using stale detail data.
+#[tokio::test]
+async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Impact series").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "First").await).await;
+    let first_episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 3, 2, "Second").await).await;
+    let second_episode_id = hierarchy["seasons"][0]["episodes"][1]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
+    let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
+    attach_episode_video(&db, first_episode_id, first_video.id).await;
+    attach_episode_video(&db, second_episode_id, second_video.id).await;
+
+    let impact = request(
+        &app,
+        "GET",
+        &format!("/api/admin/series/{series_id}/delete-impact"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(impact.status(), StatusCode::OK);
+    assert_eq!(
+        body(impact).await,
+        json!({
+            "name":"Impact series", "version":4, "season_count":1, "episode_count":2,
+            "exclusive_media_count":3, "shared_media_count":0
+        })
+    );
+    assert_eq!(
+        write(
+            &app,
+            "DELETE",
+            &format!("/api/admin/series/{series_id}"),
+            json!({"version":3}),
+            &cookie,
+            &csrf
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/series/{series_id}"),
+        json!({"version":4}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        body(deleted).await,
+        json!({"cleanup_pending":false,"job_count":3,"warning":null})
+    );
+    assert_eq!(
+        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
+        0
+    );
+    assert!(!root.as_ref().join(poster.storage_key).exists());
+    assert!(!root.as_ref().join(first_video.storage_key).exists());
+    assert!(!root.as_ref().join(second_video.storage_key).exists());
+}
+
 // Catches malformed identifiers being confused with absent series resources.
 #[tokio::test]
 async fn invalid_and_missing_series_identifiers_are_mapped_consistently() {
@@ -1879,6 +1977,6 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
 }

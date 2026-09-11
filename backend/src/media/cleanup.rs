@@ -38,6 +38,26 @@ pub async fn run_once(
     Ok(outcome)
 }
 
+pub async fn run_for_assets(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    asset_ids: &[Uuid],
+) -> Result<CleanupOutcome, MediaError> {
+    let jobs = file_cleanup_job::Entity::find()
+        .filter(file_cleanup_job::Column::MediaAssetId.is_in(asset_ids.iter().copied()))
+        .all(db)
+        .await?;
+    let mut outcome = CleanupOutcome::default();
+    for job in jobs {
+        if process_job(db, storage, job.id).await? {
+            outcome.succeeded += 1;
+        } else {
+            outcome.failed += 1;
+        }
+    }
+    Ok(outcome)
+}
+
 pub async fn recover_uploads(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,

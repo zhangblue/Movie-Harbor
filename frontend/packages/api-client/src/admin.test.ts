@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { changePassword, createGenre, getSession } from "./admin";
+import { changePassword, createGenre, deleteMovie, getMovieDeleteImpact, getSession } from "./admin";
 import { ApiError, clearCsrfToken } from "./http";
 
 afterEach(() => {
@@ -56,4 +56,22 @@ it("keeps the session CSRF token when a password change is rejected", async () =
   await createGenre("剧情");
 
   expect(new Headers(requests[2]?.headers).get("x-csrf-token")).toBe("still-valid");
+});
+
+it("uses the authoritative delete-impact endpoint and returns cleanup state", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+    urls.push(String(url));
+    return new Response(urls.length === 1
+      ? '{"name":"Movie","version":7,"season_count":0,"episode_count":0,"exclusive_media_count":1,"shared_media_count":1}'
+      : '{"cleanup_pending":true,"job_count":1,"warning":"media cleanup pending retry"}',
+    { headers: { "content-type": "application/json" } });
+  }));
+
+  expect((await getMovieDeleteImpact("movie/1")).version).toBe(7);
+  expect((await deleteMovie("movie/1", 7)).cleanup_pending).toBe(true);
+  expect(urls).toEqual([
+    "/api/admin/movies/movie%2F1/delete-impact",
+    "/api/admin/movies/movie%2F1",
+  ]);
 });

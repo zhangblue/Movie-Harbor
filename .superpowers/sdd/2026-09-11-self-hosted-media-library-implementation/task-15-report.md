@@ -67,3 +67,22 @@ Base: `fb987c7`
 - Demo files and implementation-plan checkboxes were not changed.
 
 Commit message: `feat: deliver self-hosted media library`.
+
+## Final review fix round 1
+
+- Replaced the bypassable `(IP, input-name)` login budget with independent IP and normalized-account budgets. Argon2 work is capped by a two-permit semaphore and runs outside database transactions; login then briefly locks and confirms the verified hash is unchanged, so concurrent password changes cannot authenticate an old hash.
+- Added homogeneous `no-store` authentication errors and regression coverage for random-name IP exhaustion, independent client IPs, administrator row-lock contention, and concurrent password replacement.
+- Added authoritative movie/series delete-impact endpoints with current name/version, hierarchy counts, and reference-counted exclusive/shared media totals. DELETE now returns cleanup state, attempts exclusive media cleanup after commit, retains failed jobs for retry, and surfaces a persistent accessible administrator warning.
+- Added shared API-client DTO/route coverage and changed both deletion dialogs to use server impact data rather than details. A Compose E2E failure exposed deletion of a newly-created movie using the nullable route id; the dialog now uses the created model id.
+- Added reusable PostgreSQL `TestDatabase` schema drop guard coverage for the new auth response regression without globally deleting schemas owned by concurrent suites.
+- Moved post-pagination focus to the catalog heading after results load without stealing focus on initial render, rejected simultaneous `DATABASE_URL` and component settings, and documented the mutually exclusive database configuration modes.
+
+Final verification after the review fixes:
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- `TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test cargo test --workspace`: exit 0; **121 passed**.
+- `npm test --workspaces`: exit 0; public **34**, admin **68**, API client **21**, UI **31** = **154 passed**.
+- `npm run build --workspaces`: exit 0.
+- `npm run test:e2e`: first review-fix run reached **3/4** then failed in the admin deletion flow with `invalid movie request`; after the id fix the isolated deployment passed **4/4**, restart persistence passed **1/1**, and the runner removed only `mh-task15-e2e` resources.
+- `git diff --check`: exit 0.

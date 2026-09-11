@@ -20,6 +20,7 @@ export function App() {
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [deletionNotice, setDeletionNotice] = useState("");
   const [section, setSection] = useState("内容管理");
   const [moviePage, setMoviePage] = useState<{ id: string | null; deleting: boolean } | null>(null);
   const [seriesPage, setSeriesPage] = useState<{ id: string | null; deleting: boolean } | null>(null);
@@ -93,11 +94,12 @@ export function App() {
         {["内容管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
       </nav><main className="admin-content">
         {error && <p role="alert" className="error-message">{error}</p>}
+        {deletionNotice && <p role="alert" className="error-message">{deletionNotice}</p>}
         {section === "内容管理" && creating && <Field label="新建内容形态" className="movie-field-short"><select value={seriesPage ? "series" : "movie"} onChange={(event) => {
           if (event.target.value === "series") { setMoviePage(null); setSeriesPage({ id: null, deleting: false }); }
           else { setSeriesPage(null); setMoviePage({ id: null, deleting: false }); }
         }}><option value="movie">电影</option><option value="series">剧集</option></select></Field>}
-        {section === "内容管理" ? seriesPage ? <SeriesEditor seriesId={seriesPage.id} initialDelete={seriesPage.deleting} resumeCreation={creating} onCreated={(id) => setSeriesPage({ id, deleting: false })} onBack={() => { setSeriesPage(null); setCreating(false); }} onExpired={onExpired} /> : moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onBack={() => { setMoviePage(null); setCreating(false); }} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
+        {section === "内容管理" ? seriesPage ? <SeriesEditor seriesId={seriesPage.id} initialDelete={seriesPage.deleting} resumeCreation={creating} onCreated={(id) => setSeriesPage({ id, deleting: false })} onDeleteWarning={setDeletionNotice} onBack={() => { setSeriesPage(null); setCreating(false); }} onExpired={onExpired} /> : moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onDeleteWarning={setDeletionNotice} onBack={() => { setMoviePage(null); setCreating(false); }} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
           if (!row) { setCreating(true); setMoviePage({ id: null, deleting: false }); return; }
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });

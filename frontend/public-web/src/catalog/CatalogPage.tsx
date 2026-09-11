@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { listCatalog, type CatalogKind } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { Brand } from "../app/Brand";
@@ -16,6 +16,14 @@ export function CatalogPage({ search, navigate }: { search: string; navigate: (h
   const page = Number.isSafeInteger(rawPage) && rawPage > 0 && rawPage <= 1_000_000 ? rawPage : 1;
   const load = useCallback(() => listCatalog({ kind, q: query, page, size: 25 }), [kind, query, page]);
   const { state, retry } = usePublicRequest(load);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const focusAfterLoad = useRef(false);
+  useEffect(() => {
+    if (state.status === "ready" && focusAfterLoad.current) {
+      focusAfterLoad.current = false;
+      titleRef.current?.focus();
+    }
+  }, [state]);
   const title = kind === "movie" ? "电影" : kind === "series" ? "剧集" : "全部影片";
 
   function update(next: { kind?: CatalogKind; q?: string; page?: number }, replace = false) {
@@ -27,6 +35,7 @@ export function CatalogPage({ search, navigate }: { search: string; navigate: (h
     if (nextQuery) updated.set("q", nextQuery);
     if (nextPage !== 1) updated.set("page", String(nextPage));
     const encoded = updated.toString();
+    if (next.page !== undefined && next.page !== page) focusAfterLoad.current = true;
     navigate(encoded ? `/?${encoded}` : "/", replace);
   }
 
@@ -38,7 +47,7 @@ export function CatalogPage({ search, navigate }: { search: string; navigate: (h
     </header>
     <section aria-labelledby="catalog-title" aria-busy={state.status === "loading"}>
       <div className="section-heading">
-        <div><p className="eyebrow">LIBRARY</p><h1 id="catalog-title">{title}</h1></div>
+        <div><p className="eyebrow">LIBRARY</p><h1 id="catalog-title" ref={titleRef} tabIndex={-1}>{title}</h1></div>
         <p className="result-count" aria-live="polite">{state.status === "ready" ? `${state.data.total} 部影片` : ""}</p>
       </div>
       {state.status === "loading" ? <Loading /> : state.status === "error" ? <RequestError error={state.error} retry={retry} /> : <>

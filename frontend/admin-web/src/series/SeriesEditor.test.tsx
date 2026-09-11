@@ -26,6 +26,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     if (url === "/api/admin/series" && r.method === "GET") return json([current]);
     if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: r.body.name, version: 1, seasons: [], poster: null }); return json(current, 201); }
     if (url === base && r.method === "GET") return json(current);
+    if (url === `${base}/delete-impact`) return json({ name: current.name, version: current.version, season_count: current.seasons.length, episode_count: current.seasons.flatMap((s) => s.episodes).length, exclusive_media_count: 0, shared_media_count: 0 });
     if (url.startsWith("/api/admin/media/")) {
       const file = r.body.get("file") as File;
       const media = { id: "asset", url: "/media/new", original_name: file.name, mime_type: file.type, byte_size: file.size };
@@ -35,7 +36,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
       ep.video = media; ep.version++; return json({ ...media, version: ep.version, series_version: current.version });
     }
     if (url === base && r.method === "PATCH") { current = { ...current, ...r.body, version: current.version + 1 }; return json(current); }
-    if (url === base && r.method === "DELETE") return new Response(null, { status: 204 });
+    if (url === base && r.method === "DELETE") return json({ cleanup_pending: false, job_count: 0, warning: null });
     if (/\/series-1\/(publish|archive|draft)$/.test(url)) { current = { ...current, version: current.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" }; return json(current); }
     const seasonId = url.split("/")[6]; const season = current.seasons.find((s) => s.id === seasonId);
     if (url === `${base}/seasons`) { current = { ...current, version: current.version + 1, seasons: [...current.seasons, { id: `s${++sequence}`, number: r.body.number, episodes: [] }] }; return json(current, 201); }

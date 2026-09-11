@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, createMovie, deleteMovie, getMovie, listGenres, transitionMovie, updateMovie, uploadMedia, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
+import { ApiError, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -14,7 +14,7 @@ function fieldsOf(movie: MovieResponse): Fields {
   return { name: movie.name, synopsis: movie.synopsis, year: movie.year?.toString() ?? "", minutes: movie.duration_seconds === null ? "" : String(movie.duration_seconds / 60), genreIds: movie.genres.map((g) => g.id) };
 }
 
-export function MovieEditor({ movieId, onBack, onExpired, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; initialDelete?: boolean }) {
+export function MovieEditor({ movieId, onBack, onExpired, onDeleteWarning = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteWarning?: (warning: string) => void; initialDelete?: boolean }) {
   const [movie, setMovie] = useState<MovieResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
@@ -27,7 +27,7 @@ export function MovieEditor({ movieId, onBack, onExpired, initialDelete = false 
   const [invalid, setInvalid] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
-  const [deleting, setDeleting] = useState<MovieResponse | null>(null);
+  const [deleting, setDeleting] = useState<DeleteImpactResponse | null>(null);
   const [confirmation, setConfirmation] = useState("");
   const operation = useRef(false);
   const mounted = useMounted();
@@ -42,12 +42,15 @@ export function MovieEditor({ movieId, onBack, onExpired, initialDelete = false 
       if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
       throw cause;
     });
-    void Promise.all([id ? watch(getMovie(id)) : null, watch(listGenres())]).then(([value, choices]) => {
+    void Promise.all([id ? watch(getMovie(id)) : null, watch(listGenres())]).then(async ([value, choices]) => {
       if (ignore) return;
       setGenres(choices); setConflict(false);
       if (value) {
         accept(value);
-        if (initialDelete && revision === 0 && value.status !== "published") { setDeleting(value); setConfirmation(""); }
+        if (initialDelete && revision === 0 && value.status !== "published") {
+          const impact = await watch(getMovieDeleteImpact(value.id));
+          if (!ignore) { setDeleting(impact); setConfirmation(""); }
+        }
       }
     }).catch((cause: unknown) => { if (!ignore && !(cause instanceof ApiError && cause.status === 401)) { setError("电影详情加载失败，请重新加载。"); setConflict(true); } })
       .finally(() => { if (!ignore) setLoading(false); });
@@ -119,13 +122,11 @@ export function MovieEditor({ movieId, onBack, onExpired, initialDelete = false 
     if (!movie) return;
     await run(async () => { await transitionMovie(movie.id, action, movie.version); await refreshAfterWrite(); });
   }
-  async function prepareDelete() {
-    if (!movie || movie.status === "published") return;
+  async function prepareDelete(targetId = movie?.id) {
+    if (!targetId || movie?.status === "published") return;
     await run(async () => {
-      const fresh = await getMovie(movie.id);
+      const fresh = await getMovieDeleteImpact(targetId);
       if (!mounted.current) return;
-      accept(fresh);
-      if (fresh.status === "published") { setError("内容已发布，请先归档。"); return; }
       setConfirmation(""); setDeleting(fresh);
     });
   }
@@ -164,10 +165,10 @@ export function MovieEditor({ movieId, onBack, onExpired, initialDelete = false 
       </div>}
     </div>
     <Dialog open={!!deleting} title="永久删除电影" onClose={() => { if (!busy) setDeleting(null); }}>
-      {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新详情，影响范围：</p><ul><li>季：0</li><li>单集：0</li><li>海报：{deleting.poster ? 1 : 0}</li><li>视频：{deleting.video ? 1 : 0}</li></ul>
+      {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>独占媒体：{deleting.exclusive_media_count}</li><li>共享媒体（保留）：{deleting.shared_media_count}</li></ul>
         {error && <p role="alert" className="error-message">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
-        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { await deleteMovie(deleting.id, deleting.version); if (mounted.current) onBack(); }); }}>确认永久删除</Button></div>
+        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; const result = await deleteMovie(movie.id, deleting.version); if (mounted.current) { if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); onBack(); } }); }}>确认永久删除</Button></div>
       </>}
     </Dialog>
   </section>;

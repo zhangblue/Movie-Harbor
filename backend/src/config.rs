@@ -113,6 +113,18 @@ where
     F: Fn(&str) -> Option<String>,
 {
     if let Some(value) = lookup("DATABASE_URL").filter(|value| !value.trim().is_empty()) {
+        if [
+            "DATABASE_HOST",
+            "DATABASE_PORT",
+            "POSTGRES_DB",
+            "POSTGRES_USER",
+            "POSTGRES_PASSWORD",
+        ]
+        .into_iter()
+        .any(|name| lookup(name).is_some_and(|component| !component.trim().is_empty()))
+        {
+            return Err(ConfigError::Invalid("DATABASE_URL"));
+        }
         return Ok(value);
     }
 
@@ -208,6 +220,14 @@ mod tests {
             ("VIDEO_MIME_ALLOWLIST", "video/mp4,video/webm"),
             ("ADMIN_NAME", "admin"),
         ])
+    }
+
+    #[test]
+    fn database_url_cannot_be_combined_with_component_settings() {
+        let mut values = required_values();
+        values.insert("DATABASE_HOST", "db");
+        let result = Config::from_lookup(|name| values.get(name).map(|value| (*value).to_owned()));
+        assert!(matches!(result, Err(ConfigError::Invalid("DATABASE_URL"))));
     }
 
     // Catches enabling a non-browser media type or silently accepting an empty allowlist.

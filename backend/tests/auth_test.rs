@@ -11,11 +11,15 @@ use movie_harbor_api::{
     config::Config,
     entities::{admin_session, admin_user},
 };
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait};
+use sea_orm::{
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
+    IntoActiveModel, QuerySelect, Set, TransactionTrait,
+};
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use uuid::Uuid;
+mod support;
 
 fn config() -> Config {
     Config {
@@ -56,6 +60,26 @@ async fn request(
     csrf: Option<&str>,
     origin: Option<&str>,
 ) -> Response {
+    request_from(
+        app,
+        method,
+        path,
+        body,
+        (cookie, csrf, origin),
+        "127.0.0.1:12345",
+    )
+    .await
+}
+
+async fn request_from(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Value,
+    auth: (Option<&str>, Option<&str>, Option<&str>),
+    address: &str,
+) -> Response {
+    let (cookie, csrf, origin) = auth;
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -72,9 +96,74 @@ async fn request(
     }
     let mut req = req.body(Body::from(body.to_string())).unwrap();
     req.extensions_mut().insert(ConnectInfo(
-        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        address.parse::<std::net::SocketAddr>().unwrap(),
     ));
     app.clone().oneshot(req).await.unwrap()
+}
+
+// Catches Argon2 verification running while an exclusive administrator-row lock and pooled
+// connection are held. Unknown-name work must finish while an unrelated writer owns the row.
+#[tokio::test]
+async fn invalid_logins_do_not_wait_for_the_administrator_row_lock() {
+    let db = database().await;
+    let app = app::build(db.clone(), &config()).await.unwrap();
+    let lock = db.begin().await.unwrap();
+    admin_user::Entity::find()
+        .lock_exclusive()
+        .one(&lock)
+        .await
+        .unwrap();
+
+    let attempts = (1..=3).map(|suffix| {
+        let app = app.clone();
+        tokio::spawn(async move {
+            request_from(
+                &app,
+                "POST",
+                "/api/admin/login",
+                json!({"name":format!("Missing-{suffix}"),"password":"wrong"}),
+                (None, None, Some("https://harbor.test")),
+                &format!("127.0.0.{suffix}:12345"),
+            )
+            .await
+            .status()
+        })
+    });
+    let statuses = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let mut statuses = Vec::new();
+        for attempt in attempts {
+            statuses.push(attempt.await.unwrap());
+        }
+        statuses
+    })
+    .await
+    .expect("invalid logins waited on a row lock");
+    assert_eq!(statuses, vec![StatusCode::UNAUTHORIZED; 3]);
+    lock.rollback().await.unwrap();
+}
+
+// Catches a login minting a session from a hash that changed while Argon2 was verifying it.
+#[tokio::test]
+async fn login_never_accepts_an_old_hash_changed_during_verification() {
+    let db = database().await;
+    let app = app::build(db.clone(), &config()).await.unwrap();
+    let replacement =
+        match movie_harbor_api::auth::password::hash("replacement-password".into()).await {
+            Ok(hash) => hash,
+            Err(_) => panic!("replacement password hashing failed"),
+        };
+    let login_app = app.clone();
+    let pending = tokio::spawn(async move { login(&login_app, "Admin", "initial-password").await });
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    let admin = admin_user::Entity::find().one(&db).await.unwrap().unwrap();
+    let mut changed = admin.into_active_model();
+    changed.password_hash = Set(replacement);
+    changed.update(&db).await.unwrap();
+    assert_eq!(pending.await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        admin_session::Entity::find().all(&db).await.unwrap().len(),
+        0
+    );
 }
 
 async fn body(response: Response) -> Value {
@@ -198,7 +287,7 @@ async fn login_errors_are_indistinguishable_and_sixth_failure_is_limited() {
     let known = login(&app, "Admin", "wrong").await;
     assert_eq!(known.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(body(unknown).await, body(known).await);
-    for _ in 2..=5 {
+    for _ in 2..5 {
         assert_eq!(
             login(&app, "Admin", "wrong").await.status(),
             StatusCode::UNAUTHORIZED
@@ -220,6 +309,45 @@ async fn login_errors_are_indistinguishable_and_sixth_failure_is_limited() {
         login(&app, "Admin", "initial-password").await.status(),
         StatusCode::OK
     );
+}
+
+// Catches authentication failures being cached by a browser or intermediary.
+#[tokio::test]
+async fn every_sensitive_auth_failure_is_no_store() {
+    let database = support::TestDatabase::migrated("auth_no_store").await;
+    let app = app::build(database.connection(), &config()).await.unwrap();
+    let responses = [
+        login(&app, "Missing", "wrong").await,
+        request(
+            &app,
+            "GET",
+            "/api/admin/session",
+            json!(null),
+            None,
+            None,
+            None,
+        )
+        .await,
+        request(
+            &app,
+            "POST",
+            "/api/admin/password",
+            json!({"current_password":"wrong","new_password":"new"}),
+            None,
+            None,
+            Some("https://harbor.test"),
+        )
+        .await,
+    ];
+    for response in responses {
+        assert_eq!(
+            response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+    }
 }
 
 // Catches writes bypassing either authorization, CSRF, or same-origin checks.

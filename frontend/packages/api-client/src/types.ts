@@ -73,3 +73,10 @@ export interface EpisodeEnvelope { series_version: number; episode: EpisodeRespo
 export interface MediaAssetResponse {
   id: string; original_name: string; mime_type: string; byte_size: number; version: number; series_version?: number;
 }
+export interface DeleteImpactResponse {
+  name: string; version: number; season_count: number; episode_count: number;
+  exclusive_media_count: number; shared_media_count: number;
+}
+export interface DeleteResultResponse {
+  cleanup_pending: boolean; job_count: number; warning: string | null;
+}

@@ -2,8 +2,8 @@ use crate::{
     entities::{media_asset, movie},
     genres,
     media::{
-        LocalMediaStorage, is_publishable_asset,
-        references::{lock_for_reference_removal, queue_locked_if_unreferenced},
+        LocalMediaStorage, cleanup, is_publishable_asset,
+        references::{lock_for_reference_removal, queue_locked_if_unreferenced, reference_count},
     },
 };
 use axum::{
@@ -20,7 +20,10 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use super::{
-    dto::{MovieListQuery, MovieResponse, Patch, UpdateMovieRequest},
+    dto::{
+        DeleteImpactResponse, DeleteResultResponse, MovieListQuery, MovieResponse, Patch,
+        UpdateMovieRequest,
+    },
     repository,
 };
 
@@ -289,11 +292,44 @@ pub async fn transition(
     Ok(result)
 }
 
-pub async fn delete(
+pub async fn delete_impact(
     db: &DatabaseConnection,
     id: Uuid,
+) -> Result<DeleteImpactResponse, MovieError> {
+    let model = repository::find(db, id).await?;
+    let assets = [model.poster_asset_id, model.video_asset_id]
+        .into_iter()
+        .flatten()
+        .collect::<HashSet<_>>();
+    let mut exclusive_media_count = 0;
+    let mut shared_media_count = 0;
+    for asset_id in assets {
+        let within = [model.poster_asset_id, model.video_asset_id]
+            .into_iter()
+            .filter(|candidate| *candidate == Some(asset_id))
+            .count() as u64;
+        if reference_count(db, asset_id).await? > within {
+            shared_media_count += 1;
+        } else {
+            exclusive_media_count += 1;
+        }
+    }
+    Ok(DeleteImpactResponse {
+        name: model.name,
+        version: model.version,
+        season_count: 0,
+        episode_count: 0,
+        exclusive_media_count,
+        shared_media_count,
+    })
+}
+
+pub async fn delete(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    id: Uuid,
     expected_version: i64,
-) -> Result<(), MovieError> {
+) -> Result<DeleteResultResponse, MovieError> {
     valid_version(expected_version)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
@@ -307,9 +343,19 @@ pub async fn delete(
         .collect::<HashSet<_>>();
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     repository::delete(&tx, id, expected_version).await?;
-    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
+    let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
-    Ok(())
+    let job_count = queued_assets.len();
+    let cleanup = cleanup::run_for_assets(db, storage, &queued_assets).await;
+    let cleanup_pending = match cleanup {
+        Ok(outcome) => outcome.failed > 0,
+        Err(_) => job_count > 0,
+    };
+    Ok(DeleteResultResponse {
+        cleanup_pending,
+        job_count,
+        warning: cleanup_pending.then_some("media cleanup pending retry"),
+    })
 }
 
 async fn response<C: sea_orm::ConnectionTrait>(

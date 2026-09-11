@@ -14,8 +14,8 @@ use uuid::Uuid;
 
 use super::{
     dto::{
-        AssociateMediaRequest, CreateMovieRequest, MovieListQuery, MovieResponse,
-        UpdateMovieRequest, VersionRequest,
+        AssociateMediaRequest, CreateMovieRequest, DeleteImpactResponse, DeleteResultResponse,
+        MovieListQuery, MovieResponse, UpdateMovieRequest, VersionRequest,
     },
     service::{self, MediaSlot, MovieError},
 };
@@ -48,6 +48,7 @@ pub fn router(
         .route("/api/admin/movies/{id}/publish", post(publish))
         .route("/api/admin/movies/{id}/archive", post(archive))
         .route("/api/admin/movies/{id}/draft", post(revert_to_draft))
+        .route("/api/admin/movies/{id}/delete-impact", get(delete_impact))
         .route_layer(middleware::from_fn_with_state(
             auth_state,
             auth::routes::require_session,
@@ -170,9 +171,19 @@ async fn delete_movie(
     State(state): State<MovieState>,
     Path(id): Path<String>,
     Json(input): Json<VersionRequest>,
-) -> Result<StatusCode, MovieError> {
-    service::delete(&state.db, parse_id(id)?, input.version).await?;
-    Ok(StatusCode::NO_CONTENT)
+) -> Result<Json<DeleteResultResponse>, MovieError> {
+    Ok(Json(
+        service::delete(&state.db, &state.storage, parse_id(id)?, input.version).await?,
+    ))
+}
+
+async fn delete_impact(
+    State(state): State<MovieState>,
+    Path(id): Path<String>,
+) -> Result<Json<DeleteImpactResponse>, MovieError> {
+    Ok(Json(
+        service::delete_impact(&state.db, parse_id(id)?).await?,
+    ))
 }
 
 fn parse_id(value: String) -> Result<Uuid, MovieError> {

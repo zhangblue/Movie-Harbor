@@ -8,31 +8,70 @@ use std::{
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::time::Instant;
 
-type Key = (IpAddr, String);
-
 #[derive(Default)]
-pub struct RateLimiter(Mutex<HashMap<Key, Arc<AsyncMutex<Window>>>>);
+pub struct RateLimiter {
+    by_ip: Mutex<HashMap<IpAddr, Arc<AsyncMutex<Window>>>>,
+    by_account: Mutex<HashMap<String, Arc<AsyncMutex<Window>>>>,
+}
+
+pub struct LoginLimit {
+    ip: Arc<AsyncMutex<Window>>,
+    account: Arc<AsyncMutex<Window>>,
+}
 
 impl RateLimiter {
-    pub fn for_login(&self, address: IpAddr, name: &str) -> Arc<AsyncMutex<Window>> {
+    pub fn for_login(&self, address: IpAddr, name: &str) -> LoginLimit {
         let ip = match address {
             IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(address),
             _ => address,
         };
-        let mut windows = self.0.lock().expect("rate limiter lock poisoned");
-        let now = Instant::now();
-        windows.retain(|_, window| {
-            Arc::strong_count(window) > 1
-                || window
-                    .try_lock()
-                    .map(|window| {
-                        window.started.is_some_and(|start| {
-                            now.duration_since(start) < Duration::from_secs(900)
-                        })
-                    })
-                    .unwrap_or(true)
-        });
-        windows.entry((ip, csrf::digest(name))).or_default().clone()
+        LoginLimit {
+            ip: window(&self.by_ip, ip),
+            account: window(&self.by_account, csrf::digest(name)),
+        }
+    }
+}
+
+fn window<K: Eq + std::hash::Hash>(
+    map: &Mutex<HashMap<K, Arc<AsyncMutex<Window>>>>,
+    key: K,
+) -> Arc<AsyncMutex<Window>> {
+    let mut windows = map.lock().expect("rate limiter lock poisoned");
+    let now = Instant::now();
+    windows.retain(|_, window| {
+        Arc::strong_count(window) > 1
+            || window
+                .try_lock()
+                .map(|window| {
+                    window
+                        .started
+                        .is_some_and(|start| now.duration_since(start) < Duration::from_secs(900))
+                })
+                .unwrap_or(true)
+    });
+    windows.entry(key).or_default().clone()
+}
+
+impl LoginLimit {
+    pub async fn blocked(&self, now: Instant) -> bool {
+        let mut ip = self.ip.lock().await;
+        let mut account = self.account.lock().await;
+        ip.blocked(now) || account.blocked(now)
+    }
+
+    pub async fn failure(&self, now: Instant) -> bool {
+        let mut ip = self.ip.lock().await;
+        let mut account = self.account.lock().await;
+        let ip_blocked = ip.failure(now);
+        let account_blocked = account.failure(now);
+        ip_blocked || account_blocked
+    }
+
+    pub async fn success(&self) {
+        let mut ip = self.ip.lock().await;
+        let mut account = self.account.lock().await;
+        ip.success();
+        account.success();
     }
 }
 
@@ -68,34 +107,55 @@ impl Window {
 mod tests {
     use super::*;
 
-    // Catches bypassing a limit by changing port/address notation or bleeding across accounts and clients.
+    // Catches bypassing the IP budget with random names while preserving client isolation.
     #[tokio::test]
-    async fn mapped_ipv4_shares_the_same_limit_but_other_clients_and_names_do_not() {
+    async fn mapped_ipv4_and_random_names_share_the_ip_limit_but_other_clients_do_not() {
         let limits = RateLimiter::default();
         let first = limits.for_login("127.0.0.1".parse().unwrap(), "Admin");
         for _ in 0..6 {
-            first.lock().await.failure(Instant::now());
+            first.failure(Instant::now()).await;
         }
         assert!(
             limits
                 .for_login("::ffff:127.0.0.1".parse().unwrap(), "Admin")
-                .lock()
-                .await
                 .blocked(Instant::now())
+                .await
         );
         assert!(
             !limits
-                .for_login("127.0.0.2".parse().unwrap(), "Admin")
-                .lock()
-                .await
+                .for_login("127.0.0.2".parse().unwrap(), "Other")
                 .blocked(Instant::now())
+                .await
         );
         assert!(
-            !limits
+            limits
                 .for_login("127.0.0.1".parse().unwrap(), "Other")
-                .lock()
-                .await
                 .blocked(Instant::now())
+                .await
+        );
+    }
+
+    // Catches a distributed attack bypassing the account budget by rotating source IPs.
+    #[tokio::test]
+    async fn one_account_shares_a_failure_budget_across_ips() {
+        let limits = RateLimiter::default();
+        for suffix in 1..=6 {
+            limits
+                .for_login(format!("127.0.0.{suffix}").parse().unwrap(), "Admin")
+                .failure(Instant::now())
+                .await;
+        }
+        assert!(
+            limits
+                .for_login("127.0.1.1".parse().unwrap(), "Admin")
+                .blocked(Instant::now())
+                .await
+        );
+        assert!(
+            !limits
+                .for_login("127.0.1.1".parse().unwrap(), "Other")
+                .blocked(Instant::now())
+                .await
         );
     }
 

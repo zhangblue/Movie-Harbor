@@ -17,6 +17,7 @@ use sea_orm::{
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -188,6 +189,7 @@ async fn create_asset(
     mime_type: &str,
     make_regular_file: bool,
 ) -> media_asset::Model {
+    const CONTENT: &[u8] = b"registered media";
     let id = Uuid::new_v4();
     let simple = id.simple().to_string();
     let extension = match mime_type {
@@ -200,7 +202,7 @@ async fn create_asset(
     let path = root.join(&key);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     if make_regular_file {
-        std::fs::write(&path, b"registered media").unwrap();
+        std::fs::write(&path, CONTENT).unwrap();
     } else {
         std::fs::create_dir(&path).unwrap();
     }
@@ -211,7 +213,7 @@ async fn create_asset(
         mime_type: Set(mime_type.into()),
         byte_size: Set(16),
         purpose: Set(purpose.into()),
-        checksum_sha256: Set(None),
+        checksum_sha256: Set(Some(format!("{:x}", Sha256::digest(CONTENT)))),
         ..Default::default()
     }
     .insert(db)
@@ -955,7 +957,7 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     assert!(
         movie::Entity::find_by_id(id.parse::<Uuid>().unwrap())
@@ -966,7 +968,7 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
     );
     assert_eq!(
         file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        2
+        0
     );
 
     let archived_delete = create_movie(&app, &cookie, &csrf, "Archived delete").await;
@@ -987,7 +989,7 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
 }
 
@@ -1095,6 +1097,176 @@ async fn delete_rolls_back_movie_and_cleanup_jobs_on_failure() {
     assert_eq!(
         file_cleanup_job::Entity::find().count(&db).await.unwrap(),
         0
+    );
+}
+
+// Catches confirmation data being inferred from a stale detail response and shared media being
+// reported as files that deletion will remove.
+#[tokio::test]
+async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let first = create_movie(&app, &cookie, &csrf, "Impact movie").await;
+    let second = create_movie(&app, &cookie, &csrf, "Shared owner").await;
+    let shared = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
+    let exclusive = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(
+            &app,
+            &cookie,
+            &csrf,
+            first["id"].as_str().unwrap(),
+            "poster",
+            shared.id,
+            1
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        associate(
+            &app,
+            &cookie,
+            &csrf,
+            first["id"].as_str().unwrap(),
+            "video",
+            exclusive.id,
+            2
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        associate(
+            &app,
+            &cookie,
+            &csrf,
+            second["id"].as_str().unwrap(),
+            "poster",
+            shared.id,
+            1
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    let impact = request(
+        &app,
+        "GET",
+        &format!(
+            "/api/admin/movies/{}/delete-impact",
+            first["id"].as_str().unwrap()
+        ),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(impact.status(), StatusCode::OK);
+    assert_eq!(
+        body(impact).await,
+        json!({
+            "name":"Impact movie", "version":3, "season_count":0, "episode_count":0,
+            "exclusive_media_count":1, "shared_media_count":1
+        })
+    );
+    assert_eq!(
+        write(
+            &app,
+            "DELETE",
+            &format!("/api/admin/movies/{}", first["id"].as_str().unwrap()),
+            json!({"version":2}),
+            &cookie,
+            &csrf
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/movies/{}", first["id"].as_str().unwrap()),
+        json!({"version":3}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let deleted = body(deleted).await;
+    let cleanup_jobs = file_cleanup_job::Entity::find().all(&db).await.unwrap();
+    assert_eq!(
+        deleted,
+        json!({"cleanup_pending":false,"job_count":1,"warning":null}),
+        "cleanup jobs: {cleanup_jobs:?}"
+    );
+    assert!(!root.as_ref().join(&exclusive.storage_key).exists());
+    assert!(root.as_ref().join(&shared.storage_key).exists());
+    assert_eq!(
+        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
+        0
+    );
+}
+
+// Catches post-commit filesystem failures being hidden as an unconditional delete success.
+#[cfg(unix)]
+#[tokio::test]
+async fn delete_reports_pending_cleanup_when_the_immediate_attempt_fails() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Pending cleanup").await;
+    let asset = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(
+            &app,
+            &cookie,
+            &csrf,
+            created["id"].as_str().unwrap(),
+            "video",
+            asset.id,
+            1
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let parent = root
+        .as_ref()
+        .join(&asset.storage_key)
+        .parent()
+        .unwrap()
+        .to_owned();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/movies/{}", created["id"].as_str().unwrap()),
+        json!({"version":2}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    let result = body(deleted).await;
+    assert_eq!(result["cleanup_pending"], true);
+    assert_eq!(result["job_count"], 1);
+    assert!(result["warning"].as_str().unwrap().contains("pending"));
+    assert_eq!(
+        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
+        1
     );
 }
 
