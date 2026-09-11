@@ -12,7 +12,10 @@ use movie_harbor_api::{
     entities::{genre, movie_genre},
     genres::{self, service::GenreError},
 };
-use sea_orm::{ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait};
+use sea_orm::{
+    ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, TransactionTrait,
+};
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -322,6 +325,28 @@ async fn reorder_is_atomic_and_rejects_duplicate_positions() {
         list(&app, &cookie).await,
         reordered.as_array().unwrap().clone()
     );
+
+    let stable = reordered.as_array().unwrap().clone();
+    let mut duplicate_id = stable.clone();
+    duplicate_id[1]["id"] = duplicate_id[0]["id"].clone();
+    let mut missing_id = stable.clone();
+    missing_id.pop();
+    let mut extra_id = stable.clone();
+    extra_id.push(json!({"id":Uuid::new_v4().to_string(), "sort_order":13}));
+    for invalid in [duplicate_id, missing_id, extra_id] {
+        let response = request(
+            &app,
+            "PUT",
+            "/api/admin/genres/order",
+            json!({"items":invalid}),
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://harbor.test"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(list(&app, &cookie).await, stable);
+    }
 }
 
 // Catches deleting referenced genres, removing old associations on deactivation, or allowing new ones.
@@ -332,11 +357,15 @@ async fn referenced_or_inactive_genres_obey_association_rules() {
     let (cookie, csrf) = credentials(&app).await;
     let genres = list(&app, &cookie).await;
     let referenced_id = genres[0]["id"].as_str().unwrap();
-    let removable_id = genres[1]["id"].as_str().unwrap();
+    let series_referenced_id = genres[1]["id"].as_str().unwrap();
+    let removable_id = genres[2]["id"].as_str().unwrap();
     let movie_id = Uuid::new_v4();
+    let series_id = Uuid::new_v4();
     db.execute_unprepared(&format!(
         "INSERT INTO movie (id, name) VALUES ('{movie_id}', 'Movie'); \
-         INSERT INTO movie_genre (movie_id, genre_id) VALUES ('{movie_id}', '{referenced_id}')"
+         INSERT INTO movie_genre (movie_id, genre_id) VALUES ('{movie_id}', '{referenced_id}'); \
+         INSERT INTO series (id, name) VALUES ('{series_id}', 'Series'); \
+         INSERT INTO series_genre (series_id, genre_id) VALUES ('{series_id}', '{series_referenced_id}')"
     ))
     .await
     .unwrap();
@@ -355,11 +384,27 @@ async fn referenced_or_inactive_genres_obey_association_rules() {
         .status(),
         StatusCode::CONFLICT
     );
+    assert_eq!(
+        request(
+            &app,
+            "DELETE",
+            &format!("/api/admin/genres/{series_referenced_id}"),
+            json!({}),
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://harbor.test"),
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let association_tx = db.begin().await.unwrap();
     assert!(
-        genres::service::ensure_associable(&db, &[referenced_id.parse().unwrap()])
+        genres::service::ensure_associable(&association_tx, &[referenced_id.parse().unwrap()])
             .await
             .is_ok()
     );
+    association_tx.rollback().await.unwrap();
     assert_eq!(
         request(
             &app,
@@ -381,10 +426,13 @@ async fn referenced_or_inactive_genres_obey_association_rules() {
             .unwrap()
             .is_some()
     );
+    let association_tx = db.begin().await.unwrap();
     assert!(matches!(
-        genres::service::ensure_associable(&db, &[referenced_id.parse().unwrap()]).await,
+        genres::service::ensure_associable(&association_tx, &[referenced_id.parse().unwrap()])
+            .await,
         Err(GenreError::Inactive)
     ));
+    association_tx.rollback().await.unwrap();
 
     assert_eq!(
         request(
@@ -406,5 +454,62 @@ async fn referenced_or_inactive_genres_obey_association_rules() {
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+// Catches eligibility checks that do not hold a row lock until the association transaction commits.
+#[tokio::test]
+async fn association_eligibility_serializes_with_deactivation() {
+    let db = database().await;
+    let genre_id = genre::Entity::find().one(&db).await.unwrap().unwrap().id;
+
+    let association_tx = db.begin().await.unwrap();
+    genres::service::ensure_associable(&association_tx, &[genre_id])
+        .await
+        .unwrap();
+
+    let deactivation_tx = db.begin().await.unwrap();
+    deactivation_tx
+        .execute_unprepared("SET LOCAL lock_timeout = '100ms'")
+        .await
+        .unwrap();
+    let blocked = genre::Entity::update_many()
+        .col_expr(genre::Column::Enabled, false.into())
+        .filter(genre::Column::Id.eq(genre_id))
+        .exec(&deactivation_tx)
+        .await;
+    let error = blocked.expect_err("deactivation update bypassed the eligibility transaction");
+    assert!(
+        error
+            .to_string()
+            .contains("canceling statement due to lock timeout"),
+        "unexpected concurrent update error: {error}"
+    );
+    deactivation_tx.rollback().await.unwrap();
+
+    let movie_id = Uuid::new_v4();
+    association_tx
+        .execute_unprepared(&format!(
+            "INSERT INTO movie (id, name) VALUES ('{movie_id}', 'Concurrent movie'); \
+             INSERT INTO movie_genre (movie_id, genre_id) VALUES ('{movie_id}', '{genre_id}')"
+        ))
+        .await
+        .unwrap();
+    association_tx.commit().await.unwrap();
+
+    genres::service::deactivate(&db, genre_id).await.unwrap();
+    let later_association_tx = db.begin().await.unwrap();
+    assert!(matches!(
+        genres::service::ensure_associable(&later_association_tx, &[genre_id]).await,
+        Err(GenreError::Inactive)
+    ));
+    later_association_tx.rollback().await.unwrap();
+    assert_eq!(
+        movie_genre::Entity::find()
+            .filter(movie_genre::Column::GenreId.eq(genre_id))
+            .count(&db)
+            .await
+            .unwrap(),
+        1
     );
 }

@@ -6,8 +6,9 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
-    IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr,
+    EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, QuerySelect, Set, SqlErr,
+    TransactionTrait,
 };
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -177,15 +178,19 @@ pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<(), GenreError>
     Ok(())
 }
 
-/// Validate genre IDs before a movie or series command creates new associations.
-pub async fn ensure_associable<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), GenreError> {
+/// Lock and validate genre IDs inside the transaction that will insert the associations.
+///
+/// The caller must keep `tx` open through its join-table inserts and commit. The shared row locks
+/// conflict with deactivation's `UPDATE`, ordering the association and deactivation atomically.
+pub async fn ensure_associable(tx: &DatabaseTransaction, ids: &[Uuid]) -> Result<(), GenreError> {
     let distinct = ids.iter().copied().collect::<HashSet<_>>();
     if distinct.len() != ids.len() {
         return Err(GenreError::Invalid);
     }
     let found = genre::Entity::find()
         .filter(genre::Column::Id.is_in(distinct))
-        .all(db)
+        .lock_shared()
+        .all(tx)
         .await?;
     if found.len() != ids.len() {
         return Err(GenreError::NotFound);
