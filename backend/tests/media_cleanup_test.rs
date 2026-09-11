@@ -55,7 +55,6 @@ impl StorageHooks for RecordingHooks {
 }
 
 struct FailFirstPostUnlinkSync {
-    unlinked: AtomicBool,
     failures: AtomicUsize,
     sync_attempts: AtomicUsize,
 }
@@ -63,21 +62,7 @@ struct FailFirstPostUnlinkSync {
 struct ReplaceRegisteredAtUnlink {
     root: PathBuf,
     replaced: AtomicBool,
-}
-
-struct FailOnceAfterClaim {
-    failures: AtomicUsize,
-}
-
-impl StorageHooks for FailOnceAfterClaim {
-    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
-        if matches!(event, StorageEvent::ClaimedForDeletion(_))
-            && self.failures.fetch_add(1, Ordering::SeqCst) == 0
-        {
-            return Err(std::io::Error::other("injected crash after deletion claim"));
-        }
-        Ok(())
-    }
+    no_quarantine_data_before_claim: AtomicBool,
 }
 
 impl StorageHooks for ReplaceRegisteredAtUnlink {
@@ -88,6 +73,14 @@ impl StorageHooks for ReplaceRegisteredAtUnlink {
         if self.replaced.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        self.no_quarantine_data_before_claim.store(
+            std::fs::read_dir(self.root.join(".quarantine"))?.all(|entry| {
+                entry
+                    .map(|entry| entry.path().extension() != Some(std::ffi::OsStr::new("data")))
+                    .unwrap_or(false)
+            }),
+            Ordering::SeqCst,
+        );
         let formal = self.root.join(key);
         std::fs::rename(&formal, formal.with_extension("owned-original"))?;
         std::fs::write(formal, b"UNRELATED REPLACEMENT")
@@ -96,18 +89,14 @@ impl StorageHooks for ReplaceRegisteredAtUnlink {
 
 impl StorageHooks for FailFirstPostUnlinkSync {
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
-        if matches!(event, StorageEvent::Unlinked(_)) {
-            self.unlinked.store(true, Ordering::SeqCst);
-        }
-        if matches!(event, StorageEvent::BeforeDirectorySync(_))
-            && self.unlinked.load(Ordering::SeqCst)
-        {
+        if matches!(event, StorageEvent::BeforeDirectorySync(_)) {
             self.sync_attempts.fetch_add(1, Ordering::SeqCst);
-            if self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
-                return Err(std::io::Error::other("injected directory fsync failure"));
-            }
         }
         Ok(())
+    }
+
+    fn fail_next_post_unlink_sync(&self) -> bool {
+        self.failures.fetch_add(1, Ordering::SeqCst) == 0
     }
 }
 
@@ -277,6 +266,7 @@ async fn registered_cleanup_claim_never_deletes_a_replacement_swapped_before_unl
     let hooks = Arc::new(ReplaceRegisteredAtUnlink {
         root: root.as_ref().to_owned(),
         replaced: AtomicBool::new(false),
+        no_quarantine_data_before_claim: AtomicBool::new(false),
     });
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
         .await
@@ -286,6 +276,7 @@ async fn registered_cleanup_claim_never_deletes_a_replacement_swapped_before_unl
     let outcome = run_once(&db, &storage).await.unwrap();
 
     assert_eq!((outcome.succeeded, outcome.failed), (0, 1));
+    assert!(hooks.no_quarantine_data_before_claim.load(Ordering::SeqCst));
     assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
     assert!(formal.with_extension("owned-original").exists());
     assert!(
@@ -294,58 +285,6 @@ async fn registered_cleanup_claim_never_deletes_a_replacement_swapped_before_unl
             .await
             .unwrap()
             .is_some()
-    );
-}
-
-// Catches a crash after an identity-bound claim stranding an undeletable hidden file.
-#[tokio::test]
-async fn registered_cleanup_retries_a_durable_quarantine_claim() {
-    let db = database().await;
-    let root = TempRoot::new();
-    let id = Uuid::new_v4();
-    let simple = id.simple().to_string();
-    let key = format!("poster/{}/{}.png", &simple[..2], simple);
-    let formal = root.as_ref().join(&key);
-    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
-    std::fs::write(&formal, b"x").unwrap();
-    let hooks = Arc::new(FailOnceAfterClaim {
-        failures: AtomicUsize::new(0),
-    });
-    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
-        .await
-        .unwrap();
-    let (_, job) = queued(&db, &key, b"x").await;
-
-    let first = run_once(&db, &storage).await.unwrap();
-    assert_eq!((first.succeeded, first.failed), (0, 1));
-    assert!(!formal.exists());
-    assert!(
-        formal
-            .with_file_name(format!(".delete-{}.png", simple))
-            .exists()
-    );
-    let mut retry = file_cleanup_job::Entity::find_by_id(job.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap()
-        .into_active_model();
-    retry.next_attempt_at = Set((chrono::Utc::now() - chrono::Duration::minutes(1)).fixed_offset());
-    retry.update(&db).await.unwrap();
-
-    let second = run_once(&db, &storage).await.unwrap();
-    assert_eq!((second.succeeded, second.failed), (1, 0));
-    assert!(
-        !formal
-            .with_file_name(format!(".delete-{}.png", simple))
-            .exists()
-    );
-    assert!(
-        file_cleanup_job::Entity::find_by_id(job.id)
-            .one(&db)
-            .await
-            .unwrap()
-            .is_none()
     );
 }
 
@@ -360,7 +299,6 @@ async fn retry_after_unlink_fsync_failure_syncs_missing_file_directory_before_su
     std::fs::create_dir_all(root.as_ref().join(&key).parent().unwrap()).unwrap();
     std::fs::write(root.as_ref().join(&key), b"x").unwrap();
     let hooks = Arc::new(FailFirstPostUnlinkSync {
-        unlinked: AtomicBool::new(false),
         failures: AtomicUsize::new(0),
         sync_attempts: AtomicUsize::new(0),
     });
@@ -390,7 +328,7 @@ async fn retry_after_unlink_fsync_failure_syncs_missing_file_directory_before_su
             .unwrap()
             .is_none()
     );
-    assert_eq!(hooks.sync_attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(hooks.sync_attempts.load(Ordering::SeqCst), 1);
 }
 
 // Catches traversal/symlink escapes, unbounded error persistence, and non-retrying jobs.

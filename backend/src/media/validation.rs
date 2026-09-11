@@ -1,4 +1,10 @@
 use super::MediaError;
+use h264_reader::{
+    Context as H264Context,
+    avcc::AvcDecoderConfigurationRecord,
+    nal::{Nal, RefNal, UnitType, pps::PicParamSetId},
+    rbsp::BitRead,
+};
 use image::{ImageFormat, ImageReader, Limits};
 use std::{
     collections::BTreeSet,
@@ -428,12 +434,17 @@ struct Mp4State {
 #[derive(Default)]
 struct Mp4Track {
     video_handler: bool,
-    nal_length_bytes: Option<usize>,
+    h264: Option<H264Configuration>,
     sample_description: Option<(u64, u64)>,
     sample_sizes: Mp4SampleSizes,
     chunk_offsets: Vec<u64>,
     sample_to_chunks: Vec<(u32, u32, u32)>,
     timed_sample_count: Option<u64>,
+}
+
+struct H264Configuration {
+    nal_length_bytes: usize,
+    context: H264Context,
 }
 
 #[derive(Default)]
@@ -664,9 +675,19 @@ fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return false;
     }
-    track.nal_length_bytes =
+    let configuration =
         validate_mp4_codec_configuration(file, &entry[4..8], entry_start + 86, entry_end);
-    track.nal_length_bytes.is_some()
+    if configuration.as_ref().is_none_or(|configuration| {
+        !configuration.context.sps().all(|sps| {
+            sps.pixel_dimensions().is_ok_and(|(width, height)| {
+                width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION
+            })
+        })
+    }) {
+        return false;
+    }
+    track.h264 = configuration;
+    track.h264.is_some()
 }
 
 fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Option<usize> {
@@ -785,9 +806,10 @@ fn parse_mp4_chunk_offsets(
 }
 
 fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -> bool {
-    let Some(nal_width) = track.nal_length_bytes else {
+    let Some(h264) = track.h264.as_ref() else {
         return false;
     };
+    let nal_width = h264.nal_length_bytes;
     if !track.video_handler
         || track.sample_sizes.len() == 0
         || track.chunk_offsets.is_empty()
@@ -839,7 +861,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
                 || !mdats
                     .iter()
                     .any(|&(mdat_start, mdat_end)| offset >= mdat_start && end <= mdat_end)
-                || !validate_length_prefixed_sample(file, offset, size, nal_width)
+                || !validate_length_prefixed_sample(file, offset, size, h264)
             {
                 return false;
             }
@@ -850,7 +872,13 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
     sample_index == track.sample_sizes.len()
 }
 
-fn validate_length_prefixed_sample(file: &mut File, offset: u64, size: u32, width: usize) -> bool {
+fn validate_length_prefixed_sample(
+    file: &mut File,
+    offset: u64,
+    size: u32,
+    h264: &H264Configuration,
+) -> bool {
+    let width = h264.nal_length_bytes;
     let Some(sample_end) = offset.checked_add(u64::from(size)) else {
         return false;
     };
@@ -873,19 +901,61 @@ fn validate_length_prefixed_sample(file: &mut File, offset: u64, size: u32, widt
         let Some(next) = cursor.checked_add(u64::from(length)) else {
             return false;
         };
-        let mut nal_header = [0_u8; 1];
+        let mut nal_prefix = [0_u8; 256];
+        let prefix_len = usize::try_from(length)
+            .unwrap_or(usize::MAX)
+            .min(nal_prefix.len());
         if length == 0
             || next > sample_end
             || file.seek(SeekFrom::Start(cursor)).is_err()
-            || !read_exact(file, &mut nal_header)
-            || nal_header[0] & 0x80 != 0
+            || !read_exact(file, &mut nal_prefix[..prefix_len])
         {
             return false;
         }
-        saw_video_slice |= matches!(nal_header[0] & 0x1f, 1..=5);
+        let nal = RefNal::new(
+            &nal_prefix[..prefix_len],
+            &[],
+            prefix_len == length as usize,
+        );
+        let Ok(header) = nal.header() else {
+            return false;
+        };
+        if matches!(
+            header.nal_unit_type(),
+            UnitType::SliceLayerWithoutPartitioningNonIdr
+                | UnitType::SliceLayerWithoutPartitioningIdr
+        ) {
+            if !validate_slice_parameter_set(&nal, &h264.context) {
+                return false;
+            }
+            saw_video_slice = true;
+        }
         cursor = next;
     }
     cursor == sample_end && saw_video_slice
+}
+
+fn validate_slice_parameter_set(nal: &RefNal<'_>, context: &H264Context) -> bool {
+    let mut bits = nal.rbsp_bits();
+    if bits.read_ue("first_mb_in_slice").is_err() {
+        return false;
+    }
+    let Ok(slice_type) = bits.read_ue("slice_type") else {
+        return false;
+    };
+    if slice_type > 9 {
+        return false;
+    }
+    let Ok(pps_id) = bits.read_ue("pic_parameter_set_id") else {
+        return false;
+    };
+    let Ok(pps_id) = PicParamSetId::from_u32(pps_id) else {
+        return false;
+    };
+    context
+        .pps_by_id(pps_id)
+        .and_then(|pps| context.sps_by_id(pps.seq_parameter_set_id))
+        .is_some()
 }
 
 fn supported_mp4_brand(brand: &[u8]) -> bool {
@@ -900,7 +970,7 @@ fn validate_mp4_codec_configuration(
     codec: &[u8],
     mut position: u64,
     end: u64,
-) -> Option<usize> {
+) -> Option<H264Configuration> {
     let expected = match codec {
         b"avc1" | b"avc3" => b"avcC",
         _ => return None,
@@ -933,7 +1003,7 @@ fn validate_mp4_codec_configuration(
     None
 }
 
-fn validate_avcc(payload: &[u8]) -> Option<usize> {
+fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
     if payload.len() < 7
         || payload[0] != 1
         || payload[4] & 0xfc != 0xfc
@@ -950,7 +1020,6 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
     if sps_count == 0 {
         return None;
     }
-    let mut saw_sps = false;
     for _ in 0..sps_count {
         let length = usize::from(u16::from_be_bytes([
             *payload.get(cursor)?,
@@ -960,7 +1029,6 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
         if length == 0 || cursor.checked_add(length)? > payload.len() {
             return None;
         }
-        saw_sps |= validate_h264_sps(&payload[cursor..cursor + length], payload[1]);
         cursor += length;
     }
     let pps_count = *payload.get(cursor)?;
@@ -968,7 +1036,6 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
     if pps_count == 0 {
         return None;
     }
-    let mut saw_pps = false;
     for _ in 0..pps_count {
         let length = usize::from(u16::from_be_bytes([
             *payload.get(cursor)?,
@@ -978,7 +1045,6 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
         if length == 0 || cursor.checked_add(length)? > payload.len() {
             return None;
         }
-        saw_pps |= validate_h264_pps(&payload[cursor..cursor + length]);
         cursor += length;
     }
     if is_high_avc_profile(payload[1]) {
@@ -1007,7 +1073,17 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
             cursor = end;
         }
     }
-    (cursor == payload.len() && saw_sps && saw_pps).then_some(width)
+    if cursor != payload.len() {
+        return None;
+    }
+    let avcc = AvcDecoderConfigurationRecord::try_from(payload).ok()?;
+    let context = avcc.create_context().ok()?;
+    (context.sps().count() == usize::from(sps_count)
+        && context.pps().count() == usize::from(pps_count))
+    .then_some(H264Configuration {
+        nal_length_bytes: width,
+        context,
+    })
 }
 
 fn is_high_avc_profile(profile: u8) -> bool {
@@ -1015,53 +1091,6 @@ fn is_high_avc_profile(profile: u8) -> bool {
         profile,
         44 | 83 | 86 | 100 | 110 | 118 | 122 | 128 | 134 | 135 | 138 | 139 | 144 | 244
     )
-}
-
-fn validate_h264_sps(nal: &[u8], profile: u8) -> bool {
-    nal.len() >= 5
-        && nal[0] & 0x80 == 0
-        && nal[0] & 0x1f == 7
-        && nal[1] == profile
-        && nal[3] != 0
-        && read_unsigned_exp_golomb(&nal[4..], 0).is_some_and(|(id, _)| id <= 31)
-}
-
-fn validate_h264_pps(nal: &[u8]) -> bool {
-    if nal.len() < 2 || nal[0] & 0x80 != 0 || nal[0] & 0x1f != 8 {
-        return false;
-    }
-    let Some((pps_id, bits)) = read_unsigned_exp_golomb(&nal[1..], 0) else {
-        return false;
-    };
-    let Some((sps_id, _)) = read_unsigned_exp_golomb(&nal[1..], bits) else {
-        return false;
-    };
-    pps_id <= 255 && sps_id <= 31
-}
-
-fn read_unsigned_exp_golomb(bytes: &[u8], mut bit: usize) -> Option<(u32, usize)> {
-    let bit_len = bytes.len().checked_mul(8)?;
-    let mut leading_zeroes = 0_u32;
-    while bit < bit_len && bytes[bit / 8] & (0x80 >> (bit % 8)) == 0 {
-        leading_zeroes = leading_zeroes.checked_add(1)?;
-        if leading_zeroes > 31 {
-            return None;
-        }
-        bit = bit.checked_add(1)?;
-    }
-    if bit >= bit_len {
-        return None;
-    }
-    bit = bit.checked_add(1)?;
-    let mut value = 0_u32;
-    for _ in 0..leading_zeroes {
-        if bit >= bit_len {
-            return None;
-        }
-        value = (value << 1) | u32::from((bytes[bit / 8] >> (7 - bit % 8)) & 1);
-        bit = bit.checked_add(1)?;
-    }
-    Some(((1_u32 << leading_zeroes) - 1 + value, bit))
 }
 
 #[cfg(test)]
@@ -1076,7 +1105,10 @@ mod tests {
             0x3c, 0x48, 0x96, 0x58, 0x01, 0x00, 0x06, 0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0, 0xfd,
             0xf8, 0xf8, 0x00,
         ];
-        assert_eq!(validate_avcc(&avcc), Some(4));
+        assert_eq!(
+            validate_avcc(&avcc).map(|configuration| configuration.nal_length_bytes),
+            Some(4)
+        );
     }
 
     #[test]
@@ -1090,7 +1122,17 @@ mod tests {
                 1, 66, 0, 30, 0xff, 0xe1, 0, 5, 0x67, 66, 0, 30, 0x80, 1, 0, 1, 0x68,
             ],
         ] {
-            assert_eq!(validate_avcc(&avcc), None);
+            assert!(validate_avcc(&avcc).is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_avcc_never_panics() {
+        for length in 0..512_usize {
+            let payload = (0..length)
+                .map(|index| (index.wrapping_mul(191) ^ length.wrapping_mul(17)) as u8)
+                .collect::<Vec<_>>();
+            assert!(std::panic::catch_unwind(|| validate_avcc(&payload)).is_ok());
         }
     }
 }

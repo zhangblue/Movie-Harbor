@@ -24,7 +24,7 @@ use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::time::{Duration, SystemTime};
 use std::{
     future::Future,
@@ -376,6 +376,31 @@ struct PausingChunks {
     first: bool,
 }
 
+struct BlockingChunks {
+    started: Option<tokio::sync::oneshot::Sender<()>>,
+    release: Option<tokio::sync::oneshot::Receiver<()>>,
+    finished: bool,
+}
+
+impl ChunkSource for BlockingChunks {
+    fn next_chunk(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        let started = self.started.take();
+        let release = self.release.take();
+        let finished = self.finished;
+        self.finished = true;
+        Box::pin(async move {
+            if finished {
+                return Ok(None);
+            }
+            started.unwrap().send(()).unwrap();
+            release.unwrap().await.unwrap();
+            Ok(Some(Bytes::from_static(PNG)))
+        })
+    }
+}
+
 impl ChunkSource for PausingChunks {
     fn next_chunk(
         &mut self,
@@ -565,28 +590,8 @@ struct PauseAfterDatabaseCommit {
 struct ReplaceAtOwnedUnlink {
     root: PathBuf,
     replaced: AtomicBool,
+    no_quarantine_data_before_claim: AtomicBool,
     key: Mutex<Option<String>>,
-}
-
-struct ReplaceAndCollideAtClaim {
-    root: PathBuf,
-    replaced: AtomicBool,
-}
-
-impl StorageHooks for ReplaceAndCollideAtClaim {
-    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
-        match event {
-            StorageEvent::BeforeUnlink(key) if !self.replaced.swap(true, Ordering::SeqCst) => {
-                let formal = self.root.join(key);
-                std::fs::rename(&formal, formal.with_extension("owned-original"))?;
-                std::fs::write(formal, b"UNRELATED CLAIMED ENTRY")
-            }
-            StorageEvent::ClaimedForDeletion(key) => {
-                std::fs::write(self.root.join(key), b"RESTORATION COLLISION")
-            }
-            _ => Ok(()),
-        }
-    }
 }
 
 impl StorageHooks for ReplaceAtOwnedUnlink {
@@ -597,6 +602,14 @@ impl StorageHooks for ReplaceAtOwnedUnlink {
         if self.replaced.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        self.no_quarantine_data_before_claim.store(
+            std::fs::read_dir(self.root.join(".quarantine"))?.all(|entry| {
+                entry
+                    .map(|entry| entry.path().extension() != Some(std::ffi::OsStr::new("data")))
+                    .unwrap_or(false)
+            }),
+            Ordering::SeqCst,
+        );
         *self.key.lock().unwrap() = Some(key.clone());
         let formal = self.root.join(key);
         std::fs::rename(&formal, formal.with_extension("owned-original"))?;
@@ -771,6 +784,124 @@ async fn chunks_are_written_incrementally_to_an_opaque_system_key() {
         .collect::<Vec<_>>();
     assert_eq!(incoming.len(), 1);
     assert!(incoming[0].ends_with(".pending"));
+}
+
+// Catches two storage mutations running concurrently inside one storage instance.
+#[tokio::test]
+async fn storage_mutations_are_serialized_until_the_promoted_file_is_resolved() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let first_storage = storage.clone();
+    let first = tokio::spawn(async move {
+        first_storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Poster,
+                "first.png",
+                "image/png",
+                &policy(1024),
+                BlockingChunks {
+                    started: Some(started_tx),
+                    release: Some(release_rx),
+                    finished: false,
+                },
+            )
+            .await
+    });
+    started_rx.await.unwrap();
+
+    let (second_source, second_polls) = Chunks::new([PNG]);
+    let second_storage = storage.clone();
+    let second = tokio::spawn(async move {
+        second_storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Poster,
+                "second.png",
+                "image/png",
+                &policy(1024),
+                second_source,
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(second_polls.load(Ordering::SeqCst), 0);
+
+    release_tx.send(()).unwrap();
+    let first_stored = tokio::time::timeout(Duration::from_secs(2), first)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(second_polls.load(Ordering::SeqCst), 0);
+    drop(first_stored);
+    tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+// Catches starting with a media root writable by other OS accounts or a public quarantine.
+#[cfg(unix)]
+#[tokio::test]
+async fn storage_requires_exclusive_write_permissions_and_private_quarantine() {
+    let unsafe_root = TempRoot::new();
+    std::fs::set_permissions(unsafe_root.as_ref(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    assert!(
+        LocalMediaStorage::initialize(unsafe_root.as_ref())
+            .await
+            .is_err()
+    );
+
+    let safe_root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(safe_root.as_ref())
+        .await
+        .unwrap();
+    let quarantine = storage.root().join(".quarantine");
+    let metadata = std::fs::symlink_metadata(quarantine).unwrap();
+    assert!(metadata.is_dir());
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+}
+
+// Catches a process crash after a random quarantine claim but before unlink.
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_restores_a_durable_random_quarantine_claim_for_retry() {
+    let root = TempRoot::new();
+    let resource = Uuid::new_v4();
+    let simple = resource.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    let formal = root.as_ref().join(&key);
+    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+    std::fs::write(&formal, PNG).unwrap();
+    let metadata = std::fs::metadata(&formal).unwrap();
+    let quarantine = root.as_ref().join(".quarantine");
+    std::fs::create_dir(&quarantine).unwrap();
+    std::fs::set_permissions(&quarantine, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let claim_id = Uuid::new_v4().simple().to_string();
+    std::fs::rename(&formal, quarantine.join(format!("{claim_id}.data"))).unwrap();
+    std::fs::write(
+        quarantine.join(format!("{claim_id}.claim")),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "storage_key": key,
+            "device": metadata.dev(),
+            "inode": metadata.ino(),
+            "byte_size": PNG.len(),
+            "checksum_sha256": format!("{:x}", Sha256::digest(PNG)),
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+
+    assert_eq!(std::fs::read(formal).unwrap(), PNG);
+    assert!(std::fs::read_dir(quarantine).unwrap().next().is_none());
 }
 
 // Catches replacing a destination that appears after a preflight existence check.
@@ -1073,6 +1204,7 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
     let hooks = Arc::new(ReplaceAtOwnedUnlink {
         root: root.as_ref().to_owned(),
         replaced: AtomicBool::new(false),
+        no_quarantine_data_before_claim: AtomicBool::new(false),
         key: Mutex::new(None),
     });
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
@@ -1091,6 +1223,7 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
         .unwrap();
 
     assert!(hooks.replaced.load(Ordering::SeqCst));
+    assert!(hooks.no_quarantine_data_before_claim.load(Ordering::SeqCst));
     assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
     assert!(formal.with_extension("owned-original").exists());
     assert!(
@@ -1107,6 +1240,7 @@ async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
     let hooks = Arc::new(ReplaceAtOwnedUnlink {
         root: root.as_ref().to_owned(),
         replaced: AtomicBool::new(false),
+        no_quarantine_data_before_claim: AtomicBool::new(false),
         key: Mutex::new(None),
     });
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
@@ -1131,45 +1265,11 @@ async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
     let key = hooks.key.lock().unwrap().clone().unwrap();
     let formal = root.as_ref().join(key);
     assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
+    assert!(hooks.no_quarantine_data_before_claim.load(Ordering::SeqCst));
     assert!(formal.with_extension("owned-original").exists());
     assert!(std::fs::read_dir(root.as_ref().join(".incoming"))
         .unwrap()
         .any(|entry| entry.unwrap().path().extension() == Some(std::ffi::OsStr::new("pending"))));
-}
-
-// Catches deleting or losing an unrelated claimed entry when restoring it also collides.
-#[cfg(unix)]
-#[tokio::test]
-async fn recovery_retains_quarantine_and_marker_when_identity_and_restore_both_conflict() {
-    let db = database().await;
-    let root = TempRoot::new();
-    let hooks = Arc::new(ReplaceAndCollideAtClaim {
-        root: root.as_ref().to_owned(),
-        replaced: AtomicBool::new(false),
-    });
-    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
-        .await
-        .unwrap();
-    let id = Uuid::new_v4();
-    let simple = id.simple().to_string();
-    let key = format!("poster/{}/{}.png", &simple[..2], simple);
-    let formal = root.as_ref().join(&key);
-    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
-    std::fs::write(&formal, PNG).unwrap();
-    let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
-    let quarantine = formal.with_file_name(format!(".delete-{}.png", simple));
-
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
-
-    assert_eq!(std::fs::read(&formal).unwrap(), b"RESTORATION COLLISION");
-    assert_eq!(
-        std::fs::read(&quarantine).unwrap(),
-        b"UNRELATED CLAIMED ENTRY"
-    );
-    assert!(formal.with_extension("owned-original").exists());
-    assert!(marker.exists());
 }
 
 // Catches a marker being repointed to a different resource despite matching file metadata.
@@ -1664,6 +1764,85 @@ async fn mp4_validation_rejects_forbidden_nals_and_declared_count_amplification(
         .unwrap_or_else(|_| panic!("parser did not reject {name} within its bounded budget"));
         assert!(result.is_err(), "malformed fixture {name} was accepted");
     }
+}
+
+// Catches accepting parameter sets that expose only IDs but omit required H.264 RBSP syntax.
+#[tokio::test]
+async fn mp4_validation_rejects_id_only_sps_and_pps() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let mut bytes = ffmpeg_high_h264_mp4();
+    let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
+    let sps_length = usize::from(u16::from_be_bytes(
+        bytes[avcc + 10..avcc + 12].try_into().unwrap(),
+    ));
+    bytes[avcc + 16..avcc + 12 + sps_length].fill(0);
+    bytes[avcc + 16] = 0x80;
+    let pps_length_position = avcc + 12 + sps_length + 1;
+    let pps_length = usize::from(u16::from_be_bytes(
+        bytes[pps_length_position..pps_length_position + 2]
+            .try_into()
+            .unwrap(),
+    ));
+    bytes[pps_length_position + 3..pps_length_position + 2 + pps_length].fill(0);
+    bytes[pps_length_position + 3] = 0xc0;
+    let (source, _) = Chunks::bytes(bytes);
+
+    let result = storage
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            "id-only.mp4",
+            "video/mp4",
+            &policy(1024 * 1024),
+            source,
+        )
+        .await;
+
+    assert!(result.is_err());
+}
+
+// Catches one valid SPS masking a second individually-invalid forbidden-bit SPS.
+#[tokio::test]
+async fn mp4_validation_rejects_an_additional_forbidden_sps() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let mut bytes = ffmpeg_high_h264_mp4();
+    let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
+    let sps_length = usize::from(u16::from_be_bytes(
+        bytes[avcc + 10..avcc + 12].try_into().unwrap(),
+    ));
+    let mut extra = bytes[avcc + 10..avcc + 12 + sps_length].to_vec();
+    extra[2] |= 0x80;
+    for index in 4..=avcc {
+        if [
+            b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"avc1", b"avcC",
+        ]
+        .iter()
+        .any(|kind| bytes[index..index + 4] == **kind)
+        {
+            let size = u32::from_be_bytes(bytes[index - 4..index].try_into().unwrap());
+            if index - 4 + size as usize > avcc {
+                bytes[index - 4..index].copy_from_slice(&(size + extra.len() as u32).to_be_bytes());
+            }
+        }
+    }
+    bytes[avcc + 9] += 1;
+    bytes.splice(avcc + 12 + sps_length..avcc + 12 + sps_length, extra);
+    let (source, _) = Chunks::bytes(bytes);
+
+    let result = storage
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            "extra-forbidden-sps.mp4",
+            "video/mp4",
+            &policy(1024 * 1024),
+            source,
+        )
+        .await;
+
+    assert!(result.is_err());
 }
 
 // Catches unchecked MP4 slicing and parser panics on arbitrary short malformed inputs.

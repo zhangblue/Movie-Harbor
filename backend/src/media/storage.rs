@@ -15,12 +15,13 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     future::Future,
-    io::{self, Read},
+    io::{self, Read, Seek},
     path::{Component, Path, PathBuf},
     pin::Pin,
     sync::Arc,
 };
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
 pub trait ChunkSource {
@@ -52,7 +53,6 @@ pub enum StorageEvent {
     BeforePromote(String),
     Promoted(String),
     BeforeUnlink(String),
-    ClaimedForDeletion(String),
     Unlinked(String),
     BeforeDirectorySync(String),
     DatabaseCommitted(String),
@@ -62,6 +62,12 @@ pub enum StorageEvent {
 pub trait StorageHooks: Send + Sync {
     fn on_event(&self, _event: &StorageEvent) -> io::Result<()> {
         Ok(())
+    }
+
+    /// Deterministic durability fault seam, sampled before the atomic claim.
+    /// Production hooks leave this disabled.
+    fn fail_next_post_unlink_sync(&self) -> bool {
+        false
     }
 }
 
@@ -73,6 +79,8 @@ pub struct LocalMediaStorage {
     root: Arc<PathBuf>,
     root_fd: Arc<OwnedFd>,
     incoming_fd: Arc<OwnedFd>,
+    quarantine_fd: Arc<OwnedFd>,
+    mutations: Arc<AsyncMutex<()>>,
     hooks: Arc<dyn StorageHooks>,
 }
 
@@ -143,11 +151,13 @@ struct FormalCleanup {
 
 struct PendingCleanup {
     incoming: Arc<OwnedFd>,
+    quarantine: Arc<OwnedFd>,
     temp_name: Option<String>,
     marker_name: Option<String>,
     formal: Option<FormalCleanup>,
     hooks: Arc<dyn StorageHooks>,
     destructive: bool,
+    _mutation_guard: Option<OwnedMutexGuard<()>>,
 }
 
 impl std::fmt::Debug for PendingCleanup {
@@ -165,14 +175,22 @@ impl std::fmt::Debug for PendingCleanup {
 }
 
 impl PendingCleanup {
-    fn new(incoming: Arc<OwnedFd>, temp_name: String, hooks: Arc<dyn StorageHooks>) -> Self {
+    fn new(
+        incoming: Arc<OwnedFd>,
+        quarantine: Arc<OwnedFd>,
+        temp_name: String,
+        hooks: Arc<dyn StorageHooks>,
+        mutation_guard: OwnedMutexGuard<()>,
+    ) -> Self {
         Self {
             incoming,
+            quarantine,
             temp_name: Some(temp_name),
             marker_name: None,
             formal: None,
             hooks,
             destructive: true,
+            _mutation_guard: Some(mutation_guard),
         }
     }
 
@@ -225,6 +243,7 @@ impl Drop for PendingCleanup {
                     byte_size: formal.byte_size,
                     checksum_sha256: &formal.checksum_sha256,
                 },
+                &self.quarantine,
                 &self.hooks,
             )
             .is_ok()
@@ -264,6 +283,16 @@ struct DeletionIdentity<'a> {
     checksum_sha256: &'a str,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+struct QuarantineClaim {
+    version: u8,
+    storage_key: String,
+    device: u64,
+    inode: u64,
+    byte_size: u64,
+    checksum_sha256: String,
+}
+
 impl LocalMediaStorage {
     pub async fn initialize(root: impl AsRef<Path>) -> Result<Self, MediaError> {
         Self::initialize_with_hooks(root, Arc::new(NoopHooks)).await
@@ -276,6 +305,7 @@ impl LocalMediaStorage {
         tokio::fs::create_dir_all(root.as_ref()).await?;
         let canonical = tokio::fs::canonicalize(root.as_ref()).await?;
         let root_fd = open_directory(&CWD, canonical.as_os_str())?;
+        verify_exclusive_directory(&root_fd, false)?;
         let incoming_fd = match open_directory(&root_fd, OsStr::new(".incoming")) {
             Ok(fd) => fd,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -285,12 +315,25 @@ impl LocalMediaStorage {
             }
             Err(error) => return Err(error.into()),
         };
+        let quarantine_fd = match open_directory(&root_fd, OsStr::new(".quarantine")) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                mkdirat(&root_fd, ".quarantine", directory_mode()).map_err(io::Error::from)?;
+                fsync(&root_fd).map_err(io::Error::from)?;
+                open_directory(&root_fd, OsStr::new(".quarantine"))?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        verify_exclusive_directory(&quarantine_fd, true)?;
+        recover_quarantine_claims(&root_fd, &quarantine_fd)?;
         sync_fd(&root_fd)?;
         hooks.on_event(&StorageEvent::DirectorySynced(String::new()))?;
         Ok(Self {
             root: Arc::new(canonical),
             root_fd: Arc::new(root_fd),
             incoming_fd: Arc::new(incoming_fd),
+            quarantine_fd: Arc::new(quarantine_fd),
+            mutations: Arc::new(AsyncMutex::new(())),
             hooks,
         })
     }
@@ -309,11 +352,14 @@ impl LocalMediaStorage {
         mut source: S,
     ) -> Result<StoredFile, MediaError> {
         let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
+        let mutation_guard = self.mutations.clone().lock_owned().await;
         let temp_name = format!("{}.part", Uuid::new_v4().simple());
         let mut cleanup = PendingCleanup::new(
             self.incoming_fd.clone(),
+            self.quarantine_fd.clone(),
             temp_name.clone(),
             self.hooks.clone(),
+            mutation_guard,
         );
         let spec = StoreSpec {
             resource_id,
@@ -432,11 +478,13 @@ impl LocalMediaStorage {
                 cleanup,
                 PendingCleanup {
                     incoming: self.incoming_fd.clone(),
+                    quarantine: self.quarantine_fd.clone(),
                     temp_name: None,
                     marker_name: None,
                     formal: None,
                     hooks: self.hooks.clone(),
                     destructive: true,
+                    _mutation_guard: None,
                 },
             )),
         })
@@ -512,6 +560,7 @@ impl LocalMediaStorage {
         byte_size: i64,
         checksum_sha256: Option<&str>,
     ) -> Result<(), MediaError> {
+        let _mutation_guard = self.mutations.lock().await;
         let byte_size = u64::try_from(byte_size).map_err(|_| MediaError::InvalidStorageKey)?;
         let checksum_sha256 = checksum_sha256
             .filter(|checksum| valid_sha256(checksum))
@@ -527,7 +576,11 @@ impl LocalMediaStorage {
         )
     }
 
-    pub(crate) fn remove_pending_owned(&self, marker: &PendingMarker) -> Result<(), MediaError> {
+    pub(crate) async fn remove_pending_owned(
+        &self,
+        marker: &PendingMarker,
+    ) -> Result<(), MediaError> {
+        let _mutation_guard = self.mutations.lock().await;
         self.remove_registered_if_owned(
             &marker.storage_key,
             DeletionIdentity {
@@ -555,7 +608,14 @@ impl LocalMediaStorage {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(_) => return Err(MediaError::InvalidStorageKey),
         };
-        remove_owned_from_leaf(&shard_fd, file, storage_key, owner, &self.hooks)
+        remove_owned_from_leaf(
+            &shard_fd,
+            file,
+            storage_key,
+            owner,
+            &self.quarantine_fd,
+            &self.hooks,
+        )
     }
 
     pub(crate) fn incoming_entries(&self) -> Result<Vec<IncomingEntry>, MediaError> {
@@ -615,7 +675,8 @@ impl LocalMediaStorage {
         Ok(marker)
     }
 
-    pub(crate) fn remove_incoming(&self, name: &str) -> Result<(), MediaError> {
+    pub(crate) async fn remove_incoming(&self, name: &str) -> Result<(), MediaError> {
+        let _mutation_guard = self.mutations.lock().await;
         if !is_controlled_incoming_name(name) {
             return Err(MediaError::InvalidStorageKey);
         }
@@ -640,6 +701,126 @@ fn open_directory<F: AsFd>(parent: &F, name: &OsStr) -> io::Result<OwnedFd> {
         Mode::empty(),
     )
     .map_err(Into::into)
+}
+
+#[cfg(unix)]
+fn verify_exclusive_directory(directory: &OwnedFd, require_private_mode: bool) -> io::Result<()> {
+    let stat = rustix::fs::fstat(directory).map_err(io::Error::from)?;
+    let permissions = stat.st_mode & 0o777;
+    let owned_by_backend = stat.st_uid == rustix::process::geteuid().as_raw();
+    let safe_permissions = permissions & 0o022 == 0
+        && (!require_private_mode || permissions == directory_mode().bits());
+    if owned_by_backend && safe_permissions {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "media root must be owned by the backend OS account and must not be group/world writable; .quarantine must be mode 0700",
+        ))
+    }
+}
+
+fn recover_quarantine_claims(root: &OwnedFd, quarantine: &OwnedFd) -> Result<(), MediaError> {
+    let entries = rustix::fs::Dir::read_from(quarantine).map_err(io::Error::from)?;
+    for entry in entries {
+        let entry = entry.map_err(io::Error::from)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(base) = name
+            .strip_suffix(".claim")
+            .filter(|base| valid_claim_base(base))
+        else {
+            continue;
+        };
+        let Some(claim) = read_quarantine_claim(quarantine, &name)? else {
+            continue;
+        };
+        let data_name = format!("{base}.data");
+        let data_fd = match openat(
+            quarantine,
+            data_name.as_str(),
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => {
+                remove_if_present(quarantine, &name)?;
+                sync_fd(quarantine)?;
+                continue;
+            }
+            Err(error) => return Err(io::Error::from(error).into()),
+        };
+        let stat = rustix::fs::fstat(&data_fd).map_err(io::Error::from)?;
+        let mut data = std::fs::File::from(data_fd);
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile
+            || stat.st_dev as u64 != claim.device
+            || stat.st_ino as u64 != claim.inode
+            || stat.st_size as u64 != claim.byte_size
+            || hash_opened_file(&mut data)? != claim.checksum_sha256
+        {
+            continue;
+        }
+        let Ok((kind, shard, file)) = parse_storage_key(&claim.storage_key) else {
+            continue;
+        };
+        let Ok(kind_fd) = open_directory(root, OsStr::new(kind)) else {
+            continue;
+        };
+        let Ok(shard_fd) = open_directory(&kind_fd, OsStr::new(shard)) else {
+            continue;
+        };
+        match statat(&shard_fd, file, AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => {}
+            Ok(_) | Err(_) => continue,
+        }
+        renameat_with(
+            quarantine,
+            data_name.as_str(),
+            &shard_fd,
+            file,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)?;
+        sync_fd(quarantine)?;
+        sync_fd(&shard_fd)?;
+        remove_if_present(quarantine, &name)?;
+        sync_fd(quarantine)?;
+    }
+    Ok(())
+}
+
+fn read_quarantine_claim(
+    quarantine: &OwnedFd,
+    name: &str,
+) -> Result<Option<QuarantineClaim>, MediaError> {
+    let fd = openat(
+        quarantine,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let mut reader = std::fs::File::from(fd).take(2049);
+    let mut encoded = Vec::new();
+    reader.read_to_end(&mut encoded)?;
+    if encoded.len() > 2048 {
+        return Ok(None);
+    }
+    let Ok(claim) = serde_json::from_slice::<QuarantineClaim>(&encoded) else {
+        return Ok(None);
+    };
+    Ok((claim.version == 1 && valid_sha256(&claim.checksum_sha256)).then_some(claim))
+}
+
+fn valid_claim_base(base: &str) -> bool {
+    base.len() == 32
+        && base
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(not(unix))]
+fn verify_exclusive_directory(_directory: &OwnedFd, _require_private_mode: bool) -> io::Result<()> {
+    Ok(())
 }
 
 fn same_named_directory<F: AsFd>(
@@ -671,19 +852,12 @@ fn remove_if_present<F: AsFd>(parent: &F, name: &str) -> io::Result<()> {
     }
 }
 
-fn entry_exists<F: AsFd>(parent: &F, name: &str) -> Result<bool, MediaError> {
-    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(_) => Ok(true),
-        Err(rustix::io::Errno::NOENT) => Ok(false),
-        Err(error) => Err(io::Error::from(error).into()),
-    }
-}
-
 fn remove_owned_from_leaf<F: AsFd>(
     leaf: &F,
     file: &str,
     storage_key: &str,
     owner: DeletionIdentity<'_>,
+    quarantine: &OwnedFd,
     hooks: &Arc<dyn StorageHooks>,
 ) -> Result<(), MediaError> {
     let directory_label = storage_key
@@ -698,75 +872,118 @@ fn remove_owned_from_leaf<F: AsFd>(
         hooks.on_event(&StorageEvent::DirectorySynced(directory_label.to_owned()))?;
         Ok(())
     };
-    let quarantine = format!(".delete-{file}");
-    let original_exists = entry_exists(leaf, file)?;
-    let quarantine_exists = entry_exists(leaf, &quarantine)?;
-    if original_exists && quarantine_exists {
-        return Err(MediaError::InvalidStorageKey);
-    }
-    if !original_exists && !quarantine_exists {
-        sync_leaf()?;
-        return Ok(());
-    }
-    if !quarantine_exists {
-        hooks.on_event(&StorageEvent::BeforeUnlink(storage_key.to_owned()))?;
-        renameat_with(
-            leaf,
-            file,
-            leaf,
-            quarantine.as_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(io::Error::from)?;
-        sync_leaf()?;
-        hooks.on_event(&StorageEvent::ClaimedForDeletion(storage_key.to_owned()))?;
-    }
-    let stat =
-        statat(leaf, quarantine.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
-    let matches_owner = rustix::fs::FileType::from_raw_mode(stat.st_mode)
+    let original_fd = match openat(
+        leaf,
+        file,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => {
+            clear_completed_quarantine_claims(quarantine, storage_key)?;
+            sync_fd(quarantine)?;
+            sync_leaf()?;
+            return Ok(());
+        }
+        Err(error) => return Err(io::Error::from(error).into()),
+    };
+    let original_stat = rustix::fs::fstat(&original_fd).map_err(io::Error::from)?;
+    let mut original_file = std::fs::File::from(original_fd);
+    let matches_owner = rustix::fs::FileType::from_raw_mode(original_stat.st_mode)
         == rustix::fs::FileType::RegularFile
         && owner
             .device
-            .is_none_or(|device| stat.st_dev as u64 == device)
-        && owner.inode.is_none_or(|inode| stat.st_ino as u64 == inode)
-        && stat.st_size as u64 == owner.byte_size
-        && hash_file_at(leaf, &quarantine)? == owner.checksum_sha256;
+            .is_none_or(|device| original_stat.st_dev as u64 == device)
+        && owner
+            .inode
+            .is_none_or(|inode| original_stat.st_ino as u64 == inode)
+        && original_stat.st_size as u64 == owner.byte_size
+        && hash_opened_file(&mut original_file)? == owner.checksum_sha256;
     if !matches_owner {
-        if !entry_exists(leaf, file)? {
-            renameat_with(
-                leaf,
-                quarantine.as_str(),
-                leaf,
-                file,
-                RenameFlags::NOREPLACE,
-            )
-            .map_err(io::Error::from)?;
-            sync_leaf()?;
-        }
         return Err(MediaError::InvalidStorageKey);
     }
-    unlinkat(leaf, quarantine.as_str(), AtFlags::empty()).map_err(io::Error::from)?;
+
+    // All expensive verification is complete before this injection boundary. The
+    // subsequent claim, constant-time identity check, unlink, and fsync are one
+    // synchronous critical section protected by LocalMediaStorage::mutations.
+    let quarantine_base = Uuid::new_v4().simple().to_string();
+    let quarantine_name = format!("{quarantine_base}.data");
+    let claim_name = format!("{quarantine_base}.claim");
+    write_quarantine_claim(
+        quarantine,
+        &claim_name,
+        &QuarantineClaim {
+            version: 1,
+            storage_key: storage_key.to_owned(),
+            device: original_stat.st_dev as u64,
+            inode: original_stat.st_ino as u64,
+            byte_size: original_stat.st_size as u64,
+            checksum_sha256: owner.checksum_sha256.to_owned(),
+        },
+    )?;
+    let fail_post_unlink_sync = hooks.fail_next_post_unlink_sync();
+    if let Err(error) = hooks.on_event(&StorageEvent::BeforeUnlink(storage_key.to_owned())) {
+        remove_if_present(quarantine, &claim_name)?;
+        sync_fd(quarantine)?;
+        return Err(error.into());
+    }
+    if let Err(error) = renameat_with(
+        leaf,
+        file,
+        quarantine,
+        quarantine_name.as_str(),
+        RenameFlags::NOREPLACE,
+    ) {
+        remove_if_present(quarantine, &claim_name)?;
+        sync_fd(quarantine)?;
+        return Err(io::Error::from(error).into());
+    }
+    let claimed_stat = statat(
+        quarantine,
+        quarantine_name.as_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )
+    .map_err(io::Error::from)?;
+    let claimed_is_original = rustix::fs::FileType::from_raw_mode(claimed_stat.st_mode)
+        == rustix::fs::FileType::RegularFile
+        && claimed_stat.st_dev == original_stat.st_dev
+        && claimed_stat.st_ino == original_stat.st_ino
+        && claimed_stat.st_size == original_stat.st_size;
+    if !claimed_is_original {
+        let restored = renameat_with(
+            quarantine,
+            quarantine_name.as_str(),
+            leaf,
+            file,
+            RenameFlags::NOREPLACE,
+        );
+        sync_fd(quarantine)?;
+        sync_fd(leaf)?;
+        if restored.is_err() {
+            // The unrelated entry remains in the private quarantine rather than
+            // being destroyed when its original name was concurrently occupied.
+            return Err(MediaError::InvalidStorageKey);
+        }
+        remove_if_present(quarantine, &claim_name)?;
+        sync_fd(quarantine)?;
+        return Err(MediaError::InvalidStorageKey);
+    }
+    unlinkat(quarantine, quarantine_name.as_str(), AtFlags::empty()).map_err(io::Error::from)?;
+    if fail_post_unlink_sync {
+        return Err(io::Error::other("injected post-unlink directory fsync failure").into());
+    }
+    sync_fd(quarantine)?;
+    sync_fd(leaf)?;
+    remove_if_present(quarantine, &claim_name)?;
+    sync_fd(quarantine)?;
+    drop(original_file);
     hooks.on_event(&StorageEvent::Unlinked(storage_key.to_owned()))?;
-    sync_leaf()?;
+    hooks.on_event(&StorageEvent::DirectorySynced(directory_label.to_owned()))?;
     Ok(())
 }
 
-fn valid_sha256(checksum: &str) -> bool {
-    checksum.len() == 64
-        && checksum
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn hash_file_at<F: AsFd>(parent: &F, name: &str) -> Result<String, MediaError> {
-    let fd = openat(
-        parent,
-        name,
-        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(io::Error::from)?;
-    let mut file = std::fs::File::from(fd);
+fn hash_opened_file(file: &mut std::fs::File) -> Result<String, MediaError> {
+    file.seek(std::io::SeekFrom::Start(0))?;
     let mut digest = Sha256::new();
     let mut buffer = [0_u8; 8192];
     loop {
@@ -777,6 +994,80 @@ fn hash_file_at<F: AsFd>(parent: &F, name: &str) -> Result<String, MediaError> {
         digest.update(&buffer[..count]);
     }
     Ok(format!("{:x}", digest.finalize()))
+}
+
+fn write_quarantine_claim(
+    quarantine: &OwnedFd,
+    name: &str,
+    claim: &QuarantineClaim,
+) -> Result<(), MediaError> {
+    let temporary_name = format!("{}.part", Uuid::new_v4().simple());
+    let result = (|| {
+        let fd = openat(
+            quarantine,
+            temporary_name.as_str(),
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            file_mode(),
+        )
+        .map_err(io::Error::from)?;
+        let mut file = std::fs::File::from(fd);
+        use std::io::Write;
+        file.write_all(&serde_json::to_vec(claim).map_err(io::Error::other)?)?;
+        file.sync_all()?;
+        renameat_with(
+            quarantine,
+            temporary_name.as_str(),
+            quarantine,
+            name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)?;
+        sync_fd(quarantine)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = remove_if_present(quarantine, &temporary_name);
+        let _ = sync_fd(quarantine);
+    }
+    result
+}
+
+fn clear_completed_quarantine_claims(
+    quarantine: &OwnedFd,
+    storage_key: &str,
+) -> Result<(), MediaError> {
+    let entries = rustix::fs::Dir::read_from(quarantine).map_err(io::Error::from)?;
+    for entry in entries {
+        let entry = entry.map_err(io::Error::from)?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(base) = name
+            .strip_suffix(".claim")
+            .filter(|base| valid_claim_base(base))
+        else {
+            continue;
+        };
+        let Some(claim) = read_quarantine_claim(quarantine, &name)? else {
+            continue;
+        };
+        if claim.storage_key != storage_key {
+            continue;
+        }
+        let data_name = format!("{base}.data");
+        if matches!(
+            statat(quarantine, data_name.as_str(), AtFlags::SYMLINK_NOFOLLOW),
+            Err(rustix::io::Errno::NOENT)
+        ) {
+            remove_if_present(quarantine, &name)?;
+        }
+    }
+    Ok(())
+}
+
+fn valid_sha256(checksum: &str) -> bool {
+    checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn is_controlled_incoming_name(name: &str) -> bool {

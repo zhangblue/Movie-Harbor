@@ -9,6 +9,8 @@ use std::{
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub database_url: String,
+    /// Must be owned by the backend OS account and not group/world writable.
+    /// Processes running as that same account are inside the storage trust boundary.
     pub media_dir: PathBuf,
     pub cookie_secure: bool,
     pub public_origin: String,

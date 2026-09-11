@@ -53,7 +53,7 @@ pub async fn recover_uploads(
             continue;
         }
         if entry.name.ends_with(".part") {
-            storage.remove_incoming(&entry.name)?;
+            storage.remove_incoming(&entry.name).await?;
             continue;
         }
         if entry.name.ends_with(".pending") {
@@ -69,11 +69,11 @@ pub async fn recover_uploads(
                 .one(db)
                 .await?
                 .is_some();
-            if !registered && let Err(error) = storage.remove_pending_owned(&marker) {
+            if !registered && let Err(error) = storage.remove_pending_owned(&marker).await {
                 eprintln!("retaining unproven media recovery marker: {error}");
                 continue;
             }
-            storage.remove_incoming(&entry.name)?;
+            storage.remove_incoming(&entry.name).await?;
         }
     }
     storage.notify_recovery_cycle_completed()?;
