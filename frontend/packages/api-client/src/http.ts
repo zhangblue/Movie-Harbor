@@ -110,6 +110,7 @@ export async function apiRequest<T = unknown>(
   if (csrfToken && isUnsafeAdminRequest(url, method) && !headers.has("X-CSRF-Token")) {
     headers.set("X-CSRF-Token", csrfToken);
   }
+  const requestBody = json === undefined ? body : JSON.stringify(json);
 
   let response: Response;
   try {
@@ -118,7 +119,7 @@ export async function apiRequest<T = unknown>(
       method,
       headers,
       credentials: "same-origin",
-      body: json === undefined ? body : JSON.stringify(json),
+      body: requestBody,
     });
   } catch (error) {
     throw new ApiNetworkError(error);

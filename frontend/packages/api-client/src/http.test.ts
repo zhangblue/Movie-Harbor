@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   ApiError,
+  ApiNetworkError,
   apiRequest,
   buildApiUrl,
   clearCsrfToken,
@@ -68,6 +69,21 @@ describe("apiRequest", () => {
     expect(headers.get("accept")).toBe("application/vnd.movie+json");
     expect(headers.get("content-type")).toBe("application/json");
     expect(init.body).toBe('{"name":"Moon"}');
+  });
+
+  it.each([
+    ["cyclic JSON", (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })()],
+    ["BigInt JSON", { value: 1n }],
+  ])("does not mislabel %s serialization errors as network failures", async (_label, json) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await apiRequest("/api/admin/movies", { method: "POST", json }).catch(
+      (value: unknown) => value,
+    );
+    expect(error).toBeInstanceOf(TypeError);
+    expect(error).not.toBeInstanceOf(ApiNetworkError);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("adds CSRF only to unsafe admin methods and never overwrites a caller header", async () => {

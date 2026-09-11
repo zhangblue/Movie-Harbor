@@ -1,5 +1,5 @@
 import { createPortal } from "react-dom";
-import { useEffect, useId, useRef, type ReactNode } from "react";
+import { useEffect, useEffectEvent, useId, useRef, type ReactNode } from "react";
 
 export interface DialogProps {
   open: boolean;
@@ -11,39 +11,67 @@ export interface DialogProps {
 }
 
 const focusableSelector = [
-  "button:not([disabled])", "a[href]", "input:not([disabled])", "select:not([disabled])",
-  "textarea:not([disabled])", "[tabindex]:not([tabindex='-1'])",
+  "a[href]", "button", "input:not([type='hidden'])", "select", "textarea", "summary",
+  "iframe", "audio[controls]", "video[controls]", "[contenteditable]:not([contenteditable='false'])", "[tabindex]",
 ].join(",");
+
+function tabbableElements(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
+    if (element.tabIndex < 0) return false;
+    if (element.matches(":disabled")) return false;
+    if (element.closest("[hidden], [inert], [aria-hidden='true']")) return false;
+
+    let current: HTMLElement | null = element;
+    while (current) {
+      const style = getComputedStyle(current);
+      if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return false;
+      if (current === panel) break;
+      current = current.parentElement;
+    }
+    return true;
+  }).sort((left, right) => {
+    const leftOrder = left.tabIndex > 0 ? left.tabIndex : Number.MAX_SAFE_INTEGER;
+    const rightOrder = right.tabIndex > 0 ? right.tabIndex : Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
+  });
+}
 
 export function Dialog({ open, title, onClose, children, closeLabel, className }: DialogProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
   const previousFocus = useRef<HTMLElement | null>(null);
+  const closeFromEffect = useEffectEvent(onClose);
 
   useEffect(() => {
     if (!open) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const panel = panelRef.current;
-    const first = panel?.querySelector<HTMLElement>(focusableSelector);
+    const first = panel ? tabbableElements(panel)[0] : undefined;
     (first ?? panel)?.focus();
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        closeFromEffect();
         return;
       }
       if (event.key !== "Tab" || !panel) return;
-      const focusable = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector));
+      const focusable = tabbableElements(panel);
       if (!focusable.length) {
-        event.preventDefault();
-        panel.focus();
+        if (document.activeElement !== panel) {
+          event.preventDefault();
+          panel.focus();
+        }
         return;
       }
       const firstElement = focusable[0];
       const lastElement = focusable[focusable.length - 1];
       if (!firstElement || !lastElement) return;
-      if (event.shiftKey && document.activeElement === firstElement) {
+      const activeElement = document.activeElement;
+      if (!panel.contains(activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? lastElement : firstElement).focus();
+      } else if (event.shiftKey && activeElement === firstElement) {
         event.preventDefault();
         lastElement.focus();
       } else if (!event.shiftKey && document.activeElement === lastElement) {
@@ -56,7 +84,7 @@ export function Dialog({ open, title, onClose, children, closeLabel, className }
       document.removeEventListener("keydown", handleKeyDown);
       previousFocus.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   if (!open) return null;
   const label = closeLabel ?? (typeof title === "string" ? `关闭${title}` : "关闭对话框");
