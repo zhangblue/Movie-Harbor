@@ -126,3 +126,61 @@ it("shows a recoverable list failure and an accessible empty result", async () =
   await user.click(screen.getByRole("button", { name: "重新加载" }));
   expect(await screen.findByRole("status")).toHaveTextContent(/没有匹配/);
 });
+
+// Cookie rotation in another tab leaves this tab's in-memory CSRF stale. Recovery must not replay writes.
+it("refreshes stale CSRF after a forbidden lifecycle write and requires explicit retries", async () => {
+  let token = session.csrf_token;
+  let forbidden = true;
+  let archived = false;
+  const requests = server((r) => {
+    if (r.url === "/api/admin/session") return json({ ...session, csrf_token: token });
+    if (r.url.endsWith("/archive")) {
+      if (forbidden || r.headers.get("X-CSRF-Token") !== token) return json({ error: "request forbidden" }, 403);
+      archived = true;
+      return json(series({ status: "archived", version: 4 }));
+    }
+    if (r.url === "/api/admin/series") return json([series({ status: archived ? "archived" : "published" })]);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("长夜航线");
+  token = "renewed-csrf";
+  await user.click(screen.getByRole("button", { name: "归档" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/重新确认会话.*重新执行/);
+  expect(requests.filter((r) => r.url.endsWith("/archive"))).toHaveLength(1);
+  await user.click(screen.getByRole("button", { name: "归档" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/请求被拒绝.*403/);
+  expect(requests.filter((r) => r.url.endsWith("/archive"))).toHaveLength(2);
+  forbidden = false;
+  await user.click(screen.getByRole("button", { name: "归档" }));
+  await screen.findByRole("button", { name: "原样发布" });
+  expect(requests.filter((r) => r.url.endsWith("/archive")).map((r) => r.headers.get("X-CSRF-Token"))).toEqual(["session-csrf", "renewed-csrf", "renewed-csrf"]);
+});
+
+it.each(["movies", "series"])("honors a late %s 401 even when the other list fails with 503 first", async (kind) => {
+  const pending = deferred<Response>();
+  server((r) => r.url === `/api/admin/${kind}` ? pending.promise
+    : r.url === `/api/admin/${kind === "movies" ? "series" : "movies"}` ? json({ error: "unavailable" }, 503) : undefined);
+  render(<App />);
+  expect(await screen.findByRole("alert")).toHaveTextContent(/加载失败/);
+  await act(async () => { pending.resolve(json({ error: "authentication failed" }, 401)); });
+  await screen.findByRole("heading", { name: "管理员登录" });
+  expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+});
+
+it("ignores an obsolete list's delayed 401 after a newer query succeeds", async () => {
+  const pending = deferred<Response>();
+  server((r) => r.url.includes("name=old") ? pending.promise : r.url.includes("name=new") ? json([movie({ name: "新查询结果" })]) : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.selectOptions(screen.getByLabelText("内容形态"), "movie");
+  const input = screen.getByRole("searchbox", { name: "名称" });
+  await user.type(input, "old{Enter}");
+  await user.clear(input);
+  await user.type(input, "new{Enter}");
+  await screen.findByText("新查询结果");
+  await act(async () => { pending.resolve(json({ error: "authentication failed" }, 401)); });
+  expect(screen.getByText("新查询结果")).toBeInTheDocument();
+  expect(screen.queryByRole("heading", { name: "管理员登录" })).not.toBeInTheDocument();
+});

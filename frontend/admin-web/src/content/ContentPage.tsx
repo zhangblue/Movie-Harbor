@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApiError, listMovies, listSeries, transitionMovie, transitionSeries } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
+import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
 import { availableActions, type ContentAction, type ContentRow } from "./ActionButtons";
 import { ContentFilters, initialFilters } from "./ContentFilters";
 import { ContentTable } from "./ContentTable";
@@ -26,17 +27,23 @@ export function ContentPage({ onExpired, onOpen }: {
     setError("");
     setRows([]);
     const query = { status: filters.status === "all" ? undefined : filters.status, name: filters.name || undefined };
+    function watchSession<T>(request: Promise<T>): Promise<T> {
+      return request.catch((cause: unknown) => {
+        // Observe each request: Promise.all may already have rejected on the other list's 5xx.
+        if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
+        throw cause;
+      });
+    }
     void Promise.all([
-      filters.kind === "series" ? [] : listMovies(query),
-      filters.kind === "movie" ? [] : listSeries(query),
+      filters.kind === "series" ? [] : watchSession(listMovies(query)),
+      filters.kind === "movie" ? [] : watchSession(listSeries(query)),
     ]).then(([movies, series]) => {
       if (ignore) return;
       setRows([...movies.map((row): ContentRow => ({ ...row, kind: "movie" })), ...series.map((row): ContentRow => ({ ...row, kind: "series" }))]);
       setConflict(false);
     }).catch((cause: unknown) => {
       if (ignore) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
-      else setError("内容列表加载失败，请重新加载。");
+      if (!(cause instanceof ApiError && cause.status === 401)) setError("内容列表加载失败，请重新加载。");
     }).finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
   }, [filters, revision, onExpired]);
@@ -53,7 +60,12 @@ export function ContentPage({ onExpired, onOpen }: {
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError && cause.status === 401) onExpired();
-      else if (cause instanceof ApiError && cause.status === 409) {
+      else if (cause instanceof ApiError && cause.status === 403) {
+        const recovery = await recoverForbiddenWrite();
+        if (!mounted.current) return;
+        if (recovery.expired) onExpired();
+        else setError(recovery.message);
+      } else if (cause instanceof ApiError && cause.status === 409) {
         setConflict(true);
         setError("内容已发生变化，请刷新后重试。");
       } else setError(cause instanceof ApiError ? `操作失败：${cause.message}` : "操作失败，请检查网络后重试。");

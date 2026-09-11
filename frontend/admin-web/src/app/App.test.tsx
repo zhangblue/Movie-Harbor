@@ -170,3 +170,57 @@ it("returns to login when logout loses its response but session recovery confirm
   await screen.findByRole("heading", { name: "管理员登录" });
   expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
 });
+
+it("refreshes stale CSRF for password changes without automatically resubmitting the password", async () => {
+  let token = session.csrf_token;
+  const requests = server((r) => {
+    if (r.url === "/api/admin/session") return json({ ...session, csrf_token: token });
+    if (r.url === "/api/admin/password") return r.headers.get("X-CSRF-Token") === token
+      ? new Response(null, { status: 204 }) : json({ error: "request forbidden" }, 403);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: session.name }));
+  await user.click(screen.getByRole("menuitem", { name: "修改密码" }));
+  await user.type(screen.getByLabelText("当前密码"), "old-password");
+  await user.type(screen.getByLabelText("新密码"), "new-password");
+  await user.type(screen.getByLabelText("确认新密码"), "new-password");
+  token = "renewed-csrf";
+  await user.click(screen.getByRole("button", { name: "保存密码" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/重新确认会话.*重新执行/);
+  expect(requests.filter((r) => r.url === "/api/admin/password")).toHaveLength(1);
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "保存密码" }));
+  await screen.findByRole("heading", { name: "管理员登录" });
+  expect(requests.filter((r) => r.url === "/api/admin/password").map((r) => r.headers.get("X-CSRF-Token"))).toEqual(["session-csrf", "renewed-csrf"]);
+});
+
+it.each([
+  ["lifecycle", 401], ["password", 401], ["lifecycle", 503], ["password", 503],
+])("handles %s write 403 followed by session recovery %s without replaying it", async (action, recoveryStatus) => {
+  let forbidden = false;
+  const endpoint = action === "password" ? "/api/admin/password" : "/api/admin/series/series-1/archive";
+  const requests = server((r) => {
+    if (r.url === endpoint) { forbidden = true; return json({ error: "request forbidden" }, 403); }
+    if (r.url === "/api/admin/session" && forbidden) return json({ error: "session unavailable" }, Number(recoveryStatus));
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("长夜航线");
+  if (action === "password") {
+    await user.click(screen.getByRole("button", { name: session.name }));
+    await user.click(screen.getByRole("menuitem", { name: "修改密码" }));
+    await user.type(screen.getByLabelText("当前密码"), "old-password");
+    await user.type(screen.getByLabelText("新密码"), "new-password");
+    await user.type(screen.getByLabelText("确认新密码"), "new-password");
+    await user.click(screen.getByRole("button", { name: "保存密码" }));
+  } else await user.click(screen.getByRole("button", { name: "归档" }));
+  if (recoveryStatus === 401) {
+    await screen.findByRole("heading", { name: "管理员登录" });
+    expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+  } else {
+    expect(await screen.findByRole("alert")).toHaveTextContent(/无法确认会话/);
+    expect(screen.getByRole("button", { name: action === "password" ? "保存密码" : "归档" })).toBeEnabled();
+  }
+  expect(requests.filter((r) => r.url === endpoint)).toHaveLength(1);
+});

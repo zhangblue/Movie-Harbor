@@ -2,6 +2,7 @@ import { useState, type FormEvent } from "react";
 import { ApiError, changePassword, getSession } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
+import { recoverForbiddenWrite } from "./recoverForbiddenWrite";
 
 export function ChangePasswordDialog({ onClose, onChanged, onExpired }: {
   onClose: () => void; onChanged: () => void; onExpired: () => void;
@@ -25,7 +26,12 @@ export function ChangePasswordDialog({ onClose, onChanged, onExpired }: {
       if (mounted.current) onChanged();
     } catch (cause) {
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) {
+      if (cause instanceof ApiError && cause.status === 403) {
+        const recovery = await recoverForbiddenWrite();
+        if (!mounted.current) return;
+        if (recovery.expired) onExpired();
+        else setError(recovery.message);
+      } else if (cause instanceof ApiError && cause.status === 401) {
         // A wrong current password and an expired session share HTTP 401 in the auth API.
         try {
           await getSession();
