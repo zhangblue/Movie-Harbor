@@ -1,7 +1,10 @@
 use crate::{
-    entities::{episode, file_cleanup_job, movie, season, series},
+    entities::{episode, season, series},
     genres,
-    media::{LocalMediaStorage, is_publishable_asset},
+    media::{
+        LocalMediaStorage, is_publishable_asset,
+        references::{lock_for_reference_removal, queue_locked_if_unreferenced},
+    },
     movies::dto::Patch,
 };
 use axum::{
@@ -12,7 +15,7 @@ use axum::{
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait, sea_query::OnConflict,
+    QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
 };
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -252,7 +255,6 @@ pub async fn create_season(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_series_version(&model, expected_version)?;
-    require_mutable_parent(&model)?;
     season::ActiveModel {
         id: Set(Uuid::new_v4()),
         series_id: Set(series_id),
@@ -281,7 +283,6 @@ pub async fn update_season(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_series_version(&model, expected_version)?;
-    require_mutable_parent(&model)?;
     let current = repository::season_locked(&tx, series_id, season_id).await?;
     if current.number == number {
         let result = response(&tx, model).await?;
@@ -317,7 +318,6 @@ pub async fn delete_season(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_series_version(&model, expected_version)?;
-    require_mutable_parent(&model)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episodes = repository::episodes_locked(&tx, season_id).await?;
     if episodes.iter().any(|episode| episode.status == "published") {
@@ -327,11 +327,10 @@ pub async fn delete_season(
         .into_iter()
         .filter_map(|episode| episode.video_asset_id)
         .collect::<HashSet<_>>();
+    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     season::Entity::delete_by_id(season_id).exec(&tx).await?;
     let updated = repository::bump_series(&tx, &model).await?;
-    for asset_id in assets {
-        queue_cleanup_if_unreferenced(&tx, asset_id).await?;
-    }
+    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     let result = response(&tx, updated).await?;
     tx.commit().await?;
     Ok(result)
@@ -352,7 +351,6 @@ pub async fn create_episode(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_series_version(&model, input.version)?;
-    require_mutable_parent(&model)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     episode::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -407,7 +405,6 @@ pub async fn update_episode(
     valid_version(input.version)?;
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
-    require_mutable_parent(&series)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let mut episode = repository::episode_locked(&tx, season_id, episode_id).await?;
     require_episode_version(&episode, input.version)?;
@@ -483,7 +480,6 @@ pub async fn transition_episode(
         tx.commit().await?;
         return Ok(result);
     }
-    require_mutable_parent(&series)?;
     require_episode_version(&episode, expected_version)?;
     ensure_transition(&episode.status, target)?;
     if target == TargetState::Published {
@@ -515,18 +511,16 @@ pub async fn delete_episode(
     valid_version(expected_version)?;
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
-    require_mutable_parent(&series)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episode = repository::episode_locked(&tx, season_id, episode_id).await?;
     require_episode_version(&episode, expected_version)?;
     if episode.status == "published" {
         return Err(SeriesError::Conflict);
     }
+    let locked_assets = lock_for_reference_removal(&tx, episode.video_asset_id).await?;
     repository::delete_episode(&tx, episode_id, expected_version).await?;
     repository::bump_series(&tx, &series).await?;
-    if let Some(asset_id) = episode.video_asset_id {
-        queue_cleanup_if_unreferenced(&tx, asset_id).await?;
-    }
+    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -561,10 +555,9 @@ pub async fn delete_series(
                 .filter_map(|episode| episode.video_asset_id),
         );
     }
+    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     repository::delete_series(&tx, id, expected_version).await?;
-    for asset_id in assets {
-        queue_cleanup_if_unreferenced(&tx, asset_id).await?;
-    }
+    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -665,44 +658,6 @@ async fn validate_episode_publish<C: ConnectionTrait>(
     }
 }
 
-async fn queue_cleanup_if_unreferenced<C: ConnectionTrait>(
-    db: &C,
-    media_asset_id: Uuid,
-) -> Result<(), SeriesError> {
-    let movie_reference = movie::Entity::find()
-        .filter(
-            movie::Column::PosterAssetId
-                .eq(media_asset_id)
-                .or(movie::Column::VideoAssetId.eq(media_asset_id)),
-        )
-        .one(db)
-        .await?;
-    let series_reference = series::Entity::find()
-        .filter(series::Column::PosterAssetId.eq(media_asset_id))
-        .one(db)
-        .await?;
-    let episode_reference = episode::Entity::find()
-        .filter(episode::Column::VideoAssetId.eq(media_asset_id))
-        .one(db)
-        .await?;
-    if movie_reference.is_some() || series_reference.is_some() || episode_reference.is_some() {
-        return Ok(());
-    }
-    file_cleanup_job::Entity::insert(file_cleanup_job::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        media_asset_id: Set(media_asset_id),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(file_cleanup_job::Column::MediaAssetId)
-            .do_nothing()
-            .to_owned(),
-    )
-    .exec_without_returning(db)
-    .await?;
-    Ok(())
-}
-
 fn normalize_name(name: String) -> Result<String, SeriesError> {
     let name = name.trim();
     if name.is_empty() {
@@ -738,14 +693,6 @@ fn require_series_version(model: &series::Model, version: i64) -> Result<(), Ser
 
 fn require_episode_version(model: &episode::Model, version: i64) -> Result<(), SeriesError> {
     if model.version == version {
-        Ok(())
-    } else {
-        Err(SeriesError::Conflict)
-    }
-}
-
-fn require_mutable_parent(model: &series::Model) -> Result<(), SeriesError> {
-    if matches!(model.status.as_str(), "draft" | "published") {
         Ok(())
     } else {
         Err(SeriesError::Conflict)

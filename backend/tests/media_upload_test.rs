@@ -2654,6 +2654,89 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
     );
 }
 
+// Catches treating an archived series as a blanket media freeze instead of applying the owning
+// series/episode entity's own editability rule.
+#[tokio::test]
+async fn archived_series_poster_stays_read_only_while_draft_episode_video_is_editable() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let series = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Archived series".into()),
+        synopsis: Set(String::new()),
+        status: Set("archived".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season = season::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        series_id: Set(series.id),
+        number: Set(1),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let episode = episode::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        season_id: Set(season.id),
+        number: Set(1),
+        name: Set("Draft episode".into()),
+        synopsis: Set(String::new()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+
+    let poster = app
+        .clone()
+        .oneshot(multipart_file_request(
+            format!("/api/admin/media/series/{}/poster?version=1", series.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(poster.status(), StatusCode::CONFLICT);
+
+    let video = app
+        .oneshot(multipart_request(
+            format!("/api/admin/media/episodes/{}/video?version=1", episode.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(video.status(), StatusCode::OK);
+    let video: Value =
+        serde_json::from_slice(&video.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(video["version"], 2);
+    assert_eq!(video["series_version"], 2);
+    assert_eq!(
+        series::Entity::find_by_id(series.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "archived"
+    );
+}
+
 // Catches disabling Axum's body limit and accepting unbounded multipart metadata/extra fields.
 #[tokio::test]
 async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field() {

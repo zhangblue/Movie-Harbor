@@ -1,5 +1,5 @@
-use super::{LocalMediaStorage, MediaError};
-use crate::entities::{episode, file_cleanup_job, media_asset, movie, series};
+use super::{LocalMediaStorage, MediaError, references};
+use crate::entities::{file_cleanup_job, media_asset};
 use chrono::{Duration as ChronoDuration, Utc};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
@@ -137,23 +137,7 @@ async fn process_locked_job(
 }
 
 async fn ensure_unreferenced(tx: &DatabaseTransaction, asset_id: Uuid) -> Result<(), MediaError> {
-    let movie_reference = movie::Entity::find()
-        .filter(
-            movie::Column::PosterAssetId
-                .eq(asset_id)
-                .or(movie::Column::VideoAssetId.eq(asset_id)),
-        )
-        .one(tx)
-        .await?;
-    let series_reference = series::Entity::find()
-        .filter(series::Column::PosterAssetId.eq(asset_id))
-        .one(tx)
-        .await?;
-    let episode_reference = episode::Entity::find()
-        .filter(episode::Column::VideoAssetId.eq(asset_id))
-        .one(tx)
-        .await?;
-    if movie_reference.is_some() || series_reference.is_some() || episode_reference.is_some() {
+    if references::is_referenced(tx, asset_id).await? {
         return Err(MediaError::StillReferenced);
     }
     Ok(())

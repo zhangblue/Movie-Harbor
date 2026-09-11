@@ -1,12 +1,12 @@
 use super::{
     ChunkSource, LocalMediaStorage, MediaError, StoredFile,
+    references::{lock_for_reference_removal, queue_locked_if_unreferenced},
     validation::{MediaKind, UploadPolicy},
 };
-use crate::entities::{episode, file_cleanup_job, media_asset, movie, season, series};
+use crate::entities::{episode, media_asset, movie, season, series};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    QueryFilter, QuerySelect, Set, TransactionTrait,
-    sea_query::{Expr, OnConflict},
+    QueryFilter, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
 use uuid::Uuid;
 
@@ -177,20 +177,8 @@ async fn replace_before_commit(
 ) -> Result<CommittedAttachment, MediaError> {
     let asset = insert_asset(tx, id, kind, original_name, stored).await?;
     let outcome = switch_reference(tx, target, asset.id, expected_version).await?;
-    if let Some(old_id) = outcome.old_id {
-        file_cleanup_job::Entity::insert(file_cleanup_job::ActiveModel {
-            id: Set(Uuid::new_v4()),
-            media_asset_id: Set(old_id),
-            ..Default::default()
-        })
-        .on_conflict(
-            OnConflict::column(file_cleanup_job::Column::MediaAssetId)
-                .do_nothing()
-                .to_owned(),
-        )
-        .exec_without_returning(tx)
-        .await?;
-    }
+    let removed_assets = outcome.old_id.into_iter().collect::<Vec<_>>();
+    queue_locked_if_unreferenced(tx, &removed_assets).await?;
     Ok(CommittedAttachment {
         asset,
         version: outcome.version,
@@ -242,6 +230,7 @@ async fn switch_reference(
                 AttachmentTarget::MoviePoster { .. } => model.poster_asset_id,
                 _ => model.video_asset_id,
             };
+            lock_for_reference_removal(tx, old).await?;
             let result = match target {
                 AttachmentTarget::MoviePoster { .. } => {
                     movie::Entity::update_many()
@@ -293,6 +282,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.poster_asset_id;
+            lock_for_reference_removal(tx, old).await?;
             let result = series::Entity::update_many()
                 .col_expr(series::Column::PosterAssetId, Expr::value(Some(new_id)))
                 .col_expr(series::Column::Version, Expr::value(version + 1))
@@ -329,9 +319,6 @@ async fn switch_reference(
                 .one(tx)
                 .await?
                 .ok_or(MediaError::TargetNotFound)?;
-            if parent.status == "archived" {
-                return Err(MediaError::ReadOnly);
-            }
             let season = season::Entity::find()
                 .filter(season::Column::Id.eq(season_hint.id))
                 .filter(season::Column::SeriesId.eq(parent.id))
@@ -353,6 +340,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.video_asset_id;
+            lock_for_reference_removal(tx, old).await?;
             let episode_result = episode::Entity::update_many()
                 .col_expr(episode::Column::VideoAssetId, Expr::value(Some(new_id)))
                 .col_expr(episode::Column::Version, Expr::value(version + 1))

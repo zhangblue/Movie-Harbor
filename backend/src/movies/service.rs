@@ -1,7 +1,10 @@
 use crate::{
-    entities::{file_cleanup_job, media_asset, movie},
+    entities::{media_asset, movie},
     genres,
-    media::{LocalMediaStorage, is_publishable_asset},
+    media::{
+        LocalMediaStorage, is_publishable_asset,
+        references::{lock_for_reference_removal, queue_locked_if_unreferenced},
+    },
 };
 use axum::{
     Json,
@@ -11,7 +14,7 @@ use axum::{
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder,
-    QuerySelect, Set, TransactionTrait, sea_query::OnConflict,
+    Set, TransactionTrait,
 };
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -207,25 +210,33 @@ pub async fn associate_media(
     if model.status != "draft" {
         return Err(MovieError::Conflict);
     }
+    let old_id = match slot {
+        MediaSlot::Poster => model.poster_asset_id,
+        MediaSlot::Video => model.video_asset_id,
+    };
+    let locked_assets =
+        lock_for_reference_removal(&tx, old_id.into_iter().chain(std::iter::once(asset_id)))
+            .await?;
     let asset = media_asset::Entity::find_by_id(asset_id)
-        .lock_shared()
         .one(&tx)
         .await?
         .ok_or_else(|| MovieError::Validation(vec![slot.field_name()]))?;
     if asset.purpose != slot.purpose() {
         return Err(MovieError::Validation(vec![slot.field_name()]));
     }
-    let old_id = match slot {
+    let replaced_id = match slot {
         MediaSlot::Poster => model.poster_asset_id.replace(asset_id),
         MediaSlot::Video => model.video_asset_id.replace(asset_id),
     };
-    if old_id == Some(asset_id) {
+    if replaced_id == Some(asset_id) {
         return response(&tx, model).await;
     }
     let updated = repository::persist(&tx, &model, expected_version).await?;
-    if let Some(old_id) = old_id {
-        queue_cleanup(&tx, old_id).await?;
-    }
+    let removed_assets = locked_assets
+        .into_iter()
+        .filter(|id| Some(*id) == replaced_id)
+        .collect::<Vec<_>>();
+    queue_locked_if_unreferenced(&tx, &removed_assets).await?;
     let result = response(&tx, updated).await?;
     tx.commit().await?;
     Ok(result)
@@ -294,10 +305,9 @@ pub async fn delete(
         .into_iter()
         .flatten()
         .collect::<HashSet<_>>();
+    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     repository::delete(&tx, id, expected_version).await?;
-    for asset_id in assets {
-        queue_cleanup(&tx, asset_id).await?;
-    }
+    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -310,25 +320,6 @@ async fn response<C: sea_orm::ConnectionTrait>(
     let poster = repository::asset(db, model.poster_asset_id).await?;
     let video = repository::asset(db, model.video_asset_id).await?;
     Ok(MovieResponse::new(model, genres, poster, video))
-}
-
-async fn queue_cleanup<C: sea_orm::ConnectionTrait>(
-    db: &C,
-    media_asset_id: Uuid,
-) -> Result<(), MovieError> {
-    file_cleanup_job::Entity::insert(file_cleanup_job::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        media_asset_id: Set(media_asset_id),
-        ..Default::default()
-    })
-    .on_conflict(
-        OnConflict::column(file_cleanup_job::Column::MediaAssetId)
-            .do_nothing()
-            .to_owned(),
-    )
-    .exec_without_returning(db)
-    .await?;
-    Ok(())
 }
 
 async fn validate_publish<C: sea_orm::ConnectionTrait>(

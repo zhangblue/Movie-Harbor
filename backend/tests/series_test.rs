@@ -12,16 +12,20 @@ use movie_harbor_api::{
     entities::{
         episode, file_cleanup_job, genre, media_asset, movie, season, series, series_genre,
     },
+    series::service as series_service,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
+    DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -913,24 +917,24 @@ async fn combined_lifecycle_validates_media_and_preserves_child_state_when_paren
         .unwrap();
     assert_eq!(effective_count, 0);
 
+    let added = add_season(&app, &cookie, &csrf, &series_id, 6, 2).await;
+    assert_eq!(added.status(), StatusCode::CREATED);
+    assert_eq!(body(added).await["version"], 7);
+    let republished = write(
+        &app,
+        "POST",
+        &format!("/api/admin/series/{series_id}/publish"),
+        json!({"version":7}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(republished.status(), StatusCode::OK);
+    let republished = body(republished).await;
+    assert_eq!(republished["version"], 8);
     assert_eq!(
-        add_season(&app, &cookie, &csrf, &series_id, 6, 2)
-            .await
-            .status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        write(
-            &app,
-            "POST",
-            &format!("/api/admin/series/{series_id}/publish"),
-            json!({"version":6}),
-            &cookie,
-            &csrf,
-        )
-        .await
-        .status(),
-        StatusCode::OK
+        republished["seasons"][0]["episodes"][0]["status"],
+        "published"
     );
 }
 
@@ -1207,9 +1211,122 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
     );
 }
 
-// Catches allowing child mutations beneath an archived parent and inconsistent ID errors.
+// Catches two last-reference removals both observing the other's uncommitted reference and
+// therefore leaving an orphaned media asset without a cleanup job.
 #[tokio::test]
-async fn archived_parents_reject_child_writes_and_identifiers_map_consistently() {
+async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job() {
+    let db = database().await;
+    let asset = media_asset::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        storage_key: Set("poster/concurrent-shared.png".into()),
+        original_name: Set("concurrent-shared.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(1),
+        purpose: Set("poster".into()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let first = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("First shared owner".into()),
+        synopsis: Set(String::new()),
+        poster_asset_id: Set(Some(asset.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let second = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Second shared owner".into()),
+        synopsis: Set(String::new()),
+        poster_asset_id: Set(Some(asset.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    db.execute_unprepared(
+        "CREATE FUNCTION hold_series_delete_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(17070911); RETURN NULL; END $$; CREATE CONSTRAINT TRIGGER hold_series_delete_commit AFTER DELETE ON series DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION hold_series_delete_commit()",
+    )
+    .await
+    .unwrap();
+
+    let guard = db.begin().await.unwrap();
+    guard
+        .execute_unprepared("SELECT pg_advisory_xact_lock(17070911)")
+        .await
+        .unwrap();
+    let schema = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT current_schema() AS schema".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "schema")
+        .unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let first_application = format!("task7_first_{suffix}");
+    let second_application = format!("task7_second_{suffix}");
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let mut first_options =
+        ConnectOptions::new(format!("{url}?application_name={first_application}"));
+    first_options.set_schema_search_path(schema.clone());
+    let first_db = Database::connect(first_options).await.unwrap();
+    let mut second_options =
+        ConnectOptions::new(format!("{url}?application_name={second_application}"));
+    second_options.set_schema_search_path(schema);
+    let second_db = Database::connect(second_options).await.unwrap();
+    let first_delete =
+        tokio::spawn(async move { series_service::delete_series(&first_db, first.id, 1).await });
+    let second_delete =
+        tokio::spawn(async move { series_service::delete_series(&second_db, second.id, 1).await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting = db
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    format!("SELECT count(*)::bigint AS count FROM pg_stat_activity WHERE application_name IN ('{first_application}', '{second_application}') AND wait_event_type='Lock'"),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "count")
+                .unwrap();
+            if waiting == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    guard.commit().await.unwrap();
+    first_delete.await.unwrap().unwrap();
+    second_delete.await.unwrap().unwrap();
+
+    assert_eq!(series::Entity::find().count(&db).await.unwrap(), 0);
+    assert_eq!(
+        file_cleanup_job::Entity::find()
+            .filter(file_cleanup_job::Column::MediaAssetId.eq(asset.id))
+            .count(&db)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+// Catches freezing descendant lifecycles merely because their containing series is archived.
+#[tokio::test]
+async fn archived_series_preserves_independent_child_lifecycles() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1228,32 +1345,91 @@ async fn archived_parents_reject_child_writes_and_identifiers_map_consistently()
             (&series_id, &season_id),
             2,
             1,
-            "Draft",
+            "First published",
         )
         .await,
     )
     .await;
-    let episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+    let first_episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
         .as_str()
         .unwrap()
         .to_owned();
-    db.execute_unprepared(&format!(
-        "UPDATE series SET status='archived' WHERE id='{series_id}'"
-    ))
-    .await
-    .unwrap();
-    assert_eq!(
-        add_season(&app, &cookie, &csrf, &series_id, 3, 2)
+    let hierarchy = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (&series_id, &season_id),
+            3,
+            2,
+            "Remaining published",
+        )
+        .await,
+    )
+    .await;
+    let second_episode_id = hierarchy["seasons"][0]["episodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|episode| episode["number"] == 2)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
+    let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
+    attach_episode_video(&db, first_episode_id.parse().unwrap(), first_video.id).await;
+    attach_episode_video(&db, second_episode_id.parse().unwrap(), second_video.id).await;
+
+    for episode_id in [&first_episode_id, &second_episode_id] {
+        assert_eq!(
+            write(
+                &app,
+                "POST",
+                &format!(
+                    "/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}/publish"
+                ),
+                json!({"version":1}),
+                &cookie,
+                &csrf,
+            )
             .await
             .status(),
-        StatusCode::CONFLICT
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        write(
+            &app,
+            "POST",
+            &format!("/api/admin/series/{series_id}/publish"),
+            json!({"version":6}),
+            &cookie,
+            &csrf,
+        )
+        .await
+        .status(),
+        StatusCode::OK
     );
+    let archived = write(
+        &app,
+        "POST",
+        &format!("/api/admin/series/{series_id}/archive"),
+        json!({"version":7}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(archived.status(), StatusCode::OK);
+    assert_eq!(body(archived).await["version"], 8);
     assert_eq!(
         write(
             &app,
             "PATCH",
-            &format!("/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}"),
-            json!({"version":1,"name":"Forbidden"}),
+            &format!("/api/admin/series/{series_id}"),
+            json!({"version":8,"name":"Still read only"}),
             &cookie,
             &csrf,
         )
@@ -1261,6 +1437,179 @@ async fn archived_parents_reject_child_writes_and_identifiers_map_consistently()
         .status(),
         StatusCode::CONFLICT
     );
+
+    let hierarchy = body(add_season(&app, &cookie, &csrf, &series_id, 8, 2).await).await;
+    assert_eq!(hierarchy["version"], 9);
+    let draft_season_id = hierarchy["seasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|season| season["number"] == 2)
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let hierarchy = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (&series_id, &draft_season_id),
+            9,
+            1,
+            "Archived-parent draft",
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(hierarchy["version"], 10);
+    let draft_episode_id = hierarchy["seasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|season| season["id"] == draft_season_id)
+        .unwrap()["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let draft_episode_path = format!(
+        "/api/admin/series/{series_id}/seasons/{draft_season_id}/episodes/{draft_episode_id}"
+    );
+    let edited = write(
+        &app,
+        "PATCH",
+        &draft_episode_path,
+        json!({"version":1,"name":"Editable under archive"}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(edited.status(), StatusCode::OK);
+    assert_eq!(body(edited).await["series_version"], 11);
+    assert_eq!(
+        write(
+            &app,
+            "DELETE",
+            &draft_episode_path,
+            json!({"version":2}),
+            &cookie,
+            &csrf,
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+    let renumbered = write(
+        &app,
+        "PATCH",
+        &format!("/api/admin/series/{series_id}/seasons/{draft_season_id}"),
+        json!({"version":12,"number":3}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(renumbered.status(), StatusCode::OK);
+    assert_eq!(body(renumbered).await["version"], 13);
+    assert_eq!(
+        write(
+            &app,
+            "DELETE",
+            &format!("/api/admin/series/{series_id}/seasons/{draft_season_id}"),
+            json!({"version":13}),
+            &cookie,
+            &csrf,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+
+    for (method, payload) in [
+        ("PATCH", json!({"version":14,"number":4})),
+        ("DELETE", json!({"version":14})),
+    ] {
+        assert_eq!(
+            write(
+                &app,
+                method,
+                &format!("/api/admin/series/{series_id}/seasons/{season_id}"),
+                payload,
+                &cookie,
+                &csrf,
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    let first_episode_path =
+        format!("/api/admin/series/{series_id}/seasons/{season_id}/episodes/{first_episode_id}");
+    let episode_archived = write(
+        &app,
+        "POST",
+        &format!("{first_episode_path}/archive"),
+        json!({"version":2}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(episode_archived.status(), StatusCode::OK);
+    assert_eq!(body(episode_archived).await["series_version"], 15);
+    let episode_draft = write(
+        &app,
+        "POST",
+        &format!("{first_episode_path}/draft"),
+        json!({"version":3}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(episode_draft.status(), StatusCode::OK);
+    assert_eq!(body(episode_draft).await["series_version"], 16);
+    assert_eq!(
+        write(
+            &app,
+            "DELETE",
+            &first_episode_path,
+            json!({"version":4}),
+            &cookie,
+            &csrf,
+        )
+        .await
+        .status(),
+        StatusCode::NO_CONTENT
+    );
+
+    let republished = write(
+        &app,
+        "POST",
+        &format!("/api/admin/series/{series_id}/publish"),
+        json!({"version":17}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(republished.status(), StatusCode::OK);
+    let republished = body(republished).await;
+    assert_eq!(republished["version"], 18);
+    assert_eq!(
+        republished["seasons"][0]["episodes"][0]["id"],
+        second_episode_id
+    );
+    assert_eq!(
+        republished["seasons"][0]["episodes"][0]["status"],
+        "published"
+    );
+}
+
+// Catches malformed identifiers being confused with absent series resources.
+#[tokio::test]
+async fn invalid_and_missing_series_identifiers_are_mapped_consistently() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db, &config(root.as_ref())).await.unwrap();
+    let (cookie, _) = credentials(&app).await;
     assert_eq!(
         request(
             &app,
