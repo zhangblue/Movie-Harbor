@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, clearCsrfToken, getSession, logout } from "@movie-harbor/api-client";
-import { Button, Dialog } from "@movie-harbor/ui";
+import { Button, Field } from "@movie-harbor/ui";
 import { LoginPage } from "../auth/LoginPage";
 import { AccountMenu } from "../auth/AccountMenu";
 import { ChangePasswordDialog } from "../auth/ChangePasswordDialog";
 import { ContentPage } from "../content/ContentPage";
 import { MovieEditor } from "../movies/MovieEditor";
+import { SeriesEditor } from "../series/SeriesEditor";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
@@ -19,16 +20,18 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [section, setSection] = useState("内容管理");
-  const [pendingPage, setPendingPage] = useState("");
   const [moviePage, setMoviePage] = useState<{ id: string | null; deleting: boolean } | null>(null);
+  const [seriesPage, setSeriesPage] = useState<{ id: string | null; deleting: boolean } | null>(null);
+  const [creating, setCreating] = useState(false);
   const mounted = useMounted();
 
   const expire = useCallback((message = "会话已失效，请重新登录。") => {
     clearCsrfToken();
     setAuth({ state: "anonymous" });
     setPasswordOpen(false);
-    setPendingPage("");
     setMoviePage(null);
+    setSeriesPage(null);
+    setCreating(false);
     setSection("内容管理");
     setNotice(message);
   }, []);
@@ -81,7 +84,7 @@ export function App() {
   if (auth.state === "error") return <main className="session-state"><p role="alert">无法确认管理员会话，请检查网络后重试。</p><Button onClick={() => setAttempt(attempt + 1)}>重试</Button></main>;
   if (auth.state === "anonymous") return <LoginPage notice={notice} onLogin={(name) => { setError(""); setAuth({ state: "authenticated", name }); }} />;
   return <>
-    <div className="admin-shell" inert={passwordOpen || !!pendingPage || busy}>
+    <div className="admin-shell" inert={passwordOpen || busy}>
       <header className="admin-header"><a href="/" className="brand"><span className="brand-mark" aria-hidden="true">M</span>Movie Harbor<span className="admin-label">管理后台</span></a>
         <AccountMenu name={auth.name} onPassword={() => setPasswordOpen(true)} onLogout={() => { void signOut(); }} disabled={busy} />
       </header>
@@ -89,15 +92,19 @@ export function App() {
         {["内容管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
       </nav><main className="admin-content">
         {error && <p role="alert" className="error-message">{error}</p>}
-        {section === "内容管理" ? moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onBack={() => setMoviePage(null)} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
-          if (!row || row.kind === "movie") { setMoviePage({ id: row?.id ?? null, deleting: action === "delete" }); return; }
-          const labels = { create: "新建内容", edit: "编辑", view: "查看", delete: "永久删除" };
-          setPendingPage(row ? `${labels[action]}：${row.name}` : labels[action]);
+        {section === "内容管理" && creating && <Field label="新建内容形态" className="movie-field-short"><select value={seriesPage ? "series" : "movie"} onChange={(event) => {
+          if (event.target.value === "series") { setMoviePage(null); setSeriesPage({ id: null, deleting: false }); }
+          else { setSeriesPage(null); setMoviePage({ id: null, deleting: false }); }
+        }}><option value="movie">电影</option><option value="series">剧集</option></select></Field>}
+        {section === "内容管理" ? seriesPage ? <SeriesEditor seriesId={seriesPage.id} initialDelete={seriesPage.deleting} resumeCreation={creating} onCreated={(id) => setSeriesPage({ id, deleting: false })} onBack={() => { setSeriesPage(null); setCreating(false); }} onExpired={onExpired} /> : moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onBack={() => { setMoviePage(null); setCreating(false); }} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
+          if (!row) { setCreating(true); setMoviePage({ id: null, deleting: false }); return; }
+          setCreating(false);
+          if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });
+          else setSeriesPage({ id: row.id, deleting: action === "delete" });
         }} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
       </main></div>
     </div>
     {busy && <p className="session-state" role="status">正在退出登录…</p>}
     {passwordOpen && <ChangePasswordDialog onClose={() => setPasswordOpen(false)} onChanged={() => expire("密码已修改，请重新登录。")} onExpired={onExpired} />}
-    <Dialog open={!!pendingPage} title={pendingPage} onClose={() => setPendingPage("")}><p>内容编辑与删除确认页面尚未开放。</p><Button onClick={() => setPendingPage("")}>返回列表</Button></Dialog>
   </>;
 }

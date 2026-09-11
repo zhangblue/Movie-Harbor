@@ -86,3 +86,12 @@ p { color: var(--mh-color-text-muted); }
   .filter-bar .mh-field :is(input, select) { width: 100%; }
   .admin-title-row { gap: 12px; }
 }
+.series-section { margin-top: 24px; max-width: 1050px; }
+.series-section > h2 { font-size: 19px; margin-bottom: 16px; }
+.series-season { background: var(--mh-surface, #182331); border: 1px solid var(--mh-border, #2c3c50); border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+.series-season-header { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.series-season-header h3 { font-size: 16px; }
+.series-season-header .movie-inline-fields { align-items: end; }
+.series-episode { display: grid; gap: 12px; padding: 18px 0; border-top: 1px solid var(--mh-border, #2c3c50); margin: 16px 0; }
+.series-episode > p { margin: 0; }
+.series-episode .movie-inline-fields { flex-wrap: wrap; }
