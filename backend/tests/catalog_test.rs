@@ -7,11 +7,15 @@ use axum::{
 use http_body_util::BodyExt;
 use movie_harbor_api::{
     app,
-    catalog::query::{CATALOG_ITEMS_SQL, CATALOG_SEARCH_ITEMS_SQL},
+    catalog::{
+        dto::{CatalogFilter, CatalogKind},
+        query::{self, CATALOG_ITEMS_SQL, CATALOG_SEARCH_ITEMS_SQL},
+    },
     config::Config,
 };
 use sea_orm::{
     ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement,
+    TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -60,6 +64,10 @@ fn config(root: &Path) -> Config {
 }
 
 async fn database(label: &str) -> DatabaseConnection {
+    database_with_migrations(label, None).await
+}
+
+async fn database_with_migrations(label: &str, steps: Option<u32>) -> DatabaseConnection {
     let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
     let admin = Database::connect(&url).await.unwrap();
     let schema = format!("catalog_{label}_{}", Uuid::new_v4().simple());
@@ -70,8 +78,38 @@ async fn database(label: &str) -> DatabaseConnection {
     let mut options = ConnectOptions::new(url);
     options.set_schema_search_path(schema);
     let db = Database::connect(options).await.unwrap();
-    migration::Migrator::up(&db, None).await.unwrap();
+    migration::Migrator::up(&db, steps).await.unwrap();
     db
+}
+
+async fn wait_for_locked_query(db: &DatabaseConnection, relation: &str, fragment: &str) {
+    for _ in 0..300 {
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_stat_activity activity
+    JOIN pg_locks lock ON lock.pid = activity.pid
+    WHERE activity.wait_event_type = 'Lock'
+      AND activity.query LIKE '%' || $1::text || '%'
+      AND lock.locktype = 'relation'
+      AND NOT lock.granted
+      AND lock.relation = to_regclass($2::text)::oid
+) AS blocked
+"#,
+                vec![fragment.into(), relation.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        if row.try_get::<bool>("", "blocked").unwrap() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("catalog query containing {fragment:?} did not block on {relation:?} as expected");
 }
 
 async fn sql(db: &DatabaseConnection, statement: &str) {
@@ -453,6 +491,246 @@ INSERT INTO episode (id, season_id, number, name, synopsis, duration_seconds, vi
 }
 
 #[tokio::test]
+async fn series_detail_never_combines_parent_and_episode_visibility_from_different_snapshots() {
+    let db = database("series_snapshot").await;
+    sql(
+        &db,
+        r#"
+INSERT INTO series (id, name, status, published_at) VALUES
+('65000000-0000-0000-0000-000000000001', 'Snapshot series', 'published', '2026-01-01T00:00:00Z');
+INSERT INTO season (id, series_id, number) VALUES
+('65000000-0000-0000-0000-000000000002', '65000000-0000-0000-0000-000000000001', 1);
+INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
+('65000000-0000-0000-0000-000000000003', '65000000-0000-0000-0000-000000000002', 1, 'Previously public', 'published', '2026-01-01T00:00:00Z'),
+('65000000-0000-0000-0000-000000000004', '65000000-0000-0000-0000-000000000002', 2, 'Never effectively public', 'draft', NULL);
+"#,
+    )
+    .await;
+
+    let blocker = db.begin().await.unwrap();
+    blocker
+        .execute_unprepared("LOCK TABLE series_genre IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let read_db = db.clone();
+    let detail_task = tokio::spawn(async move {
+        query::series_detail(
+            &read_db,
+            Uuid::parse_str("65000000-0000-0000-0000-000000000001").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    });
+
+    wait_for_locked_query(&db, "series_genre", "WITH requested(kind, id)").await;
+    blocker
+        .execute_unprepared(
+            r#"
+UPDATE series
+SET status = 'archived', archived_at = CURRENT_TIMESTAMP
+WHERE id = '65000000-0000-0000-0000-000000000001';
+UPDATE episode
+SET status = 'published', published_at = CURRENT_TIMESTAMP
+WHERE id = '65000000-0000-0000-0000-000000000004';
+"#,
+        )
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+
+    let detail = tokio::time::timeout(std::time::Duration::from_secs(3), detail_task)
+        .await
+        .unwrap()
+        .unwrap();
+    let episode_names = detail
+        .seasons
+        .iter()
+        .flat_map(|season| season.episodes.iter())
+        .map(|episode| episode.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(episode_names, ["Previously public"]);
+}
+
+#[tokio::test]
+async fn movie_detail_never_combines_parent_and_genres_from_different_snapshots() {
+    let db = database("movie_snapshot").await;
+    sql(
+        &db,
+        r#"
+INSERT INTO movie (id, name, status, published_at) VALUES
+('65500000-0000-0000-0000-000000000001', 'Snapshot movie', 'published', '2026-01-01T00:00:00Z');
+INSERT INTO genre (id, name, sort_order) VALUES
+('65500000-0000-0000-0000-000000000002', 'Old genre', 1),
+('65500000-0000-0000-0000-000000000003', 'New genre', 2);
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('65500000-0000-0000-0000-000000000001', '65500000-0000-0000-0000-000000000002');
+"#,
+    )
+    .await;
+
+    let blocker = db.begin().await.unwrap();
+    blocker
+        .execute_unprepared("LOCK TABLE movie_genre IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let read_db = db.clone();
+    let detail_task = tokio::spawn(async move {
+        query::movie_detail(
+            &read_db,
+            Uuid::parse_str("65500000-0000-0000-0000-000000000001").unwrap(),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+    });
+
+    wait_for_locked_query(&db, "movie_genre", "WITH requested(kind, id)").await;
+    blocker
+        .execute_unprepared(
+            r#"
+UPDATE movie
+SET status = 'archived', archived_at = CURRENT_TIMESTAMP
+WHERE id = '65500000-0000-0000-0000-000000000001';
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('65500000-0000-0000-0000-000000000001', '65500000-0000-0000-0000-000000000003');
+"#,
+        )
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+
+    let detail = tokio::time::timeout(std::time::Duration::from_secs(3), detail_task)
+        .await
+        .unwrap()
+        .unwrap();
+    let genres = detail
+        .genres
+        .iter()
+        .map(|genre| genre.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(genres, ["Old genre"]);
+}
+
+#[tokio::test]
+async fn catalog_total_and_items_share_a_snapshot_during_publication_changes() {
+    let db = database("list_snapshot").await;
+    sql(
+        &db,
+        r#"
+INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('66000000-0000-0000-0000-000000000001', 'poster/66/66000000000000000000000000000001.png', 'poster.png', 'image/png', 1, 'poster');
+INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
+('66000000-0000-0000-0000-000000000002', 'Old public movie', '66000000-0000-0000-0000-000000000001', 'published', '2026-01-01T00:00:00Z'),
+('66000000-0000-0000-0000-000000000003', 'New movie one', NULL, 'draft', NULL),
+('66000000-0000-0000-0000-000000000004', 'New movie two', NULL, 'draft', NULL);
+"#,
+    )
+    .await;
+
+    let blocker = db.begin().await.unwrap();
+    blocker
+        .execute_unprepared("LOCK TABLE media_asset IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let read_db = db.clone();
+    let list_task = tokio::spawn(async move {
+        query::list(
+            &read_db,
+            CatalogFilter {
+                kind: CatalogKind::Movie,
+                search_pattern: None,
+                page: 1,
+                size: 20,
+                offset: 0,
+                window: 20,
+            },
+        )
+        .await
+        .unwrap()
+    });
+
+    wait_for_locked_query(&db, "media_asset", "WITH candidates AS").await;
+    blocker
+        .execute_unprepared(
+            r#"
+UPDATE movie SET status = 'archived', archived_at = CURRENT_TIMESTAMP
+WHERE id = '66000000-0000-0000-0000-000000000002';
+UPDATE movie SET status = 'published', published_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    '66000000-0000-0000-0000-000000000003',
+    '66000000-0000-0000-0000-000000000004'
+);
+"#,
+        )
+        .await
+        .unwrap();
+    blocker.commit().await.unwrap();
+
+    let page = tokio::time::timeout(std::time::Duration::from_secs(3), list_task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].name, "Old public movie");
+}
+
+#[tokio::test]
+async fn publication_indexes_accept_long_noncompressible_names_on_publish() {
+    let db = database("long_publish").await;
+    sql(
+        &db,
+        r#"
+WITH long_name AS (
+    SELECT string_agg(md5(value::text), '' ORDER BY value) AS name
+    FROM generate_series(1, 200) value
+)
+INSERT INTO movie (id, name, status)
+SELECT '67000000-0000-0000-0000-000000000001', name, 'draft' FROM long_name;
+WITH long_name AS (
+    SELECT string_agg(md5((value + 1000)::text), '' ORDER BY value) AS name
+    FROM generate_series(1, 200) value
+)
+INSERT INTO series (id, name, status)
+SELECT '67000000-0000-0000-0000-000000000002', name, 'draft' FROM long_name;
+UPDATE movie SET status = 'published', published_at = CURRENT_TIMESTAMP
+WHERE id = '67000000-0000-0000-0000-000000000001';
+UPDATE series SET status = 'published', published_at = CURRENT_TIMESTAMP
+WHERE id = '67000000-0000-0000-0000-000000000002';
+"#,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn publication_index_migration_accepts_preexisting_long_published_names_and_reapplies() {
+    let db = database_with_migrations("long_migration", Some(2)).await;
+    sql(
+        &db,
+        r#"
+WITH long_name AS (
+    SELECT string_agg(md5(value::text), '' ORDER BY value) AS name
+    FROM generate_series(1, 200) value
+)
+INSERT INTO movie (id, name, status, published_at)
+SELECT '68000000-0000-0000-0000-000000000001', name, 'published', CURRENT_TIMESTAMP FROM long_name;
+WITH long_name AS (
+    SELECT string_agg(md5((value + 1000)::text), '' ORDER BY value) AS name
+    FROM generate_series(1, 200) value
+)
+INSERT INTO series (id, name, status, published_at)
+SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMESTAMP FROM long_name;
+"#,
+    )
+    .await;
+
+    migration::Migrator::up(&db, None).await.unwrap();
+    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    migration::Migrator::up(&db, None).await.unwrap();
+}
+
+#[tokio::test]
 async fn public_catalog_indexes_are_reversible_and_support_bounded_plans() {
     let db = database("indexes").await;
     let expected_indexes = [
@@ -509,6 +787,21 @@ SELECT gen_random_uuid(),
        CASE WHEN value % 10 <> 0 THEN 'published' ELSE 'draft' END,
        CASE WHEN value % 10 <> 0 THEN CURRENT_TIMESTAMP - value * INTERVAL '1 second' END
 FROM generate_series(1, 20000) value;
+INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose)
+SELECT hash::uuid, 'poster/' || left(hash, 2) || '/' || hash || '.png',
+       value || '.png', 'image/png', 1, 'poster'
+FROM (
+    SELECT value, md5('catalog-asset-' || value::text) AS hash
+    FROM generate_series(1, 5000) value
+) assets;
+UPDATE movie
+SET poster_asset_id = md5('catalog-asset-' || split_part(name, ' ', 2))::uuid
+WHERE name ~ '^Movie [0-9]+$'
+  AND split_part(name, ' ', 2)::integer <= 5000;
+UPDATE series
+SET poster_asset_id = md5('catalog-asset-' || split_part(name, ' ', 2))::uuid
+WHERE name ~ '^Series [0-9]+$'
+  AND split_part(name, ' ', 2)::integer <= 5000;
 "#,
     )
     .await;
@@ -516,6 +809,7 @@ FROM generate_series(1, 20000) value;
     // visibility/statistics before we inspect planner choices.
     sql(&db, "VACUUM ANALYZE movie").await;
     sql(&db, "VACUUM ANALYZE series").await;
+    sql(&db, "VACUUM ANALYZE media_asset").await;
 
     let home_plan = explain(
         &db,
@@ -542,28 +836,21 @@ FROM generate_series(1, 20000) value;
         "{search_plan}"
     );
 
-    let production_home_plan = explain_statement(
+    let production_home_plan = explain_json_statement(
         &db,
         CATALOG_ITEMS_SQL,
         vec!["all".into(), 20_i64.into(), 0_i64.into(), 20_i64.into()],
     )
     .await;
-    assert!(
-        production_home_plan.contains("Limit"),
-        "{production_home_plan}"
-    );
-    assert!(
-        production_home_plan.contains("CTE Scan"),
-        "{production_home_plan}"
-    );
-    assert!(
-        production_home_plan.contains("movie_public_published_idx"),
-        "{production_home_plan}"
-    );
-    assert!(
-        production_home_plan.contains("series_public_published_idx"),
-        "{production_home_plan}"
-    );
+    assert!(plan_uses_index(
+        &production_home_plan,
+        "movie_public_published_idx"
+    ));
+    assert!(plan_uses_index(
+        &production_home_plan,
+        "series_public_published_idx"
+    ));
+    assert_media_reads_are_bounded(&production_home_plan, 20);
 
     let production_search_plan = explain_statement(
         &db,
@@ -621,4 +908,73 @@ async fn explain_statement(
         .map(|row| row.try_get::<String>("", "QUERY PLAN").unwrap())
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+async fn explain_json_statement(
+    db: &DatabaseConnection,
+    query: &str,
+    values: Vec<sea_orm::Value>,
+) -> Value {
+    db.query_one(Statement::from_sql_and_values(
+        DatabaseBackend::Postgres,
+        format!("EXPLAIN (ANALYZE, FORMAT JSON) {query}"),
+        values,
+    ))
+    .await
+    .unwrap()
+    .unwrap()
+    .try_get("", "QUERY PLAN")
+    .unwrap()
+}
+
+fn plan_nodes<'a>(value: &'a Value, nodes: &mut Vec<&'a serde_json::Map<String, Value>>) {
+    match value {
+        Value::Object(object) => {
+            if object.contains_key("Node Type") {
+                nodes.push(object);
+            }
+            for child in object.values() {
+                plan_nodes(child, nodes);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                plan_nodes(child, nodes);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn plan_uses_index(plan: &Value, expected: &str) -> bool {
+    let mut nodes = Vec::new();
+    plan_nodes(plan, &mut nodes);
+    nodes
+        .iter()
+        .any(|node| node.get("Index Name").and_then(Value::as_str) == Some(expected))
+}
+
+fn assert_media_reads_are_bounded(plan: &Value, page_window: u64) {
+    let mut nodes = Vec::new();
+    plan_nodes(plan, &mut nodes);
+    let media_nodes = nodes
+        .into_iter()
+        .filter(|node| node.get("Relation Name").and_then(Value::as_str) == Some("media_asset"))
+        .collect::<Vec<_>>();
+    assert!(
+        !media_nodes.is_empty(),
+        "no media_asset access in plan: {plan}"
+    );
+    for node in media_nodes {
+        let node_type = node.get("Node Type").and_then(Value::as_str).unwrap_or("");
+        let actual_rows = node.get("Actual Rows").and_then(Value::as_u64).unwrap_or(0);
+        let actual_loops = node
+            .get("Actual Loops")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        assert!(
+            node_type.contains("Index") && actual_rows.saturating_mul(actual_loops) <= page_window,
+            "media input was not bounded by page window {page_window}: {node:?}"
+        );
+    }
 }

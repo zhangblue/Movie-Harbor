@@ -17,11 +17,11 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm WITH SCHEMA public;
 
 CREATE INDEX movie_public_published_idx
     ON movie (published_at DESC, id)
-    INCLUDE (name, year, poster_asset_id)
+    INCLUDE (year, poster_asset_id)
     WHERE status = 'published' AND published_at IS NOT NULL;
 CREATE INDEX series_public_published_idx
     ON series (published_at DESC, id)
-    INCLUDE (name, year, poster_asset_id)
+    INCLUDE (year, poster_asset_id)
     WHERE status = 'published' AND published_at IS NOT NULL;
 CREATE INDEX episode_public_season_idx
     ON episode (season_id, number, id)

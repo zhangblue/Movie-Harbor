@@ -4,8 +4,8 @@ use super::dto::{
 };
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, FromQueryResult, QueryResult,
-    Statement, Value,
+    AccessMode, ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, FromQueryResult,
+    IsolationLevel, QueryResult, Statement, TransactionTrait, Value,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -185,6 +185,9 @@ SELECT season.id AS season_id, season.number AS season_number,
        episode.id, episode.number, episode.name, episode.synopsis, episode.duration_seconds,
        video.storage_key AS video_storage_key
 FROM season
+JOIN series parent ON parent.id = season.series_id
+                  AND parent.status = 'published'
+                  AND parent.published_at IS NOT NULL
 JOIN episode ON episode.season_id = season.id
             AND episode.status = 'published'
             AND episode.published_at IS NOT NULL
@@ -254,6 +257,18 @@ impl GenreRow {
 }
 
 pub async fn list(db: &DatabaseConnection, filter: CatalogFilter) -> Result<CatalogPage, DbErr> {
+    let transaction = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let page = list_on(&transaction, filter).await?;
+    transaction.commit().await?;
+    Ok(page)
+}
+
+async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<CatalogPage, DbErr> {
     let kind_value = || filter.kind.as_str().into();
     let (count_sql, count_values) = match &filter.search_pattern {
         Some(pattern) => (
@@ -328,6 +343,21 @@ pub async fn list(db: &DatabaseConnection, filter: CatalogFilter) -> Result<Cata
 }
 
 pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<MovieDetail>, DbErr> {
+    let transaction = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let detail = movie_detail_on(&transaction, id).await?;
+    transaction.commit().await?;
+    Ok(detail)
+}
+
+async fn movie_detail_on<C: ConnectionTrait>(
+    db: &C,
+    id: Uuid,
+) -> Result<Option<MovieDetail>, DbErr> {
     let Some(row) = query_model::<MovieRow>(db, MOVIE_DETAIL_SQL, vec![id.into()]).await? else {
         return Ok(None);
     };
@@ -347,6 +377,21 @@ pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<Mo
 
 pub async fn series_detail(
     db: &DatabaseConnection,
+    id: Uuid,
+) -> Result<Option<SeriesDetail>, DbErr> {
+    let transaction = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let detail = series_detail_on(&transaction, id).await?;
+    transaction.commit().await?;
+    Ok(detail)
+}
+
+async fn series_detail_on<C: ConnectionTrait>(
+    db: &C,
     id: Uuid,
 ) -> Result<Option<SeriesDetail>, DbErr> {
     let Some(row) = query_model::<SeriesRow>(db, SERIES_DETAIL_SQL, vec![id.into()]).await? else {
@@ -388,7 +433,7 @@ pub async fn series_detail(
 }
 
 async fn query_models<T: FromQueryResult>(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     sql: &str,
     values: Vec<Value>,
 ) -> Result<Vec<T>, DbErr> {
@@ -404,7 +449,7 @@ async fn query_models<T: FromQueryResult>(
 }
 
 async fn query_model<T: FromQueryResult>(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     sql: &str,
     values: Vec<Value>,
 ) -> Result<Option<T>, DbErr> {
@@ -420,7 +465,7 @@ async fn query_model<T: FromQueryResult>(
 }
 
 async fn genres_for(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     references: &[(&str, Uuid)],
 ) -> Result<HashMap<(String, Uuid), Vec<PublicGenre>>, DbErr> {
     if references.is_empty() {
