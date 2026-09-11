@@ -1,0 +1,14 @@
+{
+  "name": "movie-harbor",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "frontend/public-web",
+    "frontend/admin-web",
+    "frontend/packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm test --workspaces"
+  }
+}

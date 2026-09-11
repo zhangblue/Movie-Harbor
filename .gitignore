@@ -1,2 +1,10 @@
 .DS_Store
 .agents/
+node_modules/
+target/
+.env
+.env.*
+!/.env.example
+frontend/public-web/dist/
+frontend/admin-web/dist/
+media/
