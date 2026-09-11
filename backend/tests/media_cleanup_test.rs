@@ -1,22 +1,31 @@
+use axum::body::Bytes;
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{file_cleanup_job, media_asset},
-    media::{LocalMediaStorage, StorageEvent, StorageHooks, cleanup::run_once},
+    entities::{file_cleanup_job, media_asset, movie},
+    media::{
+        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, StorageEvent, StorageHooks,
+        UploadPolicy, cleanup::run_once, replace_attachment,
+    },
+    movies::service as movie_service,
 };
 use sea_orm::{
-    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    IntoActiveModel, Set,
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
+    DatabaseConnection, EntityTrait, IntoActiveModel, Set, Statement, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use sha2::{Digest, Sha256};
 use std::{
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 struct TempRoot(PathBuf);
@@ -63,6 +72,44 @@ struct ReplaceRegisteredAtUnlink {
     root: PathBuf,
     replaced: AtomicBool,
     no_quarantine_data_before_claim: AtomicBool,
+}
+
+struct PromotionHooks(AtomicBool);
+
+impl StorageHooks for PromotionHooks {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::Promoted(_)) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+struct PausedSource {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    done: bool,
+}
+
+impl ChunkSource for PausedSource {
+    fn next_chunk(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        Box::pin(async move {
+            if self.done {
+                return Ok(None);
+            }
+            self.done = true;
+            self.entered.notify_one();
+            self.release.notified().await;
+            Ok(Some(Bytes::from_static(&[
+                137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0,
+                1, 8, 4, 0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100,
+                248, 15, 0, 1, 5, 1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96,
+                130,
+            ])))
+        })
+    }
 }
 
 impl StorageHooks for ReplaceRegisteredAtUnlink {
@@ -175,6 +222,82 @@ async fn queued(
     .await
     .unwrap();
     (asset, job)
+}
+
+async fn named_connection(schema: &str, application_name: &str) -> DatabaseConnection {
+    let url = std::env::var("TEST_DATABASE_URL").unwrap();
+    let mut options = ConnectOptions::new(format!("{url}?application_name={application_name}"));
+    options.set_schema_search_path(schema.to_owned());
+    Database::connect(options).await.unwrap()
+}
+
+async fn wait_for_cleanup_to_reach_storage_lock(
+    admin: &DatabaseConnection,
+    application_name: &str,
+) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        let mut stable_pre_transaction_polls = 0;
+        loop {
+            let row = admin
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    format!(
+                        "SELECT COALESCE(bool_or(state='idle in transaction' AND query ILIKE '%episode%'), false) AS locked_asset, count(*) FILTER (WHERE state='idle' AND query ILIKE '%file_cleanup_job%')::bigint AS before_transaction FROM pg_stat_activity WHERE application_name='{application_name}'"
+                    ),
+                ))
+                .await
+                .unwrap()
+                .unwrap();
+            if row.try_get::<bool>("", "locked_asset").unwrap() {
+                break;
+            }
+            if row.try_get::<i64>("", "before_transaction").unwrap() > 0 {
+                stable_pre_transaction_polls += 1;
+                if stable_pre_transaction_polls == 5 {
+                    break;
+                }
+            } else {
+                stable_pre_transaction_polls = 0;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+async fn wait_for_lock_or_completion(
+    admin: &DatabaseConnection,
+    application_name: &str,
+    task: &tokio::task::JoinHandle<
+        Result<movie_harbor_api::movies::dto::MovieResponse, movie_service::MovieError>,
+    >,
+) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if task.is_finished() {
+                break;
+            }
+            let waiting = admin
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    format!(
+                        "SELECT count(*)::bigint AS count FROM pg_stat_activity WHERE application_name='{application_name}' AND wait_event_type='Lock'"
+                    ),
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<i64>("", "count")
+                .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 // Catches removing a file but retaining its task/asset records, or vice versa.
@@ -411,6 +534,130 @@ async fn cleanup_unlink_stays_bound_to_the_opened_internal_directory() {
             .unwrap()
             .is_none()
     );
+}
+
+// Catches cleanup holding a media row while waiting for the storage mutation mutex, completing a
+// storage -> content -> media -> storage cycle with upload and reassociation.
+#[tokio::test]
+async fn global_storage_content_media_lock_order_prevents_three_party_deadlock() {
+    let db = database().await;
+    let schema = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT current_schema() AS schema".to_owned(),
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<String>("", "schema")
+        .unwrap();
+    let suffix = Uuid::new_v4().simple().to_string();
+    let associate_name = format!("lock_order_associate_{suffix}");
+    let upload_name = format!("lock_order_upload_{suffix}");
+    let cleanup_name = format!("lock_order_cleanup_{suffix}");
+    let associate_db = named_connection(&schema, &associate_name).await;
+    let upload_db = named_connection(&schema, &upload_name).await;
+    let cleanup_db = named_connection(&schema, &cleanup_name).await;
+    let movie = movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Lock order".into()),
+        synopsis: Set(String::new()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let movie_id = movie.id;
+    let root = TempRoot::new();
+    let hooks = Arc::new(PromotionHooks(AtomicBool::new(false)));
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let asset_id = Uuid::new_v4();
+    let simple = asset_id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    std::fs::create_dir_all(root.as_ref().join(&key).parent().unwrap()).unwrap();
+    std::fs::write(root.as_ref().join(&key), b"x").unwrap();
+    let (asset, job) = queued(&db, &key, b"x").await;
+
+    let movie_guard = db.begin().await.unwrap();
+    movie_guard
+        .execute_unprepared(&format!(
+            "SELECT id FROM movie WHERE id='{}' FOR UPDATE",
+            movie_id
+        ))
+        .await
+        .unwrap();
+    let associate = tokio::spawn(async move {
+        movie_service::associate_media(
+            &associate_db,
+            movie_id,
+            asset.id,
+            1,
+            movie_service::MediaSlot::Poster,
+        )
+        .await
+    });
+    wait_for_lock_or_completion(&db, &associate_name, &associate).await;
+
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let source_entered = entered.clone();
+    let source_release = release.clone();
+    let upload_storage = storage.clone();
+    let upload = tokio::spawn(async move {
+        replace_attachment(
+            &upload_db,
+            &upload_storage,
+            AttachmentTarget::MoviePoster {
+                id: movie_id,
+                version: 1,
+            },
+            "replacement.png",
+            "image/png",
+            &UploadPolicy::new(1024, ["video/mp4"]).unwrap(),
+            PausedSource {
+                entered: source_entered,
+                release: source_release,
+                done: false,
+            },
+        )
+        .await
+    });
+    entered.notified().await;
+    let cleanup_storage = storage.clone();
+    let cleanup = tokio::spawn(async move { run_once(&cleanup_db, &cleanup_storage).await });
+    wait_for_cleanup_to_reach_storage_lock(&db, &cleanup_name).await;
+
+    movie_guard.commit().await.unwrap();
+    wait_for_lock_or_completion(&db, &associate_name, &associate).await;
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(8), async {
+        while !hooks.0.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (associate, upload, cleanup) = tokio::time::timeout(Duration::from_secs(3), async {
+        tokio::join!(associate, upload, cleanup)
+    })
+    .await
+    .expect("global media operations exceeded the bounded lock-order deadline");
+    assert!(associate.unwrap().is_ok());
+    assert!(matches!(upload.unwrap(), Err(MediaError::VersionConflict)));
+    let cleanup = cleanup.unwrap().unwrap();
+    assert_eq!((cleanup.succeeded, cleanup.failed), (0, 1));
+    let retry = file_cleanup_job::Entity::find_by_id(job.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(retry.attempts, 1);
+    assert!(root.as_ref().join(&key).exists());
 }
 
 // Catches failing to register the cleanup worker during application construction.

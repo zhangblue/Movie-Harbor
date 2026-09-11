@@ -84,6 +84,11 @@ pub struct LocalMediaStorage {
     hooks: Arc<dyn StorageHooks>,
 }
 
+pub(crate) struct StorageMutationGuard<'a> {
+    storage: &'a LocalMediaStorage,
+    _guard: OwnedMutexGuard<()>,
+}
+
 impl std::fmt::Debug for LocalMediaStorage {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -582,26 +587,11 @@ impl LocalMediaStorage {
         Ok(())
     }
 
-    pub async fn remove_registered(
-        &self,
-        storage_key: &str,
-        byte_size: i64,
-        checksum_sha256: Option<&str>,
-    ) -> Result<(), MediaError> {
-        let _mutation_guard = self.mutations.lock().await;
-        let byte_size = u64::try_from(byte_size).map_err(|_| MediaError::InvalidStorageKey)?;
-        let checksum_sha256 = checksum_sha256
-            .filter(|checksum| valid_sha256(checksum))
-            .ok_or(MediaError::InvalidStorageKey)?;
-        self.remove_registered_if_owned(
-            storage_key,
-            DeletionIdentity {
-                device: None,
-                inode: None,
-                byte_size,
-                checksum_sha256,
-            },
-        )
+    pub(crate) async fn begin_mutation(&self) -> StorageMutationGuard<'_> {
+        StorageMutationGuard {
+            storage: self,
+            _guard: self.mutations.clone().lock_owned().await,
+        }
     }
 
     pub(crate) async fn remove_pending_owned(
@@ -718,6 +708,29 @@ impl LocalMediaStorage {
     pub(crate) fn notify_recovery_cycle_completed(&self) -> Result<(), MediaError> {
         self.hooks.on_event(&StorageEvent::RecoveryCycleCompleted)?;
         Ok(())
+    }
+}
+
+impl StorageMutationGuard<'_> {
+    pub(crate) fn remove_registered(
+        &self,
+        storage_key: &str,
+        byte_size: i64,
+        checksum_sha256: Option<&str>,
+    ) -> Result<(), MediaError> {
+        let byte_size = u64::try_from(byte_size).map_err(|_| MediaError::InvalidStorageKey)?;
+        let checksum_sha256 = checksum_sha256
+            .filter(|checksum| valid_sha256(checksum))
+            .ok_or(MediaError::InvalidStorageKey)?;
+        self.storage.remove_registered_if_owned(
+            storage_key,
+            DeletionIdentity {
+                device: None,
+                inode: None,
+                byte_size,
+                checksum_sha256,
+            },
+        )
     }
 }
 

@@ -1,4 +1,4 @@
-use super::{LocalMediaStorage, MediaError, references};
+use super::{LocalMediaStorage, MediaError, references, storage::StorageMutationGuard};
 use crate::entities::{file_cleanup_job, media_asset};
 use chrono::{Duration as ChronoDuration, Utc};
 use sea_orm::{
@@ -85,6 +85,9 @@ async fn process_job(
     storage: &LocalMediaStorage,
     job_id: Uuid,
 ) -> Result<bool, MediaError> {
+    // Global order for cleanup is storage -> cleanup job -> media asset -> reference reads.
+    // Upload already holds this same storage capability before it acquires content/media rows.
+    let mutation = storage.begin_mutation().await;
     let tx = db.begin().await?;
     let Some(job) = file_cleanup_job::Entity::find_by_id(job_id)
         .lock_exclusive()
@@ -94,7 +97,7 @@ async fn process_job(
         tx.commit().await?;
         return Ok(true);
     };
-    let attempt = process_locked_job(&tx, storage, &job).await;
+    let attempt = process_locked_job(&tx, &mutation, &job).await;
     if let Err(error) = attempt {
         if matches!(error, MediaError::Database(_)) {
             return Err(error);
@@ -113,7 +116,7 @@ async fn process_job(
 
 async fn process_locked_job(
     tx: &DatabaseTransaction,
-    storage: &LocalMediaStorage,
+    mutation: &StorageMutationGuard<'_>,
     job: &file_cleanup_job::Model,
 ) -> Result<(), MediaError> {
     let asset = media_asset::Entity::find_by_id(job.media_asset_id)
@@ -122,13 +125,11 @@ async fn process_locked_job(
         .await?
         .ok_or(MediaError::InvalidStorageKey)?;
     ensure_unreferenced(tx, asset.id).await?;
-    storage
-        .remove_registered(
-            &asset.storage_key,
-            asset.byte_size,
-            asset.checksum_sha256.as_deref(),
-        )
-        .await?;
+    mutation.remove_registered(
+        &asset.storage_key,
+        asset.byte_size,
+        asset.checksum_sha256.as_deref(),
+    )?;
     file_cleanup_job::Entity::delete_by_id(job.id)
         .exec(tx)
         .await?;
