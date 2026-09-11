@@ -430,7 +430,7 @@ git commit -m "feat: add shared frontend client and design system"
 - 创建：`frontend/public-web/src/styles.css`
 - 修改：`frontend/public-web/src/main.tsx`
 
-- [ ] **步骤 1：编写失败的首页行为测试**
+- [x] **步骤 1：编写失败的首页行为测试**
 
 渲染已知 API fixture，验证默认混合列表、电影/剧集切换、短搜索框、无结果状态、五列网格类名、名称/形态/年份/题材和点击进入详情。
 
@@ -438,15 +438,15 @@ git commit -m "feat: add shared frontend client and design system"
 
 预期：FAIL，页面组件不存在。
 
-- [ ] **步骤 2：实现首页和响应式样式**
+- [x] **步骤 2：实现首页和响应式样式**
 
 逐项迁移已审核 Demo：桌面五列、深色背景、左侧品牌、右侧内容切换与短搜索框、无题材/年份/排序筛选；移动端逐级降为四、三、两列。
 
-- [ ] **步骤 3：实现详情页面**
+- [x] **步骤 3：实现详情页面**
 
 电影详情显示播放入口；剧集详情按季序号分组，只显示公开单集及管理员输入的集名称；不可见内容统一展示公开 404 页面。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行：`npm test --workspace @movie-harbor/public-web`
 
