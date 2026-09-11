@@ -344,7 +344,7 @@ impl LocalMediaStorage {
 
     /// Resolve a persisted key through directory capabilities and verify it names a readable
     /// regular file. This deliberately does not follow symlinks or trust a joined path.
-    pub async fn is_accessible_regular_file(&self, storage_key: &str) -> Result<bool, MediaError> {
+    pub fn is_accessible_regular_file(&self, storage_key: &str) -> Result<bool, MediaError> {
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
             Ok(fd) => fd,
@@ -359,7 +359,7 @@ impl LocalMediaStorage {
         let file = match openat(
             &shard_fd,
             file,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::empty(),
         ) {
             Ok(file) => file,

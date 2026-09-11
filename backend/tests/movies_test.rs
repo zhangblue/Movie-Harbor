@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -722,6 +723,72 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
         .await
         .status(),
         StatusCode::UNPROCESSABLE_ENTITY
+    );
+}
+
+// Catches a blocking FIFO open pinning an async worker and holding the movie row lock.
+#[cfg(unix)]
+#[tokio::test]
+async fn publish_rejects_a_fifo_without_waiting_for_a_writer() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "FIFO movie").await;
+    let id = created["id"].as_str().unwrap();
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(&app, &cookie, &csrf, id, "poster", poster.id, 1)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        associate(&app, &cookie, &csrf, id, "video", video.id, 2)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+
+    let fifo = root.as_ref().join(&video.storage_key);
+    std::fs::remove_file(&fifo).unwrap();
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let delayed_writer_path = fifo.clone();
+    let delayed_writer = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(600));
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(delayed_writer_path)
+            .unwrap()
+    });
+
+    let started = Instant::now();
+    let response = write(
+        &app,
+        "POST",
+        &format!("/api/admin/movies/{id}/publish"),
+        json!({"version":3}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    delayed_writer.join().unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "publish blocked on FIFO open for {elapsed:?}"
     );
 }
 

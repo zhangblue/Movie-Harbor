@@ -10,7 +10,7 @@ use image::{ExtendedColorType, ImageEncoder};
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{file_cleanup_job, media_asset, movie},
+    entities::{episode, file_cleanup_job, media_asset, movie, season, series},
     media::{
         AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, StorageEvent,
         StorageHooks, UploadPolicy, replace_attachment, store_new_asset,
@@ -696,11 +696,31 @@ fn multipart_request(
     csrf: Option<&str>,
     origin: &str,
 ) -> Request<Body> {
+    multipart_file_request(
+        path,
+        cookie,
+        csrf,
+        origin,
+        "movie.mp4",
+        "video/mp4",
+        valid_mp4(),
+    )
+}
+
+fn multipart_file_request(
+    path: String,
+    cookie: Option<&str>,
+    csrf: Option<&str>,
+    origin: &str,
+    filename: &str,
+    mime_type: &str,
+    contents: Vec<u8>,
+) -> Request<Body> {
     let boundary = "movie-harbor-boundary";
     let mut body = format!(
-        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"movie.mp4\"\r\nContent-Type: video/mp4\r\n\r\n"
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: {mime_type}\r\n\r\n"
     ).into_bytes();
-    body.extend_from_slice(&valid_mp4());
+    body.extend_from_slice(&contents);
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let mut builder = Request::builder()
         .method("POST")
@@ -2459,6 +2479,131 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
         .await
         .unwrap();
     assert_eq!(missing_version.status(), StatusCode::BAD_REQUEST);
+}
+
+// Characterizes every registered attachment target before their handlers share one upload path.
+#[tokio::test]
+async fn movie_series_and_episode_routes_share_the_attachment_contract() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let movie = draft_movie(&db, None).await;
+    let series = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Series".into()),
+        synopsis: Set(String::new()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season = season::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        series_id: Set(series.id),
+        number: Set(1),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let episode = episode::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        season_id: Set(season.id),
+        number: Set(1),
+        name: Set("Pilot".into()),
+        synopsis: Set(String::new()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+
+    let missing_movie_version = app
+        .clone()
+        .oneshot(multipart_file_request(
+            format!("/api/admin/media/movies/{}/poster", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_movie_version.status(), StatusCode::BAD_REQUEST);
+
+    let movie_poster = app
+        .clone()
+        .oneshot(multipart_file_request(
+            format!("/api/admin/media/movies/{}/poster?version=1", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(movie_poster.status(), StatusCode::OK);
+    let movie = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(movie.poster_asset_id.is_some());
+    assert_eq!(movie.version, 2);
+
+    let series_poster = app
+        .clone()
+        .oneshot(multipart_file_request(
+            format!("/api/admin/media/series/{}/poster", series.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(series_poster.status(), StatusCode::OK);
+    assert!(
+        series::Entity::find_by_id(series.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .poster_asset_id
+            .is_some()
+    );
+
+    let episode_video = app
+        .oneshot(multipart_request(
+            format!("/api/admin/media/episodes/{}/video", episode.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(episode_video.status(), StatusCode::OK);
+    assert!(
+        episode::Entity::find_by_id(episode.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .video_asset_id
+            .is_some()
+    );
 }
 
 // Catches disabling Axum's body limit and accepting unbounded multipart metadata/extra fields.

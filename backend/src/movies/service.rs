@@ -347,13 +347,11 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
         poster.as_ref(),
         "poster",
         &["image/jpeg", "image/png", "image/webp"],
-    )
-    .await
-    {
+    ) {
         missing.push("poster");
     }
     let video = repository::asset(db, model.video_asset_id).await?;
-    if !valid_asset(storage, video.as_ref(), "video", allowed_video_mime_types).await {
+    if !valid_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
         missing.push("video");
     }
     if missing.is_empty() {
@@ -363,7 +361,7 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
     }
 }
 
-async fn valid_asset<S: AsRef<str>>(
+fn valid_asset<S: AsRef<str>>(
     storage: &LocalMediaStorage,
     asset: Option<&media_asset::Model>,
     purpose: &str,
@@ -378,7 +376,6 @@ async fn valid_asset<S: AsRef<str>>(
             .any(|mime| mime.as_ref() == asset.mime_type)
         && storage
             .is_accessible_regular_file(&asset.storage_key)
-            .await
             .unwrap_or(false)
 }
 

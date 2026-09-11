@@ -80,7 +80,7 @@ async fn movie_poster(
     Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload_versioned(
+    upload(
         state,
         AttachmentTarget::MoviePoster {
             id: parse_id(id)?,
@@ -97,7 +97,7 @@ async fn movie_video(
     Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload_versioned(
+    upload(
         state,
         AttachmentTarget::MovieVideo {
             id: parse_id(id)?,
@@ -139,53 +139,6 @@ fn parse_id(id: String) -> Result<Uuid, MediaError> {
 }
 
 async fn upload(
-    state: MediaState,
-    target: AttachmentTarget,
-    mut multipart: Multipart,
-) -> Result<Json<MediaAssetResponse>, MediaError> {
-    let field = multipart
-        .next_field()
-        .await
-        .map_err(map_multipart_error)?
-        .ok_or(MediaError::InvalidFileName)?;
-    if field.name() != Some("file") {
-        return Err(MediaError::InvalidFileName);
-    }
-    let original_name = field
-        .file_name()
-        .ok_or(MediaError::InvalidFileName)?
-        .to_owned();
-    if original_name.len() > MAX_FILE_NAME_BYTES {
-        return Err(MediaError::InvalidFileName);
-    }
-    let declared_mime = field
-        .content_type()
-        .ok_or(MediaError::UnsupportedType)?
-        .to_owned();
-    let pending = super::upload::prepare_attachment(
-        &state.storage,
-        target,
-        &original_name,
-        &declared_mime,
-        &state.policy,
-        field,
-    )
-    .await?;
-    if multipart
-        .next_field()
-        .await
-        .map_err(map_multipart_error)?
-        .is_some()
-    {
-        return Err(MediaError::Multipart(
-            "exactly one file field is required".into(),
-        ));
-    }
-    let asset = super::upload::commit_attachment(&state.db, pending).await?;
-    Ok(Json(asset.into()))
-}
-
-async fn upload_versioned(
     state: MediaState,
     target: AttachmentTarget,
     mut multipart: Multipart,
