@@ -35,6 +35,7 @@ pub async fn build(
     crate::media::cleanup::recover_uploads(&db, &storage, Duration::from_secs(3600)).await?;
     let _cleanup_worker = crate::media::cleanup::spawn(db.clone(), storage.clone());
     Ok(router()
+        .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))
         .merge(crate::genres::routes::router(state.clone()))
         .merge(crate::movies::routes::router(
