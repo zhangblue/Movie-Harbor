@@ -12,8 +12,8 @@ pub struct Config {
     pub media_dir: PathBuf,
     pub cookie_secure: bool,
     pub max_upload_bytes: u64,
-    pub admin_name: String,
-    pub admin_initial_password: String,
+    pub admin_name: Option<String>,
+    pub admin_initial_password: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,8 +74,8 @@ impl Config {
             media_dir,
             cookie_secure,
             max_upload_bytes,
-            admin_name: required(&lookup, "ADMIN_NAME")?,
-            admin_initial_password: required(&lookup, "ADMIN_INITIAL_PASSWORD")?,
+            admin_name: lookup("ADMIN_NAME"),
+            admin_initial_password: lookup("ADMIN_INITIAL_PASSWORD"),
         })
     }
 }
@@ -93,7 +93,7 @@ where
 mod tests {
     use std::collections::HashMap;
 
-    use super::{Config, ConfigError};
+    use super::Config;
 
     fn required_values() -> HashMap<&'static str, &'static str> {
         HashMap::from([
@@ -107,12 +107,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_missing_initial_password_without_a_default() {
-        let values = required_values();
-
-        match Config::from_lookup(|name| values.get(name).map(ToString::to_string)) {
-            Err(error) => assert_eq!(error, ConfigError::Missing("ADMIN_INITIAL_PASSWORD")),
-            Ok(_) => panic!("a missing initial password must be rejected"),
-        }
+    fn defers_initial_credentials_to_database_initialization() {
+        let mut values = required_values();
+        values.remove("ADMIN_NAME");
+        assert!(Config::from_lookup(|name| values.get(name).map(ToString::to_string)).is_ok());
     }
 }

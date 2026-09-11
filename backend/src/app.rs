@@ -14,6 +14,19 @@ pub fn test_router() -> Router {
     router()
 }
 
+pub async fn build(
+    db: sea_orm::DatabaseConnection,
+    config: &crate::config::Config,
+) -> Result<Router, Box<dyn std::error::Error>> {
+    crate::auth::initialize(&db, config).await?;
+    let state = crate::auth::AuthState {
+        db,
+        cookie_secure: config.cookie_secure,
+        limits: Default::default(),
+    };
+    Ok(router().merge(crate::auth::routes::router(state)))
+}
+
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
