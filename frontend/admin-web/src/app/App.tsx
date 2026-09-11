@@ -5,6 +5,7 @@ import { LoginPage } from "../auth/LoginPage";
 import { AccountMenu } from "../auth/AccountMenu";
 import { ChangePasswordDialog } from "../auth/ChangePasswordDialog";
 import { ContentPage } from "../content/ContentPage";
+import { MovieEditor } from "../movies/MovieEditor";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
@@ -19,6 +20,7 @@ export function App() {
   const [error, setError] = useState("");
   const [section, setSection] = useState("内容管理");
   const [pendingPage, setPendingPage] = useState("");
+  const [moviePage, setMoviePage] = useState<{ id: string | null; deleting: boolean } | null>(null);
   const mounted = useMounted();
 
   const expire = useCallback((message = "会话已失效，请重新登录。") => {
@@ -26,6 +28,7 @@ export function App() {
     setAuth({ state: "anonymous" });
     setPasswordOpen(false);
     setPendingPage("");
+    setMoviePage(null);
     setSection("内容管理");
     setNotice(message);
   }, []);
@@ -86,7 +89,8 @@ export function App() {
         {["内容管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
       </nav><main className="admin-content">
         {error && <p role="alert" className="error-message">{error}</p>}
-        {section === "内容管理" ? <ContentPage onExpired={onExpired} onOpen={(row, action) => {
+        {section === "内容管理" ? moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onBack={() => setMoviePage(null)} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
+          if (!row || row.kind === "movie") { setMoviePage({ id: row?.id ?? null, deleting: action === "delete" }); return; }
           const labels = { create: "新建内容", edit: "编辑", view: "查看", delete: "永久删除" };
           setPendingPage(row ? `${labels[action]}：${row.name}` : labels[action]);
         }} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}

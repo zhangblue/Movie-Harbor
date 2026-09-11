@@ -55,6 +55,19 @@ p { color: var(--mh-color-text-muted); }
 .error-message, .request-error p { color: var(--mh-color-danger); }
 .request-error { margin: 16px 0; }
 .empty-state { padding: 30px; text-align: center; }
+.movie-editor-card { display: grid; grid-template-columns: 178px minmax(0, 540px); gap: 28px; padding: 24px; border: 1px solid var(--mh-color-border); border-radius: 12px; background: var(--mh-color-surface); max-width: 820px; }
+.movie-form { display: flex; flex-direction: column; align-items: flex-start; gap: 15px; min-width: 0; }
+.movie-field-medium { width: 290px; max-width: 100%; }
+.movie-field-short { width: 145px; max-width: 100%; }
+.movie-field-wide { width: 500px; max-width: 100%; }
+.movie-inline-fields { display: flex; gap: 12px; max-width: 100%; }
+.movie-form textarea { resize: vertical; }
+.movie-form-actions { width: 500px; max-width: 100%; display: flex; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
+.movie-poster-frame { position: relative; display: grid; place-items: center; width: 178px; height: 267px; overflow: hidden; padding: 0; border: 1px solid var(--mh-color-border); border-radius: 12px; background: var(--mh-color-surface-hover); color: var(--mh-color-text); }
+.movie-poster-frame img { width: 100%; height: 100%; object-fit: cover; }
+.movie-poster-change { position: absolute; inset: auto 0 0; padding: 12px; background: #0a0d13d6; }
+.movie-poster p { overflow-wrap: anywhere; color: var(--mh-color-text-muted); font-size: 12px; }
+@media (max-width: 700px) { .movie-editor-card { grid-template-columns: minmax(0, 1fr); padding: 18px; } .movie-inline-fields { flex-wrap: wrap; } }
 @media (max-width: 900px) {
   .admin-layout { grid-template-columns: 1fr; width: calc(100% - 32px); }
   .sidebar { display: flex; gap: 6px; padding: 8px; }
