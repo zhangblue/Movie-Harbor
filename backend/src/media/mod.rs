@@ -15,6 +15,25 @@ pub use storage::{ChunkSource, LocalMediaStorage, StorageEvent, StorageHooks, St
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
 
+/// Validate a registered asset at the publication boundary without opening special files.
+pub fn is_publishable_asset<S: AsRef<str>>(
+    storage: &LocalMediaStorage,
+    asset: Option<&crate::entities::media_asset::Model>,
+    purpose: &str,
+    allowed_mime_types: &[S],
+) -> bool {
+    let Some(asset) = asset else {
+        return false;
+    };
+    asset.purpose == purpose
+        && allowed_mime_types
+            .iter()
+            .any(|mime| mime.as_ref() == asset.mime_type)
+        && storage
+            .is_accessible_regular_file(&asset.storage_key)
+            .unwrap_or(false)
+}
+
 #[derive(Debug)]
 pub enum MediaError {
     InvalidFileName,

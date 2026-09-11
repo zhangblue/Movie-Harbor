@@ -1,7 +1,7 @@
 use crate::{
     entities::{file_cleanup_job, media_asset, movie},
     genres,
-    media::LocalMediaStorage,
+    media::{LocalMediaStorage, is_publishable_asset},
 };
 use axum::{
     Json,
@@ -342,7 +342,7 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
         missing.push("name");
     }
     let poster = repository::asset(db, model.poster_asset_id).await?;
-    if !valid_asset(
+    if !is_publishable_asset(
         storage,
         poster.as_ref(),
         "poster",
@@ -351,7 +351,7 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
         missing.push("poster");
     }
     let video = repository::asset(db, model.video_asset_id).await?;
-    if !valid_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
+    if !is_publishable_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
         missing.push("video");
     }
     if missing.is_empty() {
@@ -359,24 +359,6 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
     } else {
         Err(MovieError::Validation(missing))
     }
-}
-
-fn valid_asset<S: AsRef<str>>(
-    storage: &LocalMediaStorage,
-    asset: Option<&media_asset::Model>,
-    purpose: &str,
-    allowed_mime_types: &[S],
-) -> bool {
-    let Some(asset) = asset else {
-        return false;
-    };
-    asset.purpose == purpose
-        && allowed_mime_types
-            .iter()
-            .any(|mime| mime.as_ref() == asset.mime_type)
-        && storage
-            .is_accessible_regular_file(&asset.storage_key)
-            .unwrap_or(false)
 }
 
 fn normalize_name(name: String) -> Result<String, MovieError> {

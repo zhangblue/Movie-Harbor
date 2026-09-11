@@ -2564,7 +2564,7 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
     let series_poster = app
         .clone()
         .oneshot(multipart_file_request(
-            format!("/api/admin/media/series/{}/poster", series.id),
+            format!("/api/admin/media/series/{}/poster?version=1", series.id),
             Some(&cookie),
             Some(&csrf),
             "https://harbor.test",
@@ -2575,6 +2575,16 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
         .await
         .unwrap();
     assert_eq!(series_poster.status(), StatusCode::OK);
+    let series_poster_body: Value = serde_json::from_slice(
+        &series_poster
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(series_poster_body["version"], 2);
     assert!(
         series::Entity::find_by_id(series.id)
             .one(&db)
@@ -2584,10 +2594,19 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
             .poster_asset_id
             .is_some()
     );
+    assert_eq!(
+        series::Entity::find_by_id(series.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
 
     let episode_video = app
         .oneshot(multipart_request(
-            format!("/api/admin/media/episodes/{}/video", episode.id),
+            format!("/api/admin/media/episodes/{}/video?version=1", episode.id),
             Some(&cookie),
             Some(&csrf),
             "https://harbor.test",
@@ -2595,6 +2614,17 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
         .await
         .unwrap();
     assert_eq!(episode_video.status(), StatusCode::OK);
+    let episode_video_body: Value = serde_json::from_slice(
+        &episode_video
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes(),
+    )
+    .unwrap();
+    assert_eq!(episode_video_body["version"], 2);
+    assert_eq!(episode_video_body["series_version"], 3);
     assert!(
         episode::Entity::find_by_id(episode.id)
             .one(&db)
@@ -2603,6 +2633,24 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
             .unwrap()
             .video_asset_id
             .is_some()
+    );
+    assert_eq!(
+        episode::Entity::find_by_id(episode.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
+    assert_eq!(
+        series::Entity::find_by_id(series.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        3
     );
 }
 

@@ -42,6 +42,11 @@ pub async fn build(
             storage.clone(),
             config.allowed_video_mime_types.clone(),
         ))
+        .merge(crate::series::routes::router(
+            state.clone(),
+            storage.clone(),
+            config.allowed_video_mime_types.clone(),
+        ))
         .merge(crate::media::routes::router(state, storage, policy)?))
 }
 

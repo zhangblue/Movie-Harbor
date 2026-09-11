@@ -26,6 +26,9 @@ struct MediaAssetResponse {
     original_name: String,
     mime_type: String,
     byte_size: i64,
+    version: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series_version: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -33,13 +36,15 @@ struct VersionQuery {
     version: i64,
 }
 
-impl From<media_asset::Model> for MediaAssetResponse {
-    fn from(asset: media_asset::Model) -> Self {
+impl MediaAssetResponse {
+    fn new(asset: media_asset::Model, version: i64, series_version: Option<i64>) -> Self {
         Self {
             id: asset.id.to_string(),
             original_name: asset.original_name,
             mime_type: asset.mime_type,
             byte_size: asset.byte_size,
+            version,
+            series_version,
         }
     }
 }
@@ -111,11 +116,15 @@ async fn movie_video(
 async fn series_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
+    Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
         state,
-        AttachmentTarget::SeriesPoster(parse_id(id)?),
+        AttachmentTarget::SeriesPoster {
+            id: parse_id(id)?,
+            version: version.version,
+        },
         multipart,
     )
     .await
@@ -124,11 +133,15 @@ async fn series_poster(
 async fn episode_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
+    Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
         state,
-        AttachmentTarget::EpisodeVideo(parse_id(id)?),
+        AttachmentTarget::EpisodeVideo {
+            id: parse_id(id)?,
+            version: version.version,
+        },
         multipart,
     )
     .await
@@ -181,8 +194,12 @@ async fn upload(
             "exactly one file field is required".into(),
         ));
     }
-    let asset = super::upload::commit_attachment(&state.db, pending).await?;
-    Ok(Json(asset.into()))
+    let committed = super::upload::commit_attachment(&state.db, pending).await?;
+    Ok(Json(MediaAssetResponse::new(
+        committed.asset,
+        committed.version,
+        committed.series_version,
+    )))
 }
 
 fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> MediaError {
