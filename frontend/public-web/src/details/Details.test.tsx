@@ -16,7 +16,7 @@ it("loads movie details from a deep link with all genres, duration and a public 
   expect(screen.getByText(/90 分钟/)).toBeInTheDocument();
   expect(screen.getByText("家庭")).toBeInTheDocument();
   expect(screen.getByText("一封信，穿越山海。")).toBeInTheDocument();
-  expect(screen.getByRole("link", { name: "播放电影" })).toHaveAttribute("href", "/media/video-1");
+  expect(screen.getByRole("link", { name: "播放电影" })).toHaveAttribute("href", "/movies/movie-1/play");
 });
 
 it("orders seasons and episodes, switches season, and uses only API-returned administrator episode names", async () => {
@@ -31,7 +31,7 @@ it("orders seasons and episodes, switches season, and uses only API-returned adm
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
   expect(screen.queryByText(/第 2 集/)).not.toBeInTheDocument();
   await user.click(seasons[1]!);
-  expect(screen.getByRole("link", { name: "第 1 集 · 归途" })).toHaveAttribute("href", "/media/ep-3");
+  expect(screen.getByRole("link", { name: "第 1 集 · 归途" })).toHaveAttribute("href", "/series/series-1/play/ep-3");
   expect(screen.queryByRole("link", { name: /启程/ })).not.toBeInTheDocument();
 });
 

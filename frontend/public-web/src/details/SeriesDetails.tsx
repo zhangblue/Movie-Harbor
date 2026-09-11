@@ -24,7 +24,7 @@ export function SeriesDetails({ id }: { id: string }) {
       </div>
       {season && <h3>第 {season.number} 季</h3>}
       {episodes.length ? <ol className="episode-list">{episodes.map((episode) => <li key={episode.id}>
-        <div>{episode.video_url ? <a href={episode.video_url}>第 {episode.number} 集 · {episode.name}</a>
+        <div>{episode.video_url ? <a href={`/series/${encodeURIComponent(id)}/play/${encodeURIComponent(episode.id)}`}>第 {episode.number} 集 · {episode.name}</a>
           : <span>第 {episode.number} 集 · {episode.name}（暂无可播放视频）</span>}
           {episode.synopsis && <p>{episode.synopsis}</p>}</div>
         <span className="episode-duration">{durationLabel(episode.duration_seconds)}</span>

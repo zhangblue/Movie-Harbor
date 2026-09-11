@@ -10,6 +10,6 @@ export function MovieDetails({ id }: { id: string }) {
   if (state.status === "loading") return <Loading />;
   if (state.status === "error") return <RequestError error={state.error} retry={retry} />;
   return <DetailsLayout detail={state.data}>
-    {state.data.video_url ? <a className="play-button" href={state.data.video_url} aria-label="播放电影">▶ 播放</a> : <p>暂无可播放视频。</p>}
+    {state.data.video_url ? <a className="play-button" href={`/movies/${encodeURIComponent(id)}/play`} aria-label="播放电影">▶ 播放</a> : <p>暂无可播放视频。</p>}
   </DetailsLayout>;
 }
