@@ -103,6 +103,54 @@ it("uses the first same-name radio in tab order when none is checked", () => {
   expect(screen.getByRole("radio", { name: "Tab 顺序靠前" })).toHaveFocus();
 });
 
+it("keeps repeated Shift+Tab inside an unchecked radio group", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <button>对话框前</button>
+      <Dialog open title="未选清晰度" onClose={() => undefined}>
+        <label><input type="radio" name="quality" />标准</label>
+        <label><input type="radio" name="quality" />高清</label>
+      </Dialog>
+    </>,
+  );
+  const close = screen.getByRole("button", { name: "关闭未选清晰度" });
+
+  close.focus();
+  await user.tab({ shift: true });
+  expect(screen.getByRole("radio", { name: "高清" })).toHaveFocus();
+
+  await user.tab({ shift: true });
+  expect(close).toHaveFocus();
+});
+
+it("traps both directions when an unchecked radio group uses positive tabindex", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <button>外部按钮</button>
+      <Dialog open title="显式 radio 顺序" onClose={() => undefined}>
+        <label><input type="radio" name="quality" tabIndex={1} />标准</label>
+        <label><input type="radio" name="quality" tabIndex={2} />高清</label>
+      </Dialog>
+    </>,
+  );
+  const first = screen.getByRole("radio", { name: "标准" });
+  const last = screen.getByRole("radio", { name: "高清" });
+  const close = screen.getByRole("button", { name: "关闭显式 radio 顺序" });
+
+  close.focus();
+  await user.tab({ shift: true });
+  expect(last).toHaveFocus();
+  await user.tab({ shift: true });
+  expect(close).toHaveFocus();
+
+  await user.tab();
+  expect(first).toHaveFocus();
+  await user.tab();
+  expect(close).toHaveFocus();
+});
+
 it("does not merge same-name radios with different form owners, including no form", () => {
   render(
     <Dialog open title="不同表单" onClose={() => undefined}>

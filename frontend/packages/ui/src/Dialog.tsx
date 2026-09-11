@@ -15,7 +15,7 @@ const focusableSelector = [
   "iframe", "audio[controls]", "video[controls]", "[contenteditable]:not([contenteditable='false'])", "[tabindex]",
 ].join(",");
 
-function tabbableElements(panel: HTMLElement): HTMLElement[] {
+function tabbableElements(panel: HTMLElement, activeElement: Element | null = null): HTMLElement[] {
   const candidates = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
     if (element.tabIndex < 0) return false;
     if (element.matches(":disabled")) return false;
@@ -51,8 +51,17 @@ function tabbableElements(panel: HTMLElement): HTMLElement[] {
   const radioTabStops = new Set<HTMLInputElement>();
   for (const formGroups of radioGroups.values()) {
     for (const group of formGroups.values()) {
-      const tabStop = group.find((radio) => radio.checked) ?? group[0];
-      if (tabStop) radioTabStops.add(tabStop);
+      const activeRadio = group.find((radio) => radio === activeElement);
+      const checkedRadio = group.find((radio) => radio.checked);
+      if (activeRadio) {
+        radioTabStops.add(activeRadio);
+      } else if (checkedRadio) {
+        radioTabStops.add(checkedRadio);
+      } else {
+        // Browsers enter an unchecked group at its first or last member depending on Tab direction.
+        // Once a member is active, that member becomes the group's sole sequential tab stop.
+        group.forEach((radio) => radioTabStops.add(radio));
+      }
     }
   }
 
@@ -84,7 +93,7 @@ export function Dialog({ open, title, onClose, children, closeLabel, className }
         return;
       }
       if (event.key !== "Tab" || !panel) return;
-      const focusable = tabbableElements(panel);
+      const focusable = tabbableElements(panel, document.activeElement);
       if (!focusable.length) {
         if (document.activeElement !== panel) {
           event.preventDefault();
@@ -92,20 +101,15 @@ export function Dialog({ open, title, onClose, children, closeLabel, className }
         }
         return;
       }
-      const firstElement = focusable[0];
-      const lastElement = focusable[focusable.length - 1];
-      if (!firstElement || !lastElement) return;
       const activeElement = document.activeElement;
-      if (!panel.contains(activeElement)) {
-        event.preventDefault();
-        (event.shiftKey ? lastElement : firstElement).focus();
-      } else if (event.shiftKey && activeElement === firstElement) {
-        event.preventDefault();
-        lastElement.focus();
-      } else if (!event.shiftKey && document.activeElement === lastElement) {
-        event.preventDefault();
-        firstElement.focus();
-      }
+      const activeIndex = focusable.findIndex((element) => element === activeElement);
+      const destinationIndex = activeIndex < 0
+        ? (event.shiftKey ? focusable.length - 1 : 0)
+        : (activeIndex + (event.shiftKey ? -1 : 1) + focusable.length) % focusable.length;
+      const destination = focusable[destinationIndex];
+      if (!destination) return;
+      event.preventDefault();
+      destination.focus();
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
