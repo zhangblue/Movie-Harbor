@@ -223,7 +223,15 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
             .name,
         "Drama"
     );
-    let genre = genre::Entity::find().one(&db).await.unwrap().unwrap();
+    let genre = genre::Entity::find_by_id(
+        "00000000-0000-0000-0000-000000000031"
+            .parse::<Uuid>()
+            .unwrap(),
+    )
+    .one(&db)
+    .await
+    .unwrap()
+    .unwrap();
     assert_eq!(
         genre
             .find_related(movie::Entity)

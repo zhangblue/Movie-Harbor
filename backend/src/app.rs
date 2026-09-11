@@ -26,7 +26,9 @@ pub async fn build(
         public_origin,
         limits: Default::default(),
     };
-    Ok(router().merge(crate::auth::routes::router(state)))
+    Ok(router()
+        .merge(crate::auth::routes::router(state.clone()))
+        .merge(crate::genres::routes::router(state)))
 }
 
 async fn health() -> Json<HealthResponse> {
