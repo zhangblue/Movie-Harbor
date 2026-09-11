@@ -294,7 +294,7 @@ git commit -m "feat: add safe local media storage"
 - 创建：`backend/tests/movies_test.rs`
 - 修改：`backend/src/app.rs`
 
-- [ ] **步骤 1：编写失败的电影生命周期测试**
+- [x] **步骤 1：编写失败的电影生命周期测试**
 
 覆盖新建草稿、只在草稿编辑、发布最低要求、发布后只读、归档、原样再发布、归档转草稿、草稿/归档删除、已发布删除拒绝、`version` 冲突拒绝和重复状态请求幂等。
 
@@ -302,15 +302,15 @@ git commit -m "feat: add safe local media storage"
 
 预期：FAIL，电影服务与路由不存在。
 
-- [ ] **步骤 2：实现 repository 与事务服务**
+- [x] **步骤 2：实现 repository 与事务服务**
 
 所有写入通过 `WHERE id = ? AND version = ?` 乐观锁；状态转换集中在一个显式状态机中；发布校验确认名称、海报和视频记录存在且正式文件可访问。
 
-- [ ] **步骤 3：实现管理 API**
+- [x] **步骤 3：实现管理 API**
 
 提供电影列表、创建、详情、草稿更新、海报/视频关联、发布、归档、转草稿和永久删除；错误统一映射到 `400/401/403/404/409/422`。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行：`cargo test --workspace`
 
