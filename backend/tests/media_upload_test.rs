@@ -128,6 +128,46 @@ fn valid_mp4() -> Vec<u8> {
     )
 }
 
+fn ffmpeg_baseline_h264_aac_mp4() -> Vec<u8> {
+    decode_base64(
+        "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",
+    )
+}
+
+fn corrupt_ffmpeg_high_h264_mp4_fixture() -> Vec<u8> {
+    decode_base64(
+        "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",
+    )
+}
+
+fn ffmpeg_high_h264_mp4() -> Vec<u8> {
+    decode_base64(concat!(
+        "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAvhtZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gy",
+        "NjQgLSBjb3JlIDE2NSByMzIyMiBiMzU2MDVhIC0gSC4yNjQvTVBFRy00IEFWQyBjb2RlYyAtIENvcHlsZWZ0IDIwMDMtMjAyNSAt",
+        "IGh0dHA6Ly93d3cudmlkZW9sYW4ub3JnL3gyNjQuaHRtbCAtIG9wdGlvbnM6IGNhYmFjPTEgcmVmPTMgZGVibG9jaz0xOjA6MCBh",
+        "bmFseXNlPTB4MzoweDExMyBtZT1oZXggc3VibWU9NyBwc3k9MSBwc3lfcmQ9MS4wMDowLjAwIG1peGVkX3JlZj0xIG1lX3Jhbmdl",
+        "PTE2IGNocm9tYV9tZT0xIHRyZWxsaXM9MSA4eDhkY3Q9MSBjcW09MCBkZWFkem9uZT0yMSwxMSBmYXN0X3Bza2lwPTEgY2hyb21h",
+        "X3FwX29mZnNldD0tMiB0aHJlYWRzPTIgbG9va2FoZWFkX3RocmVhZHM9MSBzbGljZWRfdGhyZWFkcz0wIG5yPTAgZGVjaW1hdGU9",
+        "MSBpbnRlcmxhY2VkPTAgYmx1cmF5X2NvbXBhdD0wIGNvbnN0cmFpbmVkX2ludHJhPTAgYmZyYW1lcz0zIGJfcHlyYW1pZD0yIGJf",
+        "YWRhcHQ9MSBiX2JpYXM9MCBkaXJlY3Q9MSB3ZWlnaHRiPTEgb3Blbl9nb3A9MCB3ZWlnaHRwPTIga2V5aW50PTI1MCBrZXlpbnRf",
+        "bWluPTI1IHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4w",
+        "IHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAIGWIhAAz//72",
+        "7L4FNhTIUJcRLMWmfv3kQNkVIIcHMcRBAAAACkGaImxCv/44jcAAAAAIAZ5BeQr/DDkAAANdbW9vdgAAAGxtdmhkAAAAAAAAAAAA",
+        "AAAAAAAD6AAAAHgAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAA",
+        "AAAAAAAAAAAAAAAAAAAAAgAAAoh0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAAHgAAAAAAAAAAAAAAAAAAAAAAAEA",
+        "AAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAEAAAABAAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAB4AAAEAAAB",
+        "AAAAAAIAbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAABgBVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABW",
+        "aWRlb0hhbmRsZXIAAAABq21pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAA",
+        "AQAAAWtzdGJsAAAAv3N0c2QAAAAAAAAAAQAAAK9hdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAEAAQABIAAAASAAAAAAAAAAB",
+        "FExhdmM2My4xLjEwMSBsaWJ4MjY0AAAAAAAAAAAAAAAAGP//AAAANWF2Y0MBZAAK/+EAGGdkAAqs2UQmwEQAAAMABAAAAwDIPEiW",
+        "WAEABmjr48siwP34+AAAAAAQcGFzcAAAAAEAAAABAAAAFGJ0cnQAAAAAAADD1QAAAAAAAAAYc3R0cwAAAAAAAAABAAAAAwAAAgAA",
+        "AAAUc3RzcwAAAAAAAAABAAAAAQAAAChjdHRzAAAAAAAAAAMAAAABAAAEAAAAAAEAAAYAAAAAAQAAAgAAAAAcc3RzYwAAAAAAAAAB",
+        "AAAAAQAAAAMAAAABAAAAIHN0c3oAAAAAAAAAAAAAAAMAAALWAAAADgAAAAwAAAAUc3RjbwAAAAAAAAABAAAAMAAAAGF1ZHRhAAAA",
+        "WW1ldGEAAAAAAAAAIWhkbHIAAAAAAAAAAG1kaXJhcHBsAAAAAAAAAAAAAAAALGlsc3QAAAAkqXRvbwAAABxkYXRhAAAAAQAAAABM",
+        "YXZmNjMuMS4xMDE="
+    ))
+}
+
 fn valid_webp() -> Vec<u8> {
     let mut bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
@@ -235,6 +275,17 @@ fn valid_ogg_video() -> Vec<u8> {
         ogg_page(1, 3, 0, b"\x00\x01"),
     ]
     .concat()
+}
+
+fn declared_sample_count_bomb() -> Vec<u8> {
+    let mut data = atom(b"ftyp", b"isom\0\0\0\0");
+    let mut stsz = vec![0; 4];
+    stsz.extend(1_u32.to_be_bytes());
+    stsz.extend(1_000_000_u32.to_be_bytes());
+    for _ in 0..16 {
+        data.extend(atom(b"trak", &atom(b"stsz", &stsz)));
+    }
+    data
 }
 
 struct TempRoot(PathBuf);
@@ -509,6 +560,48 @@ impl StorageHooks for AdversarialHooks {
 
 struct PauseAfterDatabaseCommit {
     commits: AtomicUsize,
+}
+
+struct ReplaceAtOwnedUnlink {
+    root: PathBuf,
+    replaced: AtomicBool,
+    key: Mutex<Option<String>>,
+}
+
+struct ReplaceAndCollideAtClaim {
+    root: PathBuf,
+    replaced: AtomicBool,
+}
+
+impl StorageHooks for ReplaceAndCollideAtClaim {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        match event {
+            StorageEvent::BeforeUnlink(key) if !self.replaced.swap(true, Ordering::SeqCst) => {
+                let formal = self.root.join(key);
+                std::fs::rename(&formal, formal.with_extension("owned-original"))?;
+                std::fs::write(formal, b"UNRELATED CLAIMED ENTRY")
+            }
+            StorageEvent::ClaimedForDeletion(key) => {
+                std::fs::write(self.root.join(key), b"RESTORATION COLLISION")
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl StorageHooks for ReplaceAtOwnedUnlink {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        let StorageEvent::BeforeUnlink(key) = event else {
+            return Ok(());
+        };
+        if self.replaced.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        *self.key.lock().unwrap() = Some(key.clone());
+        let formal = self.root.join(key);
+        std::fs::rename(&formal, formal.with_extension("owned-original"))?;
+        std::fs::write(formal, b"UNRELATED REPLACEMENT")
+    }
 }
 
 impl StorageHooks for PauseAfterDatabaseCommit {
@@ -971,6 +1064,114 @@ async fn recovery_requires_marker_identity_before_deleting_a_formal_file() {
     );
 }
 
+// Catches verifying one inode and later unlinking an attacker-replaced filename.
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(ReplaceAtOwnedUnlink {
+        root: root.as_ref().to_owned(),
+        replaced: AtomicBool::new(false),
+        key: Mutex::new(None),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let simple = id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    let formal = root.as_ref().join(&key);
+    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+    std::fs::write(&formal, PNG).unwrap();
+    let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
+
+    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+        .await
+        .unwrap();
+
+    assert!(hooks.replaced.load(Ordering::SeqCst));
+    assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
+    assert!(formal.with_extension("owned-original").exists());
+    assert!(
+        marker.exists(),
+        "identity mismatch must retain recovery state"
+    );
+}
+
+// Catches the known-rollback Drop path unlinking a name that was replaced after validation.
+#[tokio::test]
+async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(ReplaceAtOwnedUnlink {
+        root: root.as_ref().to_owned(),
+        replaced: AtomicBool::new(false),
+        key: Mutex::new(None),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let (source, _) = Chunks::new([PNG]);
+
+    assert!(matches!(
+        replace_attachment(
+            &db,
+            &storage,
+            AttachmentTarget::MoviePoster(Uuid::new_v4()),
+            "cover.png",
+            "image/png",
+            &policy(1024),
+            source,
+        )
+        .await,
+        Err(MediaError::TargetNotFound)
+    ));
+
+    let key = hooks.key.lock().unwrap().clone().unwrap();
+    let formal = root.as_ref().join(key);
+    assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
+    assert!(formal.with_extension("owned-original").exists());
+    assert!(std::fs::read_dir(root.as_ref().join(".incoming"))
+        .unwrap()
+        .any(|entry| entry.unwrap().path().extension() == Some(std::ffi::OsStr::new("pending"))));
+}
+
+// Catches deleting or losing an unrelated claimed entry when restoring it also collides.
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_retains_quarantine_and_marker_when_identity_and_restore_both_conflict() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(ReplaceAndCollideAtClaim {
+        root: root.as_ref().to_owned(),
+        replaced: AtomicBool::new(false),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
+        .await
+        .unwrap();
+    let id = Uuid::new_v4();
+    let simple = id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    let formal = root.as_ref().join(&key);
+    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+    std::fs::write(&formal, PNG).unwrap();
+    let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
+    let quarantine = formal.with_file_name(format!(".delete-{}.png", simple));
+
+    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+        .await
+        .unwrap();
+
+    assert_eq!(std::fs::read(&formal).unwrap(), b"RESTORATION COLLISION");
+    assert_eq!(
+        std::fs::read(&quarantine).unwrap(),
+        b"UNRELATED CLAIMED ENTRY"
+    );
+    assert!(formal.with_extension("owned-original").exists());
+    assert!(marker.exists());
+}
+
 // Catches a marker being repointed to a different resource despite matching file metadata.
 #[cfg(unix)]
 #[tokio::test]
@@ -1254,8 +1455,7 @@ async fn traversal_spoofed_mime_and_unsupported_types_are_rejected() {
 async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_containers() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    let video_policy =
-        UploadPolicy::new(1024 * 1024, ["video/mp4", "video/webm", "video/ogg"]).unwrap();
+    let video_policy = UploadPolicy::new(1024 * 1024, ["video/mp4", "video/webm"]).unwrap();
 
     for (kind, name, mime, bytes) in [
         (MediaKind::Poster, "valid.png", "image/png", PNG.to_vec()),
@@ -1268,12 +1468,6 @@ async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_co
         (MediaKind::Poster, "valid.webp", "image/webp", valid_webp()),
         (MediaKind::Video, "valid.mp4", "video/mp4", valid_mp4()),
         (MediaKind::Video, "valid.webm", "video/webm", valid_webm()),
-        (
-            MediaKind::Video,
-            "valid.ogv",
-            "video/ogg",
-            valid_ogg_video(),
-        ),
     ] {
         let (source, _) = Chunks::bytes(bytes);
         storage
@@ -1281,6 +1475,21 @@ async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_co
             .await
             .unwrap_or_else(|error| panic!("valid fixture {name} rejected: {error}"));
     }
+
+    let (unsupported_ogg, _) = Chunks::bytes(valid_ogg_video());
+    assert!(matches!(
+        storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Video,
+                "formerly-valid.ogv",
+                "video/ogg",
+                &video_policy,
+                unsupported_ogg,
+            )
+            .await,
+        Err(MediaError::UnsupportedType)
+    ));
 
     let audio_ogg = [ogg_page(2, 0, 2, b"\x01vorbis\0"), ogg_page(2, 1, 0, b"\0")].concat();
     let mut invalid_avcc = valid_mp4();
@@ -1388,6 +1597,75 @@ async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_co
     }
 }
 
+// Catches rejecting real browser-playable MP4s merely because they contain AAC or High avcC data.
+#[tokio::test]
+async fn mp4_validation_accepts_ffmpeg_baseline_with_aac_and_high_profile() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let video_policy = UploadPolicy::new(1024 * 1024, ["video/mp4"]).unwrap();
+    for (name, bytes) in [
+        ("baseline-aac.mp4", ffmpeg_baseline_h264_aac_mp4()),
+        ("high.mp4", ffmpeg_high_h264_mp4()),
+    ] {
+        let (source, _) = Chunks::bytes(bytes);
+        storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Video,
+                name,
+                "video/mp4",
+                &video_policy,
+                source,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("ffmpeg fixture {name} rejected: {error}"));
+    }
+}
+
+// Catches trusting only H.264 NAL types or allocating per an untrusted fixed sample count.
+#[tokio::test]
+async fn mp4_validation_rejects_forbidden_nals_and_declared_count_amplification() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let video_policy = UploadPolicy::new(1024 * 1024, ["video/mp4"]).unwrap();
+    let mut forbidden = valid_mp4();
+    let mdat = forbidden
+        .windows(4)
+        .position(|bytes| bytes == b"mdat")
+        .unwrap()
+        + 4;
+    let mut cursor = mdat;
+    while cursor < forbidden.len() {
+        let length = u32::from_be_bytes(forbidden[cursor..cursor + 4].try_into().unwrap()) as usize;
+        forbidden[cursor + 4] |= 0x80;
+        cursor += 4 + length;
+    }
+    for (name, bytes) in [
+        ("forbidden.mp4", forbidden),
+        ("count-bomb.mp4", declared_sample_count_bomb()),
+        (
+            "corrupt-metadata.mp4",
+            corrupt_ffmpeg_high_h264_mp4_fixture(),
+        ),
+    ] {
+        let (source, _) = Chunks::bytes(bytes);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            storage.store(
+                Uuid::new_v4(),
+                MediaKind::Video,
+                name,
+                "video/mp4",
+                &video_policy,
+                source,
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("parser did not reject {name} within its bounded budget"));
+        assert!(result.is_err(), "malformed fixture {name} was accepted");
+    }
+}
+
 // Catches unchecked MP4 slicing and parser panics on arbitrary short malformed inputs.
 #[tokio::test]
 async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {
@@ -1413,7 +1691,7 @@ async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {
             cases.push((name, mime, bytes.clone()));
         }
     }
-    let fuzz_policy = UploadPolicy::new(1024, ["video/mp4", "video/webm", "video/ogg"]).unwrap();
+    let fuzz_policy = UploadPolicy::new(1024, ["video/mp4", "video/webm"]).unwrap();
     for (name, mime, bytes) in cases {
         let task_storage = storage.clone();
         let task_policy = fuzz_policy.clone();

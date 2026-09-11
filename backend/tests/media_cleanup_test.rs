@@ -9,6 +9,7 @@ use sea_orm::{
     IntoActiveModel, Set,
 };
 use sea_orm_migration::MigratorTrait;
+use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -57,6 +58,40 @@ struct FailFirstPostUnlinkSync {
     unlinked: AtomicBool,
     failures: AtomicUsize,
     sync_attempts: AtomicUsize,
+}
+
+struct ReplaceRegisteredAtUnlink {
+    root: PathBuf,
+    replaced: AtomicBool,
+}
+
+struct FailOnceAfterClaim {
+    failures: AtomicUsize,
+}
+
+impl StorageHooks for FailOnceAfterClaim {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::ClaimedForDeletion(_))
+            && self.failures.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            return Err(std::io::Error::other("injected crash after deletion claim"));
+        }
+        Ok(())
+    }
+}
+
+impl StorageHooks for ReplaceRegisteredAtUnlink {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        let StorageEvent::BeforeUnlink(key) = event else {
+            return Ok(());
+        };
+        if self.replaced.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        let formal = self.root.join(key);
+        std::fs::rename(&formal, formal.with_extension("owned-original"))?;
+        std::fs::write(formal, b"UNRELATED REPLACEMENT")
+    }
 }
 
 impl StorageHooks for FailFirstPostUnlinkSync {
@@ -127,15 +162,16 @@ fn config(root: &Path) -> Config {
 async fn queued(
     db: &DatabaseConnection,
     key: &str,
+    contents: &[u8],
 ) -> (media_asset::Model, file_cleanup_job::Model) {
     let asset = media_asset::ActiveModel {
         id: Set(Uuid::new_v4()),
         storage_key: Set(key.into()),
         original_name: Set("old.png".into()),
         mime_type: Set("image/png".into()),
-        byte_size: Set(1),
+        byte_size: Set(i64::try_from(contents.len()).unwrap()),
         purpose: Set("poster".into()),
-        checksum_sha256: Set(None),
+        checksum_sha256: Set(Some(format!("{:x}", Sha256::digest(contents)))),
         ..Default::default()
     }
     .insert(db)
@@ -174,7 +210,7 @@ async fn successful_cleanup_removes_the_registered_file_job_and_asset() {
     );
     std::fs::create_dir_all(root.as_ref().join(&unregistered_key).parent().unwrap()).unwrap();
     std::fs::write(root.as_ref().join(&unregistered_key), b"unregistered").unwrap();
-    let (asset, _) = queued(&db, &key).await;
+    let (asset, _) = queued(&db, &key, b"x").await;
 
     let outcome = run_once(&db, &storage).await.unwrap();
     assert_eq!((outcome.succeeded, outcome.failed), (1, 0));
@@ -211,7 +247,7 @@ async fn successful_cleanup_syncs_the_containing_directory_after_unlink() {
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
         .await
         .unwrap();
-    queued(&db, &key).await;
+    queued(&db, &key, b"x").await;
 
     assert_eq!(run_once(&db, &storage).await.unwrap().succeeded, 1);
     let events = hooks.0.lock().unwrap();
@@ -224,6 +260,92 @@ async fn successful_cleanup_syncs_the_containing_directory_after_unlink() {
             "poster/{}",
             &simple[..2]
         )))
+    );
+}
+
+// Catches cleanup hashing one inode and unlinking a later filename replacement.
+#[tokio::test]
+async fn registered_cleanup_claim_never_deletes_a_replacement_swapped_before_unlink() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let id = Uuid::new_v4();
+    let simple = id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    let formal = root.as_ref().join(&key);
+    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+    std::fs::write(&formal, b"x").unwrap();
+    let hooks = Arc::new(ReplaceRegisteredAtUnlink {
+        root: root.as_ref().to_owned(),
+        replaced: AtomicBool::new(false),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let (_, job) = queued(&db, &key, b"x").await;
+
+    let outcome = run_once(&db, &storage).await.unwrap();
+
+    assert_eq!((outcome.succeeded, outcome.failed), (0, 1));
+    assert_eq!(std::fs::read(&formal).unwrap(), b"UNRELATED REPLACEMENT");
+    assert!(formal.with_extension("owned-original").exists());
+    assert!(
+        file_cleanup_job::Entity::find_by_id(job.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+}
+
+// Catches a crash after an identity-bound claim stranding an undeletable hidden file.
+#[tokio::test]
+async fn registered_cleanup_retries_a_durable_quarantine_claim() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let id = Uuid::new_v4();
+    let simple = id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    let formal = root.as_ref().join(&key);
+    std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+    std::fs::write(&formal, b"x").unwrap();
+    let hooks = Arc::new(FailOnceAfterClaim {
+        failures: AtomicUsize::new(0),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
+        .await
+        .unwrap();
+    let (_, job) = queued(&db, &key, b"x").await;
+
+    let first = run_once(&db, &storage).await.unwrap();
+    assert_eq!((first.succeeded, first.failed), (0, 1));
+    assert!(!formal.exists());
+    assert!(
+        formal
+            .with_file_name(format!(".delete-{}.png", simple))
+            .exists()
+    );
+    let mut retry = file_cleanup_job::Entity::find_by_id(job.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    retry.next_attempt_at = Set((chrono::Utc::now() - chrono::Duration::minutes(1)).fixed_offset());
+    retry.update(&db).await.unwrap();
+
+    let second = run_once(&db, &storage).await.unwrap();
+    assert_eq!((second.succeeded, second.failed), (1, 0));
+    assert!(
+        !formal
+            .with_file_name(format!(".delete-{}.png", simple))
+            .exists()
+    );
+    assert!(
+        file_cleanup_job::Entity::find_by_id(job.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -245,7 +367,7 @@ async fn retry_after_unlink_fsync_failure_syncs_missing_file_directory_before_su
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
         .await
         .unwrap();
-    let (_, job) = queued(&db, &key).await;
+    let (_, job) = queued(&db, &key, b"x").await;
 
     let first = run_once(&db, &storage).await.unwrap();
     assert_eq!((first.succeeded, first.failed), (0, 1));
@@ -288,7 +410,7 @@ async fn cleanup_rejects_symlink_escape_and_records_a_sanitized_retry() {
         b"outside",
     )
     .unwrap();
-    let (asset, job) = queued(&db, &key).await;
+    let (asset, job) = queued(&db, &key, b"outside").await;
 
     let outcome = run_once(&db, &storage).await.unwrap();
     assert_eq!((outcome.succeeded, outcome.failed), (0, 1));
@@ -336,7 +458,7 @@ async fn cleanup_unlink_stays_bound_to_the_opened_internal_directory() {
     let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
         .await
         .unwrap();
-    let (_, job) = queued(&db, &key).await;
+    let (_, job) = queued(&db, &key, b"inside").await;
 
     let outcome = run_once(&db, &storage).await.unwrap();
     assert_eq!((outcome.succeeded, outcome.failed), (1, 0));
@@ -366,7 +488,7 @@ async fn application_starts_the_due_cleanup_worker() {
     );
     std::fs::create_dir_all(root.as_ref().join(&key).parent().unwrap()).unwrap();
     std::fs::write(root.as_ref().join(&key), b"x").unwrap();
-    let (_, job) = queued(&db, &key).await;
+    let (_, job) = queued(&db, &key, b"x").await;
     let stale_part = root
         .as_ref()
         .join(".incoming")

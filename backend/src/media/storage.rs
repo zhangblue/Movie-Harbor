@@ -52,6 +52,7 @@ pub enum StorageEvent {
     BeforePromote(String),
     Promoted(String),
     BeforeUnlink(String),
+    ClaimedForDeletion(String),
     Unlinked(String),
     BeforeDirectorySync(String),
     DatabaseCommitted(String),
@@ -134,6 +135,10 @@ struct FormalCleanup {
     directory: Arc<OwnedFd>,
     file_name: String,
     storage_key: String,
+    device: u64,
+    inode: u64,
+    byte_size: u64,
+    checksum_sha256: String,
 }
 
 struct PendingCleanup {
@@ -171,12 +176,22 @@ impl PendingCleanup {
         }
     }
 
-    fn promoted(&mut self, directory: Arc<OwnedFd>, file_name: String, storage_key: String) {
+    fn promoted(
+        &mut self,
+        directory: Arc<OwnedFd>,
+        file_name: String,
+        storage_key: String,
+        marker: &PendingMarker,
+    ) {
         self.temp_name = None;
         self.formal = Some(FormalCleanup {
             directory,
             file_name,
             storage_key,
+            device: marker.device,
+            inode: marker.inode,
+            byte_size: marker.byte_size,
+            checksum_sha256: marker.checksum_sha256.clone(),
         });
     }
 
@@ -200,16 +215,19 @@ impl Drop for PendingCleanup {
         let formal_removed = if !self.destructive {
             false
         } else if let Some(formal) = self.formal.take() {
-            if self
-                .hooks
-                .on_event(&StorageEvent::BeforeUnlink(formal.storage_key.clone()))
-                .is_err()
-            {
-                false
-            } else {
-                remove_if_present(&formal.directory, &formal.file_name).is_ok()
-                    && sync_fd(&formal.directory).is_ok()
-            }
+            remove_owned_from_leaf(
+                &formal.directory,
+                &formal.file_name,
+                &formal.storage_key,
+                DeletionIdentity {
+                    device: Some(formal.device),
+                    inode: Some(formal.inode),
+                    byte_size: formal.byte_size,
+                    checksum_sha256: &formal.checksum_sha256,
+                },
+                &self.hooks,
+            )
+            .is_ok()
         } else {
             true
         };
@@ -237,6 +255,13 @@ pub(crate) struct PendingMarker {
     inode: u64,
     byte_size: u64,
     checksum_sha256: String,
+}
+
+struct DeletionIdentity<'a> {
+    device: Option<u64>,
+    inode: Option<u64>,
+    byte_size: u64,
+    checksum_sha256: &'a str,
 }
 
 impl LocalMediaStorage {
@@ -382,7 +407,7 @@ impl LocalMediaStorage {
             RenameFlags::NOREPLACE,
         )
         .map_err(io::Error::from)?;
-        cleanup.promoted(shard_fd.clone(), file_name.clone(), key.clone());
+        cleanup.promoted(shard_fd.clone(), file_name.clone(), key.clone(), &marker);
         let promoted_stat = statat(&shard_fd, file_name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
             .map_err(io::Error::from)?;
         if rustix::fs::FileType::from_raw_mode(promoted_stat.st_mode)
@@ -481,18 +506,43 @@ impl LocalMediaStorage {
         Ok(())
     }
 
-    pub async fn remove_registered(&self, storage_key: &str) -> Result<(), MediaError> {
-        self.remove_registered_if_owned(storage_key, None)
+    pub async fn remove_registered(
+        &self,
+        storage_key: &str,
+        byte_size: i64,
+        checksum_sha256: Option<&str>,
+    ) -> Result<(), MediaError> {
+        let byte_size = u64::try_from(byte_size).map_err(|_| MediaError::InvalidStorageKey)?;
+        let checksum_sha256 = checksum_sha256
+            .filter(|checksum| valid_sha256(checksum))
+            .ok_or(MediaError::InvalidStorageKey)?;
+        self.remove_registered_if_owned(
+            storage_key,
+            DeletionIdentity {
+                device: None,
+                inode: None,
+                byte_size,
+                checksum_sha256,
+            },
+        )
     }
 
     pub(crate) fn remove_pending_owned(&self, marker: &PendingMarker) -> Result<(), MediaError> {
-        self.remove_registered_if_owned(&marker.storage_key, Some(marker))
+        self.remove_registered_if_owned(
+            &marker.storage_key,
+            DeletionIdentity {
+                device: Some(marker.device),
+                inode: Some(marker.inode),
+                byte_size: marker.byte_size,
+                checksum_sha256: &marker.checksum_sha256,
+            },
+        )
     }
 
     fn remove_registered_if_owned(
         &self,
         storage_key: &str,
-        owner: Option<&PendingMarker>,
+        owner: DeletionIdentity<'_>,
     ) -> Result<(), MediaError> {
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
@@ -505,32 +555,7 @@ impl LocalMediaStorage {
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(_) => return Err(MediaError::InvalidStorageKey),
         };
-        let stat = match statat(&shard_fd, file, AtFlags::SYMLINK_NOFOLLOW) {
-            Ok(stat) => stat,
-            Err(error) if error == rustix::io::Errno::NOENT => {
-                self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
-                return Ok(());
-            }
-            Err(error) => return Err(io::Error::from(error).into()),
-        };
-        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
-            return Err(MediaError::InvalidStorageKey);
-        }
-        if let Some(owner) = owner
-            && (stat.st_dev as u64 != owner.device
-                || stat.st_ino as u64 != owner.inode
-                || stat.st_size as u64 != owner.byte_size
-                || hash_file_at(&shard_fd, file)? != owner.checksum_sha256)
-        {
-            return Err(MediaError::InvalidStorageKey);
-        }
-        self.hooks
-            .on_event(&StorageEvent::BeforeUnlink(storage_key.to_owned()))?;
-        unlinkat(&shard_fd, file, AtFlags::empty()).map_err(io::Error::from)?;
-        self.hooks
-            .on_event(&StorageEvent::Unlinked(storage_key.to_owned()))?;
-        self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
-        Ok(())
+        remove_owned_from_leaf(&shard_fd, file, storage_key, owner, &self.hooks)
     }
 
     pub(crate) fn incoming_entries(&self) -> Result<Vec<IncomingEntry>, MediaError> {
@@ -576,13 +601,7 @@ impl LocalMediaStorage {
         }
         let marker: PendingMarker =
             serde_json::from_slice(&encoded).map_err(|_| MediaError::InvalidStorageKey)?;
-        if marker.version != 1
-            || marker.checksum_sha256.len() != 64
-            || !marker
-                .checksum_sha256
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
+        if marker.version != 1 || !valid_sha256(&marker.checksum_sha256) {
             return Err(MediaError::InvalidStorageKey);
         }
         let (_, _, file_name) = parse_storage_key(&marker.storage_key)?;
@@ -650,6 +669,93 @@ fn remove_if_present<F: AsFd>(parent: &F, name: &str) -> io::Result<()> {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn entry_exists<F: AsFd>(parent: &F, name: &str) -> Result<bool, MediaError> {
+    match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => Ok(true),
+        Err(rustix::io::Errno::NOENT) => Ok(false),
+        Err(error) => Err(io::Error::from(error).into()),
+    }
+}
+
+fn remove_owned_from_leaf<F: AsFd>(
+    leaf: &F,
+    file: &str,
+    storage_key: &str,
+    owner: DeletionIdentity<'_>,
+    hooks: &Arc<dyn StorageHooks>,
+) -> Result<(), MediaError> {
+    let directory_label = storage_key
+        .rsplit_once('/')
+        .map(|(directory, _)| directory)
+        .ok_or(MediaError::InvalidStorageKey)?;
+    let sync_leaf = || -> Result<(), MediaError> {
+        hooks.on_event(&StorageEvent::BeforeDirectorySync(
+            directory_label.to_owned(),
+        ))?;
+        sync_fd(leaf)?;
+        hooks.on_event(&StorageEvent::DirectorySynced(directory_label.to_owned()))?;
+        Ok(())
+    };
+    let quarantine = format!(".delete-{file}");
+    let original_exists = entry_exists(leaf, file)?;
+    let quarantine_exists = entry_exists(leaf, &quarantine)?;
+    if original_exists && quarantine_exists {
+        return Err(MediaError::InvalidStorageKey);
+    }
+    if !original_exists && !quarantine_exists {
+        sync_leaf()?;
+        return Ok(());
+    }
+    if !quarantine_exists {
+        hooks.on_event(&StorageEvent::BeforeUnlink(storage_key.to_owned()))?;
+        renameat_with(
+            leaf,
+            file,
+            leaf,
+            quarantine.as_str(),
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)?;
+        sync_leaf()?;
+        hooks.on_event(&StorageEvent::ClaimedForDeletion(storage_key.to_owned()))?;
+    }
+    let stat =
+        statat(leaf, quarantine.as_str(), AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
+    let matches_owner = rustix::fs::FileType::from_raw_mode(stat.st_mode)
+        == rustix::fs::FileType::RegularFile
+        && owner
+            .device
+            .is_none_or(|device| stat.st_dev as u64 == device)
+        && owner.inode.is_none_or(|inode| stat.st_ino as u64 == inode)
+        && stat.st_size as u64 == owner.byte_size
+        && hash_file_at(leaf, &quarantine)? == owner.checksum_sha256;
+    if !matches_owner {
+        if !entry_exists(leaf, file)? {
+            renameat_with(
+                leaf,
+                quarantine.as_str(),
+                leaf,
+                file,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)?;
+            sync_leaf()?;
+        }
+        return Err(MediaError::InvalidStorageKey);
+    }
+    unlinkat(leaf, quarantine.as_str(), AtFlags::empty()).map_err(io::Error::from)?;
+    hooks.on_event(&StorageEvent::Unlinked(storage_key.to_owned()))?;
+    sync_leaf()?;
+    Ok(())
+}
+
+fn valid_sha256(checksum: &str) -> bool {
+    checksum.len() == 64
+        && checksum
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn hash_file_at<F: AsFd>(parent: &F, name: &str) -> Result<String, MediaError> {

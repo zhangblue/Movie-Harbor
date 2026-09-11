@@ -38,7 +38,7 @@ impl UploadPolicy {
         I: IntoIterator<Item = S>,
         S: AsRef<str>,
     {
-        const SUPPORTED: [&str; 3] = ["video/mp4", "video/webm", "video/ogg"];
+        const SUPPORTED: [&str; 2] = ["video/mp4", "video/webm"];
         if max_bytes == 0 || max_bytes > i64::MAX as u64 {
             return Err(MediaError::TooLarge);
         }
@@ -114,10 +114,6 @@ pub(crate) fn validate_metadata(
             extension: "webm",
             mime_type: "video/webm",
         },
-        (MediaKind::Video, "ogv" | "ogg") => ExpectedFormat {
-            extension: "ogv",
-            mime_type: "video/ogg",
-        },
         _ => return Err(MediaError::UnsupportedType),
     };
     if declared_mime != expected.mime_type
@@ -143,7 +139,6 @@ pub(crate) fn validate_content(
         "image/webp" => validate_webp(file, byte_size) && decode_image(file, ImageFormat::WebP),
         "video/mp4" => validate_mp4(file, byte_size),
         "video/webm" => validate_webm(file, byte_size),
-        "video/ogg" => validate_ogg_video(file, byte_size),
         _ => false,
     };
     matches.then_some(()).ok_or(MediaError::ContentMismatch)
@@ -434,10 +429,40 @@ struct Mp4State {
 struct Mp4Track {
     video_handler: bool,
     nal_length_bytes: Option<usize>,
-    sample_sizes: Vec<u32>,
+    sample_description: Option<(u64, u64)>,
+    sample_sizes: Mp4SampleSizes,
     chunk_offsets: Vec<u64>,
     sample_to_chunks: Vec<(u32, u32, u32)>,
     timed_sample_count: Option<u64>,
+}
+
+#[derive(Default)]
+enum Mp4SampleSizes {
+    #[default]
+    Missing,
+    Fixed {
+        size: u32,
+        count: usize,
+    },
+    Variable(Vec<u32>),
+}
+
+impl Mp4SampleSizes {
+    fn len(&self) -> usize {
+        match self {
+            Self::Missing => 0,
+            Self::Fixed { count, .. } => *count,
+            Self::Variable(sizes) => sizes.len(),
+        }
+    }
+
+    fn get(&self, index: usize) -> Option<u32> {
+        match self {
+            Self::Missing => None,
+            Self::Fixed { size, count } => (index < *count).then_some(*size),
+            Self::Variable(sizes) => sizes.get(index).copied(),
+        }
+    }
 }
 
 fn validate_mp4(file: &mut File, byte_size: u64) -> bool {
@@ -518,6 +543,14 @@ fn parse_mp4_boxes(
                 ) {
                     return false;
                 }
+                if track.video_handler {
+                    let Some((start, end)) = track.sample_description else {
+                        return false;
+                    };
+                    if !parse_mp4_stsd(file, start, end, &mut track) {
+                        return false;
+                    }
+                }
                 state.tracks.push(track);
             }
             b"moov" if !parse_mp4_boxes(file, payload_start, payload_end, depth + 1, state) => {
@@ -570,7 +603,10 @@ fn parse_mp4_track_boxes(
                 boxes_seen,
             ),
             b"hdlr" => parse_mp4_handler(file, payload_start, payload_end, track),
-            b"stsd" => parse_mp4_stsd(file, payload_start, payload_end, track),
+            b"stsd" => track
+                .sample_description
+                .replace((payload_start, payload_end))
+                .is_none(),
             b"stts" => parse_mp4_stts(file, payload_start, payload_end, track),
             b"stsc" => parse_mp4_stsc(file, payload_start, payload_end, track),
             b"stsz" => parse_mp4_stsz(file, payload_start, payload_end, track),
@@ -600,7 +636,10 @@ fn parse_mp4_handler(file: &mut File, start: u64, end: u64, track: &mut Mp4Track
 
 fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     let mut header = [0; 8];
-    if end - start < header.len() as u64 || !read_exact(file, &mut header) {
+    if end - start < header.len() as u64
+        || file.seek(SeekFrom::Start(start)).is_err()
+        || !read_exact(file, &mut header)
+    {
         return false;
     }
     let count = u32::from_be_bytes(header[4..8].try_into().unwrap());
@@ -694,9 +733,11 @@ fn parse_mp4_stsz(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     if count == 0 || count > MAX_MP4_TABLE_ENTRIES {
         return false;
     }
-    track.sample_sizes.clear();
     if default_size != 0 {
-        track.sample_sizes.resize(count, default_size);
+        track.sample_sizes = Mp4SampleSizes::Fixed {
+            size: default_size,
+            count,
+        };
         return true;
     }
     if 12_u64
@@ -705,13 +746,15 @@ fn parse_mp4_stsz(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     {
         return false;
     }
+    let mut sizes = Vec::with_capacity(count);
     for _ in 0..count {
         let mut size = [0; 4];
         if !read_exact(file, &mut size) {
             return false;
         }
-        track.sample_sizes.push(u32::from_be_bytes(size));
+        sizes.push(u32::from_be_bytes(size));
     }
+    track.sample_sizes = Mp4SampleSizes::Variable(sizes);
     true
 }
 
@@ -746,7 +789,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
         return false;
     };
     if !track.video_handler
-        || track.sample_sizes.is_empty()
+        || track.sample_sizes.len() == 0
         || track.chunk_offsets.is_empty()
         || track.sample_to_chunks.first().map(|entry| entry.0) != Some(1)
         || track.timed_sample_count != Some(track.sample_sizes.len() as u64)
@@ -786,7 +829,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
         }
         let mut offset = *chunk_offset;
         for _ in 0..*samples_per_chunk {
-            let Some(&size) = track.sample_sizes.get(sample_index) else {
+            let Some(size) = track.sample_sizes.get(sample_index) else {
                 return false;
             };
             let Some(end) = offset.checked_add(u64::from(size)) else {
@@ -835,6 +878,7 @@ fn validate_length_prefixed_sample(file: &mut File, offset: u64, size: u32, widt
             || next > sample_end
             || file.seek(SeekFrom::Start(cursor)).is_err()
             || !read_exact(file, &mut nal_header)
+            || nal_header[0] & 0x80 != 0
         {
             return false;
         }
@@ -890,10 +934,17 @@ fn validate_mp4_codec_configuration(
 }
 
 fn validate_avcc(payload: &[u8]) -> Option<usize> {
-    if payload.len() < 7 || payload[0] != 1 {
+    if payload.len() < 7
+        || payload[0] != 1
+        || payload[4] & 0xfc != 0xfc
+        || payload[5] & 0xe0 != 0xe0
+    {
         return None;
     }
     let width = usize::from((payload[4] & 3) + 1);
+    if width == 3 {
+        return None;
+    }
     let mut cursor = 6_usize;
     let sps_count = payload[5] & 0x1f;
     if sps_count == 0 {
@@ -909,7 +960,7 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
         if length == 0 || cursor.checked_add(length)? > payload.len() {
             return None;
         }
-        saw_sps |= payload[cursor] & 0x1f == 7;
+        saw_sps |= validate_h264_sps(&payload[cursor..cursor + length], payload[1]);
         cursor += length;
     }
     let pps_count = *payload.get(cursor)?;
@@ -927,10 +978,121 @@ fn validate_avcc(payload: &[u8]) -> Option<usize> {
         if length == 0 || cursor.checked_add(length)? > payload.len() {
             return None;
         }
-        saw_pps |= payload[cursor] & 0x1f == 8;
+        saw_pps |= validate_h264_pps(&payload[cursor..cursor + length]);
         cursor += length;
     }
+    if is_high_avc_profile(payload[1]) {
+        let chroma_format = *payload.get(cursor)?;
+        let bit_depth_luma = *payload.get(cursor.checked_add(1)?)?;
+        let bit_depth_chroma = *payload.get(cursor.checked_add(2)?)?;
+        let extension_count = *payload.get(cursor.checked_add(3)?)?;
+        if chroma_format & 0xfc != 0xfc
+            || bit_depth_luma & 0xf8 != 0xf8
+            || bit_depth_chroma & 0xf8 != 0xf8
+        {
+            return None;
+        }
+        cursor = cursor.checked_add(4)?;
+        for _ in 0..extension_count {
+            let length = usize::from(u16::from_be_bytes([
+                *payload.get(cursor)?,
+                *payload.get(cursor.checked_add(1)?)?,
+            ]));
+            cursor = cursor.checked_add(2)?;
+            let end = cursor.checked_add(length)?;
+            let nal = payload.get(cursor..end)?;
+            if length < 2 || nal[0] & 0x80 != 0 || nal[0] & 0x1f != 13 {
+                return None;
+            }
+            cursor = end;
+        }
+    }
     (cursor == payload.len() && saw_sps && saw_pps).then_some(width)
+}
+
+fn is_high_avc_profile(profile: u8) -> bool {
+    matches!(
+        profile,
+        44 | 83 | 86 | 100 | 110 | 118 | 122 | 128 | 134 | 135 | 138 | 139 | 144 | 244
+    )
+}
+
+fn validate_h264_sps(nal: &[u8], profile: u8) -> bool {
+    nal.len() >= 5
+        && nal[0] & 0x80 == 0
+        && nal[0] & 0x1f == 7
+        && nal[1] == profile
+        && nal[3] != 0
+        && read_unsigned_exp_golomb(&nal[4..], 0).is_some_and(|(id, _)| id <= 31)
+}
+
+fn validate_h264_pps(nal: &[u8]) -> bool {
+    if nal.len() < 2 || nal[0] & 0x80 != 0 || nal[0] & 0x1f != 8 {
+        return false;
+    }
+    let Some((pps_id, bits)) = read_unsigned_exp_golomb(&nal[1..], 0) else {
+        return false;
+    };
+    let Some((sps_id, _)) = read_unsigned_exp_golomb(&nal[1..], bits) else {
+        return false;
+    };
+    pps_id <= 255 && sps_id <= 31
+}
+
+fn read_unsigned_exp_golomb(bytes: &[u8], mut bit: usize) -> Option<(u32, usize)> {
+    let bit_len = bytes.len().checked_mul(8)?;
+    let mut leading_zeroes = 0_u32;
+    while bit < bit_len && bytes[bit / 8] & (0x80 >> (bit % 8)) == 0 {
+        leading_zeroes = leading_zeroes.checked_add(1)?;
+        if leading_zeroes > 31 {
+            return None;
+        }
+        bit = bit.checked_add(1)?;
+    }
+    if bit >= bit_len {
+        return None;
+    }
+    bit = bit.checked_add(1)?;
+    let mut value = 0_u32;
+    for _ in 0..leading_zeroes {
+        if bit >= bit_len {
+            return None;
+        }
+        value = (value << 1) | u32::from((bytes[bit / 8] >> (7 - bit % 8)) & 1);
+        bit = bit.checked_add(1)?;
+    }
+    Some(((1_u32 << leading_zeroes) - 1 + value, bit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_avcc;
+
+    #[test]
+    fn accepts_ffmpeg_high_profile_avcc_extensions() {
+        let avcc = [
+            0x01, 0x64, 0x00, 0x0a, 0xff, 0xe1, 0x00, 0x18, 0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9,
+            0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xc8,
+            0x3c, 0x48, 0x96, 0x58, 0x01, 0x00, 0x06, 0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0, 0xfd,
+            0xf8, 0xf8, 0x00,
+        ];
+        assert_eq!(validate_avcc(&avcc), Some(4));
+    }
+
+    #[test]
+    fn rejects_type_only_or_forbidden_h264_parameter_sets() {
+        for avcc in [
+            vec![1, 66, 0, 30, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 2, 0x68, 0xc0],
+            vec![
+                1, 66, 0, 30, 0xff, 0xe1, 0, 5, 0xe7, 66, 0, 30, 0x80, 1, 0, 2, 0x68, 0xc0,
+            ],
+            vec![
+                1, 66, 0, 30, 0xff, 0xe1, 0, 5, 0x67, 66, 0, 30, 0x80, 1, 0, 1, 0x68,
+            ],
+        ] {
+            assert_eq!(validate_avcc(&avcc), None);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1151,188 +1313,4 @@ fn read_ebml_vint<R: Read>(reader: &mut R, keep_marker: bool) -> Option<(u64, us
     }
     let unknown = !keep_marker && value == (1_u64 << (7 * width)) - 1;
     (!unknown).then_some((value, width))
-}
-
-fn validate_ogg_video(file: &mut File, byte_size: u64) -> bool {
-    let mut position = 0_u64;
-    let mut serial = None;
-    let mut expected_sequence = 0_u32;
-    let mut packet = Vec::new();
-    let mut packet_index = 0_usize;
-    let mut video_data = false;
-    while position < byte_size {
-        let mut header = [0; 27];
-        if byte_size - position < 27
-            || !read_exact(file, &mut header)
-            || &header[..4] != b"OggS"
-            || header[4] != 0
-        {
-            return false;
-        }
-        let segments = usize::from(header[26]);
-        let mut lacing = vec![0; segments];
-        if !read_exact(file, &mut lacing) {
-            return false;
-        }
-        let body_size = lacing
-            .iter()
-            .map(|value| usize::from(*value))
-            .sum::<usize>();
-        if position + 27 + segments as u64 + body_size as u64 > byte_size {
-            return false;
-        }
-        let mut body = vec![0; body_size];
-        if !read_exact(file, &mut body) {
-            return false;
-        }
-        let stored_crc = u32::from_le_bytes(header[22..26].try_into().unwrap());
-        header[22..26].fill(0);
-        let mut page = header.to_vec();
-        page.extend_from_slice(&lacing);
-        page.extend_from_slice(&body);
-        if ogg_crc(&page) != stored_crc {
-            return false;
-        }
-        let page_serial = u32::from_le_bytes(header[14..18].try_into().unwrap());
-        let sequence = u32::from_le_bytes(header[18..22].try_into().unwrap());
-        if serial.is_none() {
-            if header[5] & 2 == 0 || sequence != 0 {
-                return false;
-            }
-            serial = Some(page_serial);
-        } else if serial != Some(page_serial) || sequence != expected_sequence {
-            return false;
-        }
-        expected_sequence = sequence.saturating_add(1);
-        let mut offset = 0;
-        for length in lacing {
-            let length = usize::from(length);
-            if packet.len() + length > 65_536 {
-                return false;
-            }
-            packet.extend_from_slice(&body[offset..offset + length]);
-            if length < 255 {
-                let valid = match packet_index {
-                    0 => validate_theora_identification(&packet),
-                    1 => validate_theora_comment(&packet),
-                    2 => validate_theora_setup(&packet),
-                    _ => {
-                        video_data |= packet.len() > 1 && packet[0] & 0x80 == 0;
-                        true
-                    }
-                };
-                if !valid {
-                    return false;
-                }
-                packet_index += 1;
-                packet.clear();
-            }
-            offset += length;
-        }
-        position += 27 + segments as u64 + body_size as u64;
-    }
-    packet_index >= 4 && video_data && position == byte_size
-}
-
-fn validate_theora_identification(packet: &[u8]) -> bool {
-    if packet.len() != 42 || !packet.starts_with(b"\x80theora") || packet[7..10] != [3, 2, 1] {
-        return false;
-    }
-    let frame_width = u32::from(u16::from_be_bytes([packet[10], packet[11]])) * 16;
-    let frame_height = u32::from(u16::from_be_bytes([packet[12], packet[13]])) * 16;
-    let picture_width = read_u24_be(&packet[14..17]);
-    let picture_height = read_u24_be(&packet[17..20]);
-    let picture_x = u32::from(packet[20]);
-    let picture_y = u32::from(packet[21]);
-    frame_width > 0
-        && frame_height > 0
-        && frame_width <= MAX_DIMENSION
-        && frame_height <= MAX_DIMENSION
-        && picture_width > 0
-        && picture_height > 0
-        && picture_width + picture_x <= frame_width
-        && picture_height + picture_y <= frame_height
-        && u32::from_be_bytes(packet[22..26].try_into().unwrap()) > 0
-        && u32::from_be_bytes(packet[26..30].try_into().unwrap()) > 0
-        && read_u24_be(&packet[30..33]) > 0
-        && read_u24_be(&packet[33..36]) > 0
-        && packet[36] <= 2
-        && packet[41] & 0x03 != 0x03
-}
-
-fn validate_theora_comment(packet: &[u8]) -> bool {
-    if packet.len() < 15 || !packet.starts_with(b"\x81theora") {
-        return false;
-    }
-    let mut cursor = 7_usize;
-    let Some(vendor_length) = read_u32_le_at(packet, &mut cursor) else {
-        return false;
-    };
-    let Ok(vendor_length) = usize::try_from(vendor_length) else {
-        return false;
-    };
-    if vendor_length == 0
-        || cursor
-            .checked_add(vendor_length)
-            .is_none_or(|end| end > packet.len())
-    {
-        return false;
-    }
-    cursor += vendor_length;
-    let Some(comment_count) = read_u32_le_at(packet, &mut cursor) else {
-        return false;
-    };
-    if comment_count > 1024 {
-        return false;
-    }
-    for _ in 0..comment_count {
-        let Some(length) = read_u32_le_at(packet, &mut cursor) else {
-            return false;
-        };
-        let Ok(length) = usize::try_from(length) else {
-            return false;
-        };
-        if cursor
-            .checked_add(length)
-            .is_none_or(|end| end > packet.len())
-        {
-            return false;
-        }
-        cursor += length;
-    }
-    cursor == packet.len()
-}
-
-fn validate_theora_setup(packet: &[u8]) -> bool {
-    packet.len() >= 15
-        && packet.starts_with(b"\x82theora")
-        && packet[7..].iter().any(|byte| *byte != 0)
-}
-
-fn read_u24_be(bytes: &[u8]) -> u32 {
-    bytes
-        .iter()
-        .fold(0_u32, |value, byte| (value << 8) | u32::from(*byte))
-}
-
-fn read_u32_le_at(bytes: &[u8], cursor: &mut usize) -> Option<u32> {
-    let end = cursor.checked_add(4)?;
-    let value = u32::from_le_bytes(bytes.get(*cursor..end)?.try_into().ok()?);
-    *cursor = end;
-    Some(value)
-}
-
-fn ogg_crc(bytes: &[u8]) -> u32 {
-    let mut crc = 0_u32;
-    for byte in bytes {
-        crc ^= u32::from(*byte) << 24;
-        for _ in 0..8 {
-            crc = if crc & 0x8000_0000 != 0 {
-                (crc << 1) ^ 0x04c1_1db7
-            } else {
-                crc << 1
-            };
-        }
-    }
-    crc
 }

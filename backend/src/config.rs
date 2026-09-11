@@ -107,7 +107,7 @@ impl Config {
 }
 
 fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
-    const BROWSER_VIDEO_TYPES: [&str; 3] = ["video/mp4", "video/webm", "video/ogg"];
+    const BROWSER_VIDEO_TYPES: [&str; 2] = ["video/mp4", "video/webm"];
     let mut result = Vec::new();
     for item in value.split(',').map(str::trim) {
         if item.is_empty()
@@ -172,7 +172,12 @@ mod tests {
     #[test]
     fn video_mime_allowlist_accepts_only_supported_unique_types() {
         let mut values = required_values();
-        for invalid in ["", "application/octet-stream", "video/mp4,video/mp4"] {
+        for invalid in [
+            "",
+            "application/octet-stream",
+            "video/mp4,video/mp4",
+            "video/ogg",
+        ] {
             values.insert("VIDEO_MIME_ALLOWLIST", invalid);
             assert!(matches!(
                 Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
@@ -180,9 +185,13 @@ mod tests {
                     | Err(ConfigError::Invalid("VIDEO_MIME_ALLOWLIST"))
             ));
         }
-        values.insert("VIDEO_MIME_ALLOWLIST", "video/mp4, video/ogg");
+        values.insert("VIDEO_MIME_ALLOWLIST", "video/mp4, video/webm");
         let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
-        assert_eq!(config.allowed_video_mime_types, ["video/mp4", "video/ogg"]);
+        assert_eq!(config.allowed_video_mime_types, ["video/mp4", "video/webm"]);
+        assert!(matches!(
+            crate::media::UploadPolicy::new(1024, ["video/ogg"]),
+            Err(crate::media::MediaError::UnsupportedType)
+        ));
     }
 
     // Catches a value that cannot be represented in the persisted byte_size column.

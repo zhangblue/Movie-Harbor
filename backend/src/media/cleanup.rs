@@ -122,7 +122,13 @@ async fn process_locked_job(
         .await?
         .ok_or(MediaError::InvalidStorageKey)?;
     ensure_unreferenced(tx, asset.id).await?;
-    storage.remove_registered(&asset.storage_key).await?;
+    storage
+        .remove_registered(
+            &asset.storage_key,
+            asset.byte_size,
+            asset.checksum_sha256.as_deref(),
+        )
+        .await?;
     file_cleanup_job::Entity::delete_by_id(job.id)
         .exec(tx)
         .await?;
