@@ -143,7 +143,7 @@ git commit -m "chore: initialize media library workspace"
 - 创建：`backend/tests/migration_test.rs`
 - 创建：`docker-compose.test.yml`
 
-- [ ] **步骤 1：编写失败的真实数据库迁移测试**
+- [x] **步骤 1：编写失败的真实数据库迁移测试**
 
 测试迁移后存在 11 张业务表，并验证：电影名称不能为空、季序号在剧集内唯一、集序号在季内唯一、题材名称唯一、状态只接受 `draft/published/archived`。
 
@@ -153,21 +153,21 @@ git commit -m "chore: initialize media library workspace"
 
 预期：FAIL，迁移 crate 或业务表尚不存在。
 
-- [ ] **步骤 2：实现核心迁移**
+- [x] **步骤 2：实现核心迁移**
 
 使用 UUID 主键；电影、剧集和单集包含 `status`、`version`、`published_at`、`archived_at`、时间戳；季只含 `series_id` 和 `number`；关联表使用复合唯一键；媒体资源保存 `storage_key`、`original_name`、`mime_type`、`byte_size` 和用途。
 
-- [ ] **步骤 3：实现 SeaORM entity 与关系**
+- [x] **步骤 3：实现 SeaORM entity 与关系**
 
 明确电影/题材和剧集/题材多对多关系、剧集/季/集级联关系、媒体资源外键和清理任务关系；不使用无约束的字符串多态外键。
 
-- [ ] **步骤 4：验证迁移可逆性与实体编译**
+- [x] **步骤 4：验证迁移可逆性与实体编译**
 
 运行迁移 `up → down → up`，再运行：`cargo test --workspace`
 
 预期：迁移测试通过，entity 关系编译通过。
 
-- [ ] **步骤 5：提交**
+- [x] **步骤 5：提交**
 
 ```bash
 git add backend/migration backend/src/entities backend/tests/migration_test.rs docker-compose.test.yml
