@@ -71,6 +71,60 @@ it("cycles keyboard focus within the modal", async () => {
   expect(screen.getByRole("button", { name: "第一个" })).toHaveFocus();
 });
 
+it("keeps both Tab directions inside when a later radio in a same-name group is checked", async () => {
+  const user = userEvent.setup();
+  render(
+    <>
+      <button>对话框前</button>
+      <Dialog open title="清晰度" onClose={() => undefined}>
+        <label><input type="radio" name="quality" />标准</label>
+        <label><input type="radio" name="quality" defaultChecked />高清</label>
+      </Dialog>
+    </>,
+  );
+  const checkedRadio = screen.getByRole("radio", { name: "高清" });
+  const close = screen.getByRole("button", { name: "关闭清晰度" });
+
+  checkedRadio.focus();
+  await user.tab({ shift: true });
+  expect(close).toHaveFocus();
+
+  await user.tab();
+  expect(checkedRadio).toHaveFocus();
+});
+
+it("uses the first same-name radio in tab order when none is checked", () => {
+  render(
+    <Dialog open title="未选择" onClose={() => undefined}>
+      <label><input type="radio" name="choice" tabIndex={2} />DOM 中靠前</label>
+      <label><input type="radio" name="choice" tabIndex={1} />Tab 顺序靠前</label>
+    </Dialog>,
+  );
+  expect(screen.getByRole("radio", { name: "Tab 顺序靠前" })).toHaveFocus();
+});
+
+it("does not merge same-name radios with different form owners, including no form", () => {
+  render(
+    <Dialog open title="不同表单" onClose={() => undefined}>
+      <form><label><input type="radio" name="choice" defaultChecked tabIndex={3} />表单一</label></form>
+      <form><label><input type="radio" name="choice" tabIndex={1} />表单二</label></form>
+      <label><input type="radio" name="choice" tabIndex={2} />无表单</label>
+    </Dialog>,
+  );
+  expect(screen.getByRole("radio", { name: "表单二" })).toHaveFocus();
+  expect(screen.getByRole("radio", { name: "表单一" })).toBeChecked();
+});
+
+it("treats radios with an empty name as independent tab stops", () => {
+  render(
+    <Dialog open title="空名称" onClose={() => undefined}>
+      <label><input type="radio" name="" tabIndex={1} />第一个空名称</label>
+      <label><input type="radio" name="" defaultChecked tabIndex={2} />第二个空名称</label>
+    </Dialog>,
+  );
+  expect(screen.getByRole("radio", { name: "第一个空名称" })).toHaveFocus();
+});
+
 it("does not reset focus when an inline onClose callback changes during a parent rerender", () => {
   const firstClose = vi.fn();
   const secondClose = vi.fn();

@@ -16,7 +16,7 @@ const focusableSelector = [
 ].join(",");
 
 function tabbableElements(panel: HTMLElement): HTMLElement[] {
-  return Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
+  const candidates = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
     if (element.tabIndex < 0) return false;
     if (element.matches(":disabled")) return false;
     if (element.closest("[hidden], [inert], [aria-hidden='true']")) return false;
@@ -34,6 +34,34 @@ function tabbableElements(panel: HTMLElement): HTMLElement[] {
     const rightOrder = right.tabIndex > 0 ? right.tabIndex : Number.MAX_SAFE_INTEGER;
     return leftOrder - rightOrder;
   });
+
+  const radioGroups = new Map<HTMLFormElement | null, Map<string, HTMLInputElement[]>>();
+  for (const candidate of candidates) {
+    if (!(candidate instanceof HTMLInputElement) || candidate.type !== "radio" || candidate.name === "") continue;
+    let formGroups = radioGroups.get(candidate.form);
+    if (!formGroups) {
+      formGroups = new Map();
+      radioGroups.set(candidate.form, formGroups);
+    }
+    const group = formGroups.get(candidate.name) ?? [];
+    group.push(candidate);
+    formGroups.set(candidate.name, group);
+  }
+
+  const radioTabStops = new Set<HTMLInputElement>();
+  for (const formGroups of radioGroups.values()) {
+    for (const group of formGroups.values()) {
+      const tabStop = group.find((radio) => radio.checked) ?? group[0];
+      if (tabStop) radioTabStops.add(tabStop);
+    }
+  }
+
+  return candidates.filter((candidate) => (
+    !(candidate instanceof HTMLInputElement)
+    || candidate.type !== "radio"
+    || candidate.name === ""
+    || radioTabStops.has(candidate)
+  ));
 }
 
 export function Dialog({ open, title, onClose, children, closeLabel, className }: DialogProps) {
