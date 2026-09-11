@@ -44,6 +44,7 @@ fn config() -> Config {
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
         max_upload_bytes: 1024,
+        allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),
         admin_initial_password: Some("initial-password".into()),
     }

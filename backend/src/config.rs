@@ -13,6 +13,7 @@ pub struct Config {
     pub cookie_secure: bool,
     pub public_origin: String,
     pub max_upload_bytes: u64,
+    pub allowed_video_mime_types: Vec<String>,
     pub admin_name: Option<String>,
     pub admin_initial_password: Option<String>,
 }
@@ -68,6 +69,8 @@ impl Config {
         if max_upload_bytes == 0 {
             return Err(ConfigError::Invalid("MAX_UPLOAD_BYTES"));
         }
+        let allowed_video_mime_types =
+            parse_video_mime_types(&required(&lookup, "VIDEO_MIME_ALLOWLIST")?)?;
 
         let mut config = Self {
             listen_addr,
@@ -76,6 +79,7 @@ impl Config {
             cookie_secure,
             public_origin: required(&lookup, "PUBLIC_ORIGIN")?,
             max_upload_bytes,
+            allowed_video_mime_types,
             admin_name: lookup("ADMIN_NAME"),
             admin_initial_password: lookup("ADMIN_INITIAL_PASSWORD"),
         };
@@ -100,6 +104,24 @@ impl Config {
         }
         Ok(origin)
     }
+}
+
+fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
+    const BROWSER_VIDEO_TYPES: [&str; 3] = ["video/mp4", "video/webm", "video/ogg"];
+    let mut result = Vec::new();
+    for item in value.split(',').map(str::trim) {
+        if item.is_empty()
+            || !BROWSER_VIDEO_TYPES.contains(&item)
+            || result.iter().any(|existing| existing == item)
+        {
+            return Err(ConfigError::Invalid("VIDEO_MIME_ALLOWLIST"));
+        }
+        result.push(item.to_owned());
+    }
+    if result.is_empty() {
+        return Err(ConfigError::Invalid("VIDEO_MIME_ALLOWLIST"));
+    }
+    Ok(result)
 }
 
 /// Parse an HTTP origin, rejecting URL components that do not belong to an origin.
@@ -141,8 +163,26 @@ mod tests {
             ("COOKIE_SECURE", "true"),
             ("PUBLIC_ORIGIN", "https://harbor.test"),
             ("MAX_UPLOAD_BYTES", "1048576"),
+            ("VIDEO_MIME_ALLOWLIST", "video/mp4,video/webm"),
             ("ADMIN_NAME", "admin"),
         ])
+    }
+
+    // Catches enabling a non-browser media type or silently accepting an empty allowlist.
+    #[test]
+    fn video_mime_allowlist_accepts_only_supported_unique_types() {
+        let mut values = required_values();
+        for invalid in ["", "application/octet-stream", "video/mp4,video/mp4"] {
+            values.insert("VIDEO_MIME_ALLOWLIST", invalid);
+            assert!(matches!(
+                Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+                Err(ConfigError::Missing("VIDEO_MIME_ALLOWLIST"))
+                    | Err(ConfigError::Invalid("VIDEO_MIME_ALLOWLIST"))
+            ));
+        }
+        values.insert("VIDEO_MIME_ALLOWLIST", "video/mp4, video/ogg");
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        assert_eq!(config.allowed_video_mime_types, ["video/mp4", "video/ogg"]);
     }
 
     #[test]

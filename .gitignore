@@ -7,4 +7,4 @@ target/
 !/.env.example
 frontend/public-web/dist/
 frontend/admin-web/dist/
-media/
+/media/

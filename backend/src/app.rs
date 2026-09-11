@@ -21,14 +21,21 @@ pub async fn build(
     let public_origin = config.validated_origin()?;
     crate::auth::initialize(&db, config).await?;
     let state = crate::auth::AuthState {
-        db,
+        db: db.clone(),
         cookie_secure: config.cookie_secure,
         public_origin,
         limits: Default::default(),
     };
+    let storage = crate::media::LocalMediaStorage::initialize(&config.media_dir).await?;
+    let policy = crate::media::UploadPolicy::new(
+        config.max_upload_bytes,
+        config.allowed_video_mime_types.iter(),
+    )?;
+    crate::media::cleanup::spawn(db.clone(), storage.clone());
     Ok(router()
         .merge(crate::auth::routes::router(state.clone()))
-        .merge(crate::genres::routes::router(state)))
+        .merge(crate::genres::routes::router(state.clone()))
+        .merge(crate::media::routes::router(state, storage, policy)))
 }
 
 async fn health() -> Json<HealthResponse> {
