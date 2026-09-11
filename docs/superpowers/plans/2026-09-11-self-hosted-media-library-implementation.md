@@ -184,7 +184,7 @@ git commit -m "feat: add media catalog database schema"
 - 修改：`backend/src/entities/admin_user.rs`
 - 修改：`backend/src/entities/admin_session.rs`
 
-- [ ] **步骤 1：编写失败的认证集成测试**
+- [x] **步骤 1：编写失败的认证集成测试**
 
 覆盖：空库按环境配置创建唯一管理员；重启不覆盖已有密码；正确密码登录并设置 `HttpOnly`/`SameSite=Lax` Cookie；错误密码不泄露账号是否存在；修改密码撤销全部会话；第 6 次连续失败返回 `429`，15 分钟窗口后恢复。
 
@@ -192,19 +192,19 @@ git commit -m "feat: add media catalog database schema"
 
 预期：FAIL，认证路由尚未注册。
 
-- [ ] **步骤 2：实现初始化和密码服务**
+- [x] **步骤 2：实现初始化和密码服务**
 
 使用 Argon2id 与每个密码独立盐值；启动时只在管理员表为空时消费 `ADMIN_NAME` 和 `ADMIN_INITIAL_PASSWORD`，否则忽略两项初始化值。
 
-- [ ] **步骤 3：实现不透明会话和 CSRF**
+- [x] **步骤 3：实现不透明会话和 CSRF**
 
 Cookie 只保存随机会话令牌；数据库保存 SHA-256 令牌摘要、CSRF 令牌摘要和过期时间。`GET /api/admin/session` 返回管理员显示名称与本会话 CSRF token；所有管理写请求必须带 `X-CSRF-Token`。
 
-- [ ] **步骤 4：实现路由和限流**
+- [x] **步骤 4：实现路由和限流**
 
 实现登录、退出、读取会话、修改密码；限流键使用规范化客户端地址与账号名称摘要，不记录明文密码或 Cookie。
 
-- [ ] **步骤 5：验证并提交**
+- [x] **步骤 5：验证并提交**
 
 运行：`cargo test -p movie-harbor-api --test auth_test`
 
