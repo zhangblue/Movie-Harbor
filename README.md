@@ -7,7 +7,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 产品设计：已确认。
 - UI Demo：已确认，保存在 `demo/`。
 - 实现计划：已完成。
-- 生产代码：尚未开始。
+- 生产代码：已实现，可通过 Docker Compose 自托管。
 
 ## 核心设计
 
@@ -37,6 +37,76 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 
 `MEDIA_DIR` 必须由后端进程的 OS 账号拥有，且不可对组用户或其他用户开放写权限。后端会在启动时验证该条件，并以 `0700` 创建私有 `.quarantine` 目录；权限不安全时会拒绝启动。部署时不得让其他服务共享该 OS 账号或获得媒体目录写权限。同一 OS 账号下运行的恶意进程能够修改应用自有文件，因此位于本地文件存储的信任边界内。
 
+Compose 会先用一次性初始化容器把媒体卷根目录交给专用的 API 用户，并设为 `0700`。API 以 UID `10001` 读写媒体卷；入口 Caddy 仅以只读方式挂载同一卷。若改用宿主机目录绑定，请先执行 `chown 10001:10001 <目录>` 和 `chmod 0700 <目录>`，且不要把该目录写权限授予其他服务。
+
+## 生产部署
+
+要求安装 Docker Engine 与 Docker Compose v2。复制环境变量示例并替换所有密码和域名：
+
+```bash
+cp .env.example .env
+docker compose -p movie-harbor up -d --build --wait
+```
+
+默认入口是 `http://服务器地址:8080`，可通过 `APP_PORT` 修改宿主端口。公开站位于 `/`，管理后台位于 `/admin/`，API 位于 `/api/`，媒体位于 `/media/`。PostgreSQL 不暴露宿主端口。
+
+首次启动时，API 自动执行数据库迁移。只有数据库内尚无管理员时，`ADMIN_NAME` 和 `ADMIN_INITIAL_PASSWORD` 才会创建初始账号；之后修改 `.env` 或重启容器都不会覆盖已有管理员名称和密码。首次登录并修改密码后，应从 `.env` 移除初始凭据或换成无意义的占位值，但其余必填变量仍须保留。
+
+示例配置使用纯 HTTP 入口，因此 `COOKIE_SECURE=false` 只允许 `localhost` 或环回地址测试。正式部署应把 `PUBLIC_ORIGIN` 设为实际的 `https://` 来源并保持 `COOKIE_SECURE=true`，再由部署者用域名、上游反向代理或自己的 Caddy TLS 配置启用 HTTPS。不要在公网以明文 HTTP 提供管理后台。
+
+常用运维命令：
+
+```bash
+docker compose -p movie-harbor ps
+docker compose -p movie-harbor logs -f api caddy
+docker compose -p movie-harbor restart
+docker compose -p movie-harbor pull
+docker compose -p movie-harbor up -d --build --wait
+```
+
+不要在保留数据时执行 `docker compose down --volumes`，该选项会删除命名卷。
+
+## 上传格式与容量
+
+- 海报：JPEG、PNG、WebP。后端同时检查扩展名、MIME 和实际图片内容。
+- 视频：默认 MP4 (H.264) 和 WebM；浏览器必须能直接解码，服务端不会转码。
+- `MAX_UPLOAD_BYTES` 是单文件上限，默认示例为 5 GiB。规划磁盘时需同时预留正式媒体、上传临时文件和替换期间新旧文件的空间。
+- `/media` 是公开 URL，支持浏览器 Range 请求，但不提供防下载、DRM 或可靠防盗链。
+
+## 一致备份与恢复
+
+数据库元数据和 `media_data` 媒体卷必须作为同一个一致性备份集处理，只备份其中一项会产生丢失引用或孤立文件。稳妥的单机流程是在维护窗口停止写入，然后同时备份数据库逻辑导出和媒体卷：
+
+```bash
+docker compose -p movie-harbor stop api
+docker compose -p movie-harbor exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > movie-harbor-db.dump
+docker run --rm -v movie-harbor_media_data:/source:ro -v "$PWD":/backup alpine:3.22 tar -C /source -czf /backup/movie-harbor-media.tgz .
+docker compose -p movie-harbor start api
+```
+
+恢复时先停止 API，将数据库恢复到空库并把媒体归档解压回 `movie-harbor_media_data`，确认两者来自同一备份点后再启动 API。备份文件包含私有内容与密码哈希，应加密保存并定期演练恢复。若修改了 Compose 项目名，卷名中的 `movie-harbor` 也会随之改变，请先用 `docker volume ls` 核对精确名称。
+
+## 开发与验收
+
+单元测试与构建：
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test cargo test --workspace
+npm test --workspaces
+npm run build --workspaces
+```
+
+完整 E2E 会使用隔离项目名 `mh-task15-e2e` 和端口 `18080`，生成一个很小的浏览器可播放 MP4，创建空命名卷、构建服务、验证生命周期与持久化，最后只清理该项目的容器和卷。运行前需安装 Chromium 与 `ffmpeg`：
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
+设置 `E2E_KEEP=1` 可在失败后保留隔离环境供排查；清理时仍须使用精确项目名：`docker compose -p mh-task15-e2e down --volumes --remove-orphans`。
+
 ## 查看 UI Demo
 
 Demo 使用模拟数据，用于审核访客首页、管理后台和添加剧集页面，不连接真实后端。
@@ -63,17 +133,17 @@ python3 -m http.server 4174 --directory demo --bind 127.0.0.1
 
 此时将访问地址中的端口同步改为 `4174`。
 
-## 当前目录
+## 目录结构
 
 ```text
+backend/                    Axum API、迁移与后端测试
+frontend/public-web/        公开 React 应用
+frontend/admin-web/         管理后台 React 应用
+frontend/packages/          共享 API 客户端与 UI
+tests/e2e/                  Playwright 跨服务验收
 demo/                       已审核的静态 UI Demo
-docs/superpowers/specs/     产品设计规格
-docs/superpowers/plans/     分阶段实现计划
-openspec/                   OpenSpec 工作目录
-AGENTS.md                   项目协作与实现约束
+docs/superpowers/           产品规格与实现计划
 ```
-
-生产代码目录会按照实现计划在开发阶段逐步创建。
 
 ## 首版不包含
 

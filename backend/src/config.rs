@@ -55,7 +55,7 @@ impl Config {
                 .parse()
                 .map_err(|_| ConfigError::Invalid("LISTEN_ADDR"))
         })?;
-        let database_url = required(&lookup, "DATABASE_URL")?;
+        let database_url = database_url(&lookup)?;
         let media_dir = PathBuf::from(required(&lookup, "MEDIA_DIR")?);
         let cookie_secure = required(&lookup, "COOKIE_SECURE").and_then(|value| {
             value
@@ -106,6 +106,46 @@ impl Config {
         }
         Ok(origin)
     }
+}
+
+fn database_url<F>(lookup: &F) -> Result<String, ConfigError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if let Some(value) = lookup("DATABASE_URL").filter(|value| !value.trim().is_empty()) {
+        return Ok(value);
+    }
+
+    let host = required(lookup, "DATABASE_HOST").map_err(|error| match error {
+        ConfigError::Missing(_) => ConfigError::Missing("DATABASE_URL"),
+        other => other,
+    })?;
+    let port = required(lookup, "DATABASE_PORT")?
+        .parse::<u16>()
+        .map_err(|_| ConfigError::Invalid("DATABASE_PORT"))?;
+    let database = required(lookup, "POSTGRES_DB")?;
+    if !database
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '-')
+    {
+        return Err(ConfigError::Invalid("POSTGRES_DB"));
+    }
+
+    let username = required(lookup, "POSTGRES_USER")?;
+    let password = required(lookup, "POSTGRES_PASSWORD")?;
+    let mut url = url::Url::parse("postgresql://localhost")
+        .expect("the static PostgreSQL URL should always parse");
+    url.set_host(Some(&host))
+        .map_err(|_| ConfigError::Invalid("DATABASE_HOST"))?;
+    url.set_port(Some(port))
+        .map_err(|_| ConfigError::Invalid("DATABASE_PORT"))?;
+    url.set_username(&username.replace('%', "%25"))
+        .map_err(|_| ConfigError::Invalid("POSTGRES_USER"))?;
+    url.set_password(Some(&password.replace('%', "%25")))
+        .map_err(|_| ConfigError::Invalid("POSTGRES_PASSWORD"))?;
+    url.set_path(&format!("/{database}"));
+
+    Ok(url.into())
 }
 
 fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
@@ -216,6 +256,27 @@ mod tests {
         let mut values = required_values();
         values.remove("ADMIN_NAME");
         assert!(Config::from_lookup(|name| values.get(name).map(ToString::to_string)).is_ok());
+    }
+
+    // Catches Compose corrupting strong database passwords that contain URL delimiters.
+    #[test]
+    fn database_components_are_encoded_into_a_connection_url() {
+        let mut values = required_values();
+        values.remove("DATABASE_URL");
+        values.extend([
+            ("DATABASE_HOST", "postgres"),
+            ("DATABASE_PORT", "5432"),
+            ("POSTGRES_DB", "movie_harbor"),
+            ("POSTGRES_USER", "movie@harbor"),
+            ("POSTGRES_PASSWORD", "p@ss:/?#%word"),
+        ]);
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        let url = url::Url::parse(&config.database_url).unwrap();
+        assert_eq!(url.host_str(), Some("postgres"));
+        assert_eq!(url.port(), Some(5432));
+        assert_eq!(url.username(), "movie%40harbor");
+        assert_eq!(url.password(), Some("p%40ss%3A%2F%3F%23%25word"));
+        assert_eq!(url.path(), "/movie_harbor");
     }
 
     // Catches startup allowing insecure session cookies outside a loopback deployment.

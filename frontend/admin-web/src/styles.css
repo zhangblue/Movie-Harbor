@@ -32,6 +32,10 @@ p { color: var(--mh-color-text-muted); }
 .filter-bar select { width: 138px; }
 .filter-bar .compact-query input { width: 132px; }
 .filter-bar > .mh-button { min-height: 39px; }
+.genre-create { max-width: 620px; }
+.genre-create .mh-field { flex: 1; }
+.genre-create input { width: 100%; }
+.genre-table { min-width: 420px; }
 .table-card { overflow-x: auto; border: 1px solid var(--mh-color-border); border-radius: 12px; background: var(--mh-color-surface); }
 .content-table { width: 100%; min-width: 870px; border-collapse: collapse; text-align: left; }
 .content-table :is(td, th) { padding: 11px 14px; border-bottom: 1px solid var(--mh-color-border); }

@@ -8,3 +8,6 @@ target/
 frontend/public-web/dist/
 frontend/admin-web/dist/
 /media/
+tests/e2e/.generated/
+test-results/
+playwright-report/

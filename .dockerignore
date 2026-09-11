@@ -1,0 +1,13 @@
+.git
+.env
+.env.*
+!/.env.example
+node_modules
+target
+frontend/*/dist
+test-results
+playwright-report
+tests/e2e/.generated
+demo
+docs
+.superpowers

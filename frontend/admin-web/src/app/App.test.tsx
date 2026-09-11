@@ -37,6 +37,67 @@ it("requires a session, exposes failed login, then acquires CSRF before entering
   expect(storage).not.toHaveBeenCalled();
 });
 
+it("creates a genre from the genre configuration page", async () => {
+  const genres: Array<{ id: string; name: string; sort_order: number; enabled: boolean }> = [];
+  const requests = server((request) => {
+    if (request.url === "/api/admin/genres" && request.method === "GET") return json(genres);
+    if (request.url === "/api/admin/genres" && request.method === "POST") {
+      const genre = { id: "genre-1", name: (request.body as { name: string }).name, sort_order: 1, enabled: true };
+      genres.push(genre);
+      return json(genre, 201);
+    }
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "题材配置" }));
+  await screen.findByRole("heading", { name: "题材配置" });
+  await user.type(screen.getByLabelText("题材名称"), "纪录片");
+  await user.click(screen.getByRole("button", { name: "新增题材" }));
+  expect(await screen.findByDisplayValue("纪录片")).toBeInTheDocument();
+  expect(requests.find((request) => request.method === "POST" && request.url === "/api/admin/genres")?.body).toEqual({ name: "纪录片" });
+});
+
+it("renames, reorders, deactivates, and deletes genres", async () => {
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  let genres = [
+    { id: "g1", name: "剧情", sort_order: 1, enabled: true },
+    { id: "g2", name: "科幻", sort_order: 2, enabled: true },
+  ];
+  const requests = server((request) => {
+    if (request.url === "/api/admin/genres" && request.method === "GET") return json(genres);
+    if (request.url === "/api/admin/genres/g2" && request.method === "PATCH") {
+      genres = genres.map((genre) => genre.id === "g2" ? { ...genre, name: (request.body as { name: string }).name } : genre);
+      return json(genres[1]);
+    }
+    if (request.url === "/api/admin/genres/order" && request.method === "PUT") {
+      const positions = new Map((request.body as { items: Array<{ id: string; sort_order: number }> }).items.map((item) => [item.id, item.sort_order]));
+      genres = genres.map((genre) => ({ ...genre, sort_order: positions.get(genre.id)! })).sort((a, b) => a.sort_order - b.sort_order);
+      return json(genres);
+    }
+    if (request.url === "/api/admin/genres/g1/deactivate" && request.method === "POST") {
+      genres = genres.map((genre) => genre.id === "g1" ? { ...genre, enabled: false } : genre);
+      return json(genres.find((genre) => genre.id === "g1"));
+    }
+    if (request.url === "/api/admin/genres/g2" && request.method === "DELETE") {
+      genres = genres.filter((genre) => genre.id !== "g2");
+      return new Response(null, { status: 204 });
+    }
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "题材配置" }));
+  await user.clear(await screen.findByLabelText("编辑题材 科幻"));
+  await user.type(screen.getByLabelText("编辑题材 科幻"), "太空歌剧");
+  await user.click(screen.getByRole("button", { name: "保存 科幻" }));
+  await screen.findByDisplayValue("太空歌剧");
+  await user.click(screen.getByRole("button", { name: "上移 太空歌剧" }));
+  await user.click(screen.getByRole("button", { name: "停用 剧情" }));
+  expect(await screen.findByRole("row", { name: /剧情 停用/ })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "删除 太空歌剧" }));
+  expect(screen.queryByDisplayValue("太空歌剧")).not.toBeInTheDocument();
+  expect(requests.some((request) => request.url.endsWith("/order") && request.method === "PUT")).toBe(true);
+});
+
 // Catches menu focus/closure regressions that leave controls inaccessible to keyboard users.
 it("opens the account menu by keyboard and closes on Escape and outside click", async () => {
   server();

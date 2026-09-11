@@ -7,6 +7,7 @@ import { ChangePasswordDialog } from "../auth/ChangePasswordDialog";
 import { ContentPage } from "../content/ContentPage";
 import { MovieEditor } from "../movies/MovieEditor";
 import { SeriesEditor } from "../series/SeriesEditor";
+import { GenrePage } from "../genres/GenrePage";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
@@ -101,7 +102,7 @@ export function App() {
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });
           else setSeriesPage({ id: row.id, deleting: action === "delete" });
-        }} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
+        }} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
       </main></div>
     </div>
     {busy && <p className="session-state" role="status">正在退出登录…</p>}

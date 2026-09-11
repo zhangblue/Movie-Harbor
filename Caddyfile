@@ -1,0 +1,32 @@
+:80 {
+	encode zstd gzip
+
+	@api path /api /api/*
+	handle @api {
+		reverse_proxy api:3000
+	}
+
+    @public_media path /media/poster/* /media/video/*
+    handle @public_media {
+        header X-Content-Type-Options nosniff
+        root * /srv
+        file_server
+    }
+
+    @other_media path /media /media/*
+    handle @other_media {
+        respond 404
+    }
+
+	handle /admin {
+		redir /admin/ 308
+	}
+
+	handle /admin/* {
+		reverse_proxy admin-web:80
+	}
+
+	handle {
+		reverse_proxy public-web:80
+	}
+}
