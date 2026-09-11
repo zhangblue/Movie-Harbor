@@ -18,6 +18,7 @@ use std::sync::Arc;
 pub struct AuthState {
     pub db: DatabaseConnection,
     pub cookie_secure: bool,
+    pub public_origin: url::Url,
     pub limits: Arc<rate_limit::RateLimiter>,
 }
 

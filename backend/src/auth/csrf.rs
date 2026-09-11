@@ -18,13 +18,23 @@ pub fn matches(value: &str, stored_digest: &str) -> bool {
         .into()
 }
 
-pub fn same_origin(headers: &HeaderMap, secure: bool) -> bool {
+pub fn same_origin(headers: &HeaderMap, configured: &url::Url) -> bool {
     let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) else {
         return false;
     };
     let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
         return false;
     };
-    let scheme = if secure { "https" } else { "http" };
-    origin == format!("{scheme}://{host}")
+    if host.parse::<axum::http::uri::Authority>().is_err() {
+        return false;
+    }
+    let Some(origin) = crate::config::parse_origin(origin) else {
+        return false;
+    };
+    let Some(request_origin) =
+        crate::config::parse_origin(&format!("{}://{host}", configured.scheme()))
+    else {
+        return false;
+    };
+    origin.origin() == configured.origin() && request_origin.origin() == configured.origin()
 }

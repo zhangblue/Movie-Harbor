@@ -83,10 +83,10 @@ pub async fn authenticate<C: ConnectionTrait>(
 pub fn authorize_write(
     current: &CurrentSession,
     headers: &HeaderMap,
-    secure: bool,
+    public_origin: &url::Url,
 ) -> Result<(), AuthError> {
     let token = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
-    if !csrf::same_origin(headers, secure)
+    if !csrf::same_origin(headers, public_origin)
         || !token.is_some_and(|token| csrf::matches(token, &current.session.csrf_token_hash))
     {
         return Err(AuthError(StatusCode::FORBIDDEN));

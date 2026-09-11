@@ -44,7 +44,7 @@ pub async fn require_session(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     ) {
-        session::authorize_write(&current, request.headers(), state.cookie_secure)?;
+        session::authorize_write(&current, request.headers(), &state.public_origin)?;
     }
     request.extensions_mut().insert(current);
     let mut response = next.run(request).await;
@@ -60,7 +60,7 @@ async fn login(
     headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
-    if !csrf::same_origin(&headers, state.cookie_secure) {
+    if !csrf::same_origin(&headers, &state.public_origin) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
     let window = state.limits.for_login(address.ip(), &input.name);

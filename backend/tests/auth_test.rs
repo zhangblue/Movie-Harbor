@@ -23,6 +23,7 @@ fn config() -> Config {
         database_url: String::new(),
         media_dir: "/tmp/media".into(),
         cookie_secure: true,
+        public_origin: "https://harbor.test".into(),
         max_upload_bytes: 1024,
         admin_name: Some("Admin".into()),
         admin_initial_password: Some("initial-password".into()),
@@ -482,4 +483,111 @@ async fn empty_database_reports_each_missing_initialization_credential() {
             .unwrap()
             .is_empty()
     );
+}
+
+// Catches accepting a forged Host/Origin pair that is not in trusted deployment configuration.
+#[tokio::test]
+async fn matching_but_unconfigured_host_and_origin_are_rejected() {
+    let db = database().await;
+    let app = app::build(db.clone(), &config()).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    for path in [
+        "/api/admin/login",
+        "/api/admin/logout",
+        "/api/admin/password",
+    ] {
+        let mut req = Request::builder().method("POST").uri(path)
+            .header("host", "unconfigured.test").header("origin", "https://unconfigured.test")
+            .header("forwarded", "host=harbor.test;proto=https")
+            .header("x-forwarded-host", "harbor.test")
+            .header("content-type", "application/json").header("cookie", &cookie).header("x-csrf-token", &csrf)
+            .body(Body::from(json!({"name":"Admin","password":"initial-password","current_password":"initial-password","new_password":"replacement"}).to_string())).unwrap();
+        req.extensions_mut().insert(ConnectInfo(
+            "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "unconfigured origin accepted on {path}"
+        );
+    }
+    assert_eq!(
+        admin_session::Entity::find().all(&db).await.unwrap().len(),
+        1
+    );
+}
+
+// Catches literal-string origin comparisons that reject equivalent case/default-port forms.
+#[tokio::test]
+async fn configured_origin_normalizes_scheme_host_and_default_port() {
+    let mut cfg = config();
+    cfg.public_origin = "HTTPS://HARBOR.TEST:443/".into();
+    let app = app::build(database().await, &cfg).await.unwrap();
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/admin/login",
+            json!({"name":"Admin","password":"initial-password"}),
+            None,
+            None,
+            Some("https://HARBOR.TEST:443")
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        request(
+            &app,
+            "POST",
+            "/api/admin/login",
+            json!({"name":"Admin","password":"initial-password"}),
+            None,
+            None,
+            Some("https://harbor.test:444")
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+// Catches callers bypassing environment parsing to start a production app with insecure cookies.
+#[tokio::test]
+async fn app_startup_rejects_insecure_non_loopback_configuration() {
+    let mut cfg = config();
+    cfg.cookie_secure = false;
+    assert!(app::build(database().await, &cfg).await.is_err());
+}
+
+// Catches local HTTP development passing config parsing but failing at the actual login boundary.
+#[tokio::test]
+async fn loopback_development_login_can_issue_an_http_cookie() {
+    let mut cfg = config();
+    cfg.public_origin = "http://localhost:5173".into();
+    cfg.cookie_secure = false;
+    let app = app::build(database().await, &cfg).await.unwrap();
+    let mut req = Request::builder()
+        .method("POST")
+        .uri("/api/admin/login")
+        .header("host", "LOCALHOST:5173")
+        .header("origin", "http://localhost:5173")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"name":"Admin","password":"initial-password"}).to_string(),
+        ))
+        .unwrap();
+    req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()["set-cookie"].to_str().unwrap();
+    assert!(
+        !cookie
+            .split(';')
+            .any(|attribute| attribute.trim() == "Secure")
+    );
+    assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
 }
