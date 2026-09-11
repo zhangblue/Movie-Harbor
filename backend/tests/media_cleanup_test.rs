@@ -6,14 +6,14 @@ use movie_harbor_api::{
 };
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    Set,
+    IntoActiveModel, Set,
 };
 use sea_orm_migration::MigratorTrait;
 use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 use uuid::Uuid;
@@ -49,6 +49,29 @@ struct RecordingHooks(Mutex<Vec<StorageEvent>>);
 impl StorageHooks for RecordingHooks {
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         self.0.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+}
+
+struct FailFirstPostUnlinkSync {
+    unlinked: AtomicBool,
+    failures: AtomicUsize,
+    sync_attempts: AtomicUsize,
+}
+
+impl StorageHooks for FailFirstPostUnlinkSync {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::Unlinked(_)) {
+            self.unlinked.store(true, Ordering::SeqCst);
+        }
+        if matches!(event, StorageEvent::BeforeDirectorySync(_))
+            && self.unlinked.load(Ordering::SeqCst)
+        {
+            self.sync_attempts.fetch_add(1, Ordering::SeqCst);
+            if self.failures.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(std::io::Error::other("injected directory fsync failure"));
+            }
+        }
         Ok(())
     }
 }
@@ -202,6 +225,50 @@ async fn successful_cleanup_syncs_the_containing_directory_after_unlink() {
             &simple[..2]
         )))
     );
+}
+
+// Catches an ENOENT retry deleting the job without retrying an uncertain directory fsync.
+#[tokio::test]
+async fn retry_after_unlink_fsync_failure_syncs_missing_file_directory_before_success() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let id = Uuid::new_v4();
+    let simple = id.simple().to_string();
+    let key = format!("poster/{}/{}.png", &simple[..2], simple);
+    std::fs::create_dir_all(root.as_ref().join(&key).parent().unwrap()).unwrap();
+    std::fs::write(root.as_ref().join(&key), b"x").unwrap();
+    let hooks = Arc::new(FailFirstPostUnlinkSync {
+        unlinked: AtomicBool::new(false),
+        failures: AtomicUsize::new(0),
+        sync_attempts: AtomicUsize::new(0),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let (_, job) = queued(&db, &key).await;
+
+    let first = run_once(&db, &storage).await.unwrap();
+    assert_eq!((first.succeeded, first.failed), (0, 1));
+    assert!(!root.as_ref().join(&key).exists());
+    let mut retry = file_cleanup_job::Entity::find_by_id(job.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_active_model();
+    retry.next_attempt_at = Set((chrono::Utc::now() - chrono::Duration::minutes(1)).fixed_offset());
+    retry.update(&db).await.unwrap();
+
+    let second = run_once(&db, &storage).await.unwrap();
+    assert_eq!((second.succeeded, second.failed), (1, 0));
+    assert!(
+        file_cleanup_job::Entity::find_by_id(job.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(hooks.sync_attempts.load(Ordering::SeqCst), 2);
 }
 
 // Catches traversal/symlink escapes, unbounded error persistence, and non-retrying jobs.

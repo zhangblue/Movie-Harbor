@@ -57,18 +57,26 @@ pub async fn recover_uploads(
             continue;
         }
         if entry.name.ends_with(".pending") {
-            let storage_key = storage.read_pending_marker(&entry.name)?;
+            let marker = match storage.read_pending_marker(&entry.name) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    eprintln!("retaining invalid media recovery marker: {error}");
+                    continue;
+                }
+            };
             let registered = media_asset::Entity::find()
-                .filter(media_asset::Column::StorageKey.eq(storage_key.clone()))
+                .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
                 .one(db)
                 .await?
                 .is_some();
-            if !registered {
-                storage.remove_registered(&storage_key).await?;
+            if !registered && let Err(error) = storage.remove_pending_owned(&marker) {
+                eprintln!("retaining unproven media recovery marker: {error}");
+                continue;
             }
             storage.remove_incoming(&entry.name)?;
         }
     }
+    storage.notify_recovery_cycle_completed()?;
     Ok(())
 }
 
@@ -163,6 +171,9 @@ fn sanitize_error(error: &MediaError) -> String {
 pub fn spawn(db: DatabaseConnection, storage: LocalMediaStorage) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            if let Err(error) = recover_uploads(&db, &storage, Duration::from_secs(3600)).await {
+                eprintln!("media upload recovery failed: {error}");
+            }
             if let Err(error) = run_once(&db, &storage).await {
                 eprintln!("media cleanup worker failed: {error}");
             }

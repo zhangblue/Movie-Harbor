@@ -47,7 +47,18 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     let mut stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
-    let asset = insert_asset(db, id, kind, original_name, &stored).await?;
+    stored.begin_database_write();
+    let asset = match insert_asset(db, id, kind, original_name, &stored).await {
+        Ok(asset) => asset,
+        Err(error) => {
+            if media_asset::Entity::find_by_id(id).one(db).await?.is_none() {
+                stored.database_failure_is_known();
+            }
+            return Err(error);
+        }
+    };
+    stored.notify_database_committed()?;
+    tokio::task::yield_now().await;
     stored.mark_registered()?;
     Ok(asset)
 }
@@ -99,41 +110,52 @@ pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
 ) -> Result<media_asset::Model, MediaError> {
-    let asset = replace_in_transaction(
-        db,
+    let tx = db.begin().await?;
+    pending.stored.begin_database_write();
+    let result = replace_before_commit(
+        &tx,
         pending.target,
         pending.id,
         pending.kind,
         &pending.original_name,
         &pending.stored,
     )
-    .await?;
-    let stored = &mut pending.stored;
-    stored.mark_registered()?;
+    .await;
+    let asset = match result {
+        Ok(asset) => asset,
+        Err(error) => {
+            if tx.rollback().await.is_ok() {
+                pending.stored.database_failure_is_known();
+            }
+            return Err(error);
+        }
+    };
+    tx.commit().await?;
+    pending.stored.notify_database_committed()?;
+    tokio::task::yield_now().await;
+    pending.stored.mark_registered()?;
     Ok(asset)
 }
 
-async fn replace_in_transaction(
-    db: &DatabaseConnection,
+async fn replace_before_commit(
+    tx: &DatabaseTransaction,
     target: AttachmentTarget,
     id: Uuid,
     kind: MediaKind,
     original_name: &str,
     stored: &StoredFile,
 ) -> Result<media_asset::Model, MediaError> {
-    let tx = db.begin().await?;
-    let asset = insert_asset(&tx, id, kind, original_name, stored).await?;
-    let old_id = switch_reference(&tx, target, asset.id).await?;
+    let asset = insert_asset(tx, id, kind, original_name, stored).await?;
+    let old_id = switch_reference(tx, target, asset.id).await?;
     if let Some(old_id) = old_id {
         file_cleanup_job::ActiveModel {
             id: Set(Uuid::new_v4()),
             media_asset_id: Set(old_id),
             ..Default::default()
         }
-        .insert(&tx)
+        .insert(tx)
         .await?;
     }
-    tx.commit().await?;
     Ok(asset)
 }
 

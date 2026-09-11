@@ -10,6 +10,7 @@ use rustix::{
         unlinkat,
     },
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
@@ -52,6 +53,9 @@ pub enum StorageEvent {
     Promoted(String),
     BeforeUnlink(String),
     Unlinked(String),
+    BeforeDirectorySync(String),
+    DatabaseCommitted(String),
+    RecoveryCycleCompleted,
 }
 
 pub trait StorageHooks: Send + Sync {
@@ -90,9 +94,30 @@ pub struct StoredFile {
 }
 
 impl StoredFile {
+    pub(crate) fn begin_database_write(&mut self) {
+        if let Some(cleanup) = &mut self.cleanup {
+            cleanup.destructive = false;
+        }
+    }
+
+    pub(crate) fn database_failure_is_known(&mut self) {
+        if let Some(cleanup) = &mut self.cleanup {
+            cleanup.destructive = true;
+        }
+    }
+
+    pub(crate) fn notify_database_committed(&self) -> Result<(), MediaError> {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup
+                .hooks
+                .on_event(&StorageEvent::DatabaseCommitted(self.storage_key.clone()))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn mark_registered(&mut self) -> Result<(), MediaError> {
         if let Some(mut cleanup) = self.cleanup.take() {
-            cleanup.disarm_formal();
+            cleanup.formal = None;
             cleanup.remove_marker()?;
         }
         Ok(())
@@ -117,6 +142,7 @@ struct PendingCleanup {
     marker_name: Option<String>,
     formal: Option<FormalCleanup>,
     hooks: Arc<dyn StorageHooks>,
+    destructive: bool,
 }
 
 impl std::fmt::Debug for PendingCleanup {
@@ -141,6 +167,7 @@ impl PendingCleanup {
             marker_name: None,
             formal: None,
             hooks,
+            destructive: true,
         }
     }
 
@@ -151,10 +178,6 @@ impl PendingCleanup {
             file_name,
             storage_key,
         });
-    }
-
-    fn disarm_formal(&mut self) {
-        self.formal = None;
     }
 
     fn remove_marker(&mut self) -> Result<(), MediaError> {
@@ -174,7 +197,9 @@ impl Drop for PendingCleanup {
             let _ = remove_if_present(&self.incoming, &name);
             let _ = sync_fd(&self.incoming);
         }
-        let formal_removed = if let Some(formal) = self.formal.take() {
+        let formal_removed = if !self.destructive {
+            false
+        } else if let Some(formal) = self.formal.take() {
             if self
                 .hooks
                 .on_event(&StorageEvent::BeforeUnlink(formal.storage_key.clone()))
@@ -202,6 +227,16 @@ struct StoreSpec<'a> {
     declared_mime: &'a str,
     format: validation::ExpectedFormat,
     max_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct PendingMarker {
+    version: u8,
+    pub storage_key: String,
+    device: u64,
+    inode: u64,
+    byte_size: u64,
+    checksum_sha256: String,
 }
 
 impl LocalMediaStorage {
@@ -279,7 +314,7 @@ impl LocalMediaStorage {
         let file_name = format!("{}.{}", simple, spec.format.extension);
         let key = format!("{kind}/{shard}/{file_name}");
         let kind_fd = self.open_or_create_child(&self.root_fd, kind, "")?;
-        let shard_fd = self.open_or_create_child(&kind_fd, shard, kind)?;
+        let shard_fd = Arc::new(self.open_or_create_child(&kind_fd, shard, kind)?);
 
         let temp_fd = openat(
             &self.incoming_fd,
@@ -308,11 +343,25 @@ impl LocalMediaStorage {
             .on_event(&StorageEvent::FileSynced(format!(".incoming/{temp_name}")))?;
         let mut file = file.into_std().await;
         validation::validate_content(spec.format, &mut file, byte_size)?;
-        drop(file);
+        let validated_stat = rustix::fs::fstat(&file).map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(validated_stat.st_mode)
+            != rustix::fs::FileType::RegularFile
+        {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        let checksum_sha256 = format!("{:x}", digest.finalize());
 
         // A durable marker makes a successfully promoted but unregistered file recoverable.
         let marker_name = format!("{}.pending", spec.resource_id.simple());
-        self.write_marker(&marker_name, &key)?;
+        let marker = PendingMarker {
+            version: 1,
+            storage_key: key.clone(),
+            device: validated_stat.st_dev as u64,
+            inode: validated_stat.st_ino as u64,
+            byte_size,
+            checksum_sha256: checksum_sha256.clone(),
+        };
+        self.write_marker(&marker_name, &marker)?;
         cleanup.marker_name = Some(marker_name);
         self.hooks
             .on_event(&StorageEvent::BeforePromote(key.clone()))?;
@@ -333,24 +382,27 @@ impl LocalMediaStorage {
             RenameFlags::NOREPLACE,
         )
         .map_err(io::Error::from)?;
-        cleanup.promoted(
-            Arc::new(shard_fd.try_clone()?),
-            file_name.clone(),
-            key.clone(),
-        );
+        cleanup.promoted(shard_fd.clone(), file_name.clone(), key.clone());
+        let promoted_stat = statat(&shard_fd, file_name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
+            .map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(promoted_stat.st_mode)
+            != rustix::fs::FileType::RegularFile
+            || promoted_stat.st_dev as u64 != marker.device
+            || promoted_stat.st_ino as u64 != marker.inode
+            || promoted_stat.st_size as u64 != marker.byte_size
+        {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        drop(file);
         self.hooks.on_event(&StorageEvent::Promoted(key.clone()))?;
-        sync_fd(&shard_fd)?;
-        self.hooks
-            .on_event(&StorageEvent::DirectorySynced(format!("{kind}/{shard}")))?;
-        sync_fd(&self.incoming_fd)?;
-        self.hooks
-            .on_event(&StorageEvent::DirectorySynced(".incoming".into()))?;
+        self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
+        self.sync_directory(&self.incoming_fd, ".incoming".into())?;
 
         Ok(StoredFile {
             storage_key: key,
             mime_type: spec.declared_mime.to_owned(),
             byte_size: i64::try_from(byte_size).map_err(|_| MediaError::TooLarge)?,
-            checksum_sha256: format!("{:x}", digest.finalize()),
+            checksum_sha256,
             cleanup: Some(std::mem::replace(
                 cleanup,
                 PendingCleanup {
@@ -359,29 +411,49 @@ impl LocalMediaStorage {
                     marker_name: None,
                     formal: None,
                     hooks: self.hooks.clone(),
+                    destructive: true,
                 },
             )),
         })
     }
 
-    fn write_marker(&self, name: &str, key: &str) -> Result<(), MediaError> {
-        let marker = openat(
-            &self.incoming_fd,
-            name,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            file_mode(),
-        )
-        .map_err(io::Error::from)?;
-        let mut marker = std::fs::File::from(marker);
-        use std::io::Write;
-        marker.write_all(key.as_bytes())?;
-        marker.sync_all()?;
-        self.hooks
-            .on_event(&StorageEvent::FileSynced(format!(".incoming/{name}")))?;
-        sync_fd(&self.incoming_fd)?;
-        self.hooks
-            .on_event(&StorageEvent::DirectorySynced(".incoming".into()))?;
-        Ok(())
+    fn write_marker(&self, name: &str, marker: &PendingMarker) -> Result<(), MediaError> {
+        let temporary_name = format!("{}.part", Uuid::new_v4().simple());
+        let result = (|| {
+            let marker_fd = openat(
+                &self.incoming_fd,
+                temporary_name.as_str(),
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                file_mode(),
+            )
+            .map_err(io::Error::from)?;
+            let mut marker_file = std::fs::File::from(marker_fd);
+            use std::io::Write;
+            let encoded = serde_json::to_vec(marker).map_err(io::Error::other)?;
+            marker_file.write_all(&encoded)?;
+            marker_file.sync_all()?;
+            self.hooks.on_event(&StorageEvent::FileSynced(format!(
+                ".incoming/{temporary_name}"
+            )))?;
+            self.sync_directory(&self.incoming_fd, ".incoming".into())?;
+            renameat_with(
+                &self.incoming_fd,
+                temporary_name.as_str(),
+                &self.incoming_fd,
+                name,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)?;
+            self.sync_directory(&self.incoming_fd, ".incoming".into())?;
+            self.hooks
+                .on_event(&StorageEvent::FileSynced(format!(".incoming/{name}")))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = remove_if_present(&self.incoming_fd, &temporary_name);
+            let _ = sync_fd(&self.incoming_fd);
+        }
+        result
     }
 
     fn open_or_create_child<F: AsFd>(
@@ -394,16 +466,34 @@ impl LocalMediaStorage {
             Ok(fd) => Ok(fd),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 mkdirat(parent, name, directory_mode()).map_err(io::Error::from)?;
-                sync_fd(parent)?;
-                self.hooks
-                    .on_event(&StorageEvent::DirectorySynced(parent_label.to_owned()))?;
+                self.sync_directory(parent, parent_label.to_owned())?;
                 Ok(open_directory(parent, OsStr::new(name))?)
             }
             Err(error) => Err(error.into()),
         }
     }
 
+    fn sync_directory<F: AsFd>(&self, fd: &F, label: String) -> Result<(), MediaError> {
+        self.hooks
+            .on_event(&StorageEvent::BeforeDirectorySync(label.clone()))?;
+        sync_fd(fd)?;
+        self.hooks.on_event(&StorageEvent::DirectorySynced(label))?;
+        Ok(())
+    }
+
     pub async fn remove_registered(&self, storage_key: &str) -> Result<(), MediaError> {
+        self.remove_registered_if_owned(storage_key, None)
+    }
+
+    pub(crate) fn remove_pending_owned(&self, marker: &PendingMarker) -> Result<(), MediaError> {
+        self.remove_registered_if_owned(&marker.storage_key, Some(marker))
+    }
+
+    fn remove_registered_if_owned(
+        &self,
+        storage_key: &str,
+        owner: Option<&PendingMarker>,
+    ) -> Result<(), MediaError> {
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
             Ok(fd) => fd,
@@ -417,10 +507,21 @@ impl LocalMediaStorage {
         };
         let stat = match statat(&shard_fd, file, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => stat,
-            Err(error) if error == rustix::io::Errno::NOENT => return Ok(()),
+            Err(error) if error == rustix::io::Errno::NOENT => {
+                self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
+                return Ok(());
+            }
             Err(error) => return Err(io::Error::from(error).into()),
         };
         if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        if let Some(owner) = owner
+            && (stat.st_dev as u64 != owner.device
+                || stat.st_ino as u64 != owner.inode
+                || stat.st_size as u64 != owner.byte_size
+                || hash_file_at(&shard_fd, file)? != owner.checksum_sha256)
+        {
             return Err(MediaError::InvalidStorageKey);
         }
         self.hooks
@@ -428,9 +529,7 @@ impl LocalMediaStorage {
         unlinkat(&shard_fd, file, AtFlags::empty()).map_err(io::Error::from)?;
         self.hooks
             .on_event(&StorageEvent::Unlinked(storage_key.to_owned()))?;
-        sync_fd(&shard_fd)?;
-        self.hooks
-            .on_event(&StorageEvent::DirectorySynced(format!("{kind}/{shard}")))?;
+        self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
         Ok(())
     }
 
@@ -458,7 +557,7 @@ impl LocalMediaStorage {
         Ok(entries)
     }
 
-    pub(crate) fn read_pending_marker(&self, name: &str) -> Result<String, MediaError> {
+    pub(crate) fn read_pending_marker(&self, name: &str) -> Result<PendingMarker, MediaError> {
         if !is_pending_name(name) {
             return Err(MediaError::InvalidStorageKey);
         }
@@ -469,14 +568,32 @@ impl LocalMediaStorage {
             Mode::empty(),
         )
         .map_err(io::Error::from)?;
-        let mut reader = std::fs::File::from(fd).take(257);
-        let mut key = String::new();
-        reader.read_to_string(&mut key)?;
-        if key.len() > 256 {
+        let mut reader = std::fs::File::from(fd).take(1025);
+        let mut encoded = Vec::new();
+        reader.read_to_end(&mut encoded)?;
+        if encoded.len() > 1024 {
             return Err(MediaError::InvalidStorageKey);
         }
-        parse_storage_key(&key)?;
-        Ok(key)
+        let marker: PendingMarker =
+            serde_json::from_slice(&encoded).map_err(|_| MediaError::InvalidStorageKey)?;
+        if marker.version != 1
+            || marker.checksum_sha256.len() != 64
+            || !marker
+                .checksum_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        let (_, _, file_name) = parse_storage_key(&marker.storage_key)?;
+        let resource = file_name
+            .rsplit_once('.')
+            .map(|(stem, _)| stem)
+            .ok_or(MediaError::InvalidStorageKey)?;
+        if name.strip_suffix(".pending") != Some(resource) {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        Ok(marker)
     }
 
     pub(crate) fn remove_incoming(&self, name: &str) -> Result<(), MediaError> {
@@ -487,6 +604,11 @@ impl LocalMediaStorage {
         sync_fd(&self.incoming_fd)?;
         self.hooks
             .on_event(&StorageEvent::DirectorySynced(".incoming".into()))?;
+        Ok(())
+    }
+
+    pub(crate) fn notify_recovery_cycle_completed(&self) -> Result<(), MediaError> {
+        self.hooks.on_event(&StorageEvent::RecoveryCycleCompleted)?;
         Ok(())
     }
 }
@@ -528,6 +650,27 @@ fn remove_if_present<F: AsFd>(parent: &F, name: &str) -> io::Result<()> {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(error) => Err(error.into()),
     }
+}
+
+fn hash_file_at<F: AsFd>(parent: &F, name: &str) -> Result<String, MediaError> {
+    let fd = openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let mut file = std::fs::File::from(fd);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    Ok(format!("{:x}", digest.finalize()))
 }
 
 fn is_controlled_incoming_name(name: &str) -> bool {
