@@ -501,7 +501,7 @@ git commit -m "feat: build admin authentication and content list"
 - 创建：`frontend/admin-web/src/movies/MovieEditor.test.tsx`
 - 修改：`frontend/admin-web/src/app/App.tsx`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 覆盖紧凑字段、海报即时预览、点击海报替换、取消文件选择不丢旧图、上传失败保留旧图、发布缺失项显示、非草稿页面全部只读。
 
@@ -509,15 +509,15 @@ git commit -m "feat: build admin authentication and content list"
 
 预期：FAIL，电影编辑器不存在。
 
-- [ ] **步骤 2：实现草稿编辑器**
+- [x] **步骤 2：实现草稿编辑器**
 
 使用对象 URL 预览并在替换/卸载时释放；先保存字段和题材，再按受控上传协议关联海报和视频；提交携带 `version`。
 
-- [ ] **步骤 3：接入生命周期操作和删除确认**
+- [x] **步骤 3：接入生命周期操作和删除确认**
 
 删除确认展示后端返回的影响数量并要求输入完整内容名称；归档、发布、转草稿成功后重新拉取详情。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行后台全部测试和构建后提交：
 
