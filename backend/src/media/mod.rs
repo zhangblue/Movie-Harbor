@@ -25,6 +25,8 @@ pub enum MediaError {
     Empty,
     TargetNotFound,
     ReadOnly,
+    InvalidVersion,
+    VersionConflict,
     StillReferenced,
     Io(io::Error),
     Database(sea_orm::DbErr),
@@ -42,6 +44,8 @@ impl fmt::Display for MediaError {
             Self::Empty => "upload is empty",
             Self::TargetNotFound => "media attachment target not found",
             Self::ReadOnly => "only draft content can replace media",
+            Self::InvalidVersion => "invalid content version",
+            Self::VersionConflict => "content version conflict",
             Self::StillReferenced => "media asset is still referenced",
             Self::Io(_) => "media filesystem operation failed",
             Self::Database(_) => "media database operation failed",
@@ -76,11 +80,13 @@ impl From<sea_orm::DbErr> for MediaError {
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
         let status = match self {
-            Self::InvalidFileName | Self::Empty | Self::Multipart(_) => StatusCode::BAD_REQUEST,
+            Self::InvalidFileName | Self::InvalidVersion | Self::Empty | Self::Multipart(_) => {
+                StatusCode::BAD_REQUEST
+            }
             Self::UnsupportedType | Self::ContentMismatch => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TargetNotFound => StatusCode::NOT_FOUND,
-            Self::ReadOnly | Self::StillReferenced => StatusCode::CONFLICT,
+            Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
             Self::InvalidStorageKey | Self::Io(_) | Self::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

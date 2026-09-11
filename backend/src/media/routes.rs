@@ -5,12 +5,12 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     middleware,
     routing::post,
 };
 use sea_orm::DatabaseConnection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -26,6 +26,11 @@ struct MediaAssetResponse {
     original_name: String,
     mime_type: String,
     byte_size: i64,
+}
+
+#[derive(Deserialize)]
+struct VersionQuery {
+    version: i64,
 }
 
 impl From<media_asset::Model> for MediaAssetResponse {
@@ -72,11 +77,15 @@ pub fn router(
 async fn movie_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
+    Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload(
+    upload_versioned(
         state,
-        AttachmentTarget::MoviePoster(parse_id(id)?),
+        AttachmentTarget::MoviePoster {
+            id: parse_id(id)?,
+            version: version.version,
+        },
         multipart,
     )
     .await
@@ -85,11 +94,15 @@ async fn movie_poster(
 async fn movie_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
+    Query(version): Query<VersionQuery>,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload(
+    upload_versioned(
         state,
-        AttachmentTarget::MovieVideo(parse_id(id)?),
+        AttachmentTarget::MovieVideo {
+            id: parse_id(id)?,
+            version: version.version,
+        },
         multipart,
     )
     .await
@@ -126,6 +139,53 @@ fn parse_id(id: String) -> Result<Uuid, MediaError> {
 }
 
 async fn upload(
+    state: MediaState,
+    target: AttachmentTarget,
+    mut multipart: Multipart,
+) -> Result<Json<MediaAssetResponse>, MediaError> {
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(map_multipart_error)?
+        .ok_or(MediaError::InvalidFileName)?;
+    if field.name() != Some("file") {
+        return Err(MediaError::InvalidFileName);
+    }
+    let original_name = field
+        .file_name()
+        .ok_or(MediaError::InvalidFileName)?
+        .to_owned();
+    if original_name.len() > MAX_FILE_NAME_BYTES {
+        return Err(MediaError::InvalidFileName);
+    }
+    let declared_mime = field
+        .content_type()
+        .ok_or(MediaError::UnsupportedType)?
+        .to_owned();
+    let pending = super::upload::prepare_attachment(
+        &state.storage,
+        target,
+        &original_name,
+        &declared_mime,
+        &state.policy,
+        field,
+    )
+    .await?;
+    if multipart
+        .next_field()
+        .await
+        .map_err(map_multipart_error)?
+        .is_some()
+    {
+        return Err(MediaError::Multipart(
+            "exactly one file field is required".into(),
+        ));
+    }
+    let asset = super::upload::commit_attachment(&state.db, pending).await?;
+    Ok(Json(asset.into()))
+}
+
+async fn upload_versioned(
     state: MediaState,
     target: AttachmentTarget,
     mut multipart: Multipart,

@@ -4,15 +4,16 @@ use super::{
 };
 use crate::entities::{episode, file_cleanup_job, media_asset, movie, series};
 use sea_orm::{
-    ActiveModelTrait, DatabaseConnection, DatabaseTransaction, EntityTrait, IntoActiveModel,
-    QuerySelect, Set, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
+    IntoActiveModel, QueryFilter, QuerySelect, Set, TransactionTrait,
+    sea_query::{Expr, OnConflict},
 };
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug)]
 pub enum AttachmentTarget {
-    MoviePoster(Uuid),
-    MovieVideo(Uuid),
+    MoviePoster { id: Uuid, version: i64 },
+    MovieVideo { id: Uuid, version: i64 },
     SeriesPoster(Uuid),
     EpisodeVideo(Uuid),
 }
@@ -20,8 +21,15 @@ pub enum AttachmentTarget {
 impl AttachmentTarget {
     fn kind(self) -> MediaKind {
         match self {
-            Self::MoviePoster(_) | Self::SeriesPoster(_) => MediaKind::Poster,
-            Self::MovieVideo(_) | Self::EpisodeVideo(_) => MediaKind::Video,
+            Self::MoviePoster { .. } | Self::SeriesPoster(_) => MediaKind::Poster,
+            Self::MovieVideo { .. } | Self::EpisodeVideo(_) => MediaKind::Video,
+        }
+    }
+
+    fn expected_version(self) -> Option<i64> {
+        match self {
+            Self::MoviePoster { version, .. } | Self::MovieVideo { version, .. } => Some(version),
+            Self::SeriesPoster(_) | Self::EpisodeVideo(_) => None,
         }
     }
 }
@@ -32,6 +40,7 @@ pub(crate) struct PendingAttachment {
     kind: MediaKind,
     original_name: String,
     stored: StoredFile,
+    expected_version: Option<i64>,
 }
 
 pub async fn store_new_asset<S: ChunkSource + Send>(
@@ -92,6 +101,10 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     policy: &UploadPolicy,
     source: S,
 ) -> Result<PendingAttachment, MediaError> {
+    let expected_version = target.expected_version();
+    if expected_version.is_some_and(|version| version <= 0) {
+        return Err(MediaError::InvalidVersion);
+    }
     let id = Uuid::new_v4();
     let kind = target.kind();
     let stored = storage
@@ -103,6 +116,7 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
         kind,
         original_name: original_name.to_owned(),
         stored,
+        expected_version,
     })
 }
 
@@ -119,6 +133,7 @@ pub(crate) async fn commit_attachment(
         pending.kind,
         &pending.original_name,
         &pending.stored,
+        pending.expected_version,
     )
     .await;
     let asset = match result {
@@ -144,16 +159,22 @@ async fn replace_before_commit(
     kind: MediaKind,
     original_name: &str,
     stored: &StoredFile,
+    expected_version: Option<i64>,
 ) -> Result<media_asset::Model, MediaError> {
     let asset = insert_asset(tx, id, kind, original_name, stored).await?;
-    let old_id = switch_reference(tx, target, asset.id).await?;
+    let old_id = switch_reference(tx, target, asset.id, expected_version).await?;
     if let Some(old_id) = old_id {
-        file_cleanup_job::ActiveModel {
+        file_cleanup_job::Entity::insert(file_cleanup_job::ActiveModel {
             id: Set(Uuid::new_v4()),
             media_asset_id: Set(old_id),
             ..Default::default()
-        }
-        .insert(tx)
+        })
+        .on_conflict(
+            OnConflict::column(file_cleanup_job::Column::MediaAssetId)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec_without_returning(tx)
         .await?;
     }
     Ok(asset)
@@ -184,9 +205,10 @@ async fn switch_reference(
     tx: &DatabaseTransaction,
     target: AttachmentTarget,
     new_id: Uuid,
+    expected_version: Option<i64>,
 ) -> Result<Option<Uuid>, MediaError> {
     match target {
-        AttachmentTarget::MoviePoster(id) | AttachmentTarget::MovieVideo(id) => {
+        AttachmentTarget::MoviePoster { id, .. } | AttachmentTarget::MovieVideo { id, .. } => {
             let model = movie::Entity::find_by_id(id)
                 .lock_exclusive()
                 .one(tx)
@@ -195,18 +217,62 @@ async fn switch_reference(
             if model.status != "draft" {
                 return Err(MediaError::ReadOnly);
             }
+            if let Some(version) = expected_version
+                && model.version != version
+            {
+                return Err(MediaError::VersionConflict);
+            }
             let old = match target {
-                AttachmentTarget::MoviePoster(_) => model.poster_asset_id,
+                AttachmentTarget::MoviePoster { .. } => model.poster_asset_id,
                 _ => model.video_asset_id,
             };
-            let mut active = model.into_active_model();
-            match target {
-                AttachmentTarget::MoviePoster(_) => active.poster_asset_id = Set(Some(new_id)),
-                AttachmentTarget::MovieVideo(_) => active.video_asset_id = Set(Some(new_id)),
-                _ => unreachable!(),
+            if let Some(version) = expected_version {
+                let result = match target {
+                    AttachmentTarget::MoviePoster { .. } => {
+                        movie::Entity::update_many()
+                            .col_expr(movie::Column::PosterAssetId, Expr::value(Some(new_id)))
+                            .col_expr(movie::Column::Version, Expr::value(version + 1))
+                            .col_expr(
+                                movie::Column::UpdatedAt,
+                                Expr::value(chrono::Utc::now().fixed_offset()),
+                            )
+                            .filter(movie::Column::Id.eq(model.id))
+                            .filter(movie::Column::Version.eq(version))
+                            .exec(tx)
+                            .await?
+                    }
+                    AttachmentTarget::MovieVideo { .. } => {
+                        movie::Entity::update_many()
+                            .col_expr(movie::Column::VideoAssetId, Expr::value(Some(new_id)))
+                            .col_expr(movie::Column::Version, Expr::value(version + 1))
+                            .col_expr(
+                                movie::Column::UpdatedAt,
+                                Expr::value(chrono::Utc::now().fixed_offset()),
+                            )
+                            .filter(movie::Column::Id.eq(model.id))
+                            .filter(movie::Column::Version.eq(version))
+                            .exec(tx)
+                            .await?
+                    }
+                    _ => unreachable!(),
+                };
+                if result.rows_affected != 1 {
+                    return Err(MediaError::VersionConflict);
+                }
+            } else {
+                let mut active = model.into_active_model();
+                match target {
+                    AttachmentTarget::MoviePoster { .. } => {
+                        active.poster_asset_id = Set(Some(new_id))
+                    }
+                    AttachmentTarget::MovieVideo { .. } => {
+                        active.video_asset_id = Set(Some(new_id))
+                    }
+                    _ => unreachable!(),
+                }
+                active.updated_at = Set(chrono::Utc::now().fixed_offset());
+                active.update(tx).await?;
             }
-            active.updated_at = Set(chrono::Utc::now().fixed_offset());
-            active.update(tx).await?;
             Ok(old)
         }
         AttachmentTarget::SeriesPoster(id) => {

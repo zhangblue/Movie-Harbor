@@ -1252,7 +1252,10 @@ async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
         replace_attachment(
             &db,
             &storage,
-            AttachmentTarget::MoviePoster(Uuid::new_v4()),
+            AttachmentTarget::MoviePoster {
+                id: Uuid::new_v4(),
+                version: 1,
+            },
             "cover.png",
             "image/png",
             &policy(1024),
@@ -1362,7 +1365,10 @@ async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
         replace_attachment(
             &db,
             &storage,
-            AttachmentTarget::MoviePoster(Uuid::new_v4()),
+            AttachmentTarget::MoviePoster {
+                id: Uuid::new_v4(),
+                version: 1,
+            },
             "cover.png",
             "image/png",
             &policy(1024),
@@ -1465,7 +1471,10 @@ async fn cancellation_after_replacement_commit_preserves_new_reference_and_file(
         replace_attachment(
             &task_db,
             &task_storage,
-            AttachmentTarget::MoviePoster(movie_id),
+            AttachmentTarget::MoviePoster {
+                id: movie_id,
+                version: 1,
+            },
             "new.png",
             "image/png",
             &policy(1024),
@@ -2127,12 +2136,12 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     .await
     .unwrap();
     let movie = draft_movie(&db, Some(old.id)).await;
-    file_cleanup_job::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        media_asset_id: Set(old.id),
-        ..Default::default()
-    }
-    .insert(&db)
+    db.execute_unprepared(
+        "CREATE FUNCTION reject_cleanup_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'forced cleanup failure'; END $$; \
+         CREATE TRIGGER reject_cleanup_insert BEFORE INSERT ON file_cleanup_job \
+         FOR EACH ROW EXECUTE FUNCTION reject_cleanup_insert()",
+    )
     .await
     .unwrap();
 
@@ -2141,7 +2150,10 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
         replace_attachment(
             &db,
             &storage,
-            AttachmentTarget::MoviePoster(movie.id),
+            AttachmentTarget::MoviePoster {
+                id: movie.id,
+                version: 1,
+            },
             "new.jpg",
             "image/jpeg",
             &policy(1024),
@@ -2189,7 +2201,10 @@ async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
         replace_attachment(
             &db,
             &storage,
-            AttachmentTarget::MoviePoster(published.id),
+            AttachmentTarget::MoviePoster {
+                id: published.id,
+                version: 1,
+            },
             "new.jpg",
             "image/jpeg",
             &policy(1024),
@@ -2231,7 +2246,10 @@ async fn successful_replacement_keeps_old_file_until_a_cleanup_job_runs() {
     let new = replace_attachment(
         &db,
         &storage,
-        AttachmentTarget::MoviePoster(movie.id),
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
         "new.jpg",
         "image/jpeg",
         &policy(1024),
@@ -2246,11 +2264,93 @@ async fn successful_replacement_keeps_old_file_until_a_cleanup_job_runs() {
         .unwrap()
         .unwrap();
     assert_eq!(updated.poster_asset_id, Some(new.id));
+    assert_eq!(updated.version, 2);
     assert!(only_file(root.as_ref(), &old.storage_key).await);
     assert!(only_file(root.as_ref(), &new.storage_key).await);
     let jobs = file_cleanup_job::Entity::find().all(&db).await.unwrap();
     assert_eq!(jobs.len(), 1);
     assert_eq!(jobs[0].media_asset_id, old.id);
+}
+
+// Catches a previously queued asset making every later replacement fail after reassociation.
+#[tokio::test]
+async fn replacement_cleanup_enqueue_is_idempotent_after_asset_reassociation() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (old_source, _) = Chunks::new([PNG]);
+    let old = store_new_asset(
+        &db,
+        &storage,
+        MediaKind::Poster,
+        "old.png",
+        "image/png",
+        &policy(1024),
+        old_source,
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(old.id)).await;
+    let (first_source, _) = Chunks::new([jpeg()]);
+    let first = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
+        "first.jpg",
+        "image/jpeg",
+        &policy(1024),
+        first_source,
+    )
+    .await
+    .unwrap();
+    let current = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let reassociated = movie_harbor_api::movies::service::associate_media(
+        &db,
+        movie.id,
+        old.id,
+        current.version,
+        movie_harbor_api::movies::service::MediaSlot::Poster,
+    )
+    .await
+    .unwrap();
+
+    let (second_source, _) = Chunks::new([jpeg()]);
+    let second = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: reassociated.version,
+        },
+        "second.jpg",
+        "image/jpeg",
+        &policy(1024),
+        second_source,
+    )
+    .await
+    .expect("a pre-existing cleanup job must not poison replacement");
+
+    let current = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.poster_asset_id, Some(second.id));
+    let queued = file_cleanup_job::Entity::find()
+        .all(&db)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|job| job.media_asset_id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(queued, std::collections::HashSet::from([old.id, first.id]));
 }
 
 // Catches omitting the route or bypassing the shared administrator middleware.
@@ -2262,7 +2362,7 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
     let app = app::build(db.clone(), &config(root.as_ref()))
         .await
         .unwrap();
-    let path = format!("/api/admin/media/movies/{}/video", movie.id);
+    let path = format!("/api/admin/media/movies/{}/video?version=1", movie.id);
     assert_eq!(
         app.clone()
             .oneshot(multipart_request(
@@ -2304,8 +2404,9 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
         StatusCode::FORBIDDEN
     );
     let response = app
+        .clone()
         .oneshot(multipart_request(
-            path,
+            path.clone(),
             Some(&cookie),
             Some(&csrf),
             "https://harbor.test",
@@ -2318,6 +2419,7 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
         .await
         .unwrap()
         .unwrap();
+    assert_eq!(updated.version, 2);
     let video = media_asset::Entity::find_by_id(updated.video_asset_id.unwrap())
         .one(&db)
         .await
@@ -2325,6 +2427,38 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
         .unwrap();
     assert_eq!(video.mime_type, "video/mp4");
     assert!(only_file(root.as_ref(), &video.storage_key).await);
+
+    let stale = app
+        .clone()
+        .oneshot(multipart_request(
+            path,
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        2
+    );
+
+    let missing_version = app
+        .oneshot(multipart_request(
+            format!("/api/admin/media/movies/{}/video", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(missing_version.status(), StatusCode::BAD_REQUEST);
 }
 
 // Catches disabling Axum's body limit and accepting unbounded multipart metadata/extra fields.

@@ -5,3 +5,4 @@ pub mod entities;
 pub mod error;
 pub mod genres;
 pub mod media;
+pub mod movies;

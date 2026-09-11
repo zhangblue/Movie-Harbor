@@ -342,6 +342,34 @@ impl LocalMediaStorage {
         self.root.as_ref()
     }
 
+    /// Resolve a persisted key through directory capabilities and verify it names a readable
+    /// regular file. This deliberately does not follow symlinks or trust a joined path.
+    pub async fn is_accessible_regular_file(&self, storage_key: &str) -> Result<bool, MediaError> {
+        let (kind, shard, file) = parse_storage_key(storage_key)?;
+        let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let shard_fd = match open_directory(&kind_fd, OsStr::new(shard)) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error.into()),
+        };
+        let file = match openat(
+            &shard_fd,
+            file,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(file) => file,
+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(false),
+            Err(error) => return Err(io::Error::from(error).into()),
+        };
+        let stat = rustix::fs::fstat(file).map_err(io::Error::from)?;
+        Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile)
+    }
+
     pub async fn store<S: ChunkSource + Send>(
         &self,
         resource_id: Uuid,
