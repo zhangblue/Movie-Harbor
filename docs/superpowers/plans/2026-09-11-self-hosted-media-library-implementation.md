@@ -224,7 +224,7 @@ git commit -m "feat: add single administrator authentication"
 - 修改：`backend/migration/src/lib.rs`
 - 修改：`backend/src/app.rs`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 覆盖默认题材写入、按排序返回、新增、改名、排序、停用；被引用题材删除返回 `409`；停用题材保留在既有内容上但不能新关联。
 
@@ -232,15 +232,15 @@ git commit -m "feat: add single administrator authentication"
 
 预期：FAIL，题材管理 API 不存在。
 
-- [ ] **步骤 2：实现迁移和事务服务**
+- [x] **步骤 2：实现迁移和事务服务**
 
 默认写入剧情、喜剧、动作、科幻、恐怖、悬疑、犯罪、冒险、奇幻、家庭、纪录片、动画；重排操作一次提交全部新位置并拒绝重复序号。
 
-- [ ] **步骤 3：实现管理 API**
+- [x] **步骤 3：实现管理 API**
 
 提供列表、创建、更新、停用和删除端点；写路由统一经过管理员会话与 CSRF 中间件。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行：`cargo test --workspace`
 
