@@ -566,7 +566,7 @@ git commit -m "feat: add series and episode editor"
 - 创建：`frontend/public-web/src/player/PlayerPage.test.tsx`
 - 修改：`frontend/public-web/src/app/App.tsx`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 覆盖按内容 ID 保存进度、节流写入、接近结尾时清除进度、继续/从头选择、剧集最近单集、上一集/下一集边界和本地数据损坏时回退为空。
 
@@ -574,15 +574,15 @@ git commit -m "feat: add series and episode editor"
 
 预期：FAIL，播放器与进度存储不存在。
 
-- [ ] **步骤 2：实现播放器页面**
+- [x] **步骤 2：实现播放器页面**
 
 使用原生 `<video>`；不实现转码或外挂字幕；源地址直接使用 API 返回的公开 `/media` URL；对无法播放格式给出明确提示。
 
-- [ ] **步骤 3：实现本地进度**
+- [x] **步骤 3：实现本地进度**
 
 `localStorage` 使用带版本号的单一命名空间；每 5 秒及暂停/离开时保存；剩余不足 30 秒视为完成并移除续播点。
 
-- [ ] **步骤 4：验证并提交**
+- [x] **步骤 4：验证并提交**
 
 运行公开站全部测试和构建后提交：
 
