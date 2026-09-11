@@ -396,7 +396,7 @@ git commit -m "feat: add public catalog API"
 - 创建：`frontend/packages/ui/src/Toast.test.tsx`
 - 修改：两个共享包的 `package.json` 和 `tsconfig.json`
 
-- [ ] **步骤 1：编写失败测试**
+- [x] **步骤 1：编写失败测试**
 
 测试 API 客户端同源 `/api`、JSON 错误解析、管理员写请求自动附带 CSRF header；测试按钮键盘焦点、风险样式、海报卡片最多三个题材并显示 `+N`。
 
@@ -404,11 +404,11 @@ git commit -m "feat: add public catalog API"
 
 预期：FAIL，共享实现尚不存在。
 
-- [ ] **步骤 2：实现客户端与组件**
+- [x] **步骤 2：实现客户端与组件**
 
 把 Demo 的深色 token 转为共享 CSS 变量；组件只负责展示和无障碍语义，不内置页面业务状态。
 
-- [ ] **步骤 3：验证并提交**
+- [x] **步骤 3：验证并提交**
 
 运行：`npm test --workspaces`
 
