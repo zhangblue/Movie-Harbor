@@ -84,13 +84,13 @@
 - 创建：`frontend/packages/ui/package.json`
 - 创建：各 Vite 应用的 `index.html`、`vite.config.ts`、`tsconfig.json`、`src/main.tsx`
 
-- [ ] **步骤 1：初始化 Git 并保护本地文件**
+- [x] **步骤 1：初始化 Git 并保护本地文件**
 
 运行：`git init`
 
 创建 `.gitignore`，至少包含 `node_modules/`、`target/`、`.env`、前端构建目录和本地媒体目录；保留 `demo/`、规格与计划文档。
 
-- [ ] **步骤 2：编写失败的健康检查路由测试**
+- [x] **步骤 2：编写失败的健康检查路由测试**
 
 ```rust
 #[tokio::test]
@@ -107,15 +107,15 @@ async fn health_returns_ok() {
 
 预期：FAIL，`movie_harbor_api::app::test_router` 尚不存在。
 
-- [ ] **步骤 3：创建最小 Axum 应用与严格配置解析**
+- [x] **步骤 3：创建最小 Axum 应用与严格配置解析**
 
 实现 `GET /api/health` 返回 `{"status":"ok"}`；`Config::from_env` 明确读取监听地址、数据库 URL、媒体目录、Cookie 安全开关和上传限制，不给生产密码提供默认值。
 
-- [ ] **步骤 4：创建两套独立 Vite React TypeScript 应用**
+- [x] **步骤 4：创建两套独立 Vite React TypeScript 应用**
 
 公开站与管理后台分别拥有入口、构建脚本和严格 TypeScript 配置；共享包只导出空的稳定入口，不复制 Demo 的原生 DOM 代码。
 
-- [ ] **步骤 5：验证工作区**
+- [x] **步骤 5：验证工作区**
 
 运行：`cargo test --workspace`
 
@@ -125,7 +125,7 @@ async fn health_returns_ok() {
 
 预期：Rust 测试通过，两套前端均能完成 TypeScript 检查与 Vite 构建。
 
-- [ ] **步骤 6：提交**
+- [x] **步骤 6：提交**
 
 ```bash
 git add -A
