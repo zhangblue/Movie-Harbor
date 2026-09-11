@@ -1,0 +1,59 @@
+<div style="background:#10131b;color:#edf0f7;border-radius:18px;padding:28px;min-height:700px">
+  <div style="display:flex;align-items:center;padding:4px 0 24px;border-bottom:1px solid #2d3444;margin-bottom:22px">
+    <h2 style="margin:0;color:#f5f7fb;font-size:25px">Movie Harbor 管理后台</h2>
+    <div style="margin-left:auto;position:relative;text-align:right">
+      <button style="border:1px solid #485066;border-radius:999px;padding:9px 16px;background:#171b26;color:#edf0f7">管理员名称⌄</button>
+      <div style="position:absolute;right:0;top:44px;width:150px;background:#1d2330;border:1px solid #485066;border-radius:10px;padding:7px;box-shadow:0 12px 28px rgba(0,0,0,.35);z-index:2;text-align:left">
+        <div style="padding:9px 10px">修改密码</div>
+        <div style="padding:9px 10px;color:#ff9f9f;border-top:1px solid #343c4f">退出登录</div>
+      </div>
+    </div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:170px 1fr;gap:22px">
+    <div style="min-height:500px;border:1px solid #31384a;border-radius:13px;background:#171b26;padding:18px">
+      <div style="font-size:12px;color:#8e99ae;letter-spacing:.08em;margin-bottom:14px">导航</div>
+      <div style="padding:10px 12px;border-radius:8px;background:#293143;font-weight:700">内容管理</div>
+      <div style="padding:10px 12px;margin-top:5px;color:#c6cdda">题材配置</div>
+      <div style="padding:10px 12px;margin-top:5px;color:#c6cdda">系统设置</div>
+    </div>
+
+    <div>
+      <div style="display:flex;gap:9px;align-items:center;margin-bottom:16px;flex-wrap:wrap">
+        <select style="width:145px;padding:9px 11px;border:1px solid #485066;border-radius:8px;background:#171b26;color:#edf0f7"><option>全部内容形态</option><option>电影</option><option>剧集</option></select>
+        <select style="width:130px;padding:9px 11px;border:1px solid #485066;border-radius:8px;background:#171b26;color:#edf0f7"><option>全部状态</option><option>草稿</option><option>已发布</option><option>已归档</option></select>
+        <input placeholder="名称查询" style="width:135px;padding:9px 11px;border:1px solid #485066;border-radius:8px;background:#171b26;color:#edf0f7;outline:none">
+        <button style="border:1px solid #485066;border-radius:8px;padding:9px 14px;background:#293143;color:#edf0f7">查询</button>
+        <button style="margin-left:auto;border:0;border-radius:999px;padding:10px 17px;background:#e7ebfa;color:#182033;font-weight:700">＋ 新建内容</button>
+      </div>
+
+      <div style="border:1px solid #31384a;border-radius:12px;overflow:hidden;background:#171b26">
+        <div style="display:grid;grid-template-columns:70px 1.7fr .75fr .9fr 1.5fr;align-items:center;padding:11px;background:#252c3b;color:#cbd2df;font-weight:700"><span>海报</span><span>名称</span><span>形态</span><span>状态</span><span>可用操作</span></div>
+        <div style="display:grid;grid-template-columns:70px 1.7fr .75fr .9fr 1.5fr;align-items:center;padding:11px;border-top:1px solid #31384a"><div style="width:44px;height:62px;border-radius:6px;background:linear-gradient(145deg,#758195,#212836);display:grid;place-items:center;font-size:11px">海报</div><span>示例电影</span><span>电影</span><span style="color:#f2cb63">草稿</span><span style="color:#b8c9ed">编辑 · 发布 · 删除</span></div>
+        <div style="display:grid;grid-template-columns:70px 1.7fr .75fr .9fr 1.5fr;align-items:center;padding:11px;border-top:1px solid #31384a"><div style="width:44px;height:62px;border-radius:6px;background:linear-gradient(145deg,#45697a,#192630);display:grid;place-items:center;font-size:11px">海报</div><span>示例剧集</span><span>剧集</span><span style="color:#78d8a2">已发布</span><span style="color:#b8c9ed">查看 · 归档</span></div>
+        <div style="display:grid;grid-template-columns:70px 1.7fr .75fr .9fr 1.5fr;align-items:center;padding:11px;border-top:1px solid #31384a"><div style="width:44px;height:62px;border-radius:6px;background:linear-gradient(145deg,#845e55,#232531);display:grid;place-items:center;font-size:11px">海报</div><span>另一部电影</span><span>电影</span><span style="color:#adb5c3">已归档</span><span style="color:#b8c9ed">查看 · 发布 · 转草稿 · 删除</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="background:#10131b;color:#edf0f7;border-radius:18px;padding:28px;margin-top:22px">
+  <div style="font-size:13px;color:#9ba6b9;margin-bottom:14px">草稿编辑 · 海报区域</div>
+  <div style="display:grid;grid-template-columns:170px 1fr;gap:20px">
+    <button style="border:1px solid #485066;border-radius:12px;padding:0;background:#171b26;overflow:hidden;color:#edf0f7;cursor:pointer">
+      <div style="height:230px;background:linear-gradient(145deg,#6d5d84,#211d2c);display:grid;place-items:center">当前海报</div>
+      <div style="padding:11px;font-weight:700">点击替换海报</div>
+    </button>
+    <div>
+      <input placeholder="名称（必填）" style="width:100%;box-sizing:border-box;padding:10px;border:1px solid #485066;border-radius:8px;background:#171b26;color:#edf0f7">
+      <div style="height:78px;border:1px solid #485066;border-radius:8px;background:#171b26;margin-top:10px;padding:10px;color:#929db0">简介</div>
+      <select style="width:100%;margin-top:10px;padding:10px;border:1px solid #485066;border-radius:8px;background:#171b26;color:#edf0f7"><option>选择题材（可多选）</option></select>
+      <div style="height:68px;border:1px dashed #596278;border-radius:8px;background:#171b26;margin-top:10px;display:grid;place-items:center;color:#aab3c4">上传 / 替换视频</div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:20px">
+  <h3>统一视觉规则</h3>
+  <p>公开站和后台共用深色背景、蓝灰卡片、浅色文字、细描边与圆角；状态颜色只作为辅助提示。名称查询框固定为较短宽度，内容形态和状态使用下拉框。</p>
+</div>

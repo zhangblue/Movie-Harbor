@@ -1,0 +1,82 @@
+<h2>内容模型与生命周期 · 确认修订版</h2>
+<p class="subtitle">季是纯排序容器；电影、剧集和单集遵循统一、受控的状态流转。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">电影</div>
+    <div class="mockup-body">
+      <div style="border:2px solid #496a9f;border-radius:12px;padding:16px">
+        <div class="label">MOVIE</div>
+        <h3>电影</h3>
+        <p>标题、简介、年份、时长、题材、海报、视频</p>
+      </div>
+    </div>
+  </div>
+  <div class="mockup">
+    <div class="mockup-header">剧集</div>
+    <div class="mockup-body">
+      <div style="border:2px solid #496a9f;border-radius:12px;padding:14px">
+        <div class="label">SERIES</div>
+        <strong>剧集</strong>：标题、简介、年份、题材、海报
+      </div>
+      <p style="text-align:center">↓</p>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:14px">
+        <div class="label">SEASON</div>
+        <strong>季</strong>：仅季序号
+      </div>
+      <p style="text-align:center">↓</p>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:14px">
+        <div class="label">EPISODE</div>
+        <strong>集</strong>：集序号、用户输入的名称、简介、时长、视频
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:26px">
+  <h3>受控生命周期</h3>
+  <div style="display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:12px;align-items:center;text-align:center">
+    <div style="padding:18px;border-radius:12px;background:#fff3cd;border:2px solid #d6a800">
+      <strong>草稿</strong><br><small>唯一可编辑状态</small>
+    </div>
+    <div>发布 →</div>
+    <div style="padding:18px;border-radius:12px;background:#d1e7dd;border:2px solid #468966">
+      <strong>已发布</strong><br><small>公开、只读</small>
+    </div>
+    <div>归档 →</div>
+    <div style="padding:18px;border-radius:12px;background:#e2e3e5;border:2px solid #73777b">
+      <strong>已归档</strong><br><small>隐藏、只读</small>
+    </div>
+  </div>
+  <div style="margin-top:18px;padding:16px;border:1px solid #ced5df;border-radius:12px">
+    <strong>已归档状态允许三种操作：</strong>
+    <span style="margin-left:12px">原样重新发布</span> ·
+    <span>转为草稿后编辑</span> ·
+    <span style="color:#9c2e2e">永久删除</span>
+  </div>
+  <p>草稿也允许永久删除。已发布内容不能直接修改或删除，必须先归档。</p>
+</div>
+
+<div class="section">
+  <h3>公开可见性</h3>
+  <p>电影必须自身已发布。单集必须同时满足“所属剧集已发布 + 自身已发布”。归档剧集会隐藏全部季和单集，但不改变各集自身状态。</p>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>发布前最低要求</h4>
+    <ul>
+      <li>电影：标题、海报、可播放视频</li>
+      <li>剧集：标题、海报、至少一集已发布</li>
+      <li>单集：季序号、集序号、用户输入的名称、可播放视频</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>永久删除</h4>
+    <ul>
+      <li>仅草稿或已归档内容可删除</li>
+      <li>删除父内容会级联删除下级记录与独占文件</li>
+      <li>确认框明确列出受影响记录和文件数量</li>
+    </ul>
+  </div>
+</div>

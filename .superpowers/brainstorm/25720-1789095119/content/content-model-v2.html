@@ -1,0 +1,83 @@
+<h2>内容模型与发布规则 · 修订版</h2>
+<p class="subtitle">季是纯粹的排序容器；集名称由管理员明确录入。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">电影</div>
+    <div class="mockup-body">
+      <div style="border:2px solid #496a9f;border-radius:12px;padding:16px">
+        <div class="label">MOVIE</div>
+        <h3>电影</h3>
+        <p>标题、简介、年份、时长、题材、海报、视频</p>
+      </div>
+      <p style="text-align:center">↓ 引用</p>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:14px">
+        <strong>海报资源</strong> + <strong>视频资源</strong>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">剧集</div>
+    <div class="mockup-body">
+      <div style="border:2px solid #496a9f;border-radius:12px;padding:14px">
+        <div class="label">SERIES</div>
+        <h3>剧集</h3>
+        <p>标题、简介、年份、题材、海报</p>
+      </div>
+      <p style="text-align:center">↓ 一对多</p>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:14px">
+        <div class="label">SEASON</div>
+        <strong>季</strong>：仅季序号
+      </div>
+      <p style="text-align:center">↓ 一对多</p>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:14px">
+        <div class="label">EPISODE</div>
+        <strong>集</strong>：集序号、用户输入的名称、简介、时长、视频
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:24px">
+  <h3>共享分类</h3>
+  <p><strong>题材</strong>与电影/剧集是多对多关系。系统提供默认题材；管理员可新增、改名、排序、停用。被引用的题材只能停用，不能删除。</p>
+</div>
+
+<div class="section">
+  <h3>生命周期</h3>
+  <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span style="padding:10px 16px;border-radius:999px;background:#fff3cd">草稿</span>
+    <span>⇄</span>
+    <span style="padding:10px 16px;border-radius:999px;background:#d1e7dd">已发布</span>
+    <span>⇄</span>
+    <span style="padding:10px 16px;border-radius:999px;background:#e2e3e5">已归档</span>
+    <span style="margin-left:12px">→</span>
+    <span style="padding:10px 16px;border-radius:999px;background:#f8d7da">永久删除</span>
+  </div>
+  <p>电影、剧集和单集都使用这套状态；“季”只负责按季序号组织。永久删除只允许从草稿或归档状态执行。</p>
+</div>
+
+<div class="section">
+  <h3>公开可见性的组合规则</h3>
+  <p>电影必须自身已发布。单集必须同时满足“所属剧集已发布 + 自身已发布”。归档剧集会立即隐藏全部季和单集，但保留各集原状态，重新发布后恢复已发布单集。</p>
+</div>
+
+<div class="pros-cons">
+  <div class="pros">
+    <h4>发布前最低要求</h4>
+    <ul>
+      <li>电影：标题、海报、可播放视频</li>
+      <li>剧集：标题、海报、至少一集已发布</li>
+      <li>单集：集序号、用户输入的名称、可播放视频</li>
+    </ul>
+  </div>
+  <div class="cons">
+    <h4>删除影响</h4>
+    <ul>
+      <li>删除电影或单集时同步删除其独占文件</li>
+      <li>删除剧集会级联删除季、集及独占文件</li>
+      <li>执行前必须明确展示影响范围并二次确认</li>
+    </ul>
+  </div>
+</div>

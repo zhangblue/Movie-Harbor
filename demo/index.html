@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Movie Harbor 自托管媒体库 UI Demo" />
+    <title>Movie Harbor · UI Demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <nav class="demo-switcher" aria-label="Demo 页面切换">
+      <span>审核视图</span>
+      <a data-demo-view="home" href="?view=home">访客首页</a>
+      <a data-demo-view="admin" href="?view=admin">管理后台</a>
+      <a data-demo-view="series-editor" href="?view=series-editor">添加剧集</a>
+    </nav>
+
+    <main id="public-view" class="site-shell" hidden>
+      <header class="public-header">
+        <a class="brand" href="?view=home" aria-label="Movie Harbor 首页">
+          <span class="brand-mark">M</span>
+          <span>Movie Harbor</span>
+        </a>
+        <div class="catalog-tools">
+          <div class="kind-switch" role="group" aria-label="内容形态">
+            <button class="pill is-active" data-kind="all" type="button">全部</button>
+            <button class="pill" data-kind="movie" type="button">电影</button>
+            <button class="pill" data-kind="series" type="button">剧集</button>
+          </div>
+          <label class="search-box">
+            <span class="sr-only">搜索电影或剧集</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m21 21-4.35-4.35m1.35-5.15A6.5 6.5 0 1 1 5 11.5a6.5 6.5 0 0 1 13 0Z" /></svg>
+            <input id="public-search" type="search" placeholder="搜索电影或剧集" autocomplete="off" />
+          </label>
+        </div>
+      </header>
+
+      <section aria-labelledby="catalog-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LIBRARY</p>
+            <h1 id="catalog-title">全部影片</h1>
+          </div>
+          <p id="catalog-count" class="result-count" aria-live="polite"></p>
+        </div>
+        <div id="catalog-grid" class="catalog-grid"></div>
+        <div id="catalog-empty" class="empty-state" hidden>
+          <strong>没有找到匹配内容</strong>
+          <p>换个名称，或切换内容类型再试试。</p>
+        </div>
+      </section>
+    </main>
+
+    <main id="admin-view" class="admin-shell" hidden>
+      <header class="admin-header">
+        <a class="brand" href="?view=admin" aria-label="Movie Harbor 管理后台">
+          <span class="brand-mark">M</span>
+          <span>Movie Harbor</span>
+          <span class="admin-label">管理后台</span>
+        </a>
+        <div class="account-wrap">
+          <button id="account-button" class="account-button" type="button" aria-expanded="false">
+            <span class="avatar">管</span>
+            <span>管理员</span>
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <div id="account-menu" class="account-menu" hidden>
+            <button type="button" data-toast="修改密码功能将在正式版连接后端">修改密码</button>
+            <button class="danger-text" type="button" data-toast="已退出 Demo 会话">退出登录</button>
+          </div>
+        </div>
+      </header>
+
+      <div class="admin-layout">
+        <aside class="sidebar" aria-label="后台导航">
+          <p class="eyebrow">工作台</p>
+          <button class="side-link is-active" type="button" data-admin-section="content">
+            <span>内容管理</span><span class="side-count">8</span>
+          </button>
+          <button class="side-link" type="button" data-admin-section="genres">题材配置</button>
+          <button class="side-link" type="button" data-admin-section="settings">系统设置</button>
+        </aside>
+
+        <section class="admin-content">
+          <div id="content-panel">
+            <div class="admin-title-row">
+              <div><p class="eyebrow">CONTENT</p><h1>内容管理</h1></div>
+              <button id="create-content" class="button primary" type="button">＋ 新建内容</button>
+            </div>
+
+            <div class="filter-bar" aria-label="内容查询">
+              <label><span>内容形态</span><select id="admin-kind"><option value="all">全部</option><option value="movie">电影</option><option value="series">剧集</option></select></label>
+              <label><span>状态</span><select id="admin-status"><option value="all">全部</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option></select></label>
+              <label class="compact-query"><span>名称</span><input id="admin-query" type="search" placeholder="名称查询" /></label>
+              <button id="admin-search-button" class="button secondary query-button" type="button">查询</button>
+            </div>
+
+            <div class="table-card">
+              <div class="content-table table-head" role="row">
+                <span>海报</span><span>名称</span><span>形态</span><span>状态</span><span>可用操作</span>
+              </div>
+              <div id="admin-rows"></div>
+            </div>
+          </div>
+
+          <div id="editor-panel" hidden>
+            <div class="admin-title-row">
+              <div><p class="eyebrow">DRAFT</p><h1 id="editor-title">新建电影草稿</h1></div>
+              <button id="back-to-list" class="button secondary" type="button">返回列表</button>
+            </div>
+            <div class="editor-card">
+              <div class="poster-editor">
+                <button id="poster-button" type="button" aria-label="选择或替换海报">
+                  <img id="poster-preview" alt="当前海报预览" />
+                  <span class="poster-placeholder">选择海报</span>
+                  <span class="poster-change">点击替换海报</span>
+                </button>
+                <input id="poster-input" type="file" accept="image/*" hidden />
+                <p>建议比例 2:3，支持 JPG、PNG、WebP</p>
+              </div>
+              <form id="draft-form" class="draft-form">
+                <label><span>内容形态</span><select id="draft-kind"><option value="movie">电影</option><option value="series">剧集</option></select></label>
+                <label class="field-medium"><span>名称</span><input required value="潮汐尽头" /></label>
+                <div class="inline-fields">
+                  <label><span>年份</span><input type="number" value="2026" /></label>
+                  <label><span>时长（分钟）</span><input type="number" value="126" /></label>
+                </div>
+                <label class="field-wide"><span>简介</span><textarea rows="4">一场发生在远海观测站的失联事件，让调查员重新面对被封存多年的记忆。</textarea></label>
+                <label class="field-medium"><span>题材</span><select multiple size="3"><option selected>剧情</option><option selected>悬疑</option><option>科幻</option><option>恐怖</option></select></label>
+                <label class="field-wide"><span>视频文件</span><button class="upload-zone" type="button" data-toast="Demo 中暂不读取视频文件">选择浏览器可播放的视频</button></label>
+                <div class="form-actions">
+                  <button class="button secondary" type="button" data-toast="草稿已保存（Demo）">保存草稿</button>
+                  <button class="button primary" type="submit">发布</button>
+                </div>
+              </form>
+            </div>
+          </div>
+
+          <div id="placeholder-panel" class="placeholder-panel" hidden>
+            <p class="eyebrow">PREVIEW</p>
+            <h1 id="placeholder-title"></h1>
+            <p>该页面将在功能实现阶段继续细化，当前 Demo 聚焦内容浏览与维护流程。</p>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <main id="series-editor-view" class="admin-shell" hidden>
+      <header class="admin-header">
+        <a class="brand" href="?view=admin" aria-label="返回 Movie Harbor 管理后台">
+          <span class="brand-mark">M</span>
+          <span>Movie Harbor</span>
+          <span class="admin-label">管理后台</span>
+        </a>
+        <div class="account-wrap">
+          <button class="account-button" type="button" data-toast="账号菜单已在管理后台首页展示">
+            <span class="avatar">管</span>
+            <span>管理员</span>
+          </button>
+        </div>
+      </header>
+
+      <div class="admin-layout">
+        <aside class="sidebar" aria-label="后台导航">
+          <p class="eyebrow">工作台</p>
+          <a class="side-link is-active" href="?view=admin">内容管理</a>
+          <button class="side-link" type="button" data-toast="题材配置将在正式版连接后端">题材配置</button>
+          <button class="side-link" type="button" data-toast="系统设置将在正式版连接后端">系统设置</button>
+        </aside>
+
+        <section class="admin-content">
+          <div class="admin-title-row series-title-row">
+            <div><p class="eyebrow">NEW SERIES</p><h1>添加剧集</h1></div>
+            <a class="button secondary" href="?view=admin">返回列表</a>
+          </div>
+
+          <form id="series-form">
+            <section class="series-section" aria-labelledby="series-basic-title">
+              <div class="section-label"><span>01</span><div><h2 id="series-basic-title">基本信息</h2><p>创建剧集草稿后仍可继续补充季和单集。</p></div></div>
+              <div class="series-basic-grid">
+                <div class="poster-editor">
+                  <button id="series-poster-button" type="button" aria-label="选择剧集海报">
+                    <img id="series-poster-preview" alt="剧集海报预览" />
+                    <span class="series-poster-placeholder">选择海报</span>
+                    <span class="poster-change">点击替换海报</span>
+                  </button>
+                  <input id="series-poster-input" type="file" accept="image/*" hidden />
+                  <p>建议比例 2:3，支持 JPG、PNG、WebP</p>
+                </div>
+                <div class="draft-form series-basic-form">
+                  <label class="field-medium"><span>剧集名称</span><input required placeholder="请输入剧集名称" value="雾港来信" /></label>
+                  <label class="short-field"><span>首播年份</span><input type="number" value="2026" /></label>
+                  <label class="field-wide"><span>简介</span><textarea rows="4">港口小城连续收到来自二十年前的信件，一名档案员由此追查被遗忘的失踪事件。</textarea></label>
+                  <label class="field-medium"><span>题材</span><select multiple size="4"><option selected>剧情</option><option selected>悬疑</option><option>犯罪</option><option>科幻</option><option>恐怖</option></select></label>
+                </div>
+              </div>
+            </section>
+
+            <section class="series-section" aria-labelledby="series-structure-title">
+              <div class="section-label"><span>02</span><div><h2 id="series-structure-title">季与单集</h2><p>季只填写序号；每一集必须输入名称并选择视频。</p></div></div>
+              <div id="season-builder" class="season-builder"></div>
+              <button id="add-season" class="button secondary add-season" type="button">＋ 添加一季</button>
+            </section>
+
+            <div class="series-footer">
+              <span><i></i> 当前状态：草稿，可编辑</span>
+              <div>
+                <button class="button secondary" type="button" data-toast="剧集草稿已保存（Demo）">保存草稿</button>
+                <button class="button primary" type="submit">发布剧集</button>
+              </div>
+            </div>
+          </form>
+        </section>
+      </div>
+    </main>
+
+    <dialog id="detail-dialog" class="detail-dialog">
+      <button class="dialog-close" type="button" aria-label="关闭详情">×</button>
+      <div id="detail-content"></div>
+    </dialog>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

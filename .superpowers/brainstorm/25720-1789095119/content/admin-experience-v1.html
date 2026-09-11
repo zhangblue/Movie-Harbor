@@ -1,0 +1,68 @@
+<h2>管理后台：围绕状态驱动内容维护</h2>
+<p class="subtitle">后台独立于公开站；除登录页外，所有页面都要求单一管理员会话。</p>
+
+<div class="mockup">
+  <div class="mockup-header">后台 · 内容列表</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:180px 1fr;gap:18px">
+    <div class="mock-sidebar" style="min-height:390px">
+      <strong>Movie Harbor</strong>
+      <div style="margin-top:20px;line-height:2.4">内容管理<br>题材配置<br>系统设置<br>退出登录</div>
+    </div>
+    <div>
+      <div style="display:flex;gap:9px;align-items:center;margin-bottom:16px">
+        <button class="mock-button">电影</button>
+        <button class="mock-button">剧集</button>
+        <button class="mock-button">草稿</button>
+        <button class="mock-button">已发布</button>
+        <button class="mock-button">已归档</button>
+        <input class="mock-input" style="margin-left:auto;max-width:220px" placeholder="搜索名称">
+        <button class="mock-button">＋ 新建内容</button>
+      </div>
+      <div style="border:1px solid #ced5df;border-radius:10px;overflow:hidden">
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1.4fr;padding:12px;background:#eef1f5;font-weight:700"><span>名称</span><span>形态</span><span>状态</span><span>可用操作</span></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1.4fr;padding:14px;border-top:1px solid #ced5df"><span>示例电影</span><span>电影</span><span>草稿</span><span>编辑 · 发布 · 删除</span></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1.4fr;padding:14px;border-top:1px solid #ced5df"><span>示例剧集</span><span>剧集</span><span>已发布</span><span>查看 · 归档</span></div>
+        <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1.4fr;padding:14px;border-top:1px solid #ced5df"><span>另一部电影</span><span>电影</span><span>已归档</span><span>查看 · 发布 · 转草稿 · 删除</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="split" style="margin-top:22px">
+  <div class="mockup">
+    <div class="mockup-header">草稿编辑页</div>
+    <div class="mockup-body">
+      <input class="mock-input" placeholder="名称（必填）">
+      <input class="mock-input" style="margin-top:10px" placeholder="年份">
+      <div class="placeholder" style="height:80px;margin-top:10px">简介</div>
+      <div style="margin-top:10px"><button class="mock-button">选择题材</button></div>
+      <div class="placeholder" style="height:90px;margin-top:10px">上传 / 替换海报</div>
+      <div class="placeholder" style="height:90px;margin-top:10px">上传 / 替换视频</div>
+      <div style="display:flex;justify-content:flex-end;gap:9px;margin-top:14px"><button class="mock-button">保存草稿</button><button class="mock-button">发布</button></div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">剧集结构编辑</div>
+    <div class="mockup-body">
+      <h3>剧集名称</h3>
+      <div style="border:1px solid #ced5df;border-radius:10px;padding:12px;margin-top:12px">
+        <strong>第 1 季</strong>
+        <div style="padding:9px 0;border-top:1px solid #e3e6eb;margin-top:8px">第 1 集 · 用户输入名称　<span style="float:right">草稿 · 编辑</span></div>
+        <div style="padding:9px 0;border-top:1px solid #e3e6eb">第 2 集 · 用户输入名称　<span style="float:right">已发布 · 归档</span></div>
+        <button class="mock-button" style="margin-top:8px">＋ 添加单集</button>
+      </div>
+      <button class="mock-button" style="margin-top:12px">＋ 添加季</button>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:22px">
+  <h3>状态约束直接体现在界面上</h3>
+  <ul>
+    <li>草稿显示编辑、发布和永久删除；发布前执行完整性校验。</li>
+    <li>已发布仅显示查看和归档，所有字段与文件控件只读。</li>
+    <li>已归档仅显示查看、原样发布、转为草稿和永久删除。</li>
+    <li>删除确认框列出将被删除的季、集、海报和视频数量，要求再次输入内容名称确认。</li>
+  </ul>
+</div>

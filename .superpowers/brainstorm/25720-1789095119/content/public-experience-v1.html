@@ -1,0 +1,76 @@
+<h2>访客端体验：以内容发现和播放为核心</h2>
+<p class="subtitle">无需登录；不加入评论、收藏、评分或服务端观看历史。</p>
+
+<div class="mockup">
+  <div class="mockup-header">公开站 · 首页 / 浏览页</div>
+  <div class="mockup-body">
+    <div class="mock-nav" style="display:flex;gap:18px;align-items:center">
+      <strong>Movie Harbor</strong>
+      <span>首页</span><span>电影</span><span>剧集</span>
+      <input class="mock-input" style="margin-left:auto;max-width:260px" placeholder="搜索标题或简介">
+    </div>
+    <div style="display:flex;gap:10px;margin:18px 0;flex-wrap:wrap">
+      <button class="mock-button">全部题材</button>
+      <button class="mock-button">年份</button>
+      <button class="mock-button">最近发布</button>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px">
+      <div class="placeholder" style="height:170px">海报<br>电影</div>
+      <div class="placeholder" style="height:170px">海报<br>剧集</div>
+      <div class="placeholder" style="height:170px">海报<br>电影</div>
+      <div class="placeholder" style="height:170px">海报<br>剧集</div>
+      <div class="placeholder" style="height:170px">海报<br>电影</div>
+    </div>
+  </div>
+</div>
+
+<div class="split" style="margin-top:22px">
+  <div class="mockup">
+    <div class="mockup-header">电影详情</div>
+    <div class="mockup-body" style="display:grid;grid-template-columns:120px 1fr;gap:18px">
+      <div class="placeholder" style="height:180px">海报</div>
+      <div>
+        <h3>电影标题</h3>
+        <p>年份 · 时长 · 题材</p>
+        <p>内容简介显示在这里。</p>
+        <button class="mock-button">▶ 播放</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">剧集详情</div>
+    <div class="mockup-body">
+      <h3>剧集标题</h3>
+      <p>年份 · 题材</p>
+      <div style="display:flex;gap:8px;margin:12px 0"><button class="mock-button">第 1 季</button><button class="mock-button">第 2 季</button></div>
+      <div style="border-top:1px solid #ced5df;padding:10px 0"><strong>第 1 集 · 用户输入的集名称</strong></div>
+      <div style="border-top:1px solid #ced5df;padding:10px 0"><strong>第 2 集 · 用户输入的集名称</strong></div>
+    </div>
+  </div>
+</div>
+
+<div class="mockup" style="margin-top:22px">
+  <div class="mockup-header">播放页</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:2fr 1fr;gap:18px">
+    <div>
+      <div class="placeholder" style="height:250px;background:#1d222b;color:white">HTML5 视频播放器</div>
+      <h3>当前内容名称</h3>
+      <p>检测到本浏览器的进度时，询问“继续上次播放”或“从头播放”。</p>
+    </div>
+    <div style="border-left:1px solid #ced5df;padding-left:18px">
+      <h3>选集</h3>
+      <p>电影不显示此栏；剧集显示当前季的已发布单集，并提供上一集 / 下一集。</p>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:22px">
+  <h3>行为规则</h3>
+  <ul>
+    <li>全站只返回有效发布的内容；归档后详情地址也显示不存在。</li>
+    <li>搜索匹配电影/剧集标题和简介，不单独搜索单集。</li>
+    <li>筛选支持内容形态、题材和年份；结果默认按发布时间倒序。</li>
+    <li>观看进度按内容保存在浏览器本地，剧集额外记录最近观看单集。</li>
+  </ul>
+</div>

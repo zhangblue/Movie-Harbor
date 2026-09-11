@@ -1,0 +1,48 @@
+<h2>总体架构：两套前端 + 统一 API</h2>
+<p class="subtitle">首版保持单机 Docker Compose 部署，但公开体验、后台管理与服务端职责彼此独立。</p>
+
+<div class="mockup">
+  <div class="mockup-header">浏览器端</div>
+  <div class="mockup-body" style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+    <div style="border:1px solid #ced5df;border-radius:12px;padding:18px">
+      <div class="label">PUBLIC WEB</div>
+      <h3>公开媒体站</h3>
+      <p>无需登录：浏览、分类筛选、搜索、详情、播放、浏览器本地观看进度。</p>
+    </div>
+    <div style="border:1px solid #ced5df;border-radius:12px;padding:18px">
+      <div class="label">ADMIN WEB</div>
+      <h3>管理后台</h3>
+      <p>单一管理员登录：内容录入、季集维护、文件上传、发布、归档与永久删除。</p>
+    </div>
+  </div>
+</div>
+
+<div style="text-align:center;font-size:28px;line-height:1.5">↕ <span style="font-size:14px">统一 HTTP API</span> ↕</div>
+
+<div class="mockup">
+  <div class="mockup-header">服务端</div>
+  <div class="mockup-body">
+    <div style="border:2px solid #496a9f;border-radius:12px;padding:18px;margin-bottom:16px">
+      <div class="label">BACKEND API</div>
+      <h3>统一业务服务</h3>
+      <p>公开查询 API 与管理员 API 分区；内部包含认证、内容目录、发布流程、分类预置、文件登记和校验。</p>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:18px">
+        <div class="label">DATABASE</div>
+        <h3>关系型数据库</h3>
+        <p>电影、剧集、季、集、题材、状态及媒体元数据。</p>
+      </div>
+      <div style="border:1px solid #ced5df;border-radius:12px;padding:18px">
+        <div class="label">MEDIA VOLUME</div>
+        <h3>本地媒体卷</h3>
+        <p>海报和可直接播放的视频；发布后使用公开 URL，由反向代理高效传输。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:22px">
+  <h3>部署单元</h3>
+  <p>Docker Compose 编排公开站、管理后台、API、数据库四个服务，并挂载一个持久媒体目录。反向代理作为推荐的生产入口，但不强制内置。</p>
+</div>
