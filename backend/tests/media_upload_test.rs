@@ -1845,6 +1845,189 @@ async fn mp4_validation_rejects_an_additional_forbidden_sps() {
     assert!(result.is_err());
 }
 
+fn unsigned_exp_golomb_bits(value: u32) -> String {
+    let encoded = format!("{:b}", u64::from(value) + 1);
+    format!("{}{}", "0".repeat(encoded.len() - 1), encoded)
+}
+
+fn pack_h264_rbsp(mut bits: String) -> Vec<u8> {
+    bits.push('1');
+    while !bits.len().is_multiple_of(8) {
+        bits.push('0');
+    }
+    let raw = bits
+        .as_bytes()
+        .chunks(8)
+        .map(|byte| {
+            byte.iter()
+                .fold(0_u8, |value, bit| (value << 1) | (bit - b'0'))
+        })
+        .collect::<Vec<_>>();
+    let mut result = Vec::new();
+    let mut zeroes = 0;
+    for byte in raw {
+        if zeroes >= 2 && byte <= 3 {
+            result.push(3);
+            zeroes = 0;
+        }
+        result.push(byte);
+        zeroes = if byte == 0 { zeroes + 1 } else { 0 };
+    }
+    result
+}
+
+fn extreme_dimension_avcc() -> Vec<u8> {
+    let mut sps = vec![0x67, 66, 0, 30];
+    let mut sps_bits = [0, 0, 0, 0, 0].map(unsigned_exp_golomb_bits).concat();
+    sps_bits.push('0');
+    sps_bits += &unsigned_exp_golomb_bits(65_535);
+    sps_bits += &unsigned_exp_golomb_bits(65_535);
+    sps_bits += "1100";
+    sps.extend(pack_h264_rbsp(sps_bits));
+
+    let mut pps = vec![0x68];
+    let mut pps_bits = unsigned_exp_golomb_bits(0) + &unsigned_exp_golomb_bits(0) + "00";
+    pps_bits += &unsigned_exp_golomb_bits(1);
+    pps_bits += &unsigned_exp_golomb_bits(0);
+    pps_bits += &unsigned_exp_golomb_bits(0);
+    pps.extend(pack_h264_rbsp(pps_bits));
+
+    let mut payload = vec![1, 66, 0, 30, 0xff, 0xe1];
+    payload.extend((sps.len() as u16).to_be_bytes());
+    payload.extend(sps);
+    payload.push(1);
+    payload.extend((pps.len() as u16).to_be_bytes());
+    payload.extend(pps);
+    payload
+}
+
+fn dimension_slice_group_avcc(width: u32, height: u32, map_type: u32) -> Vec<u8> {
+    let mut sps = vec![0x67, 66, 0, 30];
+    let mut sps_bits = [0, 0, 0, 0, 0].map(unsigned_exp_golomb_bits).concat();
+    sps_bits.push('0');
+    sps_bits += &unsigned_exp_golomb_bits(width);
+    sps_bits += &unsigned_exp_golomb_bits(height);
+    sps_bits += "1100";
+    sps.extend(pack_h264_rbsp(sps_bits));
+
+    let mut pps = vec![0x68];
+    let mut pps_bits = unsigned_exp_golomb_bits(0) + &unsigned_exp_golomb_bits(0) + "00";
+    pps_bits += &unsigned_exp_golomb_bits(1);
+    pps_bits += &unsigned_exp_golomb_bits(map_type);
+    match map_type {
+        0 => {
+            pps_bits += &unsigned_exp_golomb_bits(0);
+            pps_bits += &unsigned_exp_golomb_bits(0);
+        }
+        1 => {}
+        2 => {
+            pps_bits += &unsigned_exp_golomb_bits(0);
+            pps_bits += &unsigned_exp_golomb_bits(0);
+        }
+        3..=5 => {
+            pps_bits.push('0');
+            pps_bits += &unsigned_exp_golomb_bits(0);
+        }
+        6 => pps_bits += &unsigned_exp_golomb_bits(u32::MAX),
+        _ => unreachable!(),
+    }
+    pps.extend(pack_h264_rbsp(pps_bits));
+
+    let mut payload = vec![1, 66, 0, 30, 0xff, 0xe1];
+    payload.extend((sps.len() as u16).to_be_bytes());
+    payload.extend(sps);
+    payload.push(1);
+    payload.extend((pps.len() as u16).to_be_bytes());
+    payload.extend(pps);
+    payload
+}
+
+fn replace_mp4_avcc(mut bytes: Vec<u8>, replacement: Vec<u8>) -> Vec<u8> {
+    let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
+    let old_size = u32::from_be_bytes(bytes[avcc - 4..avcc].try_into().unwrap()) as usize;
+    let delta = (replacement.len() + 8) as i64 - old_size as i64;
+    for index in 4..=avcc {
+        if [
+            b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"avc1", b"avcC",
+        ]
+        .iter()
+        .any(|kind| bytes[index..index + 4] == **kind)
+        {
+            let size = u32::from_be_bytes(bytes[index - 4..index].try_into().unwrap());
+            if index - 4 + size as usize > avcc {
+                bytes[index - 4..index]
+                    .copy_from_slice(&((i64::from(size) + delta) as u32).to_be_bytes());
+            }
+        }
+    }
+    bytes.splice(avcc + 4..avcc - 4 + old_size, replacement);
+    bytes
+}
+
+// Catches unbounded SPS dimensions overflowing inside dependent PPS slice-group parsing.
+#[tokio::test]
+async fn extreme_sps_dimensions_never_panic_during_pps_parsing() {
+    let bytes = replace_mp4_avcc(ffmpeg_high_h264_mp4(), extreme_dimension_avcc());
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (source, _) = Chunks::bytes(bytes);
+
+    let result = tokio::spawn(async move {
+        storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Video,
+                "extreme.mp4",
+                "video/mp4",
+                &policy(1_000_000),
+                source,
+            )
+            .await
+    })
+    .await;
+
+    assert!(result.is_ok(), "upload task panicked: {result:?}");
+    assert!(result.unwrap().is_err());
+}
+
+// Exercises all PPS slice-group branches with extreme Exp-Golomb dimensions and values.
+#[tokio::test]
+async fn extreme_h264_dimension_and_slice_group_variants_are_bounded_and_never_panic() {
+    for dimension in [512, 65_535, u32::MAX] {
+        for map_type in 0..=6 {
+            let bytes = replace_mp4_avcc(
+                ffmpeg_high_h264_mp4(),
+                dimension_slice_group_avcc(dimension, dimension, map_type),
+            );
+            let root = TempRoot::new();
+            let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+            let (source, _) = Chunks::bytes(bytes);
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                tokio::spawn(async move {
+                    storage
+                        .store(
+                            Uuid::new_v4(),
+                            MediaKind::Video,
+                            "extreme.mp4",
+                            "video/mp4",
+                            &policy(1_000_000),
+                            source,
+                        )
+                        .await
+                }),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("dimension {dimension}, map type {map_type} timed out"));
+            assert!(
+                result.is_ok(),
+                "dimension {dimension}, map type {map_type} panicked: {result:?}"
+            );
+            assert!(result.unwrap().is_err());
+        }
+    }
+}
+
 // Catches unchecked MP4 slicing and parser panics on arbitrary short malformed inputs.
 #[tokio::test]
 async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {

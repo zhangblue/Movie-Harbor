@@ -2,7 +2,11 @@ use super::MediaError;
 use h264_reader::{
     Context as H264Context,
     avcc::AvcDecoderConfigurationRecord,
-    nal::{Nal, RefNal, UnitType, pps::PicParamSetId},
+    nal::{
+        Nal, RefNal, UnitType,
+        pps::{PicParamSetId, PicParameterSet},
+        sps::{SeqParamSetId, SeqParameterSet},
+    },
     rbsp::BitRead,
 };
 use image::{ImageFormat, ImageReader, Limits};
@@ -1077,13 +1081,138 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
         return None;
     }
     let avcc = AvcDecoderConfigurationRecord::try_from(payload).ok()?;
-    let context = avcc.create_context().ok()?;
+    let context = build_validated_h264_context(&avcc)?;
     (context.sps().count() == usize::from(sps_count)
         && context.pps().count() == usize::from(pps_count))
     .then_some(H264Configuration {
         nal_length_bytes: width,
         context,
     })
+}
+
+fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Option<H264Context> {
+    let mut context = H264Context::new();
+    for encoded in avcc.sequence_parameter_sets() {
+        let encoded = encoded.ok()?;
+        let nal = RefNal::new(encoded, &[], true);
+        let sps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            SeqParameterSet::from_bits(nal.rbsp_bits())
+        }))
+        .ok()?
+        .ok()?;
+        if !safe_sps_for_dependent_parsing(&sps) {
+            return None;
+        }
+        context.put_seq_param_set(sps);
+    }
+    for encoded in avcc.picture_parameter_sets() {
+        let encoded = encoded.ok()?;
+        let nal = RefNal::new(encoded, &[], true);
+        if !prevalidate_pps_slice_groups(&nal, &context) {
+            return None;
+        }
+        let pps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            PicParameterSet::from_bits(&context, nal.rbsp_bits())
+        }))
+        .ok()?
+        .ok()?;
+        context.put_pic_param_set(pps);
+    }
+    Some(context)
+}
+
+fn safe_sps_for_dependent_parsing(sps: &SeqParameterSet) -> bool {
+    let Some(width_in_mbs) = sps.pic_width_in_mbs_minus1.checked_add(1) else {
+        return false;
+    };
+    let Some(height_in_map_units) = sps.pic_height_in_map_units_minus1.checked_add(1) else {
+        return false;
+    };
+    let max_macroblocks_per_axis = MAX_DIMENSION / 16;
+    if width_in_mbs > max_macroblocks_per_axis
+        || height_in_map_units > max_macroblocks_per_axis
+        || width_in_mbs.checked_mul(height_in_map_units).is_none()
+    {
+        return false;
+    }
+    sps.pixel_dimensions().is_ok_and(|(width, height)| {
+        width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION
+    })
+}
+
+fn prevalidate_pps_slice_groups(nal: &RefNal<'_>, context: &H264Context) -> bool {
+    let mut bits = nal.rbsp_bits();
+    let Ok(pps_id) = bits.read_ue("pic_parameter_set_id") else {
+        return false;
+    };
+    if PicParamSetId::from_u32(pps_id).is_err() {
+        return false;
+    }
+    let Ok(sps_id) = bits.read_ue("seq_parameter_set_id") else {
+        return false;
+    };
+    let Ok(sps_id) = SeqParamSetId::from_u32(sps_id) else {
+        return false;
+    };
+    let Some(sps) = context.sps_by_id(sps_id) else {
+        return false;
+    };
+    if bits.read_bool("entropy_coding_mode_flag").is_err()
+        || bits
+            .read_bool("bottom_field_pic_order_in_frame_present_flag")
+            .is_err()
+    {
+        return false;
+    }
+    let Ok(slice_groups_minus_one) = bits.read_ue("num_slice_groups_minus1") else {
+        return false;
+    };
+    if slice_groups_minus_one == 0 {
+        return true;
+    }
+    if slice_groups_minus_one > 7 {
+        return false;
+    }
+    let Some(pic_size) = sps
+        .pic_width_in_mbs_minus1
+        .checked_add(1)
+        .and_then(|width| {
+            sps.pic_height_in_map_units_minus1
+                .checked_add(1)
+                .and_then(|height| width.checked_mul(height))
+        })
+    else {
+        return false;
+    };
+    let Ok(map_type) = bits.read_ue("slice_group_map_type") else {
+        return false;
+    };
+    match map_type {
+        0 => (0..=slice_groups_minus_one).all(|_| {
+            bits.read_ue("run_length_minus1")
+                .is_ok_and(|value| value < pic_size)
+        }),
+        1 => true,
+        2 => (0..slice_groups_minus_one).all(|_| {
+            let Ok(top_left) = bits.read_ue("top_left") else {
+                return false;
+            };
+            let Ok(bottom_right) = bits.read_ue("bottom_right") else {
+                return false;
+            };
+            top_left <= bottom_right && bottom_right < pic_size
+        }),
+        3..=5 => {
+            bits.read_bool("slice_group_change_direction_flag").is_ok()
+                && bits
+                    .read_ue("slice_group_change_rate_minus1")
+                    .is_ok_and(|value| value < pic_size)
+        }
+        6 => bits
+            .read_ue("pic_size_in_map_units_minus1")
+            .is_ok_and(|value| value < pic_size),
+        _ => false,
+    }
 }
 
 fn is_high_avc_profile(profile: u8) -> bool {
