@@ -131,6 +131,13 @@ pub struct StoredFile {
 }
 
 impl StoredFile {
+    pub(crate) fn take_mutation_guard(&mut self) -> Result<OwnedMutexGuard<()>, MediaError> {
+        self.cleanup
+            .as_mut()
+            .and_then(|cleanup| cleanup._mutation_guard.take())
+            .ok_or_else(|| io::Error::other("stored file has no mutation guard").into())
+    }
+
     pub(crate) fn begin_database_write(&mut self) {
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.destructive = false;

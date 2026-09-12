@@ -81,6 +81,16 @@ pub(crate) async fn acquire(storage: &LocalMediaStorage) -> Result<RemovalSessio
     })
 }
 
+pub(crate) fn continue_with_guard(
+    storage: &LocalMediaStorage,
+    guard: OwnedMutexGuard<()>,
+) -> RemovalSession {
+    RemovalSession {
+        storage: storage.clone(),
+        guard,
+    }
+}
+
 impl RemovalSession {
     pub(crate) fn stage(
         self,

@@ -3,7 +3,7 @@ use axum::{
     body::{Body, Bytes},
     extract::ConnectInfo,
     http::{Request, StatusCode},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use http_body_util::BodyExt;
 use image::{ExtendedColorType, ImageEncoder};
@@ -418,6 +418,44 @@ impl ChunkSource for PausingChunks {
 
 struct FailFirstUnlink {
     failed: AtomicBool,
+}
+
+struct FailFirstStage {
+    failed: AtomicBool,
+}
+
+struct MakeOperationReadOnlyAfterCommit {
+    root: PathBuf,
+    operation: Mutex<Option<PathBuf>>,
+}
+
+impl StorageHooks for MakeOperationReadOnlyAfterCommit {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if !matches!(event, StorageEvent::DatabaseCommitted(_)) {
+            return Ok(());
+        }
+        let operation = std::fs::read_dir(self.root.join(".operations"))?
+            .next()
+            .ok_or_else(|| std::io::Error::other("missing staged replacement operation"))??
+            .path();
+        std::fs::set_permissions(&operation, std::fs::Permissions::from_mode(0o500))?;
+        *self.operation.lock().unwrap() = Some(operation);
+        Ok(())
+    }
+}
+
+impl StorageHooks for FailFirstStage {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::BeforeStage(_))
+            && !self.failed.swap(true, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected replacement staging failure with sensitive detail",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl StorageHooks for FailFirstUnlink {
@@ -2139,9 +2177,79 @@ async fn byte_limit_is_enforced_while_streaming_and_stops_polling() {
     );
 }
 
-// Catches switching the database reference before the cleanup job is durably recorded.
+// Catches a failed old-file stage switching the reference or leaking the promoted replacement.
 #[tokio::test]
 async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let base_storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (old_source, _) = Chunks::new([PNG]);
+    let old = store_new_asset(
+        &db,
+        &base_storage,
+        MediaKind::Poster,
+        "old.png",
+        "image/png",
+        &policy(1024),
+        old_source,
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(old.id)).await;
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(FailFirstStage {
+            failed: AtomicBool::new(false),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (new_source, _) = Chunks::new([jpeg()]);
+    let error = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
+        "new.jpg",
+        "image/jpeg",
+        &policy(1024),
+        new_source,
+    )
+    .await
+    .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        response,
+        json!({"error":"media replacement failed","code":"media_replace_failed"})
+    );
+
+    let unchanged = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(unchanged.poster_asset_id, Some(old.id));
+    assert!(only_file(root.as_ref(), &old.storage_key).await);
+    assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
+    assert_eq!(count_files(root.as_ref()), 1);
+    assert!(
+        file_cleanup_job::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Catches a database commit failure leaving the old file staged or the new file registered.
+#[tokio::test]
+async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact() {
     let db = database().await;
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2159,32 +2267,38 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     .unwrap();
     let movie = draft_movie(&db, Some(old.id)).await;
     db.execute_unprepared(
-        "CREATE FUNCTION reject_cleanup_insert() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN RAISE EXCEPTION 'forced cleanup failure'; END $$; \
-         CREATE TRIGGER reject_cleanup_insert BEFORE INSERT ON file_cleanup_job \
-         FOR EACH ROW EXECUTE FUNCTION reject_cleanup_insert()",
+        "CREATE FUNCTION reject_replaced_asset_delete() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'forced deferred replacement failure'; END $$; \
+         CREATE CONSTRAINT TRIGGER reject_replaced_asset_delete \
+         AFTER DELETE ON media_asset DEFERRABLE INITIALLY DEFERRED \
+         FOR EACH ROW EXECUTE FUNCTION reject_replaced_asset_delete()",
     )
     .await
     .unwrap();
 
     let (new_source, _) = Chunks::new([jpeg()]);
-    assert!(
-        replace_attachment(
-            &db,
-            &storage,
-            AttachmentTarget::MoviePoster {
-                id: movie.id,
-                version: 1,
-            },
-            "new.jpg",
-            "image/jpeg",
-            &policy(1024),
-            new_source,
-        )
-        .await
-        .is_err()
+    let error = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
+        "new.jpg",
+        "image/jpeg",
+        &policy(1024),
+        new_source,
+    )
+    .await
+    .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        response,
+        json!({"error":"media replacement failed","code":"media_replace_failed"})
     );
-
     let unchanged = movie::Entity::find_by_id(movie.id)
         .one(&db)
         .await
@@ -2192,8 +2306,110 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
         .unwrap();
     assert_eq!(unchanged.poster_asset_id, Some(old.id));
     assert!(only_file(root.as_ref(), &old.storage_key).await);
+    assert!(
+        media_asset::Entity::find_by_id(old.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
     assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
     assert_eq!(count_files(root.as_ref()), 1);
+    assert!(
+        file_cleanup_job::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Catches a post-commit finish failure losing the durable removal manifest or reporting success.
+#[tokio::test]
+async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let base_storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (old_source, _) = Chunks::new([PNG]);
+    let old = store_new_asset(
+        &db,
+        &base_storage,
+        MediaKind::Poster,
+        "old.png",
+        "image/png",
+        &policy(1024),
+        old_source,
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(old.id)).await;
+    let hooks = Arc::new(MakeOperationReadOnlyAfterCommit {
+        root: root.as_ref().to_owned(),
+        operation: Mutex::new(None),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+
+    let (new_source, _) = Chunks::new([jpeg()]);
+    let error = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
+        "new.jpg",
+        "image/jpeg",
+        &policy(1024),
+        new_source,
+    )
+    .await
+    .unwrap_err();
+    let operation = hooks.operation.lock().unwrap().clone().unwrap();
+    std::fs::set_permissions(&operation, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        response,
+        json!({"error":"media replacement failed","code":"media_replace_failed"})
+    );
+    let updated = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(updated.poster_asset_id, Some(old.id));
+    let new = media_asset::Entity::find_by_id(updated.poster_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(only_file(root.as_ref(), &new.storage_key).await);
+    assert!(!root.as_ref().join(&old.storage_key).exists());
+    assert!(
+        media_asset::Entity::find_by_id(old.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        file_cleanup_job::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let operations = std::fs::read_dir(root.as_ref().join(".operations"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    assert_eq!(operations.len(), 1);
+    assert!(operations[0].join("manifest.json").is_file());
+    assert!(operations[0].join("00000000.data").is_file());
 }
 
 // Catches media routes bypassing the content lifecycle's draft-only editing rule.
@@ -2244,9 +2460,157 @@ async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
     assert_eq!(count_files(root.as_ref()), 1);
 }
 
-// Catches deleting the old file before commit or forgetting to enqueue it after a successful switch.
+// Catches any slot retaining the old asset/file or falling back to asynchronous cleanup.
 #[tokio::test]
-async fn successful_replacement_keeps_old_file_until_a_cleanup_job_runs() {
+async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let mut old_assets = Vec::new();
+    for (kind, name, mime, bytes) in [
+        (
+            MediaKind::Poster,
+            "movie-poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ),
+        (
+            MediaKind::Video,
+            "movie-video.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+        (
+            MediaKind::Poster,
+            "series-poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ),
+        (
+            MediaKind::Video,
+            "episode-video.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+    ] {
+        let (source, _) = Chunks::bytes(bytes);
+        old_assets.push(
+            store_new_asset(&db, &storage, kind, name, mime, &policy(4096), source)
+                .await
+                .unwrap(),
+        );
+    }
+    let movie = movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Movie slots".into()),
+        synopsis: Set(String::new()),
+        poster_asset_id: Set(Some(old_assets[0].id)),
+        video_asset_id: Set(Some(old_assets[1].id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let series = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Series slots".into()),
+        synopsis: Set(String::new()),
+        poster_asset_id: Set(Some(old_assets[2].id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season = season::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        series_id: Set(series.id),
+        number: Set(1),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let episode = episode::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        season_id: Set(season.id),
+        number: Set(1),
+        name: Set("Episode slot".into()),
+        video_asset_id: Set(Some(old_assets[3].id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let replacements = [
+        (
+            AttachmentTarget::MoviePoster {
+                id: movie.id,
+                version: 1,
+            },
+            "new-movie-poster.jpg",
+            "image/jpeg",
+            jpeg().to_vec(),
+        ),
+        (
+            AttachmentTarget::MovieVideo {
+                id: movie.id,
+                version: 2,
+            },
+            "new-movie-video.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+        (
+            AttachmentTarget::SeriesPoster {
+                id: series.id,
+                version: 1,
+            },
+            "new-series-poster.jpg",
+            "image/jpeg",
+            jpeg().to_vec(),
+        ),
+        (
+            AttachmentTarget::EpisodeVideo {
+                id: episode.id,
+                version: 1,
+            },
+            "new-episode-video.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+    ];
+    for ((target, name, mime, bytes), old) in replacements.into_iter().zip(&old_assets) {
+        let (source, _) = Chunks::bytes(bytes);
+        let new = replace_attachment(&db, &storage, target, name, mime, &policy(4096), source)
+            .await
+            .unwrap();
+        assert!(only_file(root.as_ref(), &new.storage_key).await);
+        assert!(!root.as_ref().join(&old.storage_key).exists());
+        assert!(
+            media_asset::Entity::find_by_id(old.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            file_cleanup_job::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+// Catches a legacy cleanup job blocking synchronous deletion or surviving a replacement.
+#[tokio::test]
+async fn replacement_removes_a_preexisting_cleanup_job_with_the_old_asset() {
     let db = database().await;
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2263,6 +2627,14 @@ async fn successful_replacement_keeps_old_file_until_a_cleanup_job_runs() {
     .await
     .unwrap();
     let movie = draft_movie(&db, Some(old.id)).await;
+    file_cleanup_job::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        media_asset_id: Set(old.id),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
 
     let (new_source, _) = Chunks::new([jpeg()]);
     let new = replace_attachment(
@@ -2278,85 +2650,6 @@ async fn successful_replacement_keeps_old_file_until_a_cleanup_job_runs() {
         new_source,
     )
     .await
-    .unwrap();
-
-    let updated = movie::Entity::find_by_id(movie.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(updated.poster_asset_id, Some(new.id));
-    assert_eq!(updated.version, 2);
-    assert!(only_file(root.as_ref(), &old.storage_key).await);
-    assert!(only_file(root.as_ref(), &new.storage_key).await);
-    let jobs = file_cleanup_job::Entity::find().all(&db).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].media_asset_id, old.id);
-}
-
-// Catches a previously queued asset making every later replacement fail after reassociation.
-#[tokio::test]
-async fn replacement_cleanup_enqueue_is_idempotent_after_asset_reassociation() {
-    let db = database().await;
-    let root = TempRoot::new();
-    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    let (old_source, _) = Chunks::new([PNG]);
-    let old = store_new_asset(
-        &db,
-        &storage,
-        MediaKind::Poster,
-        "old.png",
-        "image/png",
-        &policy(1024),
-        old_source,
-    )
-    .await
-    .unwrap();
-    let movie = draft_movie(&db, Some(old.id)).await;
-    let (first_source, _) = Chunks::new([jpeg()]);
-    let first = replace_attachment(
-        &db,
-        &storage,
-        AttachmentTarget::MoviePoster {
-            id: movie.id,
-            version: 1,
-        },
-        "first.jpg",
-        "image/jpeg",
-        &policy(1024),
-        first_source,
-    )
-    .await
-    .unwrap();
-    let current = movie::Entity::find_by_id(movie.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    let reassociated = movie_harbor_api::movies::service::associate_media(
-        &db,
-        movie.id,
-        old.id,
-        current.version,
-        movie_harbor_api::movies::service::MediaSlot::Poster,
-    )
-    .await
-    .unwrap();
-
-    let (second_source, _) = Chunks::new([jpeg()]);
-    let second = replace_attachment(
-        &db,
-        &storage,
-        AttachmentTarget::MoviePoster {
-            id: movie.id,
-            version: reassociated.version,
-        },
-        "second.jpg",
-        "image/jpeg",
-        &policy(1024),
-        second_source,
-    )
-    .await
     .expect("a pre-existing cleanup job must not poison replacement");
 
     let current = movie::Entity::find_by_id(movie.id)
@@ -2364,15 +2657,22 @@ async fn replacement_cleanup_enqueue_is_idempotent_after_asset_reassociation() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(current.poster_asset_id, Some(second.id));
-    let queued = file_cleanup_job::Entity::find()
-        .all(&db)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|job| job.media_asset_id)
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(queued, std::collections::HashSet::from([old.id, first.id]));
+    assert_eq!(current.poster_asset_id, Some(new.id));
+    assert!(!root.as_ref().join(old.storage_key).exists());
+    assert!(
+        media_asset::Entity::find_by_id(old.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        file_cleanup_job::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 // Catches omitting the route or bypassing the shared administrator middleware.

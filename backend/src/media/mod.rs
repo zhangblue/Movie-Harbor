@@ -49,6 +49,7 @@ pub enum MediaError {
     InvalidVersion,
     VersionConflict,
     StillReferenced,
+    ReplacementFailed,
     Io(io::Error),
     Database(sea_orm::DbErr),
     Multipart(String),
@@ -68,6 +69,7 @@ impl fmt::Display for MediaError {
             Self::InvalidVersion => "invalid content version",
             Self::VersionConflict => "content version conflict",
             Self::StillReferenced => "media asset is still referenced",
+            Self::ReplacementFailed => "media replacement failed",
             Self::Io(_) => "media filesystem operation failed",
             Self::Database(_) => "media database operation failed",
             Self::Multipart(_) => "invalid multipart upload",
@@ -100,6 +102,16 @@ impl From<sea_orm::DbErr> for MediaError {
 
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
+        if matches!(self, Self::ReplacementFailed) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "media replacement failed",
+                    "code": "media_replace_failed"
+                })),
+            )
+                .into_response();
+        }
         let status = match self {
             Self::InvalidFileName | Self::InvalidVersion | Self::Empty | Self::Multipart(_) => {
                 StatusCode::BAD_REQUEST
@@ -108,7 +120,7 @@ impl IntoResponse for MediaError {
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TargetNotFound => StatusCode::NOT_FOUND,
             Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
-            Self::InvalidStorageKey | Self::Io(_) | Self::Database(_) => {
+            Self::InvalidStorageKey | Self::ReplacementFailed | Self::Io(_) | Self::Database(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
