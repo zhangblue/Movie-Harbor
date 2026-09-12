@@ -53,6 +53,7 @@ pub enum StorageEvent {
     BeforePromote(String),
     Promoted(String),
     BeforeStage(String),
+    AfterStageRename(String),
     BeforeUnlink(String),
     Unlinked(String),
     BeforeDirectorySync(String),
@@ -68,6 +69,12 @@ pub trait StorageHooks: Send + Sync {
     /// Deterministic durability fault seam, sampled before the atomic claim.
     /// Production hooks leave this disabled.
     fn fail_next_post_unlink_sync(&self) -> bool {
+        false
+    }
+
+    /// Deterministic durability fault seam, sampled before the atomic move.
+    /// Production hooks leave this disabled.
+    fn fail_next_post_stage_sync(&self) -> bool {
         false
     }
 }
@@ -701,6 +708,7 @@ impl LocalMediaStorage {
         source: &RemovalSource,
         staged_name: &str,
     ) -> Result<(), MediaError> {
+        let fail_post_stage_sync = self.hooks.fail_next_post_stage_sync();
         self.hooks
             .on_event(&StorageEvent::BeforeStage(source.storage_key.clone()))?;
         let before = statat(
@@ -723,6 +731,11 @@ impl LocalMediaStorage {
             RenameFlags::NOREPLACE,
         )
         .map_err(io::Error::from)?;
+        self.hooks
+            .on_event(&StorageEvent::AfterStageRename(source.storage_key.clone()))?;
+        if fail_post_stage_sync {
+            return Err(io::Error::other("injected post-stage sync failure").into());
+        }
         sync_fd(&source.leaf)?;
         sync_fd(&operation.directory)?;
         Ok(())
@@ -779,6 +792,17 @@ impl LocalMediaStorage {
         &self,
         operation: &RemovalOperation,
     ) -> Result<(), MediaError> {
+        let directory =
+            rustix::fs::Dir::read_from(&operation.directory).map_err(io::Error::from)?;
+        for entry in directory {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_string_lossy();
+            if name != "." && name != ".." && name != "manifest.json" {
+                return Err(
+                    io::Error::other("removal operation still contains staged data").into(),
+                );
+            }
+        }
         remove_if_present(&operation.directory, "manifest.json")?;
         sync_fd(&operation.directory)?;
         unlinkat(

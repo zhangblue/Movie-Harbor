@@ -98,6 +98,102 @@ struct FailSecondMove {
     saw_manifest: AtomicBool,
 }
 
+struct FailPostRenameSync {
+    failed: AtomicBool,
+}
+
+impl StorageHooks for FailPostRenameSync {
+    fn fail_next_post_stage_sync(&self) -> bool {
+        !self.failed.swap(true, Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn post_rename_sync_failure_restores_the_current_file() {
+    let root = TempRoot::new();
+    let hooks = Arc::new(FailPostRenameSync {
+        failed: AtomicBool::new(false),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
+        .await
+        .unwrap();
+    let asset = registered_file(
+        root.as_ref(),
+        "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4",
+        b"original-video",
+    )
+    .await;
+
+    assert!(matches!(
+        removal::stage(&storage, "delete-episode", std::slice::from_ref(&asset)).await,
+        Err(MediaError::Io(_))
+    ));
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(&asset.storage_key))
+            .await
+            .unwrap(),
+        b"original-video"
+    );
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+}
+
+struct LeaveResidualStagedData {
+    root: PathBuf,
+    failed: AtomicBool,
+}
+
+impl StorageHooks for LeaveResidualStagedData {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::AfterStageRename(_)) {
+            let operation = std::fs::read_dir(self.root.join(".operations"))?
+                .next()
+                .expect("the removal operation exists")?
+                .path();
+            std::fs::write(operation.join("untracked.data"), b"residual")?;
+        }
+        Ok(())
+    }
+
+    fn fail_next_post_stage_sync(&self) -> bool {
+        !self.failed.swap(true, Ordering::SeqCst)
+    }
+}
+
+#[tokio::test]
+async fn close_with_residual_staged_data_preserves_the_manifest() {
+    let root = TempRoot::new();
+    let storage_key = "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4";
+    let hooks = Arc::new(LeaveResidualStagedData {
+        root: root.as_ref().to_owned(),
+        failed: AtomicBool::new(false),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks)
+        .await
+        .unwrap();
+    let asset = registered_file(root.as_ref(), storage_key, b"original-video").await;
+
+    assert!(matches!(
+        removal::stage(&storage, "delete-episode", &[asset]).await,
+        Err(MediaError::Io(_))
+    ));
+    let operations = operation_directories(root.as_ref()).await;
+    assert_eq!(operations.len(), 1);
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(storage_key))
+            .await
+            .unwrap(),
+        b"original-video"
+    );
+    assert!(!operations[0].join("00000000.data").exists());
+    assert_eq!(
+        tokio::fs::read(operations[0].join("untracked.data"))
+            .await
+            .unwrap(),
+        b"residual"
+    );
+    assert!(operations[0].join("manifest.json").is_file());
+}
+
 impl StorageHooks for FailSecondMove {
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if let StorageEvent::BeforeStage(_) = event {

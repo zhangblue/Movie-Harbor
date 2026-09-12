@@ -93,8 +93,15 @@ pub async fn stage(
     let operation = storage.create_removal_operation(operation_id, &encoded)?;
     let mut entries: Vec<StagedEntry> = Vec::new();
     for ((_, source), manifest_entry) in prepared.into_iter().zip(&manifest.entries) {
+        entries.push(StagedEntry {
+            source,
+            staged_name: manifest_entry.staged_name.clone(),
+        });
+        let current = entries
+            .last()
+            .expect("the current removal entry was pushed");
         if let Err(error) =
-            storage.stage_removal_source(&operation, &source, &manifest_entry.staged_name)
+            storage.stage_removal_source(&operation, &current.source, &current.staged_name)
         {
             for entry in entries.iter().rev() {
                 storage.restore_removal_source(&operation, &entry.source, &entry.staged_name)?;
@@ -102,10 +109,6 @@ pub async fn stage(
             storage.close_removal_operation(&operation)?;
             return Err(error);
         }
-        entries.push(StagedEntry {
-            source,
-            staged_name: manifest_entry.staged_name.clone(),
-        });
     }
     Ok(StagedRemoval {
         storage: storage.clone(),
