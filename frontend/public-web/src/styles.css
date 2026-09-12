@@ -64,6 +64,7 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
 .resume-prompt p { margin: 0 0 14px; }
 .player-actions, .episode-navigation { display: flex; gap: 10px; }
 .episode-navigation { margin-top: 22px; }
+.episode-navigation .pill { white-space: normal; text-align: left; }
 .episode-picker { min-width: 0; padding: 22px; border: 1px solid var(--mh-color-border); border-radius: var(--mh-radius-lg); background: var(--mh-color-surface); }
 .episode-picker h2 { margin-top: 0; }
 .episode-picker-list { display: grid; gap: 7px; margin-top: 18px; }

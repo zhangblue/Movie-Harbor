@@ -57,6 +57,10 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate }: {
 
   if (!selected?.video_url) return <NotFound />;
   const currentIndex = episodes.findIndex((episode) => episode.id === selected.id);
+  const previous = currentIndex > 0 ? episodes[currentIndex - 1] : undefined;
+  const next = currentIndex < episodes.length - 1 ? episodes[currentIndex + 1] : undefined;
+  const navigationLabel = (direction: "上一集" | "下一集", episode?: OrderedEpisode) =>
+    episode ? `${direction}：第 ${episode.number} 集 · ${episode.name}` : direction;
   const choose = (episode: OrderedEpisode) => {
     setRecentEpisode(`series:${detail.id}`, episode.id);
     navigate(seriesPlaybackPath(detail.id, episode.id));
@@ -70,8 +74,8 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate }: {
         <p className="eyebrow">{detail.name} · 第 {selected.seasonNumber} 季</p>
         <h1>第 {selected.number} 集 · {selected.name}</h1>
         <div className="episode-navigation">
-          <button type="button" className="pill" disabled={currentIndex === 0} onClick={() => choose(episodes[currentIndex - 1]!)}>上一集</button>
-          <button type="button" className="pill" disabled={currentIndex === episodes.length - 1} onClick={() => choose(episodes[currentIndex + 1]!)}>下一集</button>
+          <button type="button" className="pill" disabled={!previous} onClick={() => { if (previous) choose(previous); }}>{navigationLabel("上一集", previous)}</button>
+          <button type="button" className="pill" disabled={!next} onClick={() => { if (next) choose(next); }}>{navigationLabel("下一集", next)}</button>
         </div>
       </div>
       <EpisodePicker key={selected.id} seasons={detail.seasons} current={selected} select={choose} />

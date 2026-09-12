@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
@@ -149,11 +149,11 @@ it("deep-links to the recent episode, keeps episode keys isolated, and navigates
 
   expect(await screen.findByRole("heading", { name: "第 3 集 · 灯塔" })).toBeInTheDocument();
   expect(window.location.pathname).toBe("/series/series-1/play/ep-2");
-  expect(screen.getByRole("button", { name: "下一集" })).toBeEnabled();
-  await user.click(screen.getByRole("button", { name: "上一集" }));
+  expect(screen.getByRole("button", { name: "下一集：第 1 集 · 归途" })).toBeEnabled();
+  await user.click(screen.getByRole("button", { name: "上一集：第 1 集 · 启程" }));
   expect(window.location.pathname).toBe("/series/series-1/play/ep-1");
   expect(screen.getByRole("button", { name: "上一集" })).toBeDisabled();
-  expect(screen.getByRole("button", { name: "下一集" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "下一集：第 3 集 · 灯塔" })).toBeEnabled();
   expect(screen.getByRole("button", { name: "继续播放" })).toBeInTheDocument();
   expect(getProgress("episode:ep-2")?.position).toBe(80);
 
@@ -162,22 +162,41 @@ it("deep-links to the recent episode, keeps episode keys isolated, and navigates
   expect(await screen.findByRole("heading", { name: "第 3 集 · 灯塔" })).toBeInTheDocument();
 });
 
+it("shows each available adjacent episode name while retaining boundary labels", async () => {
+  window.history.replaceState(null, "", "/series/series-1/play/ep-2");
+  serve(() => json({ ...series, seasons: series.seasons.filter((season) => season.number === 1) }));
+  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+  render(<App />);
+
+  await screen.findByRole("heading", { name: "第 3 集 · 灯塔" });
+  const previous = screen.getByRole("button", { name: "上一集：第 1 集 · 启程" });
+  expect(previous).toBeEnabled();
+  expect(previous).toHaveTextContent("上一集：第 1 集 · 启程");
+  expect(screen.getByRole("button", { name: "下一集" })).toBeDisabled();
+
+  await user.click(previous);
+  expect(screen.getByRole("button", { name: "上一集" })).toBeDisabled();
+  const next = screen.getByRole("button", { name: "下一集：第 3 集 · 灯塔" });
+  expect(next).toBeEnabled();
+  expect(next).toHaveTextContent("下一集：第 3 集 · 灯塔");
+});
+
 it("selects episodes in season and episode order and disables the final next button", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-1");
   serve(() => json(series));
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
   render(<App />);
   await screen.findByRole("heading", { name: "第 1 集 · 启程" });
-  expect(screen.getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))
+  expect(within(screen.getByRole("complementary", { name: "选集" })).getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
   await user.click(screen.getByRole("button", { name: "第 2 季" }));
   expect(screen.getByRole("button", { name: "第 1 集 · 归途" })).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "第 1 集 · 归途" }));
   expect(screen.getByRole("button", { name: "下一集" })).toBeDisabled();
   expect(window.location.pathname).toBe("/series/series-1/play/ep-3");
-  await user.click(screen.getByRole("button", { name: "上一集" }));
+  await user.click(screen.getByRole("button", { name: "上一集：第 3 集 · 灯塔" }));
   expect(screen.getByRole("button", { name: "第 1 季" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))
+  expect(within(screen.getByRole("complementary", { name: "选集" })).getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
 });
 
@@ -188,8 +207,8 @@ it("does not revive a previously browsed season after navigating away and back t
   render(<App />);
   await screen.findByRole("heading", { name: "第 1 集 · 启程" });
   await user.click(screen.getByRole("button", { name: "第 2 季" }));
-  await user.click(screen.getByRole("button", { name: "下一集" }));
-  await user.click(screen.getByRole("button", { name: "上一集" }));
+  await user.click(screen.getByRole("button", { name: "下一集：第 3 集 · 灯塔" }));
+  await user.click(screen.getByRole("button", { name: "上一集：第 1 集 · 启程" }));
 
   expect(screen.getByRole("button", { name: "第 1 季" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "第 1 集 · 启程" })).toHaveAttribute("aria-current", "true");
