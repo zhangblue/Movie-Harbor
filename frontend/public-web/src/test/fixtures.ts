@@ -21,11 +21,12 @@ export const series: SeriesDetail = {
   poster_url: "/media/poster-2", genres: seriesCard.genres,
   seasons: [
     { id: "season-2", number: 2, episodes: [
-      { id: "ep-3", number: 1, name: "归途", synopsis: "第二次旅程", duration_seconds: 1800, video_url: "/media/ep-3" },
+      { id: "ep-3", number: 1, name: "归途", duration_seconds: 1800, video_url: "/media/ep-3" },
     ] },
     { id: "season-1", number: 1, episodes: [
-      { id: "ep-2", number: 3, name: "灯塔", synopsis: "照亮前路", duration_seconds: 2400, video_url: "/media/ep-2" },
-      { id: "ep-1", number: 1, name: "启程", synopsis: "第一步", duration_seconds: 2100, video_url: "/media/ep-1" },
+      { id: "ep-2", number: 3, name: "灯塔", duration_seconds: 2400, video_url: "/media/ep-2" },
+      { id: "ep-1", number: 1, name: "启程", duration_seconds: 2100, video_url: "/media/ep-1" },
+      { id: "ep-4", number: 4, name: "静默航线", duration_seconds: null, video_url: null },
     ] },
   ],
 };

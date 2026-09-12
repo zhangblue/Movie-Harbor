@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
@@ -27,11 +27,20 @@ it("orders seasons and episodes, switches season, and uses only API-returned adm
   await screen.findByRole("heading", { level: 1, name: "群星之间" });
   const seasons = screen.getAllByRole("button", { name: /第 \d 季/ });
   expect(seasons.map((button) => button.textContent)).toEqual(["第 1 季", "第 2 季"]);
-  expect(screen.getAllByRole("link", { name: /第 \d 集/ }).map((link) => link.textContent))
+  const episodeList = screen.getByRole("list", { name: "第 1 季单集" });
+  expect(episodeList).toHaveClass("episode-list");
+  expect(screen.getByRole("link", { name: "第 1 集 · 启程，35 分钟" })).toBeInTheDocument();
+  expect(screen.getByText("40 分钟")).toBeInTheDocument();
+  expect(screen.queryByText("第一步")).not.toBeInTheDocument();
+  expect(screen.getAllByRole("link", { name: /第 \d 集/ }).map((link) => link.querySelector(".episode-name")?.textContent))
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
+  const unavailable = within(episodeList).getByText("第 4 集 · 静默航线（暂无可播放视频）").closest("div");
+  expect(unavailable).toHaveClass("episode-card", "is-unavailable");
+  expect(within(episodeList).queryByRole("link", { name: /静默航线/ })).not.toBeInTheDocument();
+  expect(within(episodeList).getByText("时长未知")).toBeInTheDocument();
   expect(screen.queryByText(/第 2 集/)).not.toBeInTheDocument();
   await user.click(seasons[1]!);
-  expect(screen.getByRole("link", { name: "第 1 集 · 归途" })).toHaveAttribute("href", "/series/series-1/play/ep-3");
+  expect(screen.getByRole("link", { name: "第 1 集 · 归途，30 分钟" })).toHaveAttribute("href", "/series/series-1/play/ep-3");
   expect(screen.queryByRole("link", { name: /启程/ })).not.toBeInTheDocument();
 });
 

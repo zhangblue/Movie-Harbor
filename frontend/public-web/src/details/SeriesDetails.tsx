@@ -23,12 +23,20 @@ export function SeriesDetails({ id }: { id: string }) {
           aria-pressed={season?.id === item.id} key={item.id} onClick={() => setSelectedSeason(item.id)}>第 {item.number} 季</button>)}
       </div>
       {season && <h3>第 {season.number} 季</h3>}
-      {episodes.length ? <ol className="episode-list">{episodes.map((episode) => <li key={episode.id}>
-        <div>{episode.video_url ? <a href={`/series/${encodeURIComponent(id)}/play/${encodeURIComponent(episode.id)}`}>第 {episode.number} 集 · {episode.name}</a>
-          : <span>第 {episode.number} 集 · {episode.name}（暂无可播放视频）</span>}
-          {episode.synopsis && <p>{episode.synopsis}</p>}</div>
-        <span className="episode-duration">{durationLabel(episode.duration_seconds)}</span>
-      </li>)}</ol> : <p className="empty-state">暂无公开单集。</p>}
+      {episodes.length ? <ol className="episode-list" aria-label={`第 ${season.number} 季单集`}>
+        {episodes.map((episode) => {
+          const label = `第 ${episode.number} 集 · ${episode.name}`;
+          const duration = durationLabel(episode.duration_seconds);
+          return <li key={episode.id}>
+            {episode.video_url ? <a className="episode-card" aria-label={`${label}，${duration}`}
+              href={`/series/${encodeURIComponent(id)}/play/${encodeURIComponent(episode.id)}`}>
+              <span className="episode-name">{label}</span><span className="episode-duration">{duration}</span>
+            </a> : <div className="episode-card is-unavailable">
+              <span className="episode-name">{label}（暂无可播放视频）</span><span className="episode-duration">{duration}</span>
+            </div>}
+          </li>;
+        })}
+      </ol> : <p className="empty-state">暂无公开单集。</p>}
     </section>
   </>;
 }

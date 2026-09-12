@@ -50,12 +50,11 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
 .play-button { display: block; width: 100%; max-width: 340px; min-height: 44px; padding: 12px; border-radius: 10px; background: var(--mh-color-accent); color: var(--mh-color-accent-ink); font-weight: 800; text-align: center; }
 .series-episodes { margin-top: 24px; padding: 25px; border: 1px solid var(--mh-color-border); border-radius: var(--mh-radius-lg); background: var(--mh-color-surface); }
 .series-episodes h2 { margin-top: 0; }
-.episode-list { list-style: none; margin: 0; padding: 0; }
-.episode-list li { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px 0; border-top: 1px solid var(--mh-color-border); }
-.episode-list li > div { min-width: 0; overflow-wrap: anywhere; }
-.episode-list a { display: inline-block; font-weight: 700; text-decoration: underline; text-underline-offset: 4px; }
-.episode-list p { margin: 8px 0 0; color: var(--mh-color-text-muted); white-space: pre-wrap; }
-.episode-duration { flex-shrink: 0; color: var(--mh-color-text-muted); font-size: .85rem; }
+.episode-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; list-style: none; margin: 0; padding: 0; }
+.episode-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 12px 14px; border: 1px solid var(--mh-color-border); border-radius: 10px; background: var(--mh-color-surface-hover); }
+.episode-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; }
+.episode-duration { flex: none; color: var(--mh-color-text-muted); font-size: .85rem; }
+.episode-card.is-unavailable { opacity: .55; }
 .player-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(250px, 1fr); gap: 24px; }
 .player-layout > div { min-width: 0; }
 .video-player video { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: var(--mh-radius-lg); background: #05070a; }
@@ -88,6 +87,6 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
   .detail-poster { width: min(240px, 100%); justify-self: center; }
   .detail-copy { padding: 25px 22px; }
   .series-episodes { padding: 20px 16px; }
-  .episode-list li { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .episode-list { grid-template-columns: 1fr; }
   .player-layout { grid-template-columns: 1fr; }
 }
