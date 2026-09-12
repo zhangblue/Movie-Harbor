@@ -8,7 +8,7 @@ function NewEpisode({ number, disabled, create, remove, changeNumber }: { number
   const [name, setName] = useState(""); const [value, setValue] = useState(String(number));
   return <form className="series-episode" aria-label="新单集草稿" onSubmit={(e) => { e.preventDefault(); if (name.trim()) void create(Number(value), name).then((saved) => { if (saved) remove(); }); }}>
     <div className="movie-inline-fields"><Field label="集序号" className="movie-field-short"><input type="number" min="1" required disabled={disabled} value={value} onChange={(e) => { setValue(e.target.value); changeNumber(Number(e.target.value)); }} /></Field><Field label="单集名称" className="movie-field-medium"><input required disabled={disabled} value={name} placeholder="请输入名称" onChange={(e) => setName(e.target.value)} /></Field></div>
-    <p>保存单集草稿后可填写简介、时长并上传视频。</p>
+    <p>保存单集草稿后可填写时长并上传视频。</p>
     <div className="movie-form-actions"><Button type="submit" disabled={disabled}>保存单集草稿</Button><Button variant="danger" disabled={disabled} onClick={remove}>移除未保存单集</Button></div>
   </form>;
 }
