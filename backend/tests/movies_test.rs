@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::ConnectInfo,
     http::{Request, StatusCode},
     response::Response,
@@ -10,7 +10,10 @@ use movie_harbor_api::{
     app,
     config::Config,
     entities::{file_cleanup_job, genre, media_asset, movie, movie_genre},
-    media::{LocalMediaStorage, StorageEvent, StorageHooks},
+    media::{
+        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, StorageEvent, StorageHooks,
+        UploadPolicy, replace_attachment,
+    },
     movies::service as movie_service,
 };
 use sea_orm::{
@@ -24,13 +27,16 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use std::{
+    future::Future,
     io,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
 };
+use tokio::sync::{Notify, oneshot};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -256,6 +262,58 @@ struct FailSecondStage {
     stages: AtomicUsize,
 }
 
+const LOCK_ORDER_PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5, 0x1c, 0x0c,
+    0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0xf8, 0x0f, 0x00,
+    0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+];
+
+struct PausedPng {
+    started: Option<oneshot::Sender<()>>,
+    release: Option<oneshot::Receiver<()>>,
+    finished: bool,
+}
+
+impl ChunkSource for PausedPng {
+    fn next_chunk(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        let started = self.started.take();
+        let release = self.release.take();
+        let finished = self.finished;
+        self.finished = true;
+        Box::pin(async move {
+            if finished {
+                return Ok(None);
+            }
+            started
+                .expect("first chunk signals start")
+                .send(())
+                .unwrap();
+            release
+                .expect("first chunk waits for release")
+                .await
+                .unwrap();
+            Ok(Some(Bytes::from_static(LOCK_ORDER_PNG)))
+        })
+    }
+}
+
+struct RemovalLockSignal {
+    entered: Arc<Notify>,
+}
+
+impl StorageHooks for RemovalLockSignal {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::BeforeRemovalLock) {
+            self.entered.notify_one();
+        }
+        Ok(())
+    }
+}
+
 impl StorageHooks for FailSecondStage {
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::BeforeStage(_))
@@ -268,6 +326,140 @@ impl StorageHooks for FailSecondStage {
         }
         Ok(())
     }
+}
+
+async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
+    let db = database().await;
+    let root = TempRoot::new();
+    let old_upload_asset = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
+    let upload_movie = movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Upload target".into()),
+        synopsis: Set(String::new()),
+        poster_asset_id: Set(Some(old_upload_asset.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let delete_asset = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    let delete_movie = if delete_same_movie {
+        upload_movie.clone()
+    } else {
+        movie::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("Delete target".into()),
+            synopsis: Set(String::new()),
+            video_asset_id: Set(Some(delete_asset.id)),
+            status: Set("draft".into()),
+            version: Set(1),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap()
+    };
+    let removal_entered = Arc::new(Notify::new());
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(RemovalLockSignal {
+            entered: removal_entered.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    let (source_started_tx, source_started_rx) = oneshot::channel();
+    let (source_release_tx, source_release_rx) = oneshot::channel();
+    let upload_db = db.clone();
+    let upload_storage = storage.clone();
+    let upload_id = upload_movie.id;
+    let mut upload = tokio::spawn(async move {
+        replace_attachment(
+            &upload_db,
+            &upload_storage,
+            AttachmentTarget::MoviePoster {
+                id: upload_id,
+                version: 1,
+            },
+            "replacement.png",
+            "image/png",
+            &UploadPolicy::new(4096, ["video/mp4", "video/webm"]).unwrap(),
+            PausedPng {
+                started: Some(source_started_tx),
+                release: Some(source_release_rx),
+                finished: false,
+            },
+        )
+        .await
+    });
+    source_started_rx.await.unwrap();
+    let delete_db = db.clone();
+    let delete_storage = storage;
+    let delete_id = delete_movie.id;
+    let mut deletion = tokio::spawn(async move {
+        movie_service::delete(&delete_db, &delete_storage, delete_id, 1).await
+    });
+    removal_entered.notified().await;
+    source_release_tx.send(()).unwrap();
+
+    let completed = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(&mut upload, &mut deletion)
+    })
+    .await;
+    let (uploaded, deleted) = match completed {
+        Ok(results) => results,
+        Err(error) => {
+            upload.abort();
+            deletion.abort();
+            let _ = upload.await;
+            let _ = deletion.await;
+            panic!("upload/delete lock interleaving did not complete: {error}");
+        }
+    };
+    let uploaded = uploaded.unwrap().unwrap();
+    assert!(root.as_ref().join(&uploaded.storage_key).is_file());
+    let current_upload_movie = movie::Entity::find_by_id(upload_movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current_upload_movie.version, 2);
+    assert_eq!(current_upload_movie.poster_asset_id, Some(uploaded.id));
+    if delete_same_movie {
+        assert!(matches!(
+            deleted.unwrap(),
+            Err(movie_service::MovieError::Conflict)
+        ));
+    } else {
+        assert_eq!(deleted.unwrap().unwrap().deleted_media_count, 1);
+        assert!(
+            movie::Entity::find_by_id(delete_movie.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            media_asset::Entity::find_by_id(delete_asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(delete_asset.storage_key).exists());
+    }
+}
+
+#[tokio::test]
+async fn upload_and_delete_of_the_same_movie_complete_without_cross_system_deadlock() {
+    run_upload_delete_lock_interleaving(true).await;
+}
+
+#[tokio::test]
+async fn upload_and_delete_of_different_movies_complete_with_consistent_files() {
+    run_upload_delete_lock_interleaving(false).await;
 }
 
 // Catches missing route registration and bypasses of session, CSRF, or configured-origin checks.

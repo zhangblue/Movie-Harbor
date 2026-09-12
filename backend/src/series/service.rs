@@ -327,6 +327,9 @@ pub async fn delete_season(
         expected_series_version: expected_version,
     } = command;
     valid_version(expected_version)?;
+    let removal = removal::acquire(storage)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_series_version(&model, expected_version)?;
@@ -342,8 +345,8 @@ pub async fn delete_season(
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     ensure_exclusive_media(&tx, &locked_assets).await?;
     let owned = load_owned_media(&tx, &locked_assets).await?;
-    let staged = removal::stage(storage, "delete-season", &owned)
-        .await
+    let staged = removal
+        .stage("delete-season", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         season::Entity::delete_by_id(season_id).exec(&tx).await?;
@@ -527,6 +530,9 @@ pub async fn delete_episode(
         expected_episode_version: expected_version,
     } = command;
     valid_version(expected_version)?;
+    let removal = removal::acquire(storage)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
@@ -538,8 +544,8 @@ pub async fn delete_episode(
     let locked_assets = lock_for_reference_removal(&tx, episode.video_asset_id).await?;
     ensure_exclusive_media(&tx, &locked_assets).await?;
     let owned = load_owned_media(&tx, &locked_assets).await?;
-    let staged = removal::stage(storage, "delete-episode", &owned)
-        .await
+    let staged = removal
+        .stage("delete-episode", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_episode(&tx, episode_id, expected_version).await?;
@@ -558,6 +564,9 @@ pub async fn delete_series(
     expected_version: i64,
 ) -> Result<DeleteResultResponse, SeriesError> {
     valid_version(expected_version)?;
+    let removal = removal::acquire(storage)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
     require_series_version(&model, expected_version)?;
@@ -585,8 +594,8 @@ pub async fn delete_series(
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     ensure_exclusive_media(&tx, &locked_assets).await?;
     let owned = load_owned_media(&tx, &locked_assets).await?;
-    let staged = removal::stage(storage, "delete-series", &owned)
-        .await
+    let staged = removal
+        .stage("delete-series", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_series(&tx, id, expected_version).await?;

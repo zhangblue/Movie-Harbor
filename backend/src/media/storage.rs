@@ -52,6 +52,7 @@ pub enum StorageEvent {
     DirectorySynced(String),
     BeforePromote(String),
     Promoted(String),
+    BeforeRemovalLock,
     BeforeStage(String),
     AfterStageRename(String),
     BeforeUnlink(String),
@@ -627,8 +628,9 @@ impl LocalMediaStorage {
         }
     }
 
-    pub(crate) async fn lock_removal(&self) -> OwnedMutexGuard<()> {
-        self.mutations.clone().lock_owned().await
+    pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
+        self.hooks.on_event(&StorageEvent::BeforeRemovalLock)?;
+        Ok(self.mutations.clone().lock_owned().await)
     }
 
     pub(crate) fn prepare_removal(

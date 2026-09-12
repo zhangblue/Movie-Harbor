@@ -327,6 +327,9 @@ pub async fn delete(
     expected_version: i64,
 ) -> Result<DeleteResultResponse, MovieError> {
     valid_version(expected_version)?;
+    let removal = removal::acquire(storage)
+        .await
+        .map_err(|_| MovieError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
     require_version(&model, expected_version)?;
@@ -340,8 +343,8 @@ pub async fn delete(
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     ensure_exclusive_media(&tx, &locked_assets).await?;
     let owned = load_owned_media(&tx, &locked_assets).await?;
-    let staged = removal::stage(storage, "delete-movie", &owned)
-        .await
+    let staged = removal
+        .stage("delete-movie", &owned)
         .map_err(|_| MovieError::MediaDelete)?;
     let database_result: Result<(), MovieError> = async {
         repository::delete(&tx, id, expected_version).await?;
