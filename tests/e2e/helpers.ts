@@ -1,6 +1,6 @@
 import { expect, type APIRequestContext, type Playwright } from "@playwright/test";
-import { readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 export const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080";
 export const adminName = process.env.E2E_ADMIN_NAME ?? "task15-admin";
@@ -8,6 +8,26 @@ export const initialPassword = process.env.E2E_ADMIN_PASSWORD ?? "task15-initial
 export const changedPassword = process.env.E2E_CHANGED_PASSWORD ?? "task15-changed-password";
 const generated = resolve(process.cwd(), "tests/e2e/.generated");
 const statePath = resolve(generated, "state.json");
+export const mediaHostDir = resolve(process.cwd(), process.env.MEDIA_HOST_DIR ?? "data/media");
+
+export function snapshotMediaFiles(directory = mediaHostDir): Set<string> {
+  const files = new Set<string>();
+  function visit(path: string) {
+    if (!existsSync(path)) return;
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      const child = join(path, entry.name);
+      if (entry.isDirectory()) visit(child);
+      else if (entry.isFile() && lstatSync(child).isFile()) files.add(child);
+    }
+  }
+  visit(directory);
+  return files;
+}
+
+export function uploadedSince(before: Set<string>): string[] {
+  return [...snapshotMediaFiles()].filter((path) => !before.has(path));
+}
 
 export const poster = {
   name: "poster.png",
