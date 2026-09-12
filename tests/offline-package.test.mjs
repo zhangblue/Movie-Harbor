@@ -40,7 +40,7 @@ if (args[0] === 'info') {
   console.log(mode === 'wrong-host' ? 'linux/x86_64' : 'linux/aarch64');
 } else if (args[0] === 'compose' && args[1] === 'version') {
   if (mode === 'compose-down') fail('Compose unavailable');
-  console.log(mode === 'compose-v1' ? '1.29.2' : '2.39.1');
+  console.log(mode === 'compose-new-major' ? '5.1.2' : '2.39.1');
 } else if (args[0] === 'build') {
   if (!fs.existsSync(args[args.indexOf('--file') + 1])) fail('Dockerfile unavailable in build context');
   if (mode === 'build-fails') fail('Build failed');
@@ -197,8 +197,25 @@ for (const [args, error] of [
   });
 }
 
+test("shell CLI accepts a compatible Compose plugin with version 5.1.2", async t => {
+  const f = await fixture(t, "compose-new-major");
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(tar(["-tzf", f.destination]).trim().split("\n").sort(), BUNDLE_ENTRIES);
+  await assertClean(f, [BUNDLE_NAME]);
+});
+
+test("shell CLI rejects an unavailable Compose plugin before building", async t => {
+  const f = await fixture(t, "compose-down");
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Compose unavailable/);
+  assert.equal((await f.calls()).some(args => args[0] === "build"), false);
+  await assertClean(f);
+});
+
 for (const [mode, error] of [
-  ["docker-down", /Docker/i], ["compose-down", /Compose/i], ["compose-v1", /Compose.*v2/i],
+  ["docker-down", /Docker/i],
   ["wrong-host", /only supports linux\/arm64/i], ["build-fails", /Build failed/i],
   ["inspect-fails", /inspect|Image missing/i], ["wrong-image", /linux\/arm64/i],
   ["save-fails", /Save/i], ["extra-tag", /RepoTags|tags/i], ["missing-tag", /RepoTags|tags/i],

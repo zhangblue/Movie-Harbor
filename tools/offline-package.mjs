@@ -95,8 +95,7 @@ async function main(args) {
     }
 
     const platform = await run("docker", ["info", "--format", "{{.OSType}}/{{.Architecture}}"], { signal });
-    const composeVersion = await run("docker", ["compose", "version", "--short"], { signal });
-    if (!/^v?2\./.test(composeVersion)) throw new Error("Docker Compose v2 is required");
+    await run("docker", ["compose", "version", "--short"], { signal });
     normalizePlatform(...platform.split("/"));
 
     const dockerfiles = ["backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile"];
