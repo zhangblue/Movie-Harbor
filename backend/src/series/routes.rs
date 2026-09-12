@@ -15,9 +15,9 @@ use uuid::Uuid;
 
 use super::{
     dto::{
-        CreateEpisodeRequest, CreateSeasonRequest, CreateSeriesRequest, EpisodeEnvelope,
-        SeriesListQuery, SeriesResponse, UpdateEpisodeRequest, UpdateSeasonRequest,
-        UpdateSeriesRequest, VersionRequest,
+        ChildDeleteImpactResponse, CreateEpisodeRequest, CreateSeasonRequest, CreateSeriesRequest,
+        EpisodeEnvelope, SeriesListQuery, SeriesResponse, UpdateEpisodeRequest,
+        UpdateSeasonRequest, UpdateSeriesRequest, VersionRequest,
     },
     service::{
         self, CreateEpisodeCommand, CreateSeasonCommand, DeleteEpisodeCommand, DeleteSeasonCommand,
@@ -67,6 +67,10 @@ pub fn router(
             patch(update_season).delete(delete_season),
         )
         .route(
+            "/api/admin/series/{series_id}/seasons/{season_id}/delete-impact",
+            get(season_delete_impact),
+        )
+        .route(
             "/api/admin/series/{series_id}/seasons/{season_id}/episodes",
             post(create_episode),
         )
@@ -75,6 +79,10 @@ pub fn router(
             get(episode_detail)
                 .patch(update_episode)
                 .delete(delete_episode),
+        )
+        .route(
+            "/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}/delete-impact",
+            get(episode_delete_impact),
         )
         .route(
             "/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}/publish",
@@ -174,10 +182,11 @@ async fn delete_season(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
     Json(input): Json<VersionRequest>,
-) -> Result<Json<SeriesResponse>, SeriesError> {
+) -> Result<Json<DeleteResultResponse>, SeriesError> {
     Ok(Json(
         service::delete_season(
             &state.db,
+            &state.storage,
             DeleteSeasonCommand {
                 series_id: parse_id(series_id)?,
                 season_id: parse_id(season_id)?,
@@ -185,6 +194,16 @@ async fn delete_season(
             },
         )
         .await?,
+    ))
+}
+
+async fn season_delete_impact(
+    State(state): State<SeriesState>,
+    Path((series_id, season_id)): Path<(String, String)>,
+) -> Result<Json<ChildDeleteImpactResponse>, SeriesError> {
+    Ok(Json(
+        service::season_delete_impact(&state.db, parse_id(series_id)?, parse_id(season_id)?)
+            .await?,
     ))
 }
 
@@ -337,9 +356,10 @@ async fn delete_episode(
     State(state): State<SeriesState>,
     Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
     Json(input): Json<VersionRequest>,
-) -> Result<StatusCode, SeriesError> {
-    service::delete_episode(
+) -> Result<Json<DeleteResultResponse>, SeriesError> {
+    let result = service::delete_episode(
         &state.db,
+        &state.storage,
         DeleteEpisodeCommand {
             series_id: parse_id(series_id)?,
             season_id: parse_id(season_id)?,
@@ -348,7 +368,22 @@ async fn delete_episode(
         },
     )
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(result))
+}
+
+async fn episode_delete_impact(
+    State(state): State<SeriesState>,
+    Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
+) -> Result<Json<ChildDeleteImpactResponse>, SeriesError> {
+    Ok(Json(
+        service::episode_delete_impact(
+            &state.db,
+            parse_id(series_id)?,
+            parse_id(season_id)?,
+            parse_id(episode_id)?,
+        )
+        .await?,
+    ))
 }
 
 async fn delete_series(

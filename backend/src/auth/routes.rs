@@ -63,10 +63,27 @@ async fn login(
     if !csrf::same_origin(&headers, &state.public_origin) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
-    let window = state.limits.for_login(address.ip(), &input.name);
-    if window.blocked(Instant::now()).await {
-        return Err(AuthError(StatusCode::TOO_MANY_REQUESTS));
-    }
+    let proxy_authenticated = state.trust_proxy_headers
+        && headers
+            .get("x-movie-harbor-proxy-token")
+            .and_then(|value| value.to_str().ok())
+            .zip(state.trusted_proxy_secret_digest.as_deref())
+            .is_some_and(|(provided, expected)| csrf::digest(provided) == expected);
+    let client_ip = if proxy_authenticated {
+        headers
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.contains(','))
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(|| address.ip())
+    } else {
+        address.ip()
+    };
+    let window = state.limits.for_login(client_ip, &input.name);
+    let admission = window
+        .admit(Instant::now())
+        .await
+        .ok_or(AuthError(StatusCode::TOO_MANY_REQUESTS))?;
     let admin = admin_user::Entity::find()
         .one(&state.db)
         .await?
@@ -77,7 +94,7 @@ async fn login(
         password::verify_limited(&state.password_work, input.password, verified_hash.clone())
             .await?;
     if !password_ok || input.name != admin.name {
-        let limited = window.failure(Instant::now()).await;
+        let limited = admission.failure(Instant::now()).await;
         return Err(AuthError(if limited {
             StatusCode::TOO_MANY_REQUESTS
         } else {
@@ -91,12 +108,12 @@ async fn login(
         .await?
         .ok_or(AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
     if admin.password_hash != verified_hash || input.name != admin.name {
-        window.failure(Instant::now()).await;
+        admission.failure(Instant::now()).await;
         return Err(AuthError(StatusCode::UNAUTHORIZED));
     }
     let raw = session::create(&tx, &admin).await?;
     tx.commit().await?;
-    window.success().await;
+    admission.success().await;
     Ok((
         [
             (

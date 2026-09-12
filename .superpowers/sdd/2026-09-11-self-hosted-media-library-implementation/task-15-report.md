@@ -86,3 +86,30 @@ Final verification after the review fixes:
 - `npm run build --workspaces`: exit 0.
 - `npm run test:e2e`: first review-fix run reached **3/4** then failed in the admin deletion flow with `invalid movie request`; after the id fix the isolated deployment passed **4/4**, restart persistence passed **1/1**, and the runner removed only `mh-task15-e2e` resources.
 - `git diff --check`: exit 0.
+
+## Final review fix round 2
+
+- Added atomic login admission before database and Argon2 work. Each IP and normalized account has a bounded in-flight reservation; admission checks and attempt-budget charging occur while both windows are locked. The owned reservation releases its in-flight slot on success, failure, cancellation, or other early errors, while cancellation keeps the attempt charge so disconnected `spawn_blocking` work cannot consume Argon2 indefinitely without reaching the failure budget. The existing two-permit global Argon2 semaphore remains the final CPU bound.
+- Made proxy trust explicit. Direct deployments ignore `X-Forwarded-For` by default; standard Compose enables `TRUST_PROXY_HEADERS` only while the API remains internal, and edge Caddy overwrites the header with its actual remote client address plus a separate 32-byte proxy-authentication secret. Router tests cover direct and unauthenticated-proxy spoof attempts as well as authenticated-proxy client isolation.
+- Unified episode, season, and full-series deletion cleanup results. Every media-removing series path commits its database cleanup jobs, immediately attempts its exclusive files, keeps failed jobs retryable, and returns the structured pending warning consumed by the App-level accessible alert.
+- Added authoritative, hierarchy-scoped season and episode delete-impact endpoints. They validate parent/child ownership and calculate display name, the exact version required by DELETE, hierarchy size, and exclusive/shared media counts inside a read-only repeatable-read snapshot. The editor refuses to open confirmation if impact loading fails and uses only the returned name, counts, and version.
+- Added movie and episode regressions where a preview reports exclusive media, another resource starts sharing it without changing the target version, and DELETE safely recomputes the real reference set, returns zero cleanup jobs, and preserves the file.
+- Added a documented maintenance SQL script that only matches this repository's explicit per-suite schema prefixes. It is intentionally manual so it cannot race active test processes or delete another project's schemas.
+
+Round 2 RED evidence:
+
+- The concurrent admission regression showed every same-IP random-name request could pass before any failed Argon2 verification was recorded. Atomic reservations bound the burst and cancellation test now passes.
+- A cancellation regression then showed dropping each admitted request released its slot without consuming the six-attempt budget. Admission now atomically pre-charges the attempt, success clears it, and failure completion does not double-count it; six cancelled admissions make the seventh return the limiter response.
+- The proxy router regression showed direct peer addressing could not distinguish real clients behind Caddy. Explicit trust plus Caddy header replacement now separates trusted forwarded clients while rotating spoofed headers on a direct connection cannot evade the peer budget.
+- The child deletion integration test received `404` from the first season `delete-impact` request. Both scoped endpoints now return authoritative snapshots.
+- The SeriesEditor regression showed locally derived child counts and versions (no `独占媒体：1`) instead of the server preview. The dialog now requires the child endpoint, and an additional failure-path test proves no dialog or DELETE is possible when preview loading fails.
+
+Round 2 final verification:
+
+- `cargo fmt --all -- --check`: exit 0.
+- `cargo clippy --workspace --all-targets -- -D warnings`: exit 0.
+- `TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test cargo test --workspace`: exit 0; **123 passed** (18 unit and 105 integration tests), including the final cancellation regression.
+- `npm test --workspaces`: exit 0; public **34**, admin **71**, API client **22**, UI **31** = **158 passed**.
+- `npm run build --workspaces`: exit 0; both Vite builds and shared-package typechecks passed.
+- `E2E_COMPOSE_PROJECT=mh-task15-e2e-round2-final E2E_PORT=18080 npm run test:e2e`: exit 0; deployment flow **4/4** and restart persistence **1/1** passed after proxy authentication was enabled; only the exact isolated stack and its two volumes were removed.
+- `git diff --check`: exit 0.

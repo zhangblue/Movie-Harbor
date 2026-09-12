@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { changePassword, createGenre, deleteMovie, getMovieDeleteImpact, getSession } from "./admin";
+import { changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession } from "./admin";
 import { ApiError, clearCsrfToken } from "./http";
 
 afterEach(() => {
@@ -73,5 +73,21 @@ it("uses the authoritative delete-impact endpoint and returns cleanup state", as
   expect(urls).toEqual([
     "/api/admin/movies/movie%2F1/delete-impact",
     "/api/admin/movies/movie%2F1",
+  ]);
+});
+
+it("loads authoritative season and episode deletion impact from scoped paths", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+    urls.push(String(url));
+    return new Response('{"display_name":"Child","version":9,"season_count":0,"episode_count":1,"exclusive_media_count":1,"shared_media_count":0}',
+      { headers: { "content-type": "application/json" } });
+  }));
+
+  expect((await getSeasonDeleteImpact("series/1", "season/1")).version).toBe(9);
+  expect((await getEpisodeDeleteImpact("series/1", "season/1", "episode/1")).display_name).toBe("Child");
+  expect(urls).toEqual([
+    "/api/admin/series/series%2F1/seasons/season%2F1/delete-impact",
+    "/api/admin/series/series%2F1/seasons/season%2F1/episodes/episode%2F1/delete-impact",
   ]);
 });

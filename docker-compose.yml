@@ -44,6 +44,8 @@ services:
       MEDIA_DIR: /media
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}
+      TRUST_PROXY_HEADERS: "true"
+      TRUST_PROXY_SECRET: ${TRUST_PROXY_SECRET:?set TRUST_PROXY_SECRET}
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-5368709120}
       VIDEO_MIME_ALLOWLIST: ${VIDEO_MIME_ALLOWLIST:-video/mp4,video/webm}
       ADMIN_NAME: ${ADMIN_NAME:-}
@@ -82,6 +84,8 @@ services:
   caddy:
     image: caddy:2.10-alpine
     restart: unless-stopped
+    environment:
+      TRUST_PROXY_SECRET: ${TRUST_PROXY_SECRET:?set TRUST_PROXY_SECRET}
     depends_on:
       api:
         condition: service_healthy

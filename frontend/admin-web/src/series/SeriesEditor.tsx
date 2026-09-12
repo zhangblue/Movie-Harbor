@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
+import { ApiError, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getEpisodeDeleteImpact, getSeasonDeleteImpact, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type ChildDeleteImpactResponse, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -10,10 +10,10 @@ import { canAct, canChangeSeason, knownStatus, permits, statusNames } from "./pe
 import type { EpisodeFields } from "./EpisodeRow";
 
 type Fields = { name: string; year: string; synopsis: string; genreIds: string[] };
-type Deletion = { series: SeriesResponse; season?: SeasonResponse; episode?: EpisodeResponse; impact?: DeleteImpactResponse };
+type Deletion = { series: SeriesResponse; season?: SeasonResponse; episode?: EpisodeResponse; impact: DeleteImpactResponse | ChildDeleteImpactResponse };
 const empty: Fields = { name: "", year: "", synopsis: "", genreIds: [] };
 function fieldsOf(series: SeriesResponse): Fields { return { name: series.name, year: series.year?.toString() ?? "", synopsis: series.synopsis, genreIds: series.genres.map((g) => g.id) }; }
-function deletionAllowed(target: Deletion) {
+function deletionAllowed(target: Pick<Deletion, "series" | "season" | "episode">) {
   if (!knownStatus(target.series.status)) return false;
   if (target.episode) return canAct(target.episode, "delete");
   if (target.season) return canChangeSeason(target.series, target.season, "delete");
@@ -150,7 +150,12 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       const season = seasonId ? fresh.seasons.find((s) => s.id === seasonId) : undefined;
       const episode = episodeId ? season?.episodes.find((e) => e.id === episodeId) : undefined;
       if ((seasonId && !season) || (episodeId && !episode)) throw new ApiError(409, "Conflict", "Content changed", undefined);
-      const target = { series: fresh, season, episode };
+      const candidate = { series: fresh, season, episode };
+      if (!deletionAllowed(candidate)) { setError("服务器最新状态不允许删除，请先归档已发布内容。"); return; }
+      const impact = episode && season
+        ? await getEpisodeDeleteImpact(fresh.id, season.id, episode.id)
+        : await getSeasonDeleteImpact(fresh.id, season!.id);
+      const target = { ...candidate, impact };
       if (!deletionAllowed(target)) { setError("服务器最新状态不允许删除，请先归档已发布内容。"); return; }
       setDeleting(target); setConfirmation("");
     });
@@ -158,8 +163,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const locked = busy || loading || conflict;
   const readOnly = !series || !canAct(series, "edit");
   const choices = [...genres, ...(series?.genres.filter((g) => !genres.some((choice) => choice.id === g.id)).map((g) => ({ ...g, sort_order: 0 })) ?? [])];
-  const deleteName = deleting?.episode?.name ?? deleting?.impact?.name ?? deleting?.series.name ?? "";
-  const deleteEpisodes = deleting ? deleting.episode ? [deleting.episode] : deleting.season ? deleting.season.episodes : deleting.series.seasons.flatMap((s) => s.episodes) : [];
+  const deleteName = deleting ? "display_name" in deleting.impact ? deleting.impact.display_name : deleting.impact.name : "";
   return <section>
     <div inert={!!deleting}>
       <div className="admin-title-row"><div><p className="eyebrow">SERIES · {series ? statusNames[series.status] ?? "未知状态" : "新建"}</p><h1>{series ? series.status === "draft" ? "编辑剧集草稿" : "查看剧集" : "新建剧集草稿"}</h1></div><Button disabled={busy} onClick={onBack}>返回列表</Button></div>
@@ -212,16 +216,16 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       </>}
     </div>
     <Dialog open={!!deleting} title={deleting?.episode ? "永久删除单集" : deleting?.season ? "永久删除本季" : "永久删除剧集"} onClose={() => { if (!busy) setDeleting(null); }}>
-      {deleting && <><p>将永久删除“{deleting.episode?.name ?? (deleting.season ? `第 ${deleting.season.number} 季` : deleteName)}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p>
-        <ul><li>季：{deleting.impact?.season_count ?? (deleting.episode ? 0 : deleting.season ? 1 : deleting.series.seasons.length)}</li><li>单集：{deleting.impact?.episode_count ?? deleteEpisodes.length}</li>{deleting.impact ? <><li>独占媒体：{deleting.impact.exclusive_media_count}</li><li>共享媒体（保留）：{deleting.impact.shared_media_count}</li></> : <><li>海报：{!deleting.season && deleting.series.poster ? 1 : 0}</li><li>视频：{deleteEpisodes.filter((e) => e.video).length}</li></>}</ul>
-        {deleting.season && !deleting.episode && <p>请输入所属剧集名称：{deleting.series.name}</p>}
+      {deleting && <><p>将永久删除“{deleteName}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p>
+        <ul><li>季：{deleting.impact.season_count}</li><li>单集：{deleting.impact.episode_count}</li><li>独占媒体：{deleting.impact.exclusive_media_count}</li><li>共享媒体（保留）：{deleting.impact.shared_media_count}</li></ul>
+        {deleting.season && !deleting.episode && <p>请输入服务器确认名称：{deleteName}</p>}
         {error && <p role="alert">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
         <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleteName || !deletionAllowed(deleting)} onClick={() => { void run(async () => {
           const target = deleting;
-          if (target.episode && target.season) await deleteEpisode(target.series.id, target.season.id, target.episode.id, target.episode.version);
-          else if (target.season) await deleteSeason(target.series.id, target.season.id, target.series.version);
-          else { const result = await deleteSeries(target.series.id, target.impact?.version ?? target.series.version); if (mounted.current) { if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); onBack(); } return; }
+          if (target.episode && target.season) { const result = await deleteEpisode(target.series.id, target.season.id, target.episode.id, target.impact.version); if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); }
+          else if (target.season) { const result = await deleteSeason(target.series.id, target.season.id, target.impact.version); if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); }
+          else { const result = await deleteSeries(target.series.id, target.impact.version); if (mounted.current) { if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); onBack(); } return; }
           if (mounted.current) setDeleting(null); await refresh();
         }); }}>确认永久删除</Button></div>
       </>}

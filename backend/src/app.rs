@@ -25,6 +25,11 @@ pub async fn build(
         db: db.clone(),
         cookie_secure: config.cookie_secure,
         public_origin,
+        trust_proxy_headers: config.trust_proxy_headers,
+        trusted_proxy_secret_digest: config
+            .trusted_proxy_secret
+            .as_deref()
+            .map(crate::auth::csrf::digest),
         limits: Default::default(),
         password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
     };

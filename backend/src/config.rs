@@ -14,6 +14,8 @@ pub struct Config {
     pub media_dir: PathBuf,
     pub cookie_secure: bool,
     pub public_origin: String,
+    pub trust_proxy_headers: bool,
+    pub trusted_proxy_secret: Option<String>,
     pub max_upload_bytes: u64,
     pub allowed_video_mime_types: Vec<String>,
     pub admin_name: Option<String>,
@@ -74,12 +76,27 @@ impl Config {
         let allowed_video_mime_types =
             parse_video_mime_types(&required(&lookup, "VIDEO_MIME_ALLOWLIST")?)?;
 
+        let trust_proxy_headers = lookup("TRUST_PROXY_HEADERS").map_or(Ok(false), |value| {
+            value
+                .parse()
+                .map_err(|_| ConfigError::Invalid("TRUST_PROXY_HEADERS"))
+        })?;
+        let trusted_proxy_secret = lookup("TRUST_PROXY_SECRET").filter(|value| !value.is_empty());
+        if trust_proxy_headers
+            && trusted_proxy_secret
+                .as_ref()
+                .is_none_or(|secret| secret.len() < 32)
+        {
+            return Err(ConfigError::Invalid("TRUST_PROXY_SECRET"));
+        }
         let mut config = Self {
             listen_addr,
             database_url,
             media_dir,
             cookie_secure,
             public_origin: required(&lookup, "PUBLIC_ORIGIN")?,
+            trust_proxy_headers,
+            trusted_proxy_secret,
             max_upload_bytes,
             allowed_video_mime_types,
             admin_name: lookup("ADMIN_NAME"),
@@ -228,6 +245,29 @@ mod tests {
         values.insert("DATABASE_HOST", "db");
         let result = Config::from_lookup(|name| values.get(name).map(|value| (*value).to_owned()));
         assert!(matches!(result, Err(ConfigError::Invalid("DATABASE_URL"))));
+    }
+
+    #[test]
+    fn trusted_proxy_headers_are_explicit_and_strictly_parsed() {
+        let values = required_values();
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        assert!(!config.trust_proxy_headers);
+
+        let mut values = required_values();
+        values.insert("TRUST_PROXY_HEADERS", "true");
+        assert!(matches!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+            Err(ConfigError::Invalid("TRUST_PROXY_SECRET"))
+        ));
+        values.insert("TRUST_PROXY_SECRET", "test-proxy-secret-at-least-32-bytes");
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        assert!(config.trust_proxy_headers);
+
+        values.insert("TRUST_PROXY_HEADERS", "yes");
+        assert!(matches!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+            Err(ConfigError::Invalid("TRUST_PROXY_HEADERS"))
+        ));
     }
 
     // Catches enabling a non-browser media type or silently accepting an empty allowlist.

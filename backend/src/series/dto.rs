@@ -26,6 +26,16 @@ pub struct VersionRequest {
     pub version: i64,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ChildDeleteImpactResponse {
+    pub display_name: String,
+    pub version: i64,
+    pub season_count: u64,
+    pub episode_count: u64,
+    pub exclusive_media_count: u64,
+    pub shared_media_count: u64,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateSeasonRequest {
     pub version: i64,

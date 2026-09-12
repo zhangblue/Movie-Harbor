@@ -61,6 +61,8 @@ fn config(root: &Path) -> Config {
         media_dir: root.into(),
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
+        trust_proxy_headers: false,
+        trusted_proxy_secret: None,
         max_upload_bytes: 4096,
         allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),
@@ -756,8 +758,20 @@ async fn published_series_is_read_only_but_accepts_new_draft_children() {
     .await;
     assert_eq!(deleted_draft_season.status(), StatusCode::OK);
     let deleted_draft_season = body(deleted_draft_season).await;
-    assert_eq!(deleted_draft_season["version"], 9);
-    assert_eq!(deleted_draft_season["seasons"].as_array().unwrap().len(), 1);
+    assert_eq!(deleted_draft_season["cleanup_pending"], false);
+    let current = request(
+        &app,
+        "GET",
+        &format!("/api/admin/series/{series_id}"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    let current = body(current).await;
+    assert_eq!(current["version"], 9);
+    assert_eq!(current["seasons"].as_array().unwrap().len(), 1);
 }
 
 // Catches missing publish requirements, invalid transitions, and non-idempotent retries.
@@ -1507,7 +1521,7 @@ async fn archived_series_preserves_independent_child_lifecycles() {
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     let renumbered = write(
         &app,
@@ -1588,7 +1602,7 @@ async fn archived_series_preserves_independent_child_lifecycles() {
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
 
     let republished = write(
@@ -1699,6 +1713,182 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
     assert!(!root.as_ref().join(poster.storage_key).exists());
     assert!(!root.as_ref().join(first_video.storage_key).exists());
     assert!(!root.as_ref().join(second_video.storage_key).exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn season_delete_reports_failed_exclusive_cleanup_and_preserves_shared_media() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Child cleanup").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "One").await).await;
+    let first = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 3, 2, "Two").await).await;
+    let second = hierarchy["seasons"][0]["episodes"][1]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 4, 3, "Three").await).await;
+    let third = hierarchy["seasons"][0]["episodes"][2]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let exclusive = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let shared = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, first, exclusive.id).await;
+    attach_episode_video(&db, third, exclusive.id).await;
+    attach_episode_video(&db, second, shared.id).await;
+    movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Shared".into()),
+        synopsis: Set(String::new()),
+        video_asset_id: Set(Some(shared.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season_impact = request(
+        &app,
+        "GET",
+        &format!("/api/admin/series/{series_id}/seasons/{season_id}/delete-impact"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(season_impact.status(), StatusCode::OK);
+    assert_eq!(
+        body(season_impact).await,
+        json!({"display_name":"第 1 季","version":5,"season_count":1,"episode_count":3,"exclusive_media_count":1,"shared_media_count":1})
+    );
+    let episode_impact = request(
+        &app,
+        "GET",
+        &format!(
+            "/api/admin/series/{series_id}/seasons/{season_id}/episodes/{first}/delete-impact"
+        ),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(episode_impact.status(), StatusCode::OK);
+    assert_eq!(
+        body(episode_impact).await,
+        json!({"display_name":"One","version":1,"season_count":0,"episode_count":1,"exclusive_media_count":0,"shared_media_count":1})
+    );
+    let parent = root
+        .as_ref()
+        .join(&exclusive.storage_key)
+        .parent()
+        .unwrap()
+        .to_owned();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/series/{series_id}/seasons/{season_id}"),
+        json!({"version":5}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        body(deleted).await,
+        json!({"cleanup_pending":true,"job_count":1,"warning":"media cleanup pending retry"})
+    );
+    assert_eq!(
+        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
+        1
+    );
+    assert!(root.as_ref().join(shared.storage_key).exists());
+}
+
+#[tokio::test]
+async fn episode_delete_recomputes_sharing_changed_after_the_impact_preview() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Preview race").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "One").await).await;
+    let episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap();
+    let asset = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, episode_id.parse().unwrap(), asset.id).await;
+
+    let impact = request(
+        &app,
+        "GET",
+        &format!(
+            "/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}/delete-impact"
+        ),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(impact.status(), StatusCode::OK);
+    assert_eq!(body(impact).await["exclusive_media_count"], 1);
+
+    movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("New shared owner".into()),
+        synopsis: Set(String::new()),
+        video_asset_id: Set(Some(asset.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}"),
+        json!({"version":1}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        body(deleted).await,
+        json!({"cleanup_pending":false,"job_count":0,"warning":null})
+    );
+    assert!(root.as_ref().join(asset.storage_key).exists());
 }
 
 // Catches malformed identifiers being confused with absent series resources.
@@ -1891,7 +2081,7 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
         )
         .await
         .status(),
-        StatusCode::NO_CONTENT
+        StatusCode::OK
     );
     assert_eq!(
         series::Entity::find_by_id(series_id.parse::<Uuid>().unwrap())
@@ -1908,7 +2098,7 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
             .count(&db)
             .await
             .unwrap(),
-        1
+        0
     );
 
     let published = create_series(&app, &cookie, &csrf, "Published delete gate").await;

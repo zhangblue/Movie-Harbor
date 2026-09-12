@@ -28,6 +28,8 @@ fn config() -> Config {
         media_dir: "/tmp/media".into(),
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
+        trust_proxy_headers: false,
+        trusted_proxy_secret: None,
         max_upload_bytes: 1024,
         allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),
@@ -66,7 +68,7 @@ async fn request(
         path,
         body,
         (cookie, csrf, origin),
-        "127.0.0.1:12345",
+        ("127.0.0.1:12345", None, false),
     )
     .await
 }
@@ -77,9 +79,10 @@ async fn request_from(
     path: &str,
     body: Value,
     auth: (Option<&str>, Option<&str>, Option<&str>),
-    address: &str,
+    connection: (&str, Option<&str>, bool),
 ) -> Response {
     let (cookie, csrf, origin) = auth;
+    let (address, forwarded_for, authenticate_proxy) = connection;
     let mut req = Request::builder()
         .method(method)
         .uri(path)
@@ -93,6 +96,15 @@ async fn request_from(
     }
     if let Some(value) = origin {
         req = req.header("origin", value);
+    }
+    if let Some(value) = forwarded_for {
+        req = req.header("x-forwarded-for", value);
+    }
+    if authenticate_proxy {
+        req = req.header(
+            "x-movie-harbor-proxy-token",
+            "test-proxy-secret-at-least-32-bytes",
+        );
     }
     let mut req = req.body(Body::from(body.to_string())).unwrap();
     req.extensions_mut().insert(ConnectInfo(
@@ -123,7 +135,7 @@ async fn invalid_logins_do_not_wait_for_the_administrator_row_lock() {
                 "/api/admin/login",
                 json!({"name":format!("Missing-{suffix}"),"password":"wrong"}),
                 (None, None, Some("https://harbor.test")),
-                &format!("127.0.0.{suffix}:12345"),
+                (&format!("127.0.0.{suffix}:12345"), None, false),
             )
             .await
             .status()
@@ -163,6 +175,82 @@ async fn login_never_accepts_an_old_hash_changed_during_verification() {
     assert_eq!(
         admin_session::Entity::find().all(&db).await.unwrap().len(),
         0
+    );
+}
+
+#[tokio::test]
+async fn forwarded_client_ip_is_used_only_when_the_proxy_mode_is_explicitly_trusted() {
+    async fn forwarded(app: &Router, ip: &str, name: &str, authenticated: bool) -> StatusCode {
+        request_from(
+            app,
+            "POST",
+            "/api/admin/login",
+            json!({"name":name,"password":"wrong"}),
+            (None, None, Some("https://harbor.test")),
+            ("172.20.0.5:12345", Some(ip), authenticated),
+        )
+        .await
+        .status()
+    }
+    let db = database().await;
+    let mut cfg = config();
+    cfg.trust_proxy_headers = true;
+    cfg.trusted_proxy_secret = Some("test-proxy-secret-at-least-32-bytes".into());
+    let app = app::build(db, &cfg).await.unwrap();
+    for _ in 0..5 {
+        assert_eq!(
+            forwarded(&app, "198.51.100.1", "Missing", true).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        forwarded(&app, "198.51.100.1", "Missing", true).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        forwarded(&app, "198.51.100.2", "Other", true).await,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let db = database().await;
+    let mut cfg = config();
+    cfg.trust_proxy_headers = true;
+    cfg.trusted_proxy_secret = Some("test-proxy-secret-at-least-32-bytes".into());
+    let app = app::build(db, &cfg).await.unwrap();
+    for suffix in 1..=5 {
+        assert_eq!(
+            forwarded(
+                &app,
+                &format!("198.51.100.{suffix}"),
+                &format!("Unauthenticated-{suffix}"),
+                false,
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        forwarded(&app, "198.51.100.99", "Unauthenticated-last", false).await,
+        StatusCode::TOO_MANY_REQUESTS
+    );
+
+    let db = database().await;
+    let app = app::build(db, &config()).await.unwrap();
+    for suffix in 1..=5 {
+        assert_eq!(
+            forwarded(
+                &app,
+                &format!("198.51.100.{suffix}"),
+                &format!("Missing-{suffix}"),
+                false,
+            )
+            .await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(
+        forwarded(&app, "198.51.100.99", "Another", false).await,
+        StatusCode::TOO_MANY_REQUESTS
     );
 }
 

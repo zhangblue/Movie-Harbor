@@ -3,7 +3,10 @@
 
 	@api path /api /api/*
 	handle @api {
-		reverse_proxy api:3000
+		reverse_proxy api:3000 {
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Movie-Harbor-Proxy-Token {$TRUST_PROXY_SECRET}
+		}
 	}
 
     @public_media path /media/poster/* /media/video/*

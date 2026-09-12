@@ -35,6 +35,7 @@ writeFileSync(envFile, [
   `ADMIN_INITIAL_PASSWORD=${initialPassword}`,
   `PUBLIC_ORIGIN=http://127.0.0.1:${port}`,
   "COOKIE_SECURE=false",
+  "TRUST_PROXY_SECRET=task15-e2e-proxy-secret-at-least-32-bytes",
   "MAX_UPLOAD_BYTES=10485760",
   "VIDEO_MIME_ALLOWLIST=video/mp4,video/webm",
   "",

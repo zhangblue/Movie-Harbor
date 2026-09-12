@@ -43,6 +43,8 @@ fn config() -> Config {
         media_dir: "/tmp/media".into(),
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
+        trust_proxy_headers: false,
+        trusted_proxy_secret: None,
         max_upload_bytes: 1024,
         allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),

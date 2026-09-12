@@ -1,7 +1,7 @@
 import { apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
 import type {
   ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
-  DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
+  ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
 } from "./types";
 
@@ -103,8 +103,11 @@ export async function createSeason(seriesId: string, number: number, version: nu
 export async function updateSeason(seriesId: string, seasonId: string, number: number, version: number): Promise<SeriesResponse> {
   return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "PATCH", json: { number, version } }));
 }
-export async function deleteSeason(seriesId: string, seasonId: string, version: number): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "DELETE", json: { version } }));
+export async function deleteSeason(seriesId: string, seasonId: string, version: number): Promise<DeleteResultResponse> {
+  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "DELETE", json: { version } }));
+}
+export async function getSeasonDeleteImpact(seriesId: string, seasonId: string): Promise<ChildDeleteImpactResponse> {
+  return required(await apiRequest<ChildDeleteImpactResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "delete-impact")));
 }
 export async function createEpisode(seriesId: string, seasonId: string, input: { version: number; number: number; name: string }): Promise<SeriesResponse> {
   return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "episodes"), { method: "POST", json: input }));
@@ -121,8 +124,11 @@ export async function updateEpisode(seriesId: string, seasonId: string, episodeI
 export async function transitionEpisode(seriesId: string, seasonId: string, episodeId: string, action: LifecycleAction, version: number): Promise<EpisodeEnvelope> {
   return required(await apiRequest<EpisodeEnvelope>(`${episodePath(seriesId, seasonId, episodeId)}/${action}`, { method: "POST", json: { version } }));
 }
-export async function deleteEpisode(seriesId: string, seasonId: string, episodeId: string, version: number): Promise<void> {
-  await apiRequest(episodePath(seriesId, seasonId, episodeId), { method: "DELETE", json: { version } });
+export async function deleteEpisode(seriesId: string, seasonId: string, episodeId: string, version: number): Promise<DeleteResultResponse> {
+  return required(await apiRequest<DeleteResultResponse>(episodePath(seriesId, seasonId, episodeId), { method: "DELETE", json: { version } }));
+}
+export async function getEpisodeDeleteImpact(seriesId: string, seasonId: string, episodeId: string): Promise<ChildDeleteImpactResponse> {
+  return required(await apiRequest<ChildDeleteImpactResponse>(`${episodePath(seriesId, seasonId, episodeId)}/delete-impact`));
 }
 
 type MediaUploadTarget =

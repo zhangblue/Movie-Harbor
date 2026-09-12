@@ -14,16 +14,17 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
-    QueryFilter, QueryOrder, QuerySelect, Set, SqlErr, TransactionTrait,
+    AccessMode, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr,
+    EntityTrait, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Set, SqlErr,
+    TransactionTrait,
 };
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::{
     dto::{
-        CreateEpisodeRequest, EpisodeEnvelope, EpisodeResponse, SeasonResponse, SeriesListQuery,
-        SeriesResponse, UpdateEpisodeRequest, UpdateSeriesRequest,
+        ChildDeleteImpactResponse, CreateEpisodeRequest, EpisodeEnvelope, EpisodeResponse,
+        SeasonResponse, SeriesListQuery, SeriesResponse, UpdateEpisodeRequest, UpdateSeriesRequest,
     },
     repository,
 };
@@ -307,8 +308,9 @@ pub async fn update_season(
 
 pub async fn delete_season(
     db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
     command: DeleteSeasonCommand,
-) -> Result<SeriesResponse, SeriesError> {
+) -> Result<DeleteResultResponse, SeriesError> {
     let DeleteSeasonCommand {
         series_id,
         season_id,
@@ -329,11 +331,10 @@ pub async fn delete_season(
         .collect::<HashSet<_>>();
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
     season::Entity::delete_by_id(season_id).exec(&tx).await?;
-    let updated = repository::bump_series(&tx, &model).await?;
-    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
-    let result = response(&tx, updated).await?;
+    repository::bump_series(&tx, &model).await?;
+    let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
-    Ok(result)
+    cleanup_result(db, storage, queued_assets).await
 }
 
 pub async fn create_episode(
@@ -500,8 +501,9 @@ pub async fn transition_episode(
 
 pub async fn delete_episode(
     db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
     command: DeleteEpisodeCommand,
-) -> Result<(), SeriesError> {
+) -> Result<DeleteResultResponse, SeriesError> {
     let DeleteEpisodeCommand {
         series_id,
         season_id,
@@ -520,9 +522,9 @@ pub async fn delete_episode(
     let locked_assets = lock_for_reference_removal(&tx, episode.video_asset_id).await?;
     repository::delete_episode(&tx, episode_id, expected_version).await?;
     repository::bump_series(&tx, &series).await?;
-    queue_locked_if_unreferenced(&tx, &locked_assets).await?;
+    let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
-    Ok(())
+    cleanup_result(db, storage, queued_assets).await
 }
 
 pub async fn delete_series(
@@ -560,6 +562,14 @@ pub async fn delete_series(
     repository::delete_series(&tx, id, expected_version).await?;
     let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
     tx.commit().await?;
+    cleanup_result(db, storage, queued_assets).await
+}
+
+async fn cleanup_result(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    queued_assets: Vec<Uuid>,
+) -> Result<DeleteResultResponse, SeriesError> {
     let job_count = queued_assets.len();
     let cleanup = cleanup::run_for_assets(db, storage, &queued_assets).await;
     let cleanup_pending = match cleanup {
@@ -609,6 +619,98 @@ pub async fn delete_impact(
         exclusive_media_count,
         shared_media_count,
     })
+}
+
+pub async fn season_delete_impact(
+    db: &DatabaseConnection,
+    series_id: Uuid,
+    season_id: Uuid,
+) -> Result<ChildDeleteImpactResponse, SeriesError> {
+    let tx = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let parent = repository::find(&tx, series_id).await?;
+    let selected = season::Entity::find_by_id(season_id)
+        .filter(season::Column::SeriesId.eq(series_id))
+        .one(&tx)
+        .await?
+        .ok_or(SeriesError::NotFound)?;
+    let episodes = repository::episodes(&tx, season_id).await?;
+    let mut references = HashMap::new();
+    for asset_id in episodes.iter().filter_map(|episode| episode.video_asset_id) {
+        *references.entry(asset_id).or_insert(0_u64) += 1;
+    }
+    let (exclusive_media_count, shared_media_count) = impact_media_counts(&tx, references).await?;
+    let result = ChildDeleteImpactResponse {
+        display_name: format!("第 {} 季", selected.number),
+        version: parent.version,
+        season_count: 1,
+        episode_count: episodes.len() as u64,
+        exclusive_media_count,
+        shared_media_count,
+    };
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub async fn episode_delete_impact(
+    db: &DatabaseConnection,
+    series_id: Uuid,
+    season_id: Uuid,
+    episode_id: Uuid,
+) -> Result<ChildDeleteImpactResponse, SeriesError> {
+    let tx = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    repository::find(&tx, series_id).await?;
+    season::Entity::find_by_id(season_id)
+        .filter(season::Column::SeriesId.eq(series_id))
+        .one(&tx)
+        .await?
+        .ok_or(SeriesError::NotFound)?;
+    let selected = episode::Entity::find_by_id(episode_id)
+        .filter(episode::Column::SeasonId.eq(season_id))
+        .one(&tx)
+        .await?
+        .ok_or(SeriesError::NotFound)?;
+    let references = selected
+        .video_asset_id
+        .into_iter()
+        .map(|id| (id, 1))
+        .collect();
+    let (exclusive_media_count, shared_media_count) = impact_media_counts(&tx, references).await?;
+    let result = ChildDeleteImpactResponse {
+        display_name: selected.name,
+        version: selected.version,
+        season_count: 0,
+        episode_count: 1,
+        exclusive_media_count,
+        shared_media_count,
+    };
+    tx.commit().await?;
+    Ok(result)
+}
+
+async fn impact_media_counts<C: ConnectionTrait>(
+    db: &C,
+    assets: HashMap<Uuid, u64>,
+) -> Result<(u64, u64), SeriesError> {
+    let mut exclusive = 0;
+    let mut shared = 0;
+    for (asset_id, within) in assets {
+        if reference_count(db, asset_id).await? > within {
+            shared += 1;
+        } else {
+            exclusive += 1;
+        }
+    }
+    Ok((exclusive, shared))
 }
 
 async fn response<C: ConnectionTrait>(

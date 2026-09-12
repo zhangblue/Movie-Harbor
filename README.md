@@ -54,6 +54,8 @@ docker compose -p movie-harbor up -d --build --wait
 
 数据库连接必须二选一：直接运行 API 时可只设置 `DATABASE_URL`；Compose 使用 `DATABASE_HOST`、`DATABASE_PORT`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 这组分项变量。为避免迁移和运行时误连不同数据库，两种方式同时出现时 API 会拒绝启动。
 
+登录限流默认只信任 API 连接的对端地址，并忽略客户端提供的 `X-Forwarded-For`。标准 Compose 不向宿主机暴露 API，由 Caddy 覆盖该请求头为实际客户端地址，并用独立的 `TRUST_PROXY_SECRET` 向 API 认证代理身份。请把示例值替换为至少 32 字节的随机秘密且不要复用其他密码。仅当 API 只能由持有该秘密且会覆盖（而非追加）该请求头的受信反向代理访问时才可开启 `TRUST_PROXY_HEADERS`；直接暴露 API 时必须保持关闭。
+
 示例配置使用纯 HTTP 入口，因此 `COOKIE_SECURE=false` 只允许 `localhost` 或环回地址测试。正式部署应把 `PUBLIC_ORIGIN` 设为实际的 `https://` 来源并保持 `COOKIE_SECURE=true`，再由部署者用域名、上游反向代理或自己的 Caddy TLS 配置启用 HTTPS。不要在公网以明文 HTTP 提供管理后台。
 
 常用运维命令：
@@ -99,6 +101,8 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_te
 npm test --workspaces
 npm run build --workspaces
 ```
+
+旧版测试曾在中断时遗留按测试套件命名的 schema。确认没有 Movie Harbor 测试正在运行后，可用 `psql "$TEST_DATABASE_URL" -f backend/tests/cleanup_test_schemas.sql` 仅清理本项目已知前缀的遗留 schema；脚本不会匹配其他项目或普通业务 schema。
 
 完整 E2E 会使用隔离项目名 `mh-task15-e2e` 和端口 `18080`，生成一个很小的浏览器可播放 MP4，创建空命名卷、构建服务、验证生命周期与持久化，最后只清理该项目的容器和卷。运行前需安装 Chromium 与 `ffmpeg`：
 

@@ -56,6 +56,8 @@ fn config(root: &Path) -> Config {
         media_dir: root.into(),
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
+        trust_proxy_headers: false,
+        trusted_proxy_secret: None,
         max_upload_bytes: 4096,
         allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),
@@ -1214,6 +1216,71 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
         file_cleanup_job::Entity::find().count(&db).await.unwrap(),
         0
     );
+}
+
+// Catches an impact preview being treated as authoritative after another title starts sharing
+// the asset. The target version is intentionally unchanged by that external association.
+#[tokio::test]
+async fn delete_recomputes_cleanup_after_media_sharing_changes_since_the_impact_preview() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let first = create_movie(&app, &cookie, &csrf, "Preview owner").await;
+    let second = create_movie(&app, &cookie, &csrf, "Later owner").await;
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
+    let first_id = first["id"].as_str().unwrap();
+
+    assert_eq!(
+        associate(&app, &cookie, &csrf, first_id, "poster", poster.id, 1)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let impact = request(
+        &app,
+        "GET",
+        &format!("/api/admin/movies/{first_id}/delete-impact"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(impact.status(), StatusCode::OK);
+    assert_eq!(body(impact).await["exclusive_media_count"], 1);
+
+    assert_eq!(
+        associate(
+            &app,
+            &cookie,
+            &csrf,
+            second["id"].as_str().unwrap(),
+            "poster",
+            poster.id,
+            1
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/movies/{first_id}"),
+        json!({"version":2}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(
+        body(deleted).await,
+        json!({"cleanup_pending":false,"job_count":0,"warning":null})
+    );
+    assert!(root.as_ref().join(&poster.storage_key).exists());
 }
 
 // Catches post-commit filesystem failures being hidden as an unconditional delete success.

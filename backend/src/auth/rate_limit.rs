@@ -2,6 +2,7 @@ use super::csrf;
 use std::{
     collections::HashMap,
     net::IpAddr,
+    sync::atomic::{AtomicU8, Ordering},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -10,13 +11,32 @@ use tokio::time::Instant;
 
 #[derive(Default)]
 pub struct RateLimiter {
-    by_ip: Mutex<HashMap<IpAddr, Arc<AsyncMutex<Window>>>>,
-    by_account: Mutex<HashMap<String, Arc<AsyncMutex<Window>>>>,
+    by_ip: Mutex<HashMap<IpAddr, Arc<LimitWindow>>>,
+    by_account: Mutex<HashMap<String, Arc<LimitWindow>>>,
 }
 
 pub struct LoginLimit {
-    ip: Arc<AsyncMutex<Window>>,
-    account: Arc<AsyncMutex<Window>>,
+    ip: Arc<LimitWindow>,
+    account: Arc<LimitWindow>,
+}
+
+pub struct LoginAdmission {
+    ip: Arc<LimitWindow>,
+    account: Arc<LimitWindow>,
+    finished: bool,
+}
+
+struct LimitWindow {
+    state: AsyncMutex<Window>,
+    in_flight: AtomicU8,
+}
+impl Default for LimitWindow {
+    fn default() -> Self {
+        Self {
+            state: AsyncMutex::new(Window::default()),
+            in_flight: AtomicU8::new(0),
+        }
+    }
 }
 
 impl RateLimiter {
@@ -33,14 +53,15 @@ impl RateLimiter {
 }
 
 fn window<K: Eq + std::hash::Hash>(
-    map: &Mutex<HashMap<K, Arc<AsyncMutex<Window>>>>,
+    map: &Mutex<HashMap<K, Arc<LimitWindow>>>,
     key: K,
-) -> Arc<AsyncMutex<Window>> {
+) -> Arc<LimitWindow> {
     let mut windows = map.lock().expect("rate limiter lock poisoned");
     let now = Instant::now();
     windows.retain(|_, window| {
         Arc::strong_count(window) > 1
             || window
+                .state
                 .try_lock()
                 .map(|window| {
                     window
@@ -53,25 +74,84 @@ fn window<K: Eq + std::hash::Hash>(
 }
 
 impl LoginLimit {
+    pub async fn admit(&self, now: Instant) -> Option<LoginAdmission> {
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
+        if ip.blocked(now)
+            || account.blocked(now)
+            || self.ip.in_flight.load(Ordering::Acquire) >= 1
+            || self.account.in_flight.load(Ordering::Acquire) >= 1
+        {
+            return None;
+        }
+        // Reserve one attempt before any database/Argon2 await. Cancellation keeps this charge,
+        // while a completed successful login clears both windows.
+        ip.failure(now);
+        account.failure(now);
+        self.ip.in_flight.fetch_add(1, Ordering::AcqRel);
+        self.account.in_flight.fetch_add(1, Ordering::AcqRel);
+        Some(LoginAdmission {
+            ip: self.ip.clone(),
+            account: self.account.clone(),
+            finished: false,
+        })
+    }
+
     pub async fn blocked(&self, now: Instant) -> bool {
-        let mut ip = self.ip.lock().await;
-        let mut account = self.account.lock().await;
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
         ip.blocked(now) || account.blocked(now)
     }
 
     pub async fn failure(&self, now: Instant) -> bool {
-        let mut ip = self.ip.lock().await;
-        let mut account = self.account.lock().await;
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
         let ip_blocked = ip.failure(now);
         let account_blocked = account.failure(now);
         ip_blocked || account_blocked
     }
 
     pub async fn success(&self) {
-        let mut ip = self.ip.lock().await;
-        let mut account = self.account.lock().await;
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
         ip.success();
         account.success();
+    }
+}
+
+impl LoginAdmission {
+    pub async fn failure(mut self, now: Instant) -> bool {
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
+        // Admission already charged this attempt; completion must not count it twice.
+        let ip_blocked = ip.blocked(now);
+        let account_blocked = account.blocked(now);
+        let blocked = ip_blocked || account_blocked;
+        drop(account);
+        drop(ip);
+        self.release();
+        blocked
+    }
+    pub async fn success(mut self) {
+        let mut ip = self.ip.state.lock().await;
+        let mut account = self.account.state.lock().await;
+        ip.success();
+        account.success();
+        drop(account);
+        drop(ip);
+        self.release();
+    }
+    fn release(&mut self) {
+        if !self.finished {
+            self.ip.in_flight.fetch_sub(1, Ordering::AcqRel);
+            self.account.in_flight.fetch_sub(1, Ordering::AcqRel);
+            self.finished = true;
+        }
+    }
+}
+impl Drop for LoginAdmission {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -156,6 +236,51 @@ mod tests {
                 .for_login("127.0.1.1".parse().unwrap(), "Other")
                 .blocked(Instant::now())
                 .await
+        );
+    }
+
+    #[tokio::test]
+    async fn admission_bounds_a_same_ip_burst_and_cancellation_releases_it() {
+        let limits = RateLimiter::default();
+        let first = limits.for_login("127.0.0.1".parse().unwrap(), "random-1");
+        let held = first.admit(Instant::now()).await.expect("first admitted");
+        for suffix in 2..=20 {
+            assert!(
+                limits
+                    .for_login("127.0.0.1".parse().unwrap(), &format!("random-{suffix}"))
+                    .admit(Instant::now())
+                    .await
+                    .is_none()
+            );
+        }
+        assert!(
+            limits
+                .for_login("127.0.0.2".parse().unwrap(), "Admin")
+                .admit(Instant::now())
+                .await
+                .is_some()
+        );
+        drop(held);
+        assert!(first.admit(Instant::now()).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_admissions_still_consume_the_ip_attempt_budget() {
+        let limits = RateLimiter::default();
+        for suffix in 1..=6 {
+            let admission = limits
+                .for_login("127.0.0.9".parse().unwrap(), &format!("random-{suffix}"))
+                .admit(Instant::now())
+                .await
+                .expect("first six attempts are admitted");
+            drop(admission);
+        }
+        assert!(
+            limits
+                .for_login("127.0.0.9".parse().unwrap(), "another-random-name")
+                .admit(Instant::now())
+                .await
+                .is_none()
         );
     }
 
