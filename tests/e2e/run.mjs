@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { buildE2EEnvironment, cleanupE2ERun, createE2ERun } from "./run-safety.mjs";
+import { buildBindCleanupPlan, buildE2EEnvironment, cleanupE2ERun, createE2ERun } from "./run-safety.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const generated = resolve(import.meta.dirname, ".generated");
@@ -46,6 +46,7 @@ const testEnv = {
   E2E_CHANGED_PASSWORD: changedPassword,
 };
 
+let containerStartAttempted = false;
 try {
   writeFileSync(envFile, [
     `APP_PORT=${port}`,
@@ -74,6 +75,7 @@ try {
 
   run("docker", [...compose, "down", "--volumes", "--remove-orphans"]);
   await assertPortAvailable();
+  containerStartAttempted = true;
   run("docker", [...compose, "up", "-d", "--build", "--wait"]);
   run("docker", [...compose, "exec", "-T", "--user", "10001", "api", "sh", "-c", "printf private > /media/.incoming/e2e-private-sentinel"]);
   run("npx", ["playwright", "test", "--project=admin"], { env: testEnv });
@@ -83,11 +85,20 @@ try {
 } finally {
   if (process.env.E2E_KEEP === "1") {
     console.error(`E2E_KEEP=1: kept project ${project}, run directory ${isolatedRun.runDir}, media directory ${isolatedRun.mediaDir}, and database directory ${isolatedRun.databaseDir}`);
+  } else if (!containerStartAttempted) {
+    cleanupE2ERun(isolatedRun);
   } else {
+    run("docker", [...compose, "stop"]);
+    const cleanupPlan = buildBindCleanupPlan(isolatedRun, {
+      uid: process.getuid(),
+      gid: process.getgid(),
+    });
     try {
-      run("docker", [...compose, "down", "--volumes", "--remove-orphans"]);
-    } finally {
-      cleanupE2ERun(isolatedRun);
+      run(cleanupPlan.command, cleanupPlan.args);
+    } catch (error) {
+      throw new Error(`E2E bind cleanup failed; preserved stopped project ${project} and run directory ${isolatedRun.runDir}`, { cause: error });
     }
+    run("docker", [...compose, "down", "--volumes", "--remove-orphans"]);
+    cleanupE2ERun(isolatedRun);
   }
 }

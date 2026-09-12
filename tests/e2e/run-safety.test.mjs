@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -46,13 +46,46 @@ test("cleanup accepts only this run's marked directory under the generated runs 
   const roots = fixture();
   t.after(() => rmSync(roots.workspaceRoot, { recursive: true, force: true }));
   const run = safety.createE2ERun({ ...roots, runId: "c".repeat(32), ownerToken: "owned-run" });
-  writeFileSync(join(run.mediaDir, "fixture.mp4"), "fixture");
-  writeFileSync(join(run.databaseDir, "database-file"), "database");
+  writeFileSync(join(run.runDir, "runner-file"), "runner");
 
   safety.cleanupE2ERun(run);
 
   assert.equal(existsSync(run.runDir), false);
   assert.equal(existsSync(roots.workspaceRoot), true);
+});
+
+test("container cleanup is planned without traversing inaccessible nonempty bind directories", (t) => {
+  assert.equal(typeof safety.buildBindCleanupPlan, "function");
+  const roots = fixture();
+  const run = safety.createE2ERun({ ...roots, runId: "f".repeat(32), ownerToken: "owned-run" });
+  t.after(() => {
+    if (existsSync(run.mediaDir)) chmodSync(run.mediaDir, 0o700);
+    if (existsSync(run.databaseDir)) chmodSync(run.databaseDir, 0o700);
+    rmSync(roots.workspaceRoot, { recursive: true, force: true });
+  });
+  writeFileSync(join(run.mediaDir, "fixture.mp4"), "fixture");
+  writeFileSync(join(run.databaseDir, "database-file"), "database");
+  chmodSync(run.mediaDir, 0o000);
+  chmodSync(run.databaseDir, 0o000);
+
+  assert.throws(() => safety.cleanupE2ERun(run));
+  assert.equal(existsSync(run.runDir), true);
+  const plan = safety.buildBindCleanupPlan(run, { uid: 501, gid: 20 });
+
+  assert.equal(plan.command, "docker");
+  assert.deepEqual(plan.args.filter((arg) => arg.startsWith("type=bind,")), [
+    `type=bind,source=${run.mediaDir},target=/e2e-media`,
+    `type=bind,source=${run.databaseDir},target=/e2e-database`,
+  ]);
+  assert.deepEqual(plan.args.slice(0, 10), [
+    "run", "--rm", "--network", "none", "--read-only",
+    "--security-opt", "no-new-privileges", "--user", "0:0", "--mount",
+  ]);
+  assert.match(plan.args.at(-1), /find \/e2e-media -mindepth 1 -delete/);
+  assert.match(plan.args.at(-1), /find \/e2e-database -mindepth 1 -delete/);
+  assert.match(plan.args.at(-1), /chown 501:20 \/e2e-media \/e2e-database/);
+  assert.equal(plan.args.join(" ").includes(roots.workspaceRoot + "/data"), false);
+  assert.throws(() => safety.buildBindCleanupPlan(run, { uid: -1, gid: 20 }), /non-negative integers/);
 });
 
 test("cleanup rejects empty, broad, production-default, external, unmarked, and replaced targets", (t) => {
@@ -69,6 +102,14 @@ test("cleanup rejects empty, broad, production-default, external, unmarked, and 
   for (const unsafe of ["", "/", roots.workspaceRoot, productionMedia, productionDatabase, external]) {
     assert.throws(() => safety.cleanupE2ERun({ ...run, runDir: unsafe }), /refusing E2E cleanup/);
   }
+  assert.throws(
+    () => safety.buildBindCleanupPlan({ ...run, mediaDir: productionMedia }, { uid: 501, gid: 20 }),
+    /refusing E2E cleanup/,
+  );
+  assert.throws(
+    () => safety.buildBindCleanupPlan({ ...run, databaseDir: productionDatabase }, { uid: 501, gid: 20 }),
+    /refusing E2E cleanup/,
+  );
 
   rmSync(run.runDir, { recursive: true });
   mkdirSync(run.runDir, { recursive: true });

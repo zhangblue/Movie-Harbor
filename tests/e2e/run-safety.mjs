@@ -3,6 +3,7 @@ import {
   lstatSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -22,6 +23,17 @@ function requireRealDirectory(path, message) {
   const metadata = lstatSync(path);
   if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(message);
   return realpathSync(path);
+}
+
+function directoryIdentity(path, message) {
+  if (!existsSync(path)) throw new Error(message);
+  const metadata = lstatSync(path);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw new Error(message);
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+function sameIdentity(actual, expected) {
+  return actual.dev === expected?.dev && actual.ino === expected?.ino;
 }
 
 export function createE2ERun({
@@ -73,7 +85,9 @@ export function createE2ERun({
     ownerToken,
     runDir: realpathSync(runDir),
     mediaDir: realpathSync(mediaDir),
+    mediaIdentity: directoryIdentity(mediaDir, "media directory must be a real directory"),
     databaseDir: realpathSync(databaseDir),
+    databaseIdentity: directoryIdentity(databaseDir, "database directory must be a real directory"),
     project: `${projectPrefix}-${runId}`,
   };
 }
@@ -92,10 +106,10 @@ function verifyOwnedRun(run) {
   if (requireRealDirectory(run.runDir, "run directory must be a real directory") !== expectedRun) refuse("run directory identity changed");
   const expectedMedia = join(expectedRun, "media");
   if (run.mediaDir !== expectedMedia) refuse("media directory mismatch");
-  if (requireRealDirectory(run.mediaDir, "media directory must be a real directory") !== expectedMedia) refuse("media directory identity changed");
+  if (!sameIdentity(directoryIdentity(run.mediaDir, "media directory must be a real directory"), run.mediaIdentity)) refuse("media directory identity changed");
   const expectedDatabase = join(expectedRun, "postgres");
   if (run.databaseDir !== expectedDatabase) refuse("database directory mismatch");
-  if (requireRealDirectory(run.databaseDir, "database directory must be a real directory") !== expectedDatabase) refuse("database directory identity changed");
+  if (!sameIdentity(directoryIdentity(run.databaseDir, "database directory must be a real directory"), run.databaseIdentity)) refuse("database directory identity changed");
 
   const marker = join(expectedRun, ownerMarker);
   if (!existsSync(marker)) refuse("owner marker missing");
@@ -120,9 +134,38 @@ export function buildE2EEnvironment(inherited, run) {
   };
 }
 
+export function buildBindCleanupPlan(run, { uid, gid }) {
+  verifyOwnedRun(run);
+  if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
+    throw new Error("host uid and gid must be non-negative integers");
+  }
+  const cleanup = [
+    "find /e2e-media -mindepth 1 -delete",
+    "find /e2e-database -mindepth 1 -delete",
+    `chown ${uid}:${gid} /e2e-media /e2e-database`,
+    "chmod 0700 /e2e-media /e2e-database",
+  ].join("\n");
+  return {
+    command: "docker",
+    args: [
+      "run", "--rm", "--network", "none", "--read-only",
+      "--security-opt", "no-new-privileges", "--user", "0:0",
+      "--mount", `type=bind,source=${run.mediaDir},target=/e2e-media`,
+      "--mount", `type=bind,source=${run.databaseDir},target=/e2e-database`,
+      "alpine:3.22", "sh", "-ec", cleanup,
+    ],
+  };
+}
+
 export function cleanupE2ERun(run) {
   try {
     verifyOwnedRun(run);
+    if (realpathSync(run.mediaDir) !== run.mediaDir || realpathSync(run.databaseDir) !== run.databaseDir) {
+      refuse("bind directory identity changed");
+    }
+    if (readdirSync(run.mediaDir).length !== 0 || readdirSync(run.databaseDir).length !== 0) {
+      refuse("bind directories must be empty before host cleanup");
+    }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("refusing E2E cleanup:")) throw error;
     refuse(error instanceof Error ? error.message : "target validation failed");
