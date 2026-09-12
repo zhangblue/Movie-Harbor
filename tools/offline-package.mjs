@@ -1,4 +1,4 @@
-const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
 const SUPPORTED_PLATFORM = "linux/arm64";
 
 export function validateVersion(value) {

@@ -13,7 +13,11 @@ import {
 const VERSION = "test-v1";
 
 test("validates the release version against a strict tag-safe whitelist", () => {
+  const longestTagSafeVersion = "v".repeat(116);
+
   assert.equal(validateVersion("v1.2.3-rc_1"), "v1.2.3-rc_1");
+  assert.equal(validateVersion(longestTagSafeVersion), longestTagSafeVersion);
+  assert.throws(() => validateVersion("v".repeat(117)), /invalid version/);
   assert.throws(() => validateVersion("../secret"), /invalid version/);
   assert.throws(() => validateVersion("release version"), /invalid version/);
   assert.throws(() => validateVersion(""), /invalid version/);
