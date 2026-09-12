@@ -10,7 +10,7 @@ import { deferred, json, series, session } from "../test/server";
 const base = "/api/admin/series/series-1";
 const episodePath = `${base}/seasons/s1/episodes/e1`;
 function episode(overrides: Partial<EpisodeResponse> = {}): EpisodeResponse {
-  return { id: "e1", season_id: "s1", number: 1, name: "来信", synopsis: "第一封信", duration_seconds: 2700, status: "draft", version: 2, video: null, published_at: null, archived_at: null, created_at: "2026-09-01", updated_at: "2026-09-01", ...overrides };
+  return { id: "e1", season_id: "s1", number: 1, name: "来信", duration_seconds: 2700, status: "draft", version: 2, video: null, published_at: null, archived_at: null, created_at: "2026-09-01", updated_at: "2026-09-01", ...overrides };
 }
 function detail(overrides: Partial<SeriesResponse> = {}) { return series({ status: "draft", seasons: [{ id: "s1", number: 1, episodes: [episode()] }], ...overrides }); }
 type Request = { url: string; method: string; body: any; headers: Headers };
@@ -47,7 +47,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
       else season.number = r.body.number;
       current = { ...current, version: current.version + 1 }; return json(current);
     }
-    if (season && url.endsWith("/episodes")) { season.episodes.push(episode({ id: `e${++sequence}`, season_id: season.id, version: 1, name: r.body.name, number: r.body.number, synopsis: "", duration_seconds: null })); current = { ...current, version: current.version + 1 }; return json(current, 201); }
+    if (season && url.endsWith("/episodes")) { season.episodes.push(episode({ id: `e${++sequence}`, season_id: season.id, version: 1, name: r.body.name, number: r.body.number, duration_seconds: null })); current = { ...current, version: current.version + 1 }; return json(current, 201); }
     const ep = season?.episodes.find((e) => e.id === url.split("/")[8]);
     if (ep && season) {
       if (r.method === "GET") return json({ episode: ep, series_version: current.version });
@@ -188,8 +188,19 @@ it("saves one episode and its video independently, retaining another episode's u
   await user.click(screen.getByRole("button", { name: "添加一季" })); await screen.findByRole("heading", { name: "第 2 季" });
   const writes = requests.filter((r) => r.method !== "GET");
   expect(writes.map((r) => r.url)).toEqual([episodePath, "/api/admin/media/episodes/e1/video?version=3", `${base}/seasons`]);
-  expect(writes[0].body).toEqual({ version: 2, number: 1, name: "来信", synopsis: "第一封信", duration_seconds: 2700 });
+  expect(writes[0].body).toEqual({ version: 2, number: 1, name: "来信", duration_seconds: 2700 });
   expect(writes[2].body).toEqual({ version: 5, number: 2 });
+});
+
+it("does not render or submit an episode synopsis", async () => {
+  const requests = fixture(detail());
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("单集名称");
+  expect(screen.queryByLabelText("单集简介")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
+  expect(requests.find((request) => request.method === "PATCH" && request.url === episodePath)?.body)
+    .toEqual({ version: 2, number: 1, name: "来信", duration_seconds: 2700 });
 });
 
 it("locks published series fields and seasons with published episodes while permitting new drafts", async () => {

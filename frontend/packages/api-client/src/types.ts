@@ -13,7 +13,7 @@ export interface MovieDetail {
   duration_seconds: number | null; poster_url: string | null; video_url: string | null; genres: PublicGenre[];
 }
 export interface PublicEpisode {
-  id: string; number: number; name: string; synopsis: string; duration_seconds: number | null; video_url: string | null;
+  id: string; number: number; name: string; duration_seconds: number | null; video_url: string | null;
 }
 export interface PublicSeason { id: string; number: number; episodes: PublicEpisode[] }
 export interface SeriesDetail {
@@ -48,7 +48,7 @@ export interface UpdateMovieRequest {
   duration_seconds?: number | null; genre_ids?: string[] | null;
 }
 export interface EpisodeResponse {
-  id: string; season_id: string; number: number; name: string; synopsis: string; duration_seconds: number | null;
+  id: string; season_id: string; number: number; name: string; duration_seconds: number | null;
   status: ContentStatus; version: number; published_at: string | null; archived_at: string | null;
   created_at: string; updated_at: string; video: MediaSummary | null;
 }
@@ -67,7 +67,7 @@ export interface UpdateSeriesRequest {
   version: number; name?: string | null; synopsis?: string | null; year?: number | null; genre_ids?: string[] | null;
 }
 export interface UpdateEpisodeRequest {
-  version: number; number?: number | null; name?: string | null; synopsis?: string | null; duration_seconds?: number | null;
+  version: number; number?: number | null; name?: string | null; duration_seconds?: number | null;
 }
 export interface EpisodeEnvelope { series_version: number; episode: EpisodeResponse }
 export interface MediaAssetResponse {
