@@ -39,7 +39,7 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
 .detail-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--mh-color-border); border-radius: 18px; background: #121721; }
 .detail-poster { aspect-ratio: 2 / 3; background: var(--mh-color-surface-hover); align-self: start; }
 .detail-poster img { width: 100%; height: 100%; display: block; object-fit: cover; }
-.poster-fallback { display: grid; place-items: center; height: 100%; color: var(--mh-color-text-muted); }
+.detail-poster .poster-blank { width: 100%; height: 100%; background: var(--mh-color-surface-hover); }
 .detail-copy { min-width: 0; padding: 38px 34px; }
 .detail-copy p { color: #b9c1d0; line-height: 1.7; }
 .detail-copy .eyebrow { margin-top: 0; }

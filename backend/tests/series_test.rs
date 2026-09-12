@@ -871,7 +871,7 @@ async fn combined_lifecycle_validates_media_and_preserves_child_state_when_paren
     );
     assert_eq!(
         body(no_published_episode).await["fields"],
-        json!(["poster", "episodes"])
+        json!(["episodes"])
     );
 
     let missing_episode_media = write(
@@ -918,7 +918,7 @@ async fn combined_lifecycle_validates_media_and_preserves_child_state_when_paren
     assert_eq!(repeated_episode.status(), StatusCode::OK);
     assert_eq!(body(repeated_episode).await["series_version"], 4);
 
-    let missing_poster = write(
+    let published_without_poster = write(
         &app,
         "POST",
         &format!("/api/admin/series/{series_id}/publish"),
@@ -927,23 +927,7 @@ async fn combined_lifecycle_validates_media_and_preserves_child_state_when_paren
         &csrf,
     )
     .await;
-    assert_eq!(missing_poster.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(body(missing_poster).await["fields"], json!(["poster"]));
-    let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
-    attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
-    assert_eq!(
-        write(
-            &app,
-            "POST",
-            &format!("/api/admin/series/{series_id}/publish"),
-            json!({"version":4}),
-            &cookie,
-            &csrf,
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
+    assert_eq!(published_without_poster.status(), StatusCode::OK);
     let archived = write(
         &app,
         "POST",

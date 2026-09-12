@@ -177,6 +177,19 @@ it("chains the saved series and poster versions into publication", async () => {
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:1");
 });
 
+it("explains that a series needs a published playable episode without requiring a poster", async () => {
+  fixture(detail({ poster: null }), (r) => r.url.endsWith("/publish")
+    ? json({ error: "validation", fields: ["poster", "episodes"] }, 422)
+    : undefined);
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("剧集名称");
+  await user.click(screen.getByRole("button", { name: "发布剧集" }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("发布剧集失败：当前剧集没有已发布的单集。请先为单集上传可播放视频并发布至少一集，然后再发布整个剧集。");
+  expect(alert).not.toHaveTextContent("海报");
+});
+
 // Ensures the update/upload boundary is one episode and propagates both versions to later writes.
 it("saves one episode and its video independently, retaining another episode's unsaved input", async () => {
   const requests = fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [episode(), episode({ id: "e2", number: 2, name: "回信" })] }] }));

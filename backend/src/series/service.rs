@@ -799,15 +799,6 @@ async fn validate_series_publish<C: ConnectionTrait>(
     if model.name.trim().is_empty() {
         missing.push("name");
     }
-    let poster = repository::asset(db, model.poster_asset_id).await?;
-    if !is_publishable_asset(
-        storage,
-        poster.as_ref(),
-        "poster",
-        &["image/jpeg", "image/png", "image/webp"],
-    ) {
-        missing.push("poster");
-    }
     let mut publishable_episode = false;
     for season in repository::seasons(db, model.id).await? {
         for episode in repository::episodes(db, season.id).await? {

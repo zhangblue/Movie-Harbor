@@ -90,11 +90,15 @@ it("ignores empty genres and safely renders text that resembles markup", () => {
   expect(screen.getByText("剧集 · 年份未知")).toBeInTheDocument();
 });
 
-it("shows an accessible fallback when the poster is missing or fails", () => {
+it("shows an aria-hidden blank poster when the poster is missing or fails", () => {
   const { rerender } = render(
     <PosterCard href="/movies/1" title="无海报电影" kind="movie" year={2020} genres={[]} />,
   );
-  expect(screen.getByRole("img", { name: "无海报电影海报不可用" })).toBeInTheDocument();
+  let blank = document.querySelector(".poster-blank");
+  expect(blank).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByText("MH")).not.toBeInTheDocument();
+  expect(screen.queryByText(/海报不可用/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
 
   rerender(
     <PosterCard
@@ -107,7 +111,11 @@ it("shows an accessible fallback when the poster is missing or fails", () => {
     />,
   );
   fireEvent.error(screen.getByRole("img", { name: "无海报电影海报" }));
-  expect(screen.getByRole("img", { name: "无海报电影海报不可用" })).toBeInTheDocument();
+  blank = document.querySelector(".poster-blank");
+  expect(blank).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByText("MH")).not.toBeInTheDocument();
+  expect(screen.queryByText(/海报不可用/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
 it("shows fewer names and an accurate overflow count when the measured row narrows", () => {

@@ -12,7 +12,7 @@ export function DetailsLayout({ detail, children }: { detail: MovieDetail | Seri
     <article className="detail-layout">
       <div className="detail-poster">
         {detail.poster_url && !posterFailed ? <img src={detail.poster_url} alt={`${detail.name}海报`} onError={() => setPosterFailed(true)} />
-          : <div className="poster-fallback" role="img" aria-label={`${detail.name}海报不可用`}>MH</div>}
+          : <div className="poster-blank" aria-hidden="true" />}
       </div>
       <div className="detail-copy">
         <p className="eyebrow">{detail.kind === "movie" ? "MOVIE" : "SERIES"}</p>

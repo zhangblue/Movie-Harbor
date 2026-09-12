@@ -6,6 +6,7 @@ export function PosterPicker({ current, file, onSelect, readOnly, disabled }: {
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [posterFailed, setPosterFailed] = useState(false);
   useEffect(() => {
     if (!file || readOnly) { setPreview(null); return; }
     const url = URL.createObjectURL(file);
@@ -13,10 +14,13 @@ export function PosterPicker({ current, file, onSelect, readOnly, disabled }: {
     return () => URL.revokeObjectURL(url);
   }, [file, readOnly]);
   const source = readOnly ? current?.url : preview ?? current?.url;
-  const picture = source ? <img src={source} alt="当前海报预览" /> : <span>选择海报</span>;
+  useEffect(() => setPosterFailed(false), [source]);
+  const picture = source && !posterFailed
+    ? <img src={source} alt="当前海报预览" onError={() => setPosterFailed(true)} />
+    : <div className="poster-blank" aria-hidden="true" />;
   return <div className="movie-poster">
     {readOnly ? <div className="movie-poster-frame">{picture}</div> : <>
-      <button className="movie-poster-frame" type="button" aria-label="选择或替换海报" disabled={disabled} onClick={() => input.current?.click()}>{picture}<span className="movie-poster-change">点击替换海报</span></button>
+      <button className="movie-poster-frame" type="button" aria-label="选择或替换海报" disabled={disabled} onClick={() => input.current?.click()}>{picture}{source && !posterFailed ? <span className="movie-poster-change">点击替换海报</span> : null}</button>
       <input ref={input} aria-label="海报文件" type="file" accept="image/jpeg,image/png,image/webp" hidden disabled={disabled} onChange={(event) => {
         const selected = event.currentTarget.files?.[0];
         if (selected) onSelect(selected);

@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
@@ -17,6 +17,24 @@ it("loads movie details from a deep link with all genres, duration and a public 
   expect(screen.getByText("家庭")).toBeInTheDocument();
   expect(screen.getByText("一封信，穿越山海。")).toBeInTheDocument();
   expect(screen.getByRole("link", { name: "播放电影" })).toHaveAttribute("href", "/movies/movie-1/play");
+});
+
+it("shows the same aria-hidden blank poster when artwork is missing or fails", async () => {
+  window.history.replaceState(null, "", "/movies/movie-1");
+  serve((url) => url.pathname === "/api/catalog/movies/movie-1" ? json({ ...movie, poster_url: null }) : json({}, 404));
+  render(<App />);
+  await screen.findByRole("heading", { level: 1, name: "远方来信" });
+  expect(document.querySelector(".poster-blank")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByText("MH")).not.toBeInTheDocument();
+  expect(screen.queryByText(/海报不可用/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
+
+  cleanup();
+  serve((url) => url.pathname === "/api/catalog/movies/movie-1" ? json(movie) : json({}, 404));
+  render(<App />);
+  fireEvent.error(await screen.findByRole("img", { name: "远方来信海报" }));
+  expect(document.querySelector(".poster-blank")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
 it("orders seasons and episodes, switches season, and uses only API-returned administrator episode names", async () => {

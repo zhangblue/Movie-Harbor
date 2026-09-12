@@ -734,9 +734,9 @@ async fn removed_arbitrary_media_association_routes_return_not_found() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
-// Catches publishing without both registered files or trusting unsafe/missing/non-regular keys.
+// Catches requiring a poster or trusting an unsafe, missing, or non-regular video key.
 #[tokio::test]
-async fn publish_requires_valid_accessible_poster_and_browser_video() {
+async fn publish_allows_no_poster_but_requires_an_accessible_browser_video() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -757,7 +757,30 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
     .await;
     assert_eq!(missing.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let missing = body(missing).await;
-    assert_eq!(missing["fields"], json!(["poster", "video"]));
+    assert_eq!(missing["fields"], json!(["video"]));
+
+    let video_only = create_movie(&app, &cookie, &csrf, "No poster").await;
+    let video_only_id = video_only["id"].as_str().unwrap();
+    let playable_video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(&db, video_only_id, "video", playable_video.id, 1)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        write(
+            &app,
+            "POST",
+            &format!("/api/admin/movies/{video_only_id}/publish"),
+            json!({"version":2}),
+            &cookie,
+            &csrf,
+        )
+        .await
+        .status(),
+        StatusCode::OK
+    );
 
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let inaccessible_video = create_asset(&db, root.as_ref(), "video", "video/mp4", false).await;

@@ -374,15 +374,6 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
     if model.name.trim().is_empty() {
         missing.push("name");
     }
-    let poster = repository::asset(db, model.poster_asset_id).await?;
-    if !is_publishable_asset(
-        storage,
-        poster.as_ref(),
-        "poster",
-        &["image/jpeg", "image/png", "image/webp"],
-    ) {
-        missing.push("poster");
-    }
     let video = repository::asset(db, model.video_asset_id).await?;
     if !is_publishable_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
         missing.push("video");

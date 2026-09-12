@@ -132,8 +132,25 @@ it("shows structured publish validation without losing the draft", async () => {
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
   await user.click(screen.getByRole("button", { name: "发布" }));
   const errors = await screen.findByRole("alert");
-  expect(within(errors).getAllByRole("listitem").map((x) => x.textContent)).toEqual(["名称", "海报", "可播放视频"]);
+  expect(within(errors).getAllByRole("listitem").map((x) => x.textContent)).toEqual(["名称", "可播放视频"]);
+  expect(errors).not.toHaveTextContent("海报");
   expect(screen.getByLabelText("名称")).toBeEnabled();
+});
+
+it("uses the same aria-hidden blank poster for an empty or failed preview", async () => {
+  fixture(movie({ poster: null }));
+  editor();
+  await screen.findByLabelText("名称");
+  expect(document.querySelector(".poster-blank")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByText("选择海报")).not.toBeInTheDocument();
+
+  cleanup();
+  fixture(movie());
+  editor();
+  const image = await screen.findByRole("img", { name: "当前海报预览" });
+  fireEvent.error(image);
+  expect(document.querySelector(".poster-blank")).toHaveAttribute("aria-hidden", "true");
+  expect(screen.queryByRole("img", { name: "当前海报预览" })).not.toBeInTheDocument();
 });
 
 it("reloads authoritative details after publish, archive and return to draft", async () => {

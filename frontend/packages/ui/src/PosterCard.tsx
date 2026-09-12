@@ -62,16 +62,15 @@ export function PosterCard({ href, title, kind, year, posterUrl, genres, genreCo
   };
   const badges = visibleNameCount === null ? [] : candidateBadges(visibleNameCount);
   const kindName = kind === "movie" ? "电影" : "剧集";
+  const displayedPoster = posterUrl && !posterFailed ? posterUrl : null;
 
   return (
     <a className={["mh-poster-card", className].filter(Boolean).join(" ")} href={href} aria-label={`查看${title}详情`}>
-      <div className="mh-poster-card__frame">
-        {posterUrl && !posterFailed ? (
-          <img src={posterUrl} alt={`${title}海报`} loading="lazy" onError={() => setPosterFailed(true)} />
+      <div className={`mh-poster-card__frame${displayedPoster ? "" : " is-blank"}`}>
+        {displayedPoster ? (
+          <img src={displayedPoster} alt={`${title}海报`} loading="lazy" onError={() => setPosterFailed(true)} />
         ) : (
-          <div className="mh-poster-card__fallback" role="img" aria-label={`${title}海报不可用`}>
-            <span aria-hidden="true">MH</span>
-          </div>
+          <div className="poster-blank" aria-hidden="true" />
         )}
       </div>
       <div className="mh-poster-card__copy">
