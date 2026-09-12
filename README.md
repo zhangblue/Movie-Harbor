@@ -112,14 +112,14 @@ npm run build --workspaces
 
 旧版测试曾在中断时遗留按测试套件命名的 schema。确认没有 Movie Harbor 测试正在运行后，可用 `psql "$TEST_DATABASE_URL" -f backend/tests/cleanup_test_schemas.sql` 仅清理本项目已知前缀的遗留 schema；脚本不会匹配其他项目或普通业务 schema。
 
-完整 E2E 会使用隔离项目名 `mh-task15-e2e` 和端口 `18080`，生成一个很小的浏览器可播放 MP4，创建空命名卷、构建服务、验证生命周期与持久化，最后只清理该项目的容器和卷。运行前需安装 Chromium 与 `ffmpeg`：
+完整 E2E 会为每次运行生成以 `mh-task15-e2e-` 开头的唯一 Compose 项目名，并在被忽略的 `tests/e2e/.generated/runs/` 下创建带所有权标记的唯一运行目录。该目录内的 PostgreSQL 与媒体子目录会被显式传给 Compose 和 Playwright；验证生命周期与持久化后，runner 先停止该轮的精确 Compose 项目，再只清理这个经过重新验证的本轮目录。测试不会读取或修改生产默认的 `data/postgres` 和 `data/media`。
 
 ```bash
 npx playwright install chromium
 npm run test:e2e
 ```
 
-设置 `E2E_KEEP=1` 可在失败后保留隔离环境供排查；清理时仍须使用精确项目名：`docker compose -p mh-task15-e2e down --volumes --remove-orphans`。
+设置 `E2E_KEEP=1` 可在失败后保留隔离容器和本轮目录供排查；runner 会在终端打印本轮的完整项目名、绝对运行目录、媒体目录和数据库目录。排查结束后，应使用该条输出中的精确项目名执行 `docker compose -p <本轮项目名> down --volumes --remove-orphans`，再仅删除输出中对应的本轮运行目录。
 
 ## 查看 UI Demo
 
