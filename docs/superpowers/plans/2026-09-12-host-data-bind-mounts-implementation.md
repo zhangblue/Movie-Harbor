@@ -147,7 +147,7 @@ git diff --check
 
 预期：全部退出码为 0；Node 顶层测试包含新建的 3 项 Compose 存储测试，应用单元测试、构建和 Compose/Playwright 端到端流程全部通过。
 
-- [ ] **步骤 6：提交交付物**
+- [x] **步骤 6：提交交付物**
 
 ```bash
 git add tests/compose-storage.test.mjs docker-compose.yml .env.example .gitignore docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md
