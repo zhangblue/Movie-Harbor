@@ -20,7 +20,7 @@ function deletionAllowed(target: Pick<Deletion, "series" | "season" | "episode">
   return canAct(target.series, "delete") && target.series.seasons.every((s) => s.episodes.every((e) => knownStatus(e.status)));
 }
 
-export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}, onDeleteSuccess = () => {}, initialDelete = false, resumeCreation = false }: { seriesId: string | null; onBack: () => void; onExpired: () => void; onCreated?: (id: string) => void; onDeleteSuccess?: () => void; initialDelete?: boolean; resumeCreation?: boolean }) {
+export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}, onDeleteSuccess = () => {}, onDeleteFinalization = () => {}, initialDelete = false, resumeCreation = false }: { seriesId: string | null; onBack: () => void; onExpired: () => void; onCreated?: (id: string) => void; onDeleteSuccess?: () => void; onDeleteFinalization?: () => void; initialDelete?: boolean; resumeCreation?: boolean }) {
   const [series, setSeries] = useState<SeriesResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
@@ -31,6 +31,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const [error, setError] = useState("");
   const [invalid, setInvalid] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
+  const [warning, setWarning] = useState("");
   const [revision, setRevision] = useState(0);
   const [newSeasons, setNewSeasons] = useState<string[]>([]);
   const [deleting, setDeleting] = useState<Deletion | null>(null);
@@ -44,7 +45,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   }
   useEffect(() => {
     let ignore = false;
-    setLoading(true); setError(""); setInvalid([]); setNotice(""); setPoster(null); setDeleting(null); setNewSeasons([]);
+    setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setPoster(null); setDeleting(null); setNewSeasons([]);
     const watch = <T,>(request: Promise<T>) => request.catch((cause: unknown) => {
       if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
       throw cause;
@@ -78,6 +79,12 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
       setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
+    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_finalization_failed") {
+      try { await refresh(undefined, true); } catch { setConflict(true); }
+      if (mounted.current) {
+        setPoster(null);
+        setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+      }
     } else if (cause instanceof ApiError && cause.status === 409) { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
     else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
       setInvalid(cause.details.fields.filter((f): f is string => typeof f === "string"));
@@ -85,7 +92,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   }
   async function run(action: () => Promise<void>): Promise<boolean> {
     if (operation.current || loading || conflict || !mounted.current) return false;
-    operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice("");
+    operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice(""); setWarning("");
     try { await action(); return mounted.current; }
     catch (cause) { await fail(cause); return false; }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
@@ -126,7 +133,18 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       if (!mounted.current) return;
       acceptEpisode(saved);
       if (file) {
-        const uploaded = await uploadMedia({ kind: "episodes", id: episode.id, slot: "video" }, file, saved.episode.version);
+        let uploaded;
+        try {
+          uploaded = await uploadMedia({ kind: "episodes", id: episode.id, slot: "video" }, file, saved.episode.version);
+        } catch (cause) {
+          if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+          try { await refresh(); } catch { setConflict(true); }
+          if (mounted.current) {
+            onUploaded();
+            setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+          }
+          return;
+        }
         if (!mounted.current) return;
         // Both episode and parent versions must agree with the atomic upload result.
         setConflict(true);
@@ -174,6 +192,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       {!deleting && error && <div className="request-error"><p role="alert">{error}</p><Button disabled={busy || loading} onClick={() => setRevision((v) => v + 1)}>重新加载</Button></div>}
       {!deleting && invalid.length > 0 && <SeriesPublishErrors fields={invalid} />}
       {notice && <p role="status">{notice}</p>}
+      {warning && <p role="alert" className="error-message">{warning}</p>}
       {loading ? <p role="status">正在加载剧集…</p> : !series ? <form className="movie-form" onSubmit={(event) => {
         event.preventDefault(); if (!fields.name.trim()) return;
         void run(async () => {
@@ -227,9 +246,19 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
         <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleteName || !deletionAllowed(deleting)} onClick={() => { void run(async () => {
           const target = deleting;
-          if (target.episode && target.season) await deleteEpisode(target.series.id, target.season.id, target.episode.id, target.impact.version);
-          else if (target.season) await deleteSeason(target.series.id, target.season.id, target.impact.version);
-          else { await deleteSeries(target.series.id, target.impact.version); if (mounted.current) { onDeleteSuccess(); onBack(); } return; }
+          try {
+            if (target.episode && target.season) await deleteEpisode(target.series.id, target.season.id, target.episode.id, target.impact.version);
+            else if (target.season) await deleteSeason(target.series.id, target.season.id, target.impact.version);
+            else await deleteSeries(target.series.id, target.impact.version);
+          } catch (cause) {
+            if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_delete_finalization_failed") throw cause;
+            if (!target.season) { if (mounted.current) { onDeleteFinalization(); onBack(); } return; }
+            if (mounted.current) setDeleting(null);
+            try { await refresh(); } catch { setConflict(true); }
+            if (mounted.current) setWarning("内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+            return;
+          }
+          if (!target.season) { if (mounted.current) { onDeleteSuccess(); onBack(); } return; }
           if (mounted.current) { setDeleting(null); setNotice("内容及其媒体文件已删除"); }
           await refresh();
         }); }}>确认永久删除</Button></div>

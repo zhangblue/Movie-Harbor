@@ -48,6 +48,7 @@ pub enum MediaError {
     VersionConflict,
     StillReferenced,
     ReplacementFailed,
+    ReplacementFinalizationFailed,
     Io(io::Error),
     Database(sea_orm::DbErr),
     Multipart(String),
@@ -68,6 +69,7 @@ impl fmt::Display for MediaError {
             Self::VersionConflict => "content version conflict",
             Self::StillReferenced => "media asset is still referenced",
             Self::ReplacementFailed => "media replacement failed",
+            Self::ReplacementFinalizationFailed => "media replacement finalization failed",
             Self::Io(_) => "media filesystem operation failed",
             Self::Database(_) => "media database operation failed",
             Self::Multipart(_) => "invalid multipart upload",
@@ -110,6 +112,16 @@ impl IntoResponse for MediaError {
             )
                 .into_response();
         }
+        if matches!(self, Self::ReplacementFinalizationFailed) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "media replacement finalization failed",
+                    "code": "media_replace_finalization_failed"
+                })),
+            )
+                .into_response();
+        }
         let status = match self {
             Self::InvalidFileName | Self::InvalidVersion | Self::Empty | Self::Multipart(_) => {
                 StatusCode::BAD_REQUEST
@@ -118,9 +130,11 @@ impl IntoResponse for MediaError {
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TargetNotFound => StatusCode::NOT_FOUND,
             Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
-            Self::InvalidStorageKey | Self::ReplacementFailed | Self::Io(_) | Self::Database(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
+            Self::InvalidStorageKey
+            | Self::ReplacementFailed
+            | Self::ReplacementFinalizationFailed
+            | Self::Io(_)
+            | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
     }

@@ -244,6 +244,45 @@ it("keeps the deletion dialog and exact confirmation after synchronous media del
   expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
 });
 
+it("coordinates a committed deletion finalization failure as deleted and warns on the list", async () => {
+  let committed = false;
+  const requests = fixture(movie(), (r) => {
+    if (r.method === "DELETE") {
+      committed = true;
+      return json({ error: "media deletion finalization failed", code: "media_delete_finalization_failed" }, 500);
+    }
+    if (committed && r.url === "/api/admin/movies" && r.method === "GET") return json([]);
+  });
+  const user = userEvent.setup(); render(<App />);
+  await user.click(within(await screen.findByRole("row", { name: /潮汐/ })).getByRole("button", { name: "编辑" }));
+  await user.click(await screen.findByRole("button", { name: "永久删除" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "永久删除电影" }));
+  await user.type(dialog.getByLabelText("输入完整内容名称"), "潮汐尽头");
+  await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
+  expect(await screen.findByRole("heading", { name: "内容管理" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.queryByRole("dialog", { name: "永久删除电影" })).not.toBeInTheDocument();
+  expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
+});
+
+it("reloads committed replacement state and warns when finalization fails", async () => {
+  let committed = false;
+  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  fixture(movie(), (r) => {
+    if (r.url.includes("/media/") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === "/api/admin/movies/movie-1" && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["new"], "new.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.getByRole("link", { name: /已保存海报/ })).toHaveAttribute("href", "/media/new-poster");
+  expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
+});
+
 it("does not permit deletion when the fresh impact detail cannot be loaded", async () => {
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1/delete-impact" ? json({ error: "unavailable" }, 503) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");

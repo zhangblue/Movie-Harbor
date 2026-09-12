@@ -105,6 +105,84 @@ it("keeps a child deletion dialog and its form when media deletion fails", async
   expect(requests.filter((r) => r.url === episodePath && r.method === "DELETE")).toHaveLength(1);
 });
 
+it("refreshes a committed child deletion and warns instead of offering a retry", async () => {
+  let committed = false;
+  const requests = fixture(detail(), (r) => {
+    if (r.url === episodePath && r.method === "DELETE") {
+      committed = true;
+      return json({ error: "media deletion finalization failed", code: "media_delete_finalization_failed" }, 500);
+    }
+    if (committed && r.url === base && r.method === "GET") return json(detail({ version: 4, seasons: [] }));
+  });
+  const user = userEvent.setup(); editor();
+  await user.click(await screen.findByRole("button", { name: "删除单集" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
+  await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
+  await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.queryByRole("dialog", { name: "永久删除单集" })).not.toBeInTheDocument();
+  expect(screen.queryByText("来信")).not.toBeInTheDocument();
+  const deletionIndex = requests.findIndex((r) => r.url === episodePath && r.method === "DELETE");
+  expect(requests.slice(deletionIndex + 1).some((r) => r.url === base && r.method === "GET")).toBe(true);
+});
+
+it("reloads a committed series-poster replacement and shows the finalization warning", async () => {
+  let committed = false;
+  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  fixture(detail(), (r) => {
+    if (r.url.includes("/media/series/") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === base && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["new"], "new.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.getByRole("link", { name: /已保存海报/ })).toHaveAttribute("href", "/media/new-poster");
+  expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
+});
+
+it("reloads a committed episode-video replacement and clears its pending file", async () => {
+  let committed = false;
+  const savedVideo = { id: "new-video", url: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
+  const authoritative = detail({ version: 5, seasons: [{ id: "s1", number: 1, episodes: [episode({ version: 4, video: savedVideo })] }] });
+  fixture(detail(), (r) => {
+    if (r.url.includes("/api/admin/media/episodes/") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === base && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("视频文件"), new File(["new"], "new.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.getByRole("link", { name: /已保存视频/ })).toHaveAttribute("href", "/media/new-video");
+  expect(screen.queryByText(/待上传：new.mp4/)).not.toBeInTheDocument();
+});
+
+it("returns from a committed whole-series deletion and leaves a persistent warning", async () => {
+  let committed = false;
+  fixture(detail(), (r) => {
+    if (r.url === base && r.method === "DELETE") {
+      committed = true;
+      return json({ error: "media deletion finalization failed", code: "media_delete_finalization_failed" }, 500);
+    }
+    if (committed && r.url === "/api/admin/series" && r.method === "GET") return json([]);
+  });
+  const user = userEvent.setup(); render(<App />);
+  await user.click(within(await screen.findByRole("row", { name: /长夜航线/ })).getByRole("button", { name: "编辑" }));
+  await user.click(await screen.findByRole("button", { name: "永久删除剧集" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "永久删除剧集" }));
+  await user.type(dialog.getByLabelText("输入完整内容名称"), "长夜航线");
+  await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
+  expect(await screen.findByRole("heading", { name: "内容管理" })).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(screen.queryByRole("dialog", { name: "永久删除剧集" })).not.toBeInTheDocument();
+});
+
 it("uses the fixed replacement failure message and keeps the original series poster", async () => {
   fixture(detail(), (r) => r.url.includes("/media/series/")
     ? json({ error: "replacement failed", code: "media_replace_failed" }, 500)

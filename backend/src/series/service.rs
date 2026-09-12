@@ -36,6 +36,7 @@ pub enum SeriesError {
     Conflict,
     Validation(Vec<&'static str>),
     MediaDelete,
+    MediaDeleteFinalization,
     Database,
 }
 
@@ -90,6 +91,14 @@ impl IntoResponse for SeriesError {
                 Json(serde_json::json!({
                     "error":"media deletion failed",
                     "code":"media_delete_failed"
+                })),
+            )
+                .into_response(),
+            Self::MediaDeleteFinalization => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error":"media deletion finalization failed",
+                    "code":"media_delete_finalization_failed"
                 })),
             )
                 .into_response(),
@@ -629,7 +638,7 @@ async fn finish_delete_transaction(
     staged
         .finish()
         .await
-        .map_err(|_| SeriesError::MediaDelete)?;
+        .map_err(|_| SeriesError::MediaDeleteFinalization)?;
     Ok(DeleteResultResponse {
         deleted_media_count: deleted_media_count as u64,
     })

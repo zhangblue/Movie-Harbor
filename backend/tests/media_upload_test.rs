@@ -429,6 +429,25 @@ struct MakeOperationReadOnlyAfterCommit {
     operation: Mutex<Option<PathBuf>>,
 }
 
+struct FailIncomingSyncAfterCommit {
+    committed: AtomicBool,
+}
+
+impl StorageHooks for FailIncomingSyncAfterCommit {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::DatabaseCommitted(_)) {
+            self.committed.store(true, Ordering::SeqCst);
+        } else if self.committed.load(Ordering::SeqCst)
+            && matches!(event, StorageEvent::DirectorySynced(path) if path == ".incoming")
+        {
+            return Err(std::io::Error::other(
+                "injected post-commit marker sync failure",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl StorageHooks for MakeOperationReadOnlyAfterCommit {
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if !matches!(event, StorageEvent::DatabaseCommitted(_)) {
@@ -2194,6 +2213,79 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     assert_eq!(count_files(root.as_ref()), 1);
 }
 
+// Catches a post-commit registration failure being reported as if the old reference survived.
+#[tokio::test]
+async fn replacement_registration_failure_reports_committed_state() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let base_storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (old_source, _) = Chunks::new([PNG]);
+    let old = store_new_asset(
+        &db,
+        &base_storage,
+        MediaKind::Poster,
+        "old.png",
+        "image/png",
+        &policy(1024),
+        old_source,
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(old.id)).await;
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(FailIncomingSyncAfterCommit {
+            committed: AtomicBool::new(false),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let (new_source, _) = Chunks::new([jpeg()]);
+    let error = replace_attachment(
+        &db,
+        &storage,
+        AttachmentTarget::MoviePoster {
+            id: movie.id,
+            version: 1,
+        },
+        "new.jpg",
+        "image/jpeg",
+        &policy(1024),
+        new_source,
+    )
+    .await
+    .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let response: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        response,
+        json!({"error":"media replacement finalization failed","code":"media_replace_finalization_failed"})
+    );
+    let updated = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(updated.poster_asset_id, Some(old.id));
+    assert!(
+        media_asset::Entity::find_by_id(old.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        std::fs::read_dir(root.as_ref().join(".operations"))
+            .unwrap()
+            .next()
+            .is_some(),
+        "the old file removal manifest remains for startup recovery"
+    );
+}
+
 // Catches a database commit failure leaving the old file staged or the new file registered.
 #[tokio::test]
 async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact() {
@@ -2314,7 +2406,7 @@ async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error(
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(
         response,
-        json!({"error":"media replacement failed","code":"media_replace_failed"})
+        json!({"error":"media replacement finalization failed","code":"media_replace_finalization_failed"})
     );
     let updated = movie::Entity::find_by_id(movie.id)
         .one(&db)

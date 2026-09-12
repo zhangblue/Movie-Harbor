@@ -34,6 +34,7 @@ pub enum MovieError {
     Conflict,
     Validation(Vec<&'static str>),
     MediaDelete,
+    MediaDeleteFinalization,
     Database,
 }
 
@@ -84,6 +85,14 @@ impl IntoResponse for MovieError {
                 Json(serde_json::json!({
                     "error":"media deletion failed",
                     "code":"media_delete_failed"
+                })),
+            )
+                .into_response(),
+            Self::MediaDeleteFinalization => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error":"media deletion finalization failed",
+                    "code":"media_delete_finalization_failed"
                 })),
             )
                 .into_response(),
@@ -316,7 +325,10 @@ pub async fn delete(
             .map_err(|_| MovieError::MediaDelete)?;
         return Err(MovieError::MediaDelete);
     }
-    staged.finish().await.map_err(|_| MovieError::MediaDelete)?;
+    staged
+        .finish()
+        .await
+        .map_err(|_| MovieError::MediaDeleteFinalization)?;
     Ok(DeleteResultResponse {
         deleted_media_count: owned.len() as u64,
     })

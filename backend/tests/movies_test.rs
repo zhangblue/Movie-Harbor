@@ -1379,7 +1379,10 @@ async fn delete_reports_finish_failure_after_the_database_commit() {
         .unwrap_err();
     let response = axum::response::IntoResponse::into_response(error);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body(response).await["code"], "media_delete_failed");
+    assert_eq!(
+        body(response).await["code"],
+        "media_delete_finalization_failed"
+    );
     assert!(
         movie::Entity::find_by_id(id.parse::<Uuid>().unwrap())
             .one(&db)

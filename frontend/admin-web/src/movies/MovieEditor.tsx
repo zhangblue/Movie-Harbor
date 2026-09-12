@@ -14,7 +14,7 @@ function fieldsOf(movie: MovieResponse): Fields {
   return { name: movie.name, synopsis: movie.synopsis, year: movie.year?.toString() ?? "", minutes: movie.duration_seconds === null ? "" : String(movie.duration_seconds / 60), genreIds: movie.genres.map((g) => g.id) };
 }
 
-export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteSuccess?: () => void; initialDelete?: boolean }) {
+export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () => {}, onDeleteFinalization = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteSuccess?: () => void; onDeleteFinalization?: () => void; initialDelete?: boolean }) {
   const [movie, setMovie] = useState<MovieResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
@@ -26,6 +26,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   const [error, setError] = useState("");
   const [invalid, setInvalid] = useState<string[]>([]);
   const [notice, setNotice] = useState("");
+  const [warning, setWarning] = useState("");
   const [revision, setRevision] = useState(0);
   const [deleting, setDeleting] = useState<DeleteImpactResponse | null>(null);
   const [confirmation, setConfirmation] = useState("");
@@ -36,7 +37,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   function accept(value: MovieResponse) { setMovie(value); setFields(fieldsOf(value)); }
   useEffect(() => {
     let ignore = false;
-    setLoading(true); setError(""); setInvalid([]); setNotice(""); setDeleting(null);
+    setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
     setPoster(null); setVideo(null);
     const watch = <T,>(promise: Promise<T>) => promise.catch((cause: unknown) => {
       if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
@@ -69,6 +70,12 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
       setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
+    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_finalization_failed") {
+      try { await refreshAfterWrite(); } catch { setConflict(true); }
+      if (mounted.current) {
+        setPoster(null); setVideo(null);
+        setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+      }
     } else if (cause instanceof ApiError && cause.status === 409) {
       setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。");
     } else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
@@ -77,7 +84,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   }
   async function run(action: () => Promise<void>) {
     if (operation.current || loading || conflict) return;
-    operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice("");
+    operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice(""); setWarning("");
     try { await action(); } catch (cause) { await fail(cause); }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   }
@@ -143,6 +150,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {!deleting && error && <div className="request-error"><p role="alert">{error}</p><Button disabled={busy || loading} onClick={() => setRevision((v) => v + 1)}>重新加载</Button></div>}
       {!deleting && invalid.length > 0 && <PublishErrors fields={invalid} />}
       {notice && <p role="status">{notice}</p>}
+      {warning && <p role="alert" className="error-message">{warning}</p>}
       {loading ? <p role="status">正在加载电影…</p> : !movie ? <form className="movie-form" onSubmit={(event) => {
         event.preventDefault(); void run(async () => { const created = await createMovie(fields.name); if (mounted.current) accept(created); });
       }}><Field label="名称" className="movie-field-medium"><input required value={fields.name} disabled={locked} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><Button variant="primary" type="submit" disabled={locked}>创建草稿</Button></form> : <div className="movie-editor-card">
@@ -172,7 +180,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>媒体文件：{deleting.media_count}</li></ul>
         {error && <p role="alert" className="error-message">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
-        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; await deleteMovie(movie.id, deleting.version); if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
+        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; try { await deleteMovie(movie.id, deleting.version); } catch (cause) { if (cause instanceof ApiError && apiErrorCode(cause) === "media_delete_finalization_failed") { if (mounted.current) { onDeleteFinalization(); onBack(); } return; } throw cause; } if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
       </>}
     </Dialog>
   </section>;

@@ -228,16 +228,16 @@ pub(crate) async fn commit_attachment(
     pending
         .stored
         .notify_database_committed()
-        .map_err(|_| MediaError::ReplacementFailed)?;
+        .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     tokio::task::yield_now().await;
     pending
         .stored
         .mark_registered()
-        .map_err(|_| MediaError::ReplacementFailed)?;
+        .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     if let Some(staged) = staged {
         staged
             .finish(&pending.storage)
-            .map_err(|_| MediaError::ReplacementFailed)?;
+            .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     }
     Ok(CommittedAttachment {
         asset: committed.asset,

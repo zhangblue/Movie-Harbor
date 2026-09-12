@@ -307,6 +307,25 @@ impl StorageHooks for FailSecondStage {
     }
 }
 
+#[cfg(unix)]
+struct MakeOperationReadOnlyAfterStage {
+    root: PathBuf,
+}
+
+#[cfg(unix)]
+impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::AfterStageRename(_)) {
+            let operation = std::fs::read_dir(self.root.join(".operations"))?
+                .next()
+                .expect("the removal operation exists")?
+                .path();
+            std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o500))?;
+        }
+        Ok(())
+    }
+}
+
 async fn hierarchy_ids(value: &Value) -> (String, String) {
     (
         value["seasons"][0]["id"].as_str().unwrap().to_owned(),
@@ -1760,6 +1779,80 @@ async fn season_delete_restores_all_videos_when_a_later_stage_fails() {
         );
         assert!(root.as_ref().join(&asset.storage_key).is_file());
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn episode_delete_reports_finish_failure_after_the_database_commit() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Finish failure episode").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "One").await).await;
+    let episode_id: Uuid = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, episode_id, video.id).await;
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(MakeOperationReadOnlyAfterStage {
+            root: root.as_ref().to_owned(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = series_service::delete_episode(
+        &db,
+        &storage,
+        series_service::DeleteEpisodeCommand {
+            series_id: series_id.parse().unwrap(),
+            season_id: season_id.parse().unwrap(),
+            episode_id,
+            expected_episode_version: 1,
+        },
+    )
+    .await
+    .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        body(response).await["code"],
+        "media_delete_finalization_failed"
+    );
+    assert!(
+        episode::Entity::find_by_id(episode_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(video.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let operation = std::fs::read_dir(root.as_ref().join(".operations"))
+        .unwrap()
+        .next()
+        .expect("the failed operation remains")
+        .unwrap()
+        .path();
+    assert!(operation.join("manifest.json").is_file());
+    assert!(operation.join("00000000.data").is_file());
+    std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 // Catches delete confirmation flattening the hierarchy or using stale detail data.
