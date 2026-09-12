@@ -1,5 +1,6 @@
 .DS_Store
 .agents/
+.worktrees/
 node_modules/
 target/
 .env
