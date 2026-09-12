@@ -34,10 +34,14 @@ struct StagedEntry {
 
 pub struct StagedRemoval {
     storage: LocalMediaStorage,
+    staged: StagedOperation,
+    _guard: OwnedMutexGuard<()>,
+}
+
+pub(crate) struct StagedOperation {
     _operation_id: Uuid,
     operation: RemovalOperation,
     entries: Vec<StagedEntry>,
-    _guard: OwnedMutexGuard<()>,
 }
 
 pub(crate) struct RemovalSession {
@@ -47,22 +51,27 @@ pub(crate) struct RemovalSession {
 
 impl StagedRemoval {
     pub async fn restore(self) -> Result<(), MediaError> {
-        for entry in self.entries.iter().rev() {
-            self.storage.restore_removal_source(
-                &self.operation,
-                &entry.source,
-                &entry.staged_name,
-            )?;
-        }
-        self.storage.close_removal_operation(&self.operation)
+        self.staged.restore(&self.storage)
     }
 
     pub async fn finish(self) -> Result<(), MediaError> {
-        for entry in &self.entries {
-            self.storage
-                .finish_removal_source(&self.operation, &entry.staged_name)?;
+        self.staged.finish(&self.storage)
+    }
+}
+
+impl StagedOperation {
+    pub(crate) fn restore(self, storage: &LocalMediaStorage) -> Result<(), MediaError> {
+        for entry in self.entries.iter().rev() {
+            storage.restore_removal_source(&self.operation, &entry.source, &entry.staged_name)?;
         }
-        self.storage.close_removal_operation(&self.operation)
+        storage.close_removal_operation(&self.operation)
+    }
+
+    pub(crate) fn finish(self, storage: &LocalMediaStorage) -> Result<(), MediaError> {
+        for entry in &self.entries {
+            storage.finish_removal_source(&self.operation, &entry.staged_name)?;
+        }
+        storage.close_removal_operation(&self.operation)
     }
 }
 
@@ -98,59 +107,78 @@ impl RemovalSession {
         assets: &[OwnedMedia],
     ) -> Result<StagedRemoval, MediaError> {
         let Self { storage, guard } = self;
-        let mut prepared = Vec::new();
-        for asset in assets {
-            if let Some(source) = storage.prepare_removal(&asset.storage_key)? {
-                prepared.push((asset, source));
-            }
-        }
-
-        let operation_id = Uuid::new_v4();
-        let manifest = Manifest {
-            version: 1,
-            operation_id,
-            reason: reason.to_owned(),
-            entries: prepared
-                .iter()
-                .enumerate()
-                .map(|(index, (asset, _))| ManifestEntry {
-                    asset_id: asset.asset_id,
-                    storage_key: asset.storage_key.clone(),
-                    staged_name: format!("{index:08}.data"),
-                })
-                .collect(),
-        };
-        let encoded = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-        let operation = storage.create_removal_operation(operation_id, &encoded)?;
-        let mut entries: Vec<StagedEntry> = Vec::new();
-        for ((_, source), manifest_entry) in prepared.into_iter().zip(&manifest.entries) {
-            entries.push(StagedEntry {
-                source,
-                staged_name: manifest_entry.staged_name.clone(),
-            });
-            let current = entries
-                .last()
-                .expect("the current removal entry was pushed");
-            if let Err(error) =
-                storage.stage_removal_source(&operation, &current.source, &current.staged_name)
-            {
-                for entry in entries.iter().rev() {
-                    storage.restore_removal_source(
-                        &operation,
-                        &entry.source,
-                        &entry.staged_name,
-                    )?;
-                }
-                storage.close_removal_operation(&operation)?;
-                return Err(error);
-            }
-        }
+        let staged = stage_operation(&storage, reason, assets)?;
         Ok(StagedRemoval {
             storage,
-            _operation_id: operation_id,
-            operation,
-            entries,
+            staged,
             _guard: guard,
         })
     }
+
+    pub(crate) fn stage_retaining(
+        &self,
+        reason: &str,
+        assets: &[OwnedMedia],
+    ) -> Result<StagedOperation, MediaError> {
+        stage_operation(&self.storage, reason, assets)
+    }
+
+    pub(crate) fn into_guard(self) -> OwnedMutexGuard<()> {
+        self.guard
+    }
+}
+
+fn stage_operation(
+    storage: &LocalMediaStorage,
+    reason: &str,
+    assets: &[OwnedMedia],
+) -> Result<StagedOperation, MediaError> {
+    let mut prepared = Vec::new();
+    for asset in assets {
+        if let Some(source) = storage.prepare_removal(&asset.storage_key)? {
+            prepared.push((asset, source));
+        }
+    }
+
+    let operation_id = Uuid::new_v4();
+    let manifest = Manifest {
+        version: 1,
+        operation_id,
+        reason: reason.to_owned(),
+        entries: prepared
+            .iter()
+            .enumerate()
+            .map(|(index, (asset, _))| ManifestEntry {
+                asset_id: asset.asset_id,
+                storage_key: asset.storage_key.clone(),
+                staged_name: format!("{index:08}.data"),
+            })
+            .collect(),
+    };
+    let encoded = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
+    let operation = storage.create_removal_operation(operation_id, &encoded)?;
+    let mut entries: Vec<StagedEntry> = Vec::new();
+    for ((_, source), manifest_entry) in prepared.into_iter().zip(&manifest.entries) {
+        entries.push(StagedEntry {
+            source,
+            staged_name: manifest_entry.staged_name.clone(),
+        });
+        let current = entries
+            .last()
+            .expect("the current removal entry was pushed");
+        if let Err(error) =
+            storage.stage_removal_source(&operation, &current.source, &current.staged_name)
+        {
+            for entry in entries.iter().rev() {
+                storage.restore_removal_source(&operation, &entry.source, &entry.staged_name)?;
+            }
+            storage.close_removal_operation(&operation)?;
+            return Err(error);
+        }
+    }
+    Ok(StagedOperation {
+        _operation_id: operation_id,
+        operation,
+        entries,
+    })
 }

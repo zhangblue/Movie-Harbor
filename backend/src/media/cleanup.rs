@@ -89,9 +89,15 @@ pub async fn recover_uploads(
                 .one(db)
                 .await?
                 .is_some();
-            if !registered && let Err(error) = storage.remove_pending_owned(&marker).await {
-                eprintln!("retaining unproven media recovery marker: {error}");
-                continue;
+            if !registered {
+                match storage.remove_pending_owned(&marker).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        eprintln!("retaining unproven media recovery marker: {error}");
+                        continue;
+                    }
+                }
             }
             storage.remove_incoming(&entry.name).await?;
         }

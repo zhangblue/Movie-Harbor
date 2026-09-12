@@ -1,7 +1,7 @@
 use super::{
     ChunkSource, LocalMediaStorage, MediaError, StoredFile,
     references::{lock_for_reference_removal, reference_count},
-    removal::{self, OwnedMedia, RemovalSession, StagedRemoval},
+    removal::{self, OwnedMedia, RemovalSession, StagedOperation},
     validation::{MediaKind, UploadPolicy},
 };
 use crate::entities::{episode, file_cleanup_job, media_asset, movie, season, series};
@@ -56,7 +56,6 @@ pub(crate) struct CommittedAttachment {
 struct SwitchOutcome {
     version: i64,
     series_version: Option<i64>,
-    staged: Option<StagedRemoval>,
 }
 
 pub async fn store_new_asset<S: ChunkSource + Send>(
@@ -143,27 +142,39 @@ pub(crate) async fn commit_attachment(
 ) -> Result<CommittedAttachment, MediaError> {
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
-    let tx = db.begin().await?;
+    let mut staged = None;
+    let tx = match db.begin().await {
+        Ok(tx) => tx,
+        Err(error) => {
+            pending.stored.return_mutation_guard(removal.into_guard())?;
+            return Err(error.into());
+        }
+    };
     pending.stored.begin_database_write();
-    let result = replace_before_commit(&tx, &pending, removal).await;
+    let result = replace_before_commit(&tx, &pending, &removal, &mut staged).await;
     let committed = match result {
         Ok(committed) => committed,
         Err(error) => {
             if tx.rollback().await.is_ok() {
                 pending.stored.database_failure_is_known();
             }
+            let restore_result = staged
+                .take()
+                .map(|staged| staged.restore(&pending.storage))
+                .transpose();
+            pending.stored.return_mutation_guard(removal.into_guard())?;
+            restore_result.map_err(|_| MediaError::ReplacementFailed)?;
             return Err(error);
         }
     };
-    let (committed, staged) = committed;
     if tx.commit().await.is_err() {
         pending.stored.database_failure_is_known();
-        if let Some(staged) = staged {
-            staged
-                .restore()
-                .await
-                .map_err(|_| MediaError::ReplacementFailed)?;
-        }
+        let restore_result = staged
+            .take()
+            .map(|staged| staged.restore(&pending.storage))
+            .transpose();
+        pending.stored.return_mutation_guard(removal.into_guard())?;
+        restore_result.map_err(|_| MediaError::ReplacementFailed)?;
         return Err(MediaError::ReplacementFailed);
     }
     pending
@@ -177,8 +188,7 @@ pub(crate) async fn commit_attachment(
         .map_err(|_| MediaError::ReplacementFailed)?;
     if let Some(staged) = staged {
         staged
-            .finish()
-            .await
+            .finish(&pending.storage)
             .map_err(|_| MediaError::ReplacementFailed)?;
     }
     Ok(CommittedAttachment {
@@ -191,8 +201,9 @@ pub(crate) async fn commit_attachment(
 async fn replace_before_commit(
     tx: &DatabaseTransaction,
     pending: &PendingAttachment,
-    removal: RemovalSession,
-) -> Result<(CommittedAttachment, Option<StagedRemoval>), MediaError> {
+    removal: &RemovalSession,
+    staged: &mut Option<StagedOperation>,
+) -> Result<CommittedAttachment, MediaError> {
     let asset = insert_asset(
         tx,
         pending.id,
@@ -207,6 +218,7 @@ async fn replace_before_commit(
         asset.id,
         pending.expected_version,
         removal,
+        staged,
     )
     .await?;
     let committed = CommittedAttachment {
@@ -214,7 +226,7 @@ async fn replace_before_commit(
         version: outcome.version,
         series_version: outcome.series_version,
     };
-    Ok((committed, outcome.staged))
+    Ok(committed)
 }
 
 async fn insert_asset<C: sea_orm::ConnectionTrait>(
@@ -243,7 +255,8 @@ async fn switch_reference(
     target: AttachmentTarget,
     new_id: Uuid,
     expected_version: i64,
-    removal: RemovalSession,
+    removal: &RemovalSession,
+    staged: &mut Option<StagedOperation>,
 ) -> Result<SwitchOutcome, MediaError> {
     match target {
         AttachmentTarget::MoviePoster { id, .. } | AttachmentTarget::MovieVideo { id, .. } => {
@@ -262,7 +275,7 @@ async fn switch_reference(
                 AttachmentTarget::MoviePoster { .. } => model.poster_asset_id,
                 _ => model.video_asset_id,
             };
-            let (staged, old_to_delete) = stage_old_asset(tx, removal, old).await?;
+            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let result = match target {
                     AttachmentTarget::MoviePoster { .. } => {
@@ -299,14 +312,10 @@ async fn switch_reference(
                 delete_old_asset(tx, old_to_delete).await
             }
             .await;
-            if let Err(error) = database_result {
-                restore_after_failed_switch(staged).await?;
-                return Err(error);
-            }
+            database_result?;
             Ok(SwitchOutcome {
                 version: expected_version + 1,
                 series_version: None,
-                staged,
             })
         }
         AttachmentTarget::SeriesPoster { id, version } => {
@@ -322,7 +331,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.poster_asset_id;
-            let (staged, old_to_delete) = stage_old_asset(tx, removal, old).await?;
+            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let result = series::Entity::update_many()
                     .col_expr(series::Column::PosterAssetId, Expr::value(Some(new_id)))
@@ -341,14 +350,10 @@ async fn switch_reference(
                 delete_old_asset(tx, old_to_delete).await
             }
             .await;
-            if let Err(error) = database_result {
-                restore_after_failed_switch(staged).await?;
-                return Err(error);
-            }
+            database_result?;
             Ok(SwitchOutcome {
                 version: version + 1,
                 series_version: None,
-                staged,
             })
         }
         AttachmentTarget::EpisodeVideo { id, version } => {
@@ -388,7 +393,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.video_asset_id;
-            let (staged, old_to_delete) = stage_old_asset(tx, removal, old).await?;
+            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let episode_result = episode::Entity::update_many()
                     .col_expr(episode::Column::VideoAssetId, Expr::value(Some(new_id)))
@@ -420,14 +425,10 @@ async fn switch_reference(
                 delete_old_asset(tx, old_to_delete).await
             }
             .await;
-            if let Err(error) = database_result {
-                restore_after_failed_switch(staged).await?;
-                return Err(error);
-            }
+            database_result?;
             Ok(SwitchOutcome {
                 version: version + 1,
                 series_version: Some(parent.version + 1),
-                staged,
             })
         }
     }
@@ -435,30 +436,33 @@ async fn switch_reference(
 
 async fn stage_old_asset(
     tx: &DatabaseTransaction,
-    removal: RemovalSession,
+    removal: &RemovalSession,
+    staged: &mut Option<StagedOperation>,
     old_id: Option<Uuid>,
-) -> Result<(Option<StagedRemoval>, Option<Uuid>), MediaError> {
+) -> Result<Option<Uuid>, MediaError> {
     let Some(old_id) = old_id else {
-        return Ok((None, None));
+        return Ok(None);
     };
     lock_for_reference_removal(tx, [old_id]).await?;
     if reference_count(tx, old_id).await? != 1 {
-        return Ok((None, None));
+        return Ok(None);
     }
     let old = media_asset::Entity::find_by_id(old_id)
         .one(tx)
         .await?
         .ok_or(MediaError::TargetNotFound)?;
-    let staged = removal
-        .stage(
-            "replace-media",
-            &[OwnedMedia {
-                asset_id: old.id,
-                storage_key: old.storage_key,
-            }],
-        )
-        .map_err(|_| MediaError::ReplacementFailed)?;
-    Ok((Some(staged), Some(old_id)))
+    *staged = Some(
+        removal
+            .stage_retaining(
+                "replace-media",
+                &[OwnedMedia {
+                    asset_id: old.id,
+                    storage_key: old.storage_key,
+                }],
+            )
+            .map_err(|_| MediaError::ReplacementFailed)?,
+    );
+    Ok(Some(old_id))
 }
 
 async fn delete_old_asset(
@@ -475,16 +479,6 @@ async fn delete_old_asset(
     let deleted = media_asset::Entity::delete_by_id(old_id).exec(tx).await?;
     if deleted.rows_affected != 1 {
         return Err(MediaError::ReplacementFailed);
-    }
-    Ok(())
-}
-
-async fn restore_after_failed_switch(staged: Option<StagedRemoval>) -> Result<(), MediaError> {
-    if let Some(staged) = staged {
-        staged
-            .restore()
-            .await
-            .map_err(|_| MediaError::ReplacementFailed)?;
     }
     Ok(())
 }

@@ -138,6 +138,21 @@ impl StoredFile {
             .ok_or_else(|| io::Error::other("stored file has no mutation guard").into())
     }
 
+    pub(crate) fn return_mutation_guard(
+        &mut self,
+        guard: OwnedMutexGuard<()>,
+    ) -> Result<(), MediaError> {
+        let cleanup = self
+            .cleanup
+            .as_mut()
+            .ok_or_else(|| io::Error::other("stored file has no pending cleanup"))?;
+        if cleanup._mutation_guard.is_some() {
+            return Err(io::Error::other("stored file already has a mutation guard").into());
+        }
+        cleanup._mutation_guard = Some(guard);
+        Ok(())
+    }
+
     pub(crate) fn begin_database_write(&mut self) {
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.destructive = false;
@@ -301,7 +316,7 @@ struct StoreSpec<'a> {
     max_bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PendingMarker {
     version: u8,
     pub storage_key: String,
@@ -827,8 +842,18 @@ impl LocalMediaStorage {
     pub(crate) async fn remove_pending_owned(
         &self,
         marker: &PendingMarker,
-    ) -> Result<(), MediaError> {
+    ) -> Result<bool, MediaError> {
         let _mutation_guard = self.mutations.lock().await;
+        let (_, _, file) = parse_storage_key(&marker.storage_key)?;
+        let marker_name = format!(
+            "{}.pending",
+            file.rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .ok_or(MediaError::InvalidStorageKey)?
+        );
+        if self.read_pending_marker(&marker_name).ok().as_ref() != Some(marker) {
+            return Ok(false);
+        }
         self.remove_registered_if_owned(
             &marker.storage_key,
             DeletionIdentity {
@@ -837,7 +862,8 @@ impl LocalMediaStorage {
                 byte_size: marker.byte_size,
                 checksum_sha256: &marker.checksum_sha256,
             },
-        )
+        )?;
+        Ok(true)
     }
 
     fn remove_registered_if_owned(

@@ -17,8 +17,8 @@ use movie_harbor_api::{
     },
 };
 use sea_orm::{
-    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait,
-    IntoActiveModel, Set,
+    ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
+    DatabaseConnection, EntityTrait, IntoActiveModel, Set, Statement,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
@@ -2673,6 +2673,166 @@ async fn replacement_removes_a_preexisting_cleanup_job_with_the_old_asset() {
             .unwrap()
             .is_empty()
     );
+}
+
+async fn run_recovery_during_uncommitted_replacement(shared_old: bool) {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let old = if shared_old {
+        let (source, _) = Chunks::new([PNG]);
+        Some(
+            store_new_asset(
+                &db,
+                &storage,
+                MediaKind::Poster,
+                "shared.png",
+                "image/png",
+                &policy(1024),
+                source,
+            )
+            .await
+            .unwrap(),
+        )
+    } else {
+        None
+    };
+    let movie = draft_movie(&db, old.as_ref().map(|asset| asset.id)).await;
+    if let Some(old) = &old {
+        draft_movie(&db, Some(old.id)).await;
+    }
+
+    let lock_key = i64::from_be_bytes(
+        Uuid::new_v4().as_bytes()[..8]
+            .try_into()
+            .expect("UUID prefix is eight bytes"),
+    );
+    db.execute_unprepared(&format!(
+        "CREATE FUNCTION pause_replacement_update() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN PERFORM pg_advisory_xact_lock({lock_key}); RETURN NEW; END $$; \
+         CREATE TRIGGER pause_replacement_update BEFORE UPDATE ON movie \
+         FOR EACH ROW EXECUTE FUNCTION pause_replacement_update()"
+    ))
+    .await
+    .unwrap();
+    let mut blocker_options = ConnectOptions::new(
+        std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required"),
+    );
+    blocker_options.max_connections(1).min_connections(1);
+    let blocker = Database::connect(blocker_options).await.unwrap();
+    blocker
+        .execute_unprepared(&format!("SELECT pg_advisory_lock({lock_key})"))
+        .await
+        .unwrap();
+
+    let upload_db = db.clone();
+    let upload_storage = storage.clone();
+    let movie_id = movie.id;
+    let (source, _) = Chunks::new([jpeg()]);
+    let mut upload = tokio::spawn(async move {
+        replace_attachment(
+            &upload_db,
+            &upload_storage,
+            AttachmentTarget::MoviePoster {
+                id: movie_id,
+                version: 1,
+            },
+            "new.jpg",
+            "image/jpeg",
+            &policy(1024),
+            source,
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting = blocker
+                .query_one(Statement::from_string(
+                    DatabaseBackend::Postgres,
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity \
+                     WHERE wait_event_type='Lock' AND wait_event='advisory' \
+                     AND query ILIKE '%UPDATE%movie%') AS waiting",
+                ))
+                .await
+                .unwrap()
+                .unwrap()
+                .try_get::<bool>("", "waiting")
+                .unwrap();
+            if waiting {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement did not pause after inspecting the old slot");
+
+    let recovery_db = db.clone();
+    let recovery_storage = storage.clone();
+    let mut recovery = tokio::spawn(async move {
+        movie_harbor_api::media::cleanup::recover_uploads(
+            &recovery_db,
+            &recovery_storage,
+            Duration::ZERO,
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), &mut recovery)
+            .await
+            .is_err(),
+        "recovery crossed the replacement's storage critical section before registration"
+    );
+    blocker
+        .execute_unprepared(&format!("SELECT pg_advisory_unlock({lock_key})"))
+        .await
+        .unwrap();
+    let new = tokio::time::timeout(Duration::from_secs(5), &mut upload)
+        .await
+        .expect("replacement remained blocked")
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), &mut recovery)
+        .await
+        .expect("recovery remained blocked")
+        .unwrap()
+        .unwrap();
+
+    let updated = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.poster_asset_id, Some(new.id));
+    assert!(root.as_ref().join(&new.storage_key).is_file());
+    assert!(
+        std::fs::read_dir(root.as_ref().join(".incoming"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    if let Some(old) = old {
+        assert!(
+            media_asset::Entity::find_by_id(old.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(root.as_ref().join(old.storage_key).is_file());
+    }
+}
+
+// Catches an empty old slot dropping the transferred mutation guard before commit/registration.
+#[tokio::test]
+async fn empty_slot_replacement_keeps_recovery_out_until_the_new_file_is_registered() {
+    run_recovery_during_uncommitted_replacement(false).await;
+}
+
+// Catches the shared-old fail-safe branch dropping the guard while the new marker is pending.
+#[tokio::test]
+async fn shared_old_replacement_keeps_recovery_out_and_preserves_both_files() {
+    run_recovery_during_uncommitted_replacement(true).await;
 }
 
 // Catches omitting the route or bypassing the shared administrator middleware.
