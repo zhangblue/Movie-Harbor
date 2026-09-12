@@ -25,7 +25,7 @@
 - 修改：`.env.example:1-12`
 - 修改：`.gitignore:1-14`
 
-- [ ] **步骤 1：编写失败的 Compose 存储契约测试**
+- [x] **步骤 1：编写失败的 Compose 存储契约测试**
 
 ```javascript
 import assert from "node:assert/strict";
@@ -89,13 +89,13 @@ test("host storage directories can be overridden", () => {
 });
 ```
 
-- [ ] **步骤 2：运行测试并确认因仍使用命名卷而失败**
+- [x] **步骤 2：运行测试并确认因仍使用命名卷而失败**
 
 运行：`node --test tests/compose-storage.test.mjs`
 
 预期：FAIL；第一个断言显示实际挂载类型为 `volume`，不是 `bind`。
 
-- [ ] **步骤 3：实现最小 Compose 和配置变更**
+- [x] **步骤 3：实现最小 Compose 和配置变更**
 
 在 `.env.example` 增加：
 
@@ -123,23 +123,29 @@ MEDIA_HOST_DIR=./data/media
 /data/
 ```
 
-- [ ] **步骤 4：运行存储契约测试并确认通过**
+- [x] **步骤 4：运行存储契约测试并确认通过**
 
 运行：`node --test tests/compose-storage.test.mjs`
 
 预期：3 项测试全部 PASS。
 
-- [ ] **步骤 5：执行回归验证**
+- [x] **步骤 5：执行回归验证**
 
 运行：
 
 ```bash
 docker compose --env-file .env.example config --quiet
-node --test
+node --test tests/*.test.mjs
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test cargo test --workspace
+npm test --workspaces
+npm run build --workspaces
+E2E_COMPOSE_PROJECT=mh-task15-e2e-host-bind E2E_PORT=18081 npm run test:e2e
 git diff --check
 ```
 
-预期：全部退出码为 0；Node 顶层测试包含新建的 3 项 Compose 存储测试。
+预期：全部退出码为 0；Node 顶层测试包含新建的 3 项 Compose 存储测试，应用单元测试、构建和 Compose/Playwright 端到端流程全部通过。
 
 - [ ] **步骤 6：提交交付物**
 

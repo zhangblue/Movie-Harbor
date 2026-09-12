@@ -7,6 +7,7 @@ target/
 !/.env.example
 frontend/public-web/dist/
 frontend/admin-web/dist/
+/data/
 /media/
 tests/e2e/.generated/
 test-results/
