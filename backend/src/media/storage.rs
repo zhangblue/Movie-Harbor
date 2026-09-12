@@ -52,6 +52,7 @@ pub enum StorageEvent {
     DirectorySynced(String),
     BeforePromote(String),
     Promoted(String),
+    BeforeStage(String),
     BeforeUnlink(String),
     Unlinked(String),
     BeforeDirectorySync(String),
@@ -80,6 +81,7 @@ pub struct LocalMediaStorage {
     root_fd: Arc<OwnedFd>,
     incoming_fd: Arc<OwnedFd>,
     quarantine_fd: Arc<OwnedFd>,
+    operations_fd: Arc<OwnedFd>,
     mutations: Arc<AsyncMutex<()>>,
     hooks: Arc<dyn StorageHooks>,
 }
@@ -87,6 +89,19 @@ pub struct LocalMediaStorage {
 pub(crate) struct StorageMutationGuard<'a> {
     storage: &'a LocalMediaStorage,
     _guard: OwnedMutexGuard<()>,
+}
+
+pub(crate) struct RemovalSource {
+    pub storage_key: String,
+    leaf: Arc<OwnedFd>,
+    file_name: String,
+    device: u64,
+    inode: u64,
+}
+
+pub(crate) struct RemovalOperation {
+    name: String,
+    directory: Arc<OwnedFd>,
 }
 
 impl std::fmt::Debug for LocalMediaStorage {
@@ -330,6 +345,16 @@ impl LocalMediaStorage {
             Err(error) => return Err(error.into()),
         };
         verify_exclusive_directory(&quarantine_fd, true)?;
+        let operations_fd = match open_directory(&root_fd, OsStr::new(".operations")) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                mkdirat(&root_fd, ".operations", directory_mode()).map_err(io::Error::from)?;
+                fsync(&root_fd).map_err(io::Error::from)?;
+                open_directory(&root_fd, OsStr::new(".operations"))?
+            }
+            Err(error) => return Err(error.into()),
+        };
+        verify_exclusive_directory(&operations_fd, true)?;
         recover_quarantine_claims(&root_fd, &quarantine_fd)?;
         sync_fd(&root_fd)?;
         hooks.on_event(&StorageEvent::DirectorySynced(String::new()))?;
@@ -338,6 +363,7 @@ impl LocalMediaStorage {
             root_fd: Arc::new(root_fd),
             incoming_fd: Arc::new(incoming_fd),
             quarantine_fd: Arc::new(quarantine_fd),
+            operations_fd: Arc::new(operations_fd),
             mutations: Arc::new(AsyncMutex::new(())),
             hooks,
         })
@@ -592,6 +618,177 @@ impl LocalMediaStorage {
             storage: self,
             _guard: self.mutations.clone().lock_owned().await,
         }
+    }
+
+    pub(crate) async fn lock_removal(&self) -> OwnedMutexGuard<()> {
+        self.mutations.clone().lock_owned().await
+    }
+
+    pub(crate) fn prepare_removal(
+        &self,
+        storage_key: &str,
+    ) -> Result<Option<RemovalSource>, MediaError> {
+        let (kind, shard, file_name) = parse_storage_key(storage_key)?;
+        let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(MediaError::InvalidStorageKey),
+        };
+        let leaf = match open_directory(&kind_fd, OsStr::new(shard)) {
+            Ok(fd) => fd,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(MediaError::InvalidStorageKey),
+        };
+        let opened = match openat(
+            &leaf,
+            file_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(_) => return Err(MediaError::InvalidStorageKey),
+        };
+        let stat = rustix::fs::fstat(&opened).map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        Ok(Some(RemovalSource {
+            storage_key: storage_key.to_owned(),
+            leaf: Arc::new(leaf),
+            file_name: file_name.to_owned(),
+            device: stat.st_dev as u64,
+            inode: stat.st_ino as u64,
+        }))
+    }
+
+    pub(crate) fn create_removal_operation(
+        &self,
+        operation_id: Uuid,
+        manifest: &[u8],
+    ) -> Result<RemovalOperation, MediaError> {
+        let name = operation_id.simple().to_string();
+        mkdirat(&self.operations_fd, name.as_str(), directory_mode()).map_err(io::Error::from)?;
+        sync_fd(&self.operations_fd)?;
+        let directory = Arc::new(open_directory(&self.operations_fd, OsStr::new(&name))?);
+        let temporary = "manifest.part";
+        let fd = openat(
+            &directory,
+            temporary,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            file_mode(),
+        )
+        .map_err(io::Error::from)?;
+        let mut file = std::fs::File::from(fd);
+        use std::io::Write;
+        file.write_all(manifest)?;
+        file.sync_all()?;
+        renameat_with(
+            &directory,
+            temporary,
+            &directory,
+            "manifest.json",
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)?;
+        sync_fd(&directory)?;
+        Ok(RemovalOperation { name, directory })
+    }
+
+    pub(crate) fn stage_removal_source(
+        &self,
+        operation: &RemovalOperation,
+        source: &RemovalSource,
+        staged_name: &str,
+    ) -> Result<(), MediaError> {
+        self.hooks
+            .on_event(&StorageEvent::BeforeStage(source.storage_key.clone()))?;
+        let before = statat(
+            &source.leaf,
+            source.file_name.as_str(),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )
+        .map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(before.st_mode) != rustix::fs::FileType::RegularFile
+            || before.st_dev as u64 != source.device
+            || before.st_ino as u64 != source.inode
+        {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        renameat_with(
+            &source.leaf,
+            source.file_name.as_str(),
+            &operation.directory,
+            staged_name,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(io::Error::from)?;
+        sync_fd(&source.leaf)?;
+        sync_fd(&operation.directory)?;
+        Ok(())
+    }
+
+    pub(crate) fn restore_removal_source(
+        &self,
+        operation: &RemovalOperation,
+        source: &RemovalSource,
+        staged_name: &str,
+    ) -> Result<(), MediaError> {
+        match renameat_with(
+            &operation.directory,
+            staged_name,
+            &source.leaf,
+            source.file_name.as_str(),
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                sync_fd(&operation.directory)?;
+                sync_fd(&source.leaf)?;
+                Ok(())
+            }
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(error) => Err(io::Error::from(error).into()),
+        }
+    }
+
+    pub(crate) fn finish_removal_source(
+        &self,
+        operation: &RemovalOperation,
+        staged_name: &str,
+    ) -> Result<(), MediaError> {
+        let opened = match openat(
+            &operation.directory,
+            staged_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(fd) => fd,
+            Err(rustix::io::Errno::NOENT) => return Ok(()),
+            Err(_) => return Err(MediaError::InvalidStorageKey),
+        };
+        let stat = rustix::fs::fstat(opened).map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        unlinkat(&operation.directory, staged_name, AtFlags::empty()).map_err(io::Error::from)?;
+        sync_fd(&operation.directory)?;
+        Ok(())
+    }
+
+    pub(crate) fn close_removal_operation(
+        &self,
+        operation: &RemovalOperation,
+    ) -> Result<(), MediaError> {
+        remove_if_present(&operation.directory, "manifest.json")?;
+        sync_fd(&operation.directory)?;
+        unlinkat(
+            &self.operations_fd,
+            operation.name.as_str(),
+            AtFlags::REMOVEDIR,
+        )
+        .map_err(io::Error::from)?;
+        sync_fd(&self.operations_fd)?;
+        Ok(())
     }
 
     pub(crate) async fn remove_pending_owned(
