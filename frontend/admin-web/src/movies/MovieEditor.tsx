@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
+import { ApiError, apiErrorCode, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -14,7 +14,7 @@ function fieldsOf(movie: MovieResponse): Fields {
   return { name: movie.name, synopsis: movie.synopsis, year: movie.year?.toString() ?? "", minutes: movie.duration_seconds === null ? "" : String(movie.duration_seconds / 60), genreIds: movie.genres.map((g) => g.id) };
 }
 
-export function MovieEditor({ movieId, onBack, onExpired, onDeleteWarning = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteWarning?: (warning: string) => void; initialDelete?: boolean }) {
+export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteSuccess?: () => void; initialDelete?: boolean }) {
   const [movie, setMovie] = useState<MovieResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
@@ -65,6 +65,10 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteWarning = () =
       const recovery = await recoverForbiddenWrite();
       if (!mounted.current) return;
       if (recovery.expired) onExpired(); else setError(recovery.message);
+    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_delete_failed") {
+      setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
+    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
+      setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && cause.status === 409) {
       setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。");
     } else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
@@ -165,10 +169,10 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteWarning = () =
       </div>}
     </div>
     <Dialog open={!!deleting} title="永久删除电影" onClose={() => { if (!busy) setDeleting(null); }}>
-      {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>独占媒体：{deleting.exclusive_media_count}</li><li>共享媒体（保留）：{deleting.shared_media_count}</li></ul>
+      {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>媒体文件：{deleting.media_count}</li></ul>
         {error && <p role="alert" className="error-message">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
-        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; const result = await deleteMovie(movie.id, deleting.version); if (mounted.current) { if (result.cleanup_pending) onDeleteWarning(result.warning ?? "媒体文件清理未完成，将自动重试。"); onBack(); } }); }}>确认永久删除</Button></div>
+        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; await deleteMovie(movie.id, deleting.version); if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
       </>}
     </Dialog>
   </section>;

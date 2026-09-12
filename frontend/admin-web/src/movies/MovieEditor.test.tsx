@@ -23,7 +23,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
     if (url === "/api/admin/movies" && r.method === "GET") return json([current]);
     if (url === "/api/admin/movies" && r.method === "POST") { current = movie({ name: r.body.name, poster: null, version: 1 }); return json(current, 201); }
     if (url === "/api/admin/movies/movie-1" && r.method === "GET") return json(current);
-    if (url === "/api/admin/movies/movie-1/delete-impact") return json({ name: current.name, version: current.version, season_count: 0, episode_count: 0, exclusive_media_count: Number(!!current.poster) + Number(!!current.video), shared_media_count: 0 });
+    if (url === "/api/admin/movies/movie-1/delete-impact") return json({ name: current.name, version: current.version, season_count: 0, episode_count: 0, media_count: Number(!!current.poster) + Number(!!current.video) });
     if (r.method === "PATCH") {
       current = { ...current, ...r.body, version: current.version + 1, genres: r.body.genre_ids.map((id: string) => ({ id, name: id === "g1" ? "剧情" : "旧题材", enabled: id === "g1" })) };
       return json(current);
@@ -38,7 +38,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
       current = { ...current, version: current.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" };
       return json(current);
     }
-    if (r.method === "DELETE") return json({ cleanup_pending: false, job_count: 0, warning: null });
+    if (r.method === "DELETE") return json({ deleted_media_count: Number(!!current.poster) + Number(!!current.video) });
     throw new Error(`Unexpected request ${r.method} ${url}`);
   });
   return requests;
@@ -103,13 +103,13 @@ it("saves fields and genres before atomically uploading poster then video with r
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
 });
 
-it("preserves old media and pending selection after upload failure for an explicit retry", async () => {
+it("preserves old media and pending selection after a synchronous replacement failure", async () => {
   let failed = true;
-  const requests = fixture(movie(), (r) => r.url.includes("/media/") && failed ? json({ error: "upload interrupted" }, 500) : undefined);
+  const requests = fixture(movie(), (r) => r.url.includes("/media/") && failed ? json({ error: "replacement failed", code: "media_replace_failed" }, 500) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
   await user.upload(screen.getByLabelText("海报文件"), new File(["pic"], "retry.png", { type: "image/png" }));
   await user.click(screen.getByRole("button", { name: "保存草稿" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(/upload interrupted/);
+  expect(await screen.findByRole("alert")).toHaveTextContent("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
   expect(screen.getByRole("link", { name: /已保存海报/ })).toHaveAttribute("href", "/media/poster.webp");
   expect(screen.getByText(/待上传：retry.png/)).toBeInTheDocument();
   expect(URL.revokeObjectURL).not.toHaveBeenCalled();
@@ -212,20 +212,36 @@ it("keeps pending preview alive during save and releases it when a refresh hides
 // Catches deleting based on stale list/detail data, approximate name matching, or skipped impact fetch.
 it("fetches fresh deletion scope and requires the exact server name and version", async () => {
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1/delete-impact"
-    ? json({ name: "最新名称", version: 9, season_count: 0, episode_count: 0, exclusive_media_count: 1, shared_media_count: 1 }) : undefined);
+    ? json({ name: "最新名称", version: 9, season_count: 0, episode_count: 0, media_count: 2 }) : undefined);
   const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /潮汐/ })).getByRole("button", { name: "编辑" }));
   await user.click(await screen.findByRole("button", { name: "永久删除" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除电影" }));
   expect(dialog.getByText(/季：0/)).toBeInTheDocument(); expect(dialog.getByText(/单集：0/)).toBeInTheDocument();
-  expect(dialog.getByText(/独占媒体：1/)).toBeInTheDocument(); expect(dialog.getByText(/共享媒体（保留）：1/)).toBeInTheDocument();
+  expect(dialog.getByText("媒体文件：2")).toBeInTheDocument();
+  expect(dialog.queryByText(/独占媒体|共享媒体|自动重试/)).not.toBeInTheDocument();
   expect(dialog.getByText(/不可恢复/)).toBeInTheDocument();
   await user.type(dialog.getByLabelText("输入完整内容名称"), "最新名称 ");
   expect(dialog.getByRole("button", { name: "确认永久删除" })).toBeDisabled();
   await user.clear(dialog.getByLabelText("输入完整内容名称")); await user.type(dialog.getByLabelText("输入完整内容名称"), "最新名称");
   await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
   await screen.findByRole("heading", { name: "内容管理" });
+  expect(screen.getByRole("status")).toHaveTextContent("内容及其媒体文件已删除");
   expect(requests.find((r) => r.method === "DELETE")?.body).toEqual({ version: 9 });
+});
+
+it("keeps the deletion dialog and exact confirmation after synchronous media deletion fails", async () => {
+  const requests = fixture(movie(), (r) => r.method === "DELETE"
+    ? json({ error: "media deletion failed", code: "media_delete_failed" }, 500)
+    : undefined);
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
+  await user.click(screen.getByRole("button", { name: "永久删除" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "永久删除电影" }));
+  await user.type(dialog.getByLabelText("输入完整内容名称"), "潮汐尽头");
+  await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
+  expect(await dialog.findByRole("alert")).toHaveTextContent("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
+  expect(dialog.getByLabelText("输入完整内容名称")).toHaveValue("潮汐尽头");
+  expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
 });
 
 it("does not permit deletion when the fresh impact detail cannot be loaded", async () => {
@@ -269,7 +285,7 @@ it("opens the list deletion entry with a fresh server detail and allows cancel w
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /潮汐/ })).getByRole("button", { name: "永久删除" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除电影" }));
-  expect(dialog.getByText("独占媒体：1")).toBeInTheDocument();
+  expect(dialog.getByText("媒体文件：1")).toBeInTheDocument();
   expect(requests.some((r) => r.url === "/api/admin/movies/movie-1/delete-impact" && r.method === "GET")).toBe(true);
   await user.click(dialog.getByRole("button", { name: "取消" }));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

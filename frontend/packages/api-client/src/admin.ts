@@ -1,4 +1,4 @@
-import { apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
+import { ApiError, apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
 import type {
   ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
@@ -11,6 +11,12 @@ type LifecycleAction = "publish" | "archive" | "draft";
 function required<T>(value: T | undefined): T {
   if (value === undefined) throw new TypeError("Expected an API response body");
   return value;
+}
+
+export function apiErrorCode(error: ApiError): string | undefined {
+  if (!error.details || typeof error.details !== "object") return undefined;
+  const code = (error.details as Record<string, unknown>).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 export async function login(input: LoginRequest): Promise<LoginResponse> {

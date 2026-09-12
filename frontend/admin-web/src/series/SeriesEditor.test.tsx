@@ -26,9 +26,9 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     if (url === "/api/admin/series" && r.method === "GET") return json([current]);
     if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: r.body.name, version: 1, seasons: [], poster: null }); return json(current, 201); }
     if (url === base && r.method === "GET") return json(current);
-    if (url === `${base}/delete-impact`) return json({ name: current.name, version: current.version, season_count: current.seasons.length, episode_count: current.seasons.flatMap((s) => s.episodes).length, exclusive_media_count: 0, shared_media_count: 0 });
-    if (url.endsWith("/delete-impact") && url.includes("/episodes/")) { const ep = current.seasons.flatMap((s) => s.episodes).find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: ep.name, version: ep.version, season_count: 0, episode_count: 1, exclusive_media_count: ep.video ? 1 : 0, shared_media_count: 0 }); }
-    if (url.endsWith("/delete-impact") && url.includes("/seasons/")) { const season = current.seasons.find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: `第 ${season.number} 季`, version: current.version, season_count: 1, episode_count: season.episodes.length, exclusive_media_count: season.episodes.filter((ep) => ep.video).length, shared_media_count: 0 }); }
+    if (url === `${base}/delete-impact`) return json({ name: current.name, version: current.version, season_count: current.seasons.length, episode_count: current.seasons.flatMap((s) => s.episodes).length, media_count: Number(!!current.poster) + current.seasons.flatMap((s) => s.episodes).filter((ep) => ep.video).length });
+    if (url.endsWith("/delete-impact") && url.includes("/episodes/")) { const ep = current.seasons.flatMap((s) => s.episodes).find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: ep.name, version: ep.version, season_count: 0, episode_count: 1, media_count: ep.video ? 1 : 0 }); }
+    if (url.endsWith("/delete-impact") && url.includes("/seasons/")) { const season = current.seasons.find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: `第 ${season.number} 季`, version: current.version, season_count: 1, episode_count: season.episodes.length, media_count: season.episodes.filter((ep) => ep.video).length }); }
     if (url.startsWith("/api/admin/media/")) {
       const file = r.body.get("file") as File;
       const media = { id: "asset", url: "/media/new", original_name: file.name, mime_type: file.type, byte_size: file.size };
@@ -38,12 +38,12 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
       ep.video = media; ep.version++; return json({ ...media, version: ep.version, series_version: current.version });
     }
     if (url === base && r.method === "PATCH") { current = { ...current, ...r.body, version: current.version + 1 }; return json(current); }
-    if (url === base && r.method === "DELETE") return json({ cleanup_pending: false, job_count: 0, warning: null });
+    if (url === base && r.method === "DELETE") return json({ deleted_media_count: 1 });
     if (/\/series-1\/(publish|archive|draft)$/.test(url)) { current = { ...current, version: current.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" }; return json(current); }
     const seasonId = url.split("/")[6]; const season = current.seasons.find((s) => s.id === seasonId);
     if (url === `${base}/seasons`) { current = { ...current, version: current.version + 1, seasons: [...current.seasons, { id: `s${++sequence}`, number: r.body.number, episodes: [] }] }; return json(current, 201); }
     if (season && !url.includes("/episodes")) {
-      if (r.method === "DELETE") { current.seasons = current.seasons.filter((s) => s.id !== season.id); current = { ...current, version: current.version + 1 }; return json({ cleanup_pending: false, job_count: 0, warning: null }); }
+      if (r.method === "DELETE") { current.seasons = current.seasons.filter((s) => s.id !== season.id); current = { ...current, version: current.version + 1 }; return json({ deleted_media_count: season.episodes.filter((ep) => ep.video).length }); }
       else season.number = r.body.number;
       current = { ...current, version: current.version + 1 }; return json(current);
     }
@@ -51,7 +51,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     const ep = season?.episodes.find((e) => e.id === url.split("/")[8]);
     if (ep && season) {
       if (r.method === "GET") return json({ episode: ep, series_version: current.version });
-      if (r.method === "DELETE") { season.episodes = season.episodes.filter((e) => e.id !== ep.id); current.version++; return json({ cleanup_pending: false, job_count: 0, warning: null }); }
+      if (r.method === "DELETE") { season.episodes = season.episodes.filter((e) => e.id !== ep.id); current.version++; return json({ deleted_media_count: ep.video ? 1 : 0 }); }
       const value = r.method === "PATCH" ? { ...ep, ...r.body, version: ep.version + 1 } : { ...ep, version: ep.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" };
       season.episodes = season.episodes.map((e) => e.id === ep.id ? value : e); current = { ...current, version: current.version + 1 };
       return json({ episode: value, series_version: current.version });
@@ -64,29 +64,56 @@ beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL",
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
 
-it("surfaces child media cleanup warnings outside the deletion dialog", async () => {
-  fixture(detail(), (r) => r.url === episodePath && r.method === "DELETE"
-    ? json({ cleanup_pending: true, job_count: 1, warning: "media cleanup pending retry" }) : undefined);
-  const warning = vi.fn();
+it("stays on the series page, reports synchronous child deletion, and refreshes", async () => {
+  const requests = fixture();
   const user = userEvent.setup();
-  render(<SeriesEditor seriesId="series-1" onBack={() => {}} onExpired={() => {}} onDeleteWarning={warning} />);
+  render(<SeriesEditor seriesId="series-1" onBack={() => {}} onExpired={() => {}} />);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
   await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
   await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
-  await waitFor(() => expect(warning).toHaveBeenCalledWith("media cleanup pending retry"));
+  expect(await screen.findByRole("status")).toHaveTextContent("内容及其媒体文件已删除");
+  expect(screen.getByRole("heading", { name: "编辑剧集草稿" })).toBeInTheDocument();
+  const deletionIndex = requests.findIndex((r) => r.url === episodePath && r.method === "DELETE");
+  expect(requests.slice(deletionIndex + 1).some((r) => r.url === base && r.method === "GET")).toBe(true);
 });
 
 it("requires the authoritative child impact and deletes with its returned version", async () => {
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
-    ? json({ display_name: "服务器最新单集名", version: 9, season_count: 0, episode_count: 1, exclusive_media_count: 1, shared_media_count: 0 }) : undefined);
+    ? json({ display_name: "服务器最新单集名", version: 9, season_count: 0, episode_count: 1, media_count: 1 }) : undefined);
   const user = userEvent.setup(); editor();
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
-  expect(dialog.getByText("独占媒体：1")).toBeInTheDocument();
+  expect(dialog.getByText("媒体文件：1")).toBeInTheDocument();
+  expect(dialog.queryByText(/独占媒体|共享媒体|自动重试/)).not.toBeInTheDocument();
   await user.type(dialog.getByLabelText("输入完整内容名称"), "服务器最新单集名");
   await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
   await waitFor(() => expect(requests.find((r) => r.url === episodePath && r.method === "DELETE")?.body).toEqual({ version: 9 }));
+});
+
+it("keeps a child deletion dialog and its form when media deletion fails", async () => {
+  const requests = fixture(detail(), (r) => r.url === episodePath && r.method === "DELETE"
+    ? json({ error: "media deletion failed", code: "media_delete_failed" }, 500)
+    : undefined);
+  const user = userEvent.setup(); editor();
+  await user.click(await screen.findByRole("button", { name: "删除单集" }));
+  const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
+  await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
+  await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
+  expect(await dialog.findByRole("alert")).toHaveTextContent("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
+  expect(dialog.getByLabelText("输入完整内容名称")).toHaveValue("来信");
+  expect(requests.filter((r) => r.url === episodePath && r.method === "DELETE")).toHaveLength(1);
+});
+
+it("uses the fixed replacement failure message and keeps the original series poster", async () => {
+  fixture(detail(), (r) => r.url.includes("/media/series/")
+    ? json({ error: "replacement failed", code: "media_replace_failed" }, 500)
+    : undefined);
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["poster"], "new.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
+  expect(screen.getByRole("link", { name: /已保存海报/ })).toBeInTheDocument();
 });
 
 it("does not open child deletion confirmation when authoritative impact cannot load", async () => {
@@ -320,6 +347,7 @@ it("opens series creation from the content kind selector and deletion from a lis
   await user.type(dialog.getByLabelText("输入完整内容名称"), "长夜航线 "); expect(dialog.getByRole("button", { name: "确认永久删除" })).toBeDisabled();
   await user.clear(dialog.getByLabelText("输入完整内容名称")); await user.type(dialog.getByLabelText("输入完整内容名称"), "长夜航线"); await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
   await screen.findByRole("heading", { name: "内容管理" }); expect(requests.find((r) => r.method === "DELETE")?.body).toEqual({ version: 3 });
+  expect(screen.getByRole("status")).toHaveTextContent("内容及其媒体文件已删除");
 });
 
 it("does not permit deletion when the fresh hierarchy cannot be loaded", async () => {
