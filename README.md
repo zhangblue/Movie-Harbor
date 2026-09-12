@@ -78,6 +78,38 @@ docker compose -p movie-harbor up -d --build --wait
 
 不要在保留数据时执行 `docker compose down --volumes`，该选项会删除命名卷。
 
+## 半离线发布包
+
+构建机与目标机首版都必须使用 `linux/arm64` Docker 平台，并安装 Docker Engine 与 Docker Compose v2。构建机还需要 Node.js、Git 和 tar，并能下载构建依赖。在仓库根目录执行：
+
+```bash
+./tools/build-offline-package.sh [版本]
+# 或使用等价的 npm 入口：
+npm run package:offline -- [版本]
+```
+
+`[版本]` 是可选参数，使用时替换为实际版本字符串并去掉方括号；省略时使用当前 Git 提交的 12 位短 SHA。产物固定写入 `dist/offline/movie-harbor-offline-linux-arm64-<版本>.tar.gz`，同名产物已存在时构建会拒绝覆盖。
+
+包中只内置 API、公开站、管理后台这 3 个自研镜像。目标机仍必须能访问 Docker Hub 获取 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`，因此不支持完全断网部署。包内 Compose 使用固定版本的本地自研镜像且不包含源码构建上下文，启动时不会拉取或构建自研镜像。
+
+将发布包复制到目标机后，解压到部署目录并执行：
+
+```bash
+tar -xzf movie-harbor-offline-linux-arm64-<版本>.tar.gz
+cd movie-harbor
+./load-images.sh
+cp .env.example .env
+# 编辑 .env：替换密码与代理秘密，配置 PUBLIC_ORIGIN、APP_PORT 和数据目录。
+docker compose --env-file .env config
+docker compose up -d --no-build --wait
+```
+
+`load-images.sh` 先用 `sha256sum` 校验包内文件，再导入镜像并验证 `linux/arm64` 平台；目标机需要提供该命令。校验用于检查文件完整性，分发时还应通过可信渠道核对外层归档的 SHA-256。公开站、管理后台及 HTTPS、初始管理员和代理秘密要求与上述生产部署说明一致。
+
+`DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`，`MEDIA_HOST_DIR` 映射到 API 的 `/media` 和 Caddy 的只读 `/srv/media`。默认分别为解压目录下的 `./data/postgres` 和 `./data/media`；建议改为固定的宿主机绝对路径，以便升级时复用同一套数据。初始化容器会设置媒体目录的属主和权限。
+
+升级前停止写入，并将数据库和媒体目录作为同一个一致性备份集保存；新包导入后，复用原有数据目录、部署项目名和经过核对的环境配置，再执行启动命令。包不包含真实 `.env`、密码、数据库、媒体数据、源码或开发依赖；备份与秘密须由部署者单独保管。停止本部署使用 `docker compose down`，不要删除仍需保留的数据目录。
+
 ## 上传格式与容量
 
 - 海报：JPEG、PNG、WebP。后端同时检查扩展名、MIME 和实际图片内容。
