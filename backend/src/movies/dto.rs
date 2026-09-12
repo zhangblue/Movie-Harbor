@@ -62,12 +62,6 @@ pub struct DeleteResultResponse {
     pub deleted_media_count: u64,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AssociateMediaRequest {
-    pub version: i64,
-    pub asset_id: String,
-}
-
 #[derive(Debug, Default, Deserialize)]
 pub struct MovieListQuery {
     pub status: Option<String>,

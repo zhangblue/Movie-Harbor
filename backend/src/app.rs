@@ -38,8 +38,8 @@ pub async fn build(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
     )?;
-    crate::media::cleanup::recover_uploads(&db, &storage, Duration::from_secs(3600)).await?;
-    let _cleanup_worker = crate::media::cleanup::spawn(db.clone(), storage.clone());
+    crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
+    crate::media::removal::recover(&db, &storage).await?;
     Ok(router()
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))

@@ -7,17 +7,17 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use uuid::Uuid;
 
 use super::{
     dto::{
-        AssociateMediaRequest, CreateMovieRequest, DeleteImpactResponse, DeleteResultResponse,
-        MovieListQuery, MovieResponse, UpdateMovieRequest, VersionRequest,
+        CreateMovieRequest, DeleteImpactResponse, DeleteResultResponse, MovieListQuery,
+        MovieResponse, UpdateMovieRequest, VersionRequest,
     },
-    service::{self, MediaSlot, MovieError},
+    service::{self, MovieError},
 };
 
 #[derive(Clone)]
@@ -43,8 +43,6 @@ pub fn router(
             "/api/admin/movies/{id}",
             get(detail).patch(update).delete(delete_movie),
         )
-        .route("/api/admin/movies/{id}/poster", put(poster))
-        .route("/api/admin/movies/{id}/video", put(video))
         .route("/api/admin/movies/{id}/publish", post(publish))
         .route("/api/admin/movies/{id}/archive", post(archive))
         .route("/api/admin/movies/{id}/draft", post(revert_to_draft))
@@ -87,40 +85,6 @@ async fn update(
 ) -> Result<Json<MovieResponse>, MovieError> {
     Ok(Json(
         service::update(&state.db, parse_id(id)?, input).await?,
-    ))
-}
-
-async fn poster(
-    State(state): State<MovieState>,
-    Path(id): Path<String>,
-    Json(input): Json<AssociateMediaRequest>,
-) -> Result<Json<MovieResponse>, MovieError> {
-    associate(state, id, input, MediaSlot::Poster).await
-}
-
-async fn video(
-    State(state): State<MovieState>,
-    Path(id): Path<String>,
-    Json(input): Json<AssociateMediaRequest>,
-) -> Result<Json<MovieResponse>, MovieError> {
-    associate(state, id, input, MediaSlot::Video).await
-}
-
-async fn associate(
-    state: MovieState,
-    id: String,
-    input: AssociateMediaRequest,
-    slot: MediaSlot,
-) -> Result<Json<MovieResponse>, MovieError> {
-    Ok(Json(
-        service::associate_media(
-            &state.db,
-            parse_id(id)?,
-            parse_id(input.asset_id)?,
-            input.version,
-            slot,
-        )
-        .await?,
     ))
 }
 

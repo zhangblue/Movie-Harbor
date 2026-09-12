@@ -94,11 +94,6 @@ pub struct LocalMediaStorage {
     hooks: Arc<dyn StorageHooks>,
 }
 
-pub(crate) struct StorageMutationGuard<'a> {
-    storage: &'a LocalMediaStorage,
-    _guard: OwnedMutexGuard<()>,
-}
-
 pub(crate) struct RemovalSource {
     pub storage_key: String,
     leaf: Arc<OwnedFd>,
@@ -108,8 +103,13 @@ pub(crate) struct RemovalSource {
 }
 
 pub(crate) struct RemovalOperation {
-    name: String,
+    pub(crate) name: String,
     directory: Arc<OwnedFd>,
+}
+
+pub(crate) struct PersistedRemovalOperation {
+    pub operation: RemovalOperation,
+    pub manifest: Vec<u8>,
 }
 
 impl std::fmt::Debug for LocalMediaStorage {
@@ -344,6 +344,10 @@ struct QuarantineClaim {
 }
 
 impl LocalMediaStorage {
+    pub(crate) fn validate_storage_key(&self, storage_key: &str) -> Result<(), MediaError> {
+        parse_storage_key(storage_key).map(|_| ())
+    }
+
     pub async fn initialize(root: impl AsRef<Path>) -> Result<Self, MediaError> {
         Self::initialize_with_hooks(root, Arc::new(NoopHooks)).await
     }
@@ -643,13 +647,6 @@ impl LocalMediaStorage {
         Ok(())
     }
 
-    pub(crate) async fn begin_mutation(&self) -> StorageMutationGuard<'_> {
-        StorageMutationGuard {
-            storage: self,
-            _guard: self.mutations.clone().lock_owned().await,
-        }
-    }
-
     pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
         self.hooks.on_event(&StorageEvent::BeforeRemovalLock)?;
         Ok(self.mutations.clone().lock_owned().await)
@@ -839,6 +836,98 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    pub(crate) fn persisted_removal_operations(
+        &self,
+    ) -> Result<Vec<PersistedRemovalOperation>, MediaError> {
+        let directory = rustix::fs::Dir::read_from(&self.operations_fd).map_err(io::Error::from)?;
+        let mut operations = Vec::new();
+        for entry in directory {
+            let entry = entry.map_err(io::Error::from)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !valid_claim_base(&name) {
+                continue;
+            }
+            let operation_directory = Arc::new(
+                open_directory(&self.operations_fd, OsStr::new(&name))
+                    .map_err(|_| MediaError::InvalidStorageKey)?,
+            );
+            let manifest = openat(
+                &operation_directory,
+                "manifest.json",
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(io::Error::from)?;
+            let stat = rustix::fs::fstat(&manifest).map_err(io::Error::from)?;
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                != rustix::fs::FileType::RegularFile
+            {
+                return Err(MediaError::InvalidStorageKey);
+            }
+            let mut reader = std::fs::File::from(manifest).take(65_537);
+            let mut encoded = Vec::new();
+            reader.read_to_end(&mut encoded)?;
+            if encoded.len() > 65_536 {
+                return Err(MediaError::InvalidStorageKey);
+            }
+            operations.push(PersistedRemovalOperation {
+                operation: RemovalOperation {
+                    name,
+                    directory: operation_directory,
+                },
+                manifest: encoded,
+            });
+        }
+        Ok(operations)
+    }
+
+    pub(crate) fn restore_persisted_removal(
+        &self,
+        operation: &RemovalOperation,
+        storage_key: &str,
+        staged_name: &str,
+    ) -> Result<(), MediaError> {
+        if !is_staged_removal_name(staged_name) {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        let (kind, shard, file) = parse_storage_key(storage_key)?;
+        let kind_fd = open_directory(&self.root_fd, OsStr::new(kind))
+            .map_err(|_| MediaError::InvalidStorageKey)?;
+        let shard_fd = open_directory(&kind_fd, OsStr::new(shard))
+            .map_err(|_| MediaError::InvalidStorageKey)?;
+        match renameat_with(
+            &operation.directory,
+            staged_name,
+            &shard_fd,
+            file,
+            RenameFlags::NOREPLACE,
+        ) {
+            Ok(()) => {
+                sync_fd(&operation.directory)?;
+                sync_fd(&shard_fd)?;
+                Ok(())
+            }
+            Err(rustix::io::Errno::NOENT) => {
+                let existing = openat(
+                    &shard_fd,
+                    file,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
+                .map_err(|_| MediaError::InvalidStorageKey)?;
+                let stat = rustix::fs::fstat(existing).map_err(io::Error::from)?;
+                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                    == rustix::fs::FileType::RegularFile
+                {
+                    Ok(())
+                } else {
+                    Err(MediaError::InvalidStorageKey)
+                }
+            }
+            Err(_) => Err(MediaError::InvalidStorageKey),
+        }
+    }
+
     pub(crate) async fn remove_pending_owned(
         &self,
         marker: &PendingMarker,
@@ -967,29 +1056,6 @@ impl LocalMediaStorage {
     }
 }
 
-impl StorageMutationGuard<'_> {
-    pub(crate) fn remove_registered(
-        &self,
-        storage_key: &str,
-        byte_size: i64,
-        checksum_sha256: Option<&str>,
-    ) -> Result<(), MediaError> {
-        let byte_size = u64::try_from(byte_size).map_err(|_| MediaError::InvalidStorageKey)?;
-        let checksum_sha256 = checksum_sha256
-            .filter(|checksum| valid_sha256(checksum))
-            .ok_or(MediaError::InvalidStorageKey)?;
-        self.storage.remove_registered_if_owned(
-            storage_key,
-            DeletionIdentity {
-                device: None,
-                inode: None,
-                byte_size,
-                checksum_sha256,
-            },
-        )
-    }
-}
-
 fn open_directory<F: AsFd>(parent: &F, name: &OsStr) -> io::Result<OwnedFd> {
     openat(
         parent,
@@ -1113,6 +1179,12 @@ fn valid_claim_base(base: &str) -> bool {
         && base
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_staged_removal_name(name: &str) -> bool {
+    name.len() == 13
+        && name.ends_with(".data")
+        && name[..8].bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(not(unix))]

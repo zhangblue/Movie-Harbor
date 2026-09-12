@@ -21,8 +21,6 @@ pub enum Relation {
     Series,
     #[sea_orm(has_many = "super::episode::Entity")]
     Episode,
-    #[sea_orm(has_one = "super::file_cleanup_job::Entity")]
-    FileCleanupJob,
 }
 
 impl Related<super::series::Entity> for Entity {
@@ -35,10 +33,4 @@ impl Related<super::episode::Entity> for Entity {
         Relation::Episode.def()
     }
 }
-impl Related<super::file_cleanup_job::Entity> for Entity {
-    fn to() -> RelationDef {
-        Relation::FileCleanupJob.def()
-    }
-}
-
 impl ActiveModelBehavior for ActiveModel {}

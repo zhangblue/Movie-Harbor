@@ -1,7 +1,10 @@
+use movie_harbor_api::entities::{media_asset, movie};
 use movie_harbor_api::media::{
     LocalMediaStorage, MediaError, StorageEvent, StorageHooks,
     removal::{self, OwnedMedia},
 };
+use sea_orm::{ActiveModelTrait, Set};
+use serde_json::json;
 use std::{
     io,
     path::{Path, PathBuf},
@@ -11,6 +14,8 @@ use std::{
     },
 };
 use uuid::Uuid;
+
+mod support;
 
 struct TempRoot(PathBuf);
 
@@ -350,4 +355,116 @@ async fn missing_files_are_idempotent_empty_operations() {
         .await
         .unwrap();
     assert!(operation_directories(root.as_ref()).await.is_empty());
+}
+
+#[tokio::test]
+async fn recover_restores_referenced_files_and_finishes_unreferenced_files_idempotently() {
+    let database = support::TestDatabase::migrated("removal_recover").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let referenced = registered_file(
+        root.as_ref(),
+        "poster/dd/dddddddddddddddddddddddddddddddd.png",
+        b"referenced-poster",
+    )
+    .await;
+    let discarded = registered_file(
+        root.as_ref(),
+        "video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4",
+        b"discarded-video",
+    )
+    .await;
+    media_asset::ActiveModel {
+        id: Set(referenced.asset_id),
+        storage_key: Set(referenced.storage_key.clone()),
+        original_name: Set("poster.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(17),
+        purpose: Set("poster".into()),
+        checksum_sha256: Set(None),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Referenced movie".into()),
+        poster_asset_id: Set(Some(referenced.asset_id)),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+
+    drop(
+        removal::stage(&storage, "replace-media", std::slice::from_ref(&referenced))
+            .await
+            .unwrap(),
+    );
+    drop(
+        removal::stage(&storage, "delete-media", std::slice::from_ref(&discarded))
+            .await
+            .unwrap(),
+    );
+    assert!(!root.as_ref().join(&referenced.storage_key).exists());
+    assert_eq!(operation_directories(root.as_ref()).await.len(), 2);
+
+    removal::recover(&db, &storage).await.unwrap();
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(&referenced.storage_key))
+            .await
+            .unwrap(),
+        b"referenced-poster"
+    );
+    assert!(!root.as_ref().join(&discarded.storage_key).exists());
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+
+    removal::recover(&db, &storage).await.unwrap();
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(&referenced.storage_key))
+            .await
+            .unwrap(),
+        b"referenced-poster"
+    );
+}
+
+#[tokio::test]
+async fn recover_rejects_a_manifest_storage_key_escape_without_touching_external_files() {
+    let database = support::TestDatabase::migrated("removal_escape").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let operation_id = Uuid::new_v4();
+    let operation = root
+        .as_ref()
+        .join(".operations")
+        .join(operation_id.simple().to_string());
+    std::fs::create_dir(&operation).unwrap();
+    std::fs::write(operation.join("00000000.data"), b"quarantined").unwrap();
+    std::fs::write(
+        operation.join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "operation_id": operation_id,
+            "reason": "hostile-manifest",
+            "entries": [{
+                "asset_id": Uuid::new_v4(),
+                "storage_key": "../outside.mp4",
+                "staged_name": "00000000.data"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let outside = root.as_ref().with_extension("outside.mp4");
+    std::fs::write(&outside, b"outside").unwrap();
+
+    assert!(matches!(
+        removal::recover(&db, &storage).await,
+        Err(MediaError::InvalidStorageKey)
+    ));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
+    assert!(operation.join("manifest.json").is_file());
+    assert!(operation.join("00000000.data").is_file());
+    let _ = std::fs::remove_file(outside);
 }

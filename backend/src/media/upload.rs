@@ -1,14 +1,14 @@
 use super::{
     ChunkSource, LocalMediaStorage, MediaError, StoredFile,
-    references::{lock_for_reference_removal, reference_count},
     removal::{self, OwnedMedia, RemovalSession, StagedOperation},
     validation::{MediaKind, UploadPolicy},
 };
-use crate::entities::{episode, file_cleanup_job, media_asset, movie, season, series};
+use crate::entities::{episode, media_asset, movie, season, series};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
     QueryFilter, QuerySelect, Set, TransactionTrait, sea_query::Expr,
 };
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug)]
@@ -85,6 +85,54 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     tokio::task::yield_now().await;
     stored.mark_registered()?;
     Ok(asset)
+}
+
+pub async fn recover_stale_uploads(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    stale_age: Duration,
+) -> Result<(), MediaError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    for entry in storage.incoming_entries()? {
+        let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
+        if now.saturating_sub(modified) < stale_age.as_secs() {
+            continue;
+        }
+        if entry.name.ends_with(".part") {
+            storage.remove_incoming(&entry.name).await?;
+            continue;
+        }
+        if entry.name.ends_with(".pending") {
+            let marker = match storage.read_pending_marker(&entry.name) {
+                Ok(marker) => marker,
+                Err(error) => {
+                    eprintln!("retaining invalid media recovery marker: {error}");
+                    continue;
+                }
+            };
+            let registered = media_asset::Entity::find()
+                .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
+                .one(db)
+                .await?
+                .is_some();
+            if !registered {
+                match storage.remove_pending_owned(&marker).await {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        eprintln!("retaining unproven media recovery marker: {error}");
+                        continue;
+                    }
+                }
+            }
+            storage.remove_incoming(&entry.name).await?;
+        }
+    }
+    storage.notify_recovery_cycle_completed()?;
+    Ok(())
 }
 
 pub async fn replace_attachment<S: ChunkSource + Send>(
@@ -443,10 +491,6 @@ async fn stage_old_asset(
     let Some(old_id) = old_id else {
         return Ok(None);
     };
-    lock_for_reference_removal(tx, [old_id]).await?;
-    if reference_count(tx, old_id).await? != 1 {
-        return Ok(None);
-    }
     let old = media_asset::Entity::find_by_id(old_id)
         .one(tx)
         .await?
@@ -472,10 +516,6 @@ async fn delete_old_asset(
     let Some(old_id) = old_id else {
         return Ok(());
     };
-    file_cleanup_job::Entity::delete_many()
-        .filter(file_cleanup_job::Column::MediaAssetId.eq(old_id))
-        .exec(tx)
-        .await?;
     let deleted = media_asset::Entity::delete_by_id(old_id).exec(tx).await?;
     if deleted.rows_affected != 1 {
         return Err(MediaError::ReplacementFailed);

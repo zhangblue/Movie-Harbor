@@ -3,7 +3,6 @@ use crate::{
     genres,
     media::{
         LocalMediaStorage, is_publishable_asset,
-        references::{lock_for_reference_removal, reference_count},
         removal::{self, OwnedMedia},
     },
     movies::dto::{DeleteImpactResponse, DeleteResultResponse, Patch},
@@ -342,16 +341,15 @@ pub async fn delete_season(
         .into_iter()
         .filter_map(|episode| episode.video_asset_id)
         .collect::<HashSet<_>>();
-    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
-    ensure_exclusive_media(&tx, &locked_assets).await?;
-    let owned = load_owned_media(&tx, &locked_assets).await?;
+    let asset_ids = assets.into_iter().collect::<Vec<_>>();
+    let owned = load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-season", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         season::Entity::delete_by_id(season_id).exec(&tx).await?;
         repository::bump_series(&tx, &model).await?;
-        delete_media_assets(&tx, &locked_assets).await?;
+        delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -541,16 +539,15 @@ pub async fn delete_episode(
     if episode.status == "published" {
         return Err(SeriesError::Conflict);
     }
-    let locked_assets = lock_for_reference_removal(&tx, episode.video_asset_id).await?;
-    ensure_exclusive_media(&tx, &locked_assets).await?;
-    let owned = load_owned_media(&tx, &locked_assets).await?;
+    let asset_ids = episode.video_asset_id.into_iter().collect::<Vec<_>>();
+    let owned = load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-episode", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_episode(&tx, episode_id, expected_version).await?;
         repository::bump_series(&tx, &series).await?;
-        delete_media_assets(&tx, &locked_assets).await?;
+        delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -591,15 +588,14 @@ pub async fn delete_series(
                 .filter_map(|episode| episode.video_asset_id),
         );
     }
-    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
-    ensure_exclusive_media(&tx, &locked_assets).await?;
-    let owned = load_owned_media(&tx, &locked_assets).await?;
+    let asset_ids = assets.into_iter().collect::<Vec<_>>();
+    let owned = load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-series", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_series(&tx, id, expected_version).await?;
-        delete_media_assets(&tx, &locked_assets).await?;
+        delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -751,18 +747,6 @@ async fn load_owned_media<C: ConnectionTrait>(
             storage_key: asset.storage_key,
         })
         .collect())
-}
-
-async fn ensure_exclusive_media<C: ConnectionTrait>(
-    db: &C,
-    ids: &[Uuid],
-) -> Result<(), SeriesError> {
-    for id in ids {
-        if reference_count(db, *id).await? != 1 {
-            return Err(SeriesError::MediaDelete);
-        }
-    }
-    Ok(())
 }
 
 async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), SeriesError> {

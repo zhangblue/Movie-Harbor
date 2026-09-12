@@ -3,7 +3,6 @@ use crate::{
     genres,
     media::{
         LocalMediaStorage, is_publishable_asset,
-        references::{lock_for_reference_removal, queue_locked_if_unreferenced, reference_count},
         removal::{self, OwnedMedia},
     },
 };
@@ -95,12 +94,6 @@ impl IntoResponse for MovieError {
                 .into_response(),
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MediaSlot {
-    Poster,
-    Video,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -209,52 +202,6 @@ pub async fn update(
     Ok(result)
 }
 
-pub async fn associate_media(
-    db: &DatabaseConnection,
-    id: Uuid,
-    asset_id: Uuid,
-    expected_version: i64,
-    slot: MediaSlot,
-) -> Result<MovieResponse, MovieError> {
-    valid_version(expected_version)?;
-    let tx = db.begin().await?;
-    let mut model = repository::find_locked(&tx, id).await?;
-    require_version(&model, expected_version)?;
-    if model.status != "draft" {
-        return Err(MovieError::Conflict);
-    }
-    let old_id = match slot {
-        MediaSlot::Poster => model.poster_asset_id,
-        MediaSlot::Video => model.video_asset_id,
-    };
-    let locked_assets =
-        lock_for_reference_removal(&tx, old_id.into_iter().chain(std::iter::once(asset_id)))
-            .await?;
-    let asset = media_asset::Entity::find_by_id(asset_id)
-        .one(&tx)
-        .await?
-        .ok_or_else(|| MovieError::Validation(vec![slot.field_name()]))?;
-    if asset.purpose != slot.purpose() {
-        return Err(MovieError::Validation(vec![slot.field_name()]));
-    }
-    let replaced_id = match slot {
-        MediaSlot::Poster => model.poster_asset_id.replace(asset_id),
-        MediaSlot::Video => model.video_asset_id.replace(asset_id),
-    };
-    if replaced_id == Some(asset_id) {
-        return response(&tx, model).await;
-    }
-    let updated = repository::persist(&tx, &model, expected_version).await?;
-    let removed_assets = locked_assets
-        .into_iter()
-        .filter(|id| Some(*id) == replaced_id)
-        .collect::<Vec<_>>();
-    queue_locked_if_unreferenced(&tx, &removed_assets).await?;
-    let result = response(&tx, updated).await?;
-    tx.commit().await?;
-    Ok(result)
-}
-
 pub async fn transition(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -340,15 +287,14 @@ pub async fn delete(
         .into_iter()
         .flatten()
         .collect::<HashSet<_>>();
-    let locked_assets = lock_for_reference_removal(&tx, assets).await?;
-    ensure_exclusive_media(&tx, &locked_assets).await?;
-    let owned = load_owned_media(&tx, &locked_assets).await?;
+    let asset_ids = assets.into_iter().collect::<Vec<_>>();
+    let owned = load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-movie", &owned)
         .map_err(|_| MovieError::MediaDelete)?;
     let database_result: Result<(), MovieError> = async {
         repository::delete(&tx, id, expected_version).await?;
-        delete_media_assets(&tx, &locked_assets).await?;
+        delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -393,18 +339,6 @@ async fn load_owned_media<C: sea_orm::ConnectionTrait>(
             storage_key: asset.storage_key,
         })
         .collect())
-}
-
-async fn ensure_exclusive_media<C: sea_orm::ConnectionTrait>(
-    db: &C,
-    ids: &[Uuid],
-) -> Result<(), MovieError> {
-    for id in ids {
-        if reference_count(db, *id).await? != 1 {
-            return Err(MovieError::MediaDelete);
-        }
-    }
-    Ok(())
 }
 
 async fn delete_media_assets<C: sea_orm::ConnectionTrait>(
@@ -546,19 +480,6 @@ fn ensure_transition(current: &str, target: TargetState) -> Result<(), MovieErro
         Ok(())
     } else {
         Err(MovieError::Conflict)
-    }
-}
-
-impl MediaSlot {
-    fn purpose(self) -> &'static str {
-        match self {
-            Self::Poster => "poster",
-            Self::Video => "video",
-        }
-    }
-
-    fn field_name(self) -> &'static str {
-        self.purpose()
     }
 }
 

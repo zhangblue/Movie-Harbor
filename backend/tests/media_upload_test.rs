@@ -10,7 +10,7 @@ use image::{ExtendedColorType, ImageEncoder};
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{episode, file_cleanup_job, media_asset, movie, season, series},
+    entities::{episode, media_asset, movie, season, series},
     media::{
         AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, StorageEvent,
         StorageHooks, UploadPolicy, replace_attachment, store_new_asset,
@@ -1187,9 +1187,13 @@ async fn recovery_sweeps_only_stale_incoming_part_files() {
     std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
     std::fs::write(&formal, b"formal").unwrap();
 
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::from_secs(3600))
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage,
+        Duration::from_secs(3600),
+    )
+    .await
+    .unwrap();
 
     assert!(!stale.exists());
     assert!(fresh.exists());
@@ -1215,7 +1219,7 @@ async fn invalid_recovery_markers_are_retained_without_aborting_the_sweep() {
     make_stale(&invalid);
     make_stale(&stale_part);
 
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
         .await
         .unwrap();
 
@@ -1244,7 +1248,7 @@ async fn recovery_requires_marker_identity_before_deleting_a_formal_file() {
     let marker = write_pending_marker(root.as_ref(), id, &key, &owner);
     make_stale(&marker);
 
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
         .await
         .unwrap();
 
@@ -1278,7 +1282,7 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
     std::fs::write(&formal, PNG).unwrap();
     let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
 
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
         .await
         .unwrap();
 
@@ -1351,62 +1355,12 @@ async fn recovery_marker_name_must_match_its_formal_resource_key() {
     let marker = write_pending_marker(root.as_ref(), Uuid::new_v4(), &key, &formal);
     make_stale(&marker);
 
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
         .await
         .unwrap();
 
     assert!(formal.exists());
     assert!(marker.exists());
-}
-
-// Catches a worker that only recovers once at startup and never revisits initially fresh parts.
-#[tokio::test]
-async fn cleanup_worker_periodically_revisits_initially_fresh_parts() {
-    let db = database().await;
-    let root = TempRoot::new();
-    let hooks = Arc::new(RecordingHooks::default());
-    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
-        .await
-        .unwrap();
-    let fresh = root
-        .as_ref()
-        .join(".incoming")
-        .join(format!("{}.part", Uuid::new_v4().simple()));
-    std::fs::write(&fresh, b"fresh").unwrap();
-    tokio::time::pause();
-    let worker = movie_harbor_api::media::cleanup::spawn(db, storage);
-    for _ in 0..500 {
-        if hooks
-            .events
-            .lock()
-            .unwrap()
-            .contains(&StorageEvent::RecoveryCycleCompleted)
-        {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        hooks
-            .events
-            .lock()
-            .unwrap()
-            .contains(&StorageEvent::RecoveryCycleCompleted),
-        "worker did not finish its initial recovery cycle"
-    );
-    assert!(fresh.exists());
-    make_stale(&fresh);
-    for _ in 0..10 {
-        tokio::time::advance(Duration::from_secs(301)).await;
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
-        if !fresh.exists() {
-            break;
-        }
-    }
-    worker.abort();
-    assert!(!fresh.exists());
 }
 
 // Catches a DB failure plus cleanup failure silently leaking a promoted formal file.
@@ -1443,7 +1397,7 @@ async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
     );
 
     let recovered = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &recovered, Duration::from_secs(0))
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &recovered, Duration::from_secs(0))
         .await
         .unwrap();
     assert_eq!(count_files(root.as_ref()), 0);
@@ -1492,7 +1446,7 @@ async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliatio
                 .to_string_lossy()
                 .ends_with(".pending"))
     );
-    movie_harbor_api::media::cleanup::recover_uploads(&db, &storage, Duration::ZERO)
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
         .await
         .unwrap();
     assert!(root.as_ref().join(asset.storage_key).is_file());
@@ -2238,13 +2192,6 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     assert!(only_file(root.as_ref(), &old.storage_key).await);
     assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
     assert_eq!(count_files(root.as_ref()), 1);
-    assert!(
-        file_cleanup_job::Entity::find()
-            .all(&db)
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 // Catches a database commit failure leaving the old file staged or the new file registered.
@@ -2315,13 +2262,6 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
     );
     assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
     assert_eq!(count_files(root.as_ref()), 1);
-    assert!(
-        file_cleanup_job::Entity::find()
-            .all(&db)
-            .await
-            .unwrap()
-            .is_empty()
-    );
 }
 
 // Catches a post-commit finish failure losing the durable removal manifest or reporting success.
@@ -2395,13 +2335,6 @@ async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error(
             .await
             .unwrap()
             .is_none()
-    );
-    assert!(
-        file_cleanup_job::Entity::find()
-            .all(&db)
-            .await
-            .unwrap()
-            .is_empty()
     );
     let operations = std::fs::read_dir(root.as_ref().join(".operations"))
         .unwrap()
@@ -2598,109 +2531,14 @@ async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot(
                 .unwrap()
                 .is_none()
         );
-        assert!(
-            file_cleanup_job::Entity::find()
-                .all(&db)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 }
 
-// Catches a legacy cleanup job blocking synchronous deletion or surviving a replacement.
-#[tokio::test]
-async fn replacement_removes_a_preexisting_cleanup_job_with_the_old_asset() {
+async fn run_recovery_during_uncommitted_replacement() {
     let db = database().await;
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    let (old_source, _) = Chunks::new([PNG]);
-    let old = store_new_asset(
-        &db,
-        &storage,
-        MediaKind::Poster,
-        "old.png",
-        "image/png",
-        &policy(1024),
-        old_source,
-    )
-    .await
-    .unwrap();
-    let movie = draft_movie(&db, Some(old.id)).await;
-    file_cleanup_job::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        media_asset_id: Set(old.id),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .unwrap();
-
-    let (new_source, _) = Chunks::new([jpeg()]);
-    let new = replace_attachment(
-        &db,
-        &storage,
-        AttachmentTarget::MoviePoster {
-            id: movie.id,
-            version: 1,
-        },
-        "new.jpg",
-        "image/jpeg",
-        &policy(1024),
-        new_source,
-    )
-    .await
-    .expect("a pre-existing cleanup job must not poison replacement");
-
-    let current = movie::Entity::find_by_id(movie.id)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(current.poster_asset_id, Some(new.id));
-    assert!(!root.as_ref().join(old.storage_key).exists());
-    assert!(
-        media_asset::Entity::find_by_id(old.id)
-            .one(&db)
-            .await
-            .unwrap()
-            .is_none()
-    );
-    assert!(
-        file_cleanup_job::Entity::find()
-            .all(&db)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-}
-
-async fn run_recovery_during_uncommitted_replacement(shared_old: bool) {
-    let db = database().await;
-    let root = TempRoot::new();
-    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    let old = if shared_old {
-        let (source, _) = Chunks::new([PNG]);
-        Some(
-            store_new_asset(
-                &db,
-                &storage,
-                MediaKind::Poster,
-                "shared.png",
-                "image/png",
-                &policy(1024),
-                source,
-            )
-            .await
-            .unwrap(),
-        )
-    } else {
-        None
-    };
-    let movie = draft_movie(&db, old.as_ref().map(|asset| asset.id)).await;
-    if let Some(old) = &old {
-        draft_movie(&db, Some(old.id)).await;
-    }
+    let movie = draft_movie(&db, None).await;
 
     let lock_key = i64::from_be_bytes(
         Uuid::new_v4().as_bytes()[..8]
@@ -2770,7 +2608,7 @@ async fn run_recovery_during_uncommitted_replacement(shared_old: bool) {
     let recovery_db = db.clone();
     let recovery_storage = storage.clone();
     let mut recovery = tokio::spawn(async move {
-        movie_harbor_api::media::cleanup::recover_uploads(
+        movie_harbor_api::media::upload::recover_stale_uploads(
             &recovery_db,
             &recovery_storage,
             Duration::ZERO,
@@ -2811,28 +2649,12 @@ async fn run_recovery_during_uncommitted_replacement(shared_old: bool) {
             .next()
             .is_none()
     );
-    if let Some(old) = old {
-        assert!(
-            media_asset::Entity::find_by_id(old.id)
-                .one(&db)
-                .await
-                .unwrap()
-                .is_some()
-        );
-        assert!(root.as_ref().join(old.storage_key).is_file());
-    }
 }
 
 // Catches an empty old slot dropping the transferred mutation guard before commit/registration.
 #[tokio::test]
 async fn empty_slot_replacement_keeps_recovery_out_until_the_new_file_is_registered() {
-    run_recovery_during_uncommitted_replacement(false).await;
-}
-
-// Catches the shared-old fail-safe branch dropping the guard while the new marker is pending.
-#[tokio::test]
-async fn shared_old_replacement_keeps_recovery_out_and_preserves_both_files() {
-    run_recovery_during_uncommitted_replacement(true).await;
+    run_recovery_during_uncommitted_replacement().await;
 }
 
 // Catches omitting the route or bypassing the shared administrator middleware.

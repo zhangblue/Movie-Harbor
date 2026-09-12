@@ -62,9 +62,6 @@ export async function getMovie(id: string): Promise<MovieResponse> {
 export async function updateMovie(id: string, input: UpdateMovieRequest): Promise<MovieResponse> {
   return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id), { method: "PATCH", json: input }));
 }
-export async function associateMovieMedia(id: string, slot: "poster" | "video", assetId: string, version: number): Promise<MovieResponse> {
-  return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id, slot), { method: "PUT", json: { asset_id: assetId, version } }));
-}
 export async function transitionMovie(id: string, action: LifecycleAction, version: number): Promise<MovieResponse> {
   return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id, action), { method: "POST", json: { version } }));
 }

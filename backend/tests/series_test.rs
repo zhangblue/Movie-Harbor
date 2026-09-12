@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{episode, file_cleanup_job, genre, media_asset, season, series, series_genre},
+    entities::{episode, genre, media_asset, season, series, series_genre},
     media::{LocalMediaStorage, StorageEvent, StorageHooks},
     series::service as series_service,
 };
@@ -2231,14 +2231,6 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
             .unwrap()
             .version,
         8
-    );
-    assert_eq!(
-        file_cleanup_job::Entity::find()
-            .filter(file_cleanup_job::Column::MediaAssetId.eq(video.id))
-            .count(&db)
-            .await
-            .unwrap(),
-        0
     );
 
     let published = create_series(&app, &cookie, &csrf, "Published delete gate").await;

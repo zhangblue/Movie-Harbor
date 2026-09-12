@@ -2,6 +2,7 @@ use super::{
     LocalMediaStorage, MediaError,
     storage::{RemovalOperation, RemovalSource},
 };
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
@@ -81,6 +82,68 @@ pub async fn stage(
     assets: &[OwnedMedia],
 ) -> Result<StagedRemoval, MediaError> {
     acquire(storage).await?.stage(reason, assets)
+}
+
+pub async fn recover(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+) -> Result<(), MediaError> {
+    let _session = acquire(storage).await?;
+    for persisted in storage.persisted_removal_operations()? {
+        let manifest: Manifest = serde_json::from_slice(&persisted.manifest)
+            .map_err(|_| MediaError::InvalidStorageKey)?;
+        if manifest.version != 1
+            || manifest.operation_id.simple().to_string() != persisted.operation.name
+            || manifest.entries.len() > 4096
+        {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        for (index, entry) in manifest.entries.iter().enumerate() {
+            if entry.staged_name != format!("{index:08}.data") {
+                return Err(MediaError::InvalidStorageKey);
+            }
+            storage.validate_storage_key(&entry.storage_key)?;
+        }
+        for entry in &manifest.entries {
+            if is_referenced(db, entry.asset_id, &entry.storage_key).await? {
+                storage.restore_persisted_removal(
+                    &persisted.operation,
+                    &entry.storage_key,
+                    &entry.staged_name,
+                )?;
+            } else {
+                storage.finish_removal_source(&persisted.operation, &entry.staged_name)?;
+            }
+        }
+        storage.close_removal_operation(&persisted.operation)?;
+    }
+    Ok(())
+}
+
+async fn is_referenced(
+    db: &DatabaseConnection,
+    asset_id: Uuid,
+    storage_key: &str,
+) -> Result<bool, MediaError> {
+    let row = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            r#"SELECT EXISTS (
+                SELECT 1 FROM media_asset a
+                WHERE a.id = $1 AND a.storage_key = $2 AND EXISTS (
+                    SELECT 1 FROM movie WHERE poster_asset_id = a.id OR video_asset_id = a.id
+                    UNION ALL SELECT 1 FROM series WHERE poster_asset_id = a.id
+                    UNION ALL SELECT 1 FROM episode WHERE video_asset_id = a.id
+                )
+            ) AS referenced"#,
+            [asset_id.into(), storage_key.into()],
+        ))
+        .await?
+        .ok_or(MediaError::Database(sea_orm::DbErr::RecordNotFound(
+            "recovery reference result".into(),
+        )))?;
+    row.try_get::<bool>("", "referenced")
+        .map_err(MediaError::Database)
 }
 
 pub(crate) async fn acquire(storage: &LocalMediaStorage) -> Result<RemovalSession, MediaError> {

@@ -9,7 +9,7 @@ use http_body_util::BodyExt;
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{file_cleanup_job, genre, media_asset, movie, movie_genre},
+    entities::{genre, media_asset, movie, movie_genre},
     media::{
         AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, StorageEvent, StorageHooks,
         UploadPolicy, replace_attachment,
@@ -239,23 +239,28 @@ async fn create_asset(
 }
 
 async fn associate(
-    app: &Router,
-    cookie: &str,
-    csrf: &str,
+    db: &DatabaseConnection,
     movie_id: &str,
     kind: &str,
     asset_id: Uuid,
     version: i64,
 ) -> Response {
-    write(
-        app,
-        "PUT",
-        &format!("/api/admin/movies/{movie_id}/{kind}"),
-        json!({"asset_id":asset_id.to_string(), "version":version}),
-        cookie,
-        csrf,
-    )
-    .await
+    let column = match kind {
+        "poster" => "poster_asset_id",
+        "video" => "video_asset_id",
+        _ => panic!("unexpected media slot"),
+    };
+    let result = db
+        .execute_unprepared(&format!(
+            "UPDATE movie SET {column}='{asset_id}', version=version+1 WHERE id='{movie_id}' AND version={version}"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(result.rows_affected(), 1);
+    Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::from(json!({"version": version + 1}).to_string()))
+        .unwrap()
 }
 
 struct FailSecondStage {
@@ -706,9 +711,9 @@ async fn draft_updates_are_atomic_and_preserve_omitted_genres() {
     );
 }
 
-// Catches media ID/type confusion, stale association writes, storage-key leaks, and eager old-file deletion.
+// Catches accidentally retaining the arbitrary asset-ID association API.
 #[tokio::test]
-async fn media_association_is_versioned_and_schedules_replaced_assets() {
+async fn removed_arbitrary_media_association_routes_return_not_found() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -717,46 +722,16 @@ async fn media_association_is_versioned_and_schedules_replaced_assets() {
     let (cookie, csrf) = credentials(&app).await;
     let created = create_movie(&app, &cookie, &csrf, "Media movie").await;
     let id = created["id"].as_str().unwrap();
-    let first = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
-    let second = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
-    let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
-
-    let response = associate(&app, &cookie, &csrf, id, "poster", first.id, 1).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let associated = body(response).await;
-    assert_eq!(associated["version"], 2);
-    assert_eq!(associated["poster"]["id"], first.id.to_string());
-    assert_eq!(
-        associated["poster"]["url"],
-        format!("/media/{}", first.storage_key)
-    );
-    assert!(associated["poster"].get("storage_key").is_none());
-    assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", video.id, 1)
-            .await
-            .status(),
-        StatusCode::CONFLICT
-    );
-    assert_eq!(
-        associate(&app, &cookie, &csrf, id, "poster", video.id, 2)
-            .await
-            .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-    assert_eq!(
-        associate(&app, &cookie, &csrf, id, "poster", Uuid::new_v4(), 2,)
-            .await
-            .status(),
-        StatusCode::UNPROCESSABLE_ENTITY
-    );
-
-    let replaced = associate(&app, &cookie, &csrf, id, "poster", second.id, 2).await;
-    assert_eq!(replaced.status(), StatusCode::OK);
-    assert_eq!(body(replaced).await["version"], 3);
-    assert!(root.as_ref().join(&first.storage_key).is_file());
-    let jobs = file_cleanup_job::Entity::find().all(&db).await.unwrap();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].media_asset_id, first.id);
+    let response = write(
+        &app,
+        "PUT",
+        &format!("/api/admin/movies/{id}/poster"),
+        json!({"asset_id":Uuid::new_v4().to_string(), "version":1}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 // Catches publishing without both registered files or trusting unsafe/missing/non-regular keys.
@@ -787,13 +762,11 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let inaccessible_video = create_asset(&db, root.as_ref(), "video", "video/mp4", false).await;
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "poster", poster.id, 1)
-            .await
-            .status(),
+        associate(&db, id, "poster", poster.id, 1).await.status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", inaccessible_video.id, 2,)
+        associate(&db, id, "video", inaccessible_video.id, 2,)
             .await
             .status(),
         StatusCode::OK
@@ -827,23 +800,15 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
     unsafe_active.storage_key = Set("../outside.mp4".into());
     unsafe_active.update(&db).await.unwrap();
     assert_eq!(
-        associate(&app, &cookie, &csrf, invalid_key_id, "poster", poster.id, 1,)
+        associate(&db, invalid_key_id, "poster", poster.id, 1,)
             .await
             .status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            invalid_key_id,
-            "video",
-            unsafe_video.id,
-            2,
-        )
-        .await
-        .status(),
+        associate(&db, invalid_key_id, "video", unsafe_video.id, 2,)
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
@@ -866,31 +831,15 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
     let absent_video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     std::fs::remove_file(root.as_ref().join(&absent_video.storage_key)).unwrap();
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            missing_file_id,
-            "poster",
-            poster.id,
-            1,
-        )
-        .await
-        .status(),
+        associate(&db, missing_file_id, "poster", poster.id, 1,)
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            missing_file_id,
-            "video",
-            absent_video.id,
-            2,
-        )
-        .await
-        .status(),
+        associate(&db, missing_file_id, "video", absent_video.id, 2,)
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
@@ -915,23 +864,15 @@ async fn publish_requires_valid_accessible_poster_and_browser_video() {
     wrong_mime_active.mime_type = Set("video/quicktime".into());
     wrong_mime_active.update(&db).await.unwrap();
     assert_eq!(
-        associate(&app, &cookie, &csrf, wrong_mime_id, "poster", poster.id, 1,)
+        associate(&db, wrong_mime_id, "poster", poster.id, 1,)
             .await
             .status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            wrong_mime_id,
-            "video",
-            wrong_mime_video.id,
-            2,
-        )
-        .await
-        .status(),
+        associate(&db, wrong_mime_id, "video", wrong_mime_video.id, 2,)
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
@@ -964,15 +905,11 @@ async fn publish_rejects_a_fifo_without_waiting_for_a_writer() {
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "poster", poster.id, 1)
-            .await
-            .status(),
+        associate(&db, id, "poster", poster.id, 1).await.status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", video.id, 2)
-            .await
-            .status(),
+        associate(&db, id, "video", video.id, 2).await.status(),
         StatusCode::OK
     );
 
@@ -1029,15 +966,11 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "poster", poster.id, 1)
-            .await
-            .status(),
+        associate(&db, id, "poster", poster.id, 1).await.status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", video.id, 2)
-            .await
-            .status(),
+        associate(&db, id, "video", video.id, 2).await.status(),
         StatusCode::OK
     );
 
@@ -1187,10 +1120,6 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
             .unwrap()
             .is_none()
     );
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        0
-    );
 
     let archived_delete = create_movie(&app, &cookie, &csrf, "Archived delete").await;
     let archived_id = archived_delete["id"].as_str().unwrap();
@@ -1283,9 +1212,9 @@ async fn delete_restores_staged_movie_media_when_a_later_stage_fails() {
     let id = created["id"].as_str().unwrap();
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
-    let poster_response = associate(&app, &cookie, &csrf, id, "poster", poster.id, 1).await;
+    let poster_response = associate(&db, id, "poster", poster.id, 1).await;
     assert_eq!(poster_response.status(), StatusCode::OK);
-    let video_response = associate(&app, &cookie, &csrf, id, "video", video.id, 2).await;
+    let video_response = associate(&db, id, "video", video.id, 2).await;
     assert_eq!(video_response.status(), StatusCode::OK);
     let storage = LocalMediaStorage::initialize_with_hooks(
         root.as_ref(),
@@ -1338,9 +1267,7 @@ async fn delete_restores_movie_media_when_the_database_transaction_fails() {
     let id = created["id"].as_str().unwrap();
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", video.id, 1)
-            .await
-            .status(),
+        associate(&db, id, "video", video.id, 1).await.status(),
         StatusCode::OK
     );
     db.execute_unprepared(
@@ -1412,9 +1339,7 @@ async fn delete_reports_finish_failure_after_the_database_commit() {
     let id = created["id"].as_str().unwrap();
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(&app, &cookie, &csrf, id, "video", video.id, 1)
-            .await
-            .status(),
+        associate(&db, id, "video", video.id, 1).await.status(),
         StatusCode::OK
     );
     let storage = LocalMediaStorage::initialize_with_hooks(
@@ -1472,31 +1397,15 @@ async fn delete_impact_and_delete_cover_all_movie_media() {
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
     let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            first["id"].as_str().unwrap(),
-            "poster",
-            poster.id,
-            1
-        )
-        .await
-        .status(),
+        associate(&db, first["id"].as_str().unwrap(), "poster", poster.id, 1)
+            .await
+            .status(),
         StatusCode::OK
     );
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            first["id"].as_str().unwrap(),
-            "video",
-            video.id,
-            2
-        )
-        .await
-        .status(),
+        associate(&db, first["id"].as_str().unwrap(), "video", video.id, 2)
+            .await
+            .status(),
         StatusCode::OK
     );
     let impact = request(
@@ -1556,81 +1465,6 @@ async fn delete_impact_and_delete_cover_all_movie_media() {
     }
 }
 
-// Catches legacy shared data deleting one owner before the ownership migration rejects it.
-#[tokio::test]
-async fn delete_preserves_content_and_media_when_a_legacy_shared_asset_is_detected() {
-    let db = database().await;
-    let root = TempRoot::new();
-    let app = app::build(db.clone(), &config(root.as_ref()))
-        .await
-        .unwrap();
-    let (cookie, csrf) = credentials(&app).await;
-    let first = create_movie(&app, &cookie, &csrf, "Preview owner").await;
-    let second = create_movie(&app, &cookie, &csrf, "Later owner").await;
-    let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
-    let first_id = first["id"].as_str().unwrap();
-
-    assert_eq!(
-        associate(&app, &cookie, &csrf, first_id, "poster", poster.id, 1)
-            .await
-            .status(),
-        StatusCode::OK
-    );
-    let impact = request(
-        &app,
-        "GET",
-        &format!("/api/admin/movies/{first_id}/delete-impact"),
-        json!(null),
-        Some(&cookie),
-        None,
-        None,
-    )
-    .await;
-    assert_eq!(impact.status(), StatusCode::OK);
-    assert_eq!(body(impact).await["media_count"], 1);
-
-    assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            second["id"].as_str().unwrap(),
-            "poster",
-            poster.id,
-            1
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-    let deleted = write(
-        &app,
-        "DELETE",
-        &format!("/api/admin/movies/{first_id}"),
-        json!({"version":2}),
-        &cookie,
-        &csrf,
-    )
-    .await;
-    assert_eq!(deleted.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    assert_eq!(body(deleted).await["code"], "media_delete_failed");
-    assert!(
-        movie::Entity::find_by_id(first_id.parse::<Uuid>().unwrap())
-            .one(&db)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(
-        media_asset::Entity::find_by_id(poster.id)
-            .one(&db)
-            .await
-            .unwrap()
-            .is_some()
-    );
-    assert!(root.as_ref().join(&poster.storage_key).exists());
-}
-
 // Catches a pre-commit storage permission failure deleting content or media metadata.
 #[cfg(unix)]
 #[tokio::test]
@@ -1644,17 +1478,9 @@ async fn delete_preserves_content_when_media_staging_is_not_permitted() {
     let created = create_movie(&app, &cookie, &csrf, "Pending cleanup").await;
     let asset = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            created["id"].as_str().unwrap(),
-            "video",
-            asset.id,
-            1
-        )
-        .await
-        .status(),
+        associate(&db, created["id"].as_str().unwrap(), "video", asset.id, 1)
+            .await
+            .status(),
         StatusCode::OK
     );
     let parent = root

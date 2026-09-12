@@ -1,7 +1,6 @@
 pub mod admin_session;
 pub mod admin_user;
 pub mod episode;
-pub mod file_cleanup_job;
 pub mod genre;
 pub mod media_asset;
 pub mod movie;

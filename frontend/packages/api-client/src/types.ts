@@ -42,7 +42,6 @@ export interface MovieResponse {
 export interface CreateMovieRequest { name: string }
 export interface MovieListQuery { status?: ContentStatus; name?: string }
 export interface VersionRequest { version: number }
-export interface AssociateMediaRequest { version: number; asset_id: string }
 export interface UpdateMovieRequest {
   version: number; name?: string | null; synopsis?: string | null; year?: number | null;
   duration_seconds?: number | null; genre_ids?: string[] | null;

@@ -4,6 +4,8 @@ use sea_orm::{
 use sea_orm_migration::MigratorTrait;
 use uuid::Uuid;
 
+mod support;
+
 const TABLES: [&str; 11] = [
     "admin_user",
     "admin_session",
@@ -15,7 +17,7 @@ const TABLES: [&str; 11] = [
     "episode",
     "movie_genre",
     "series_genre",
-    "file_cleanup_job",
+    "media_asset_ownership",
 ];
 
 async fn isolated_database() -> DatabaseTransaction {
@@ -98,6 +100,105 @@ async fn episode_synopsis_migration_is_reversible() {
 }
 
 #[tokio::test]
+async fn media_ownership_migration_rejects_pending_cleanup_jobs() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, Some(4)).await.unwrap();
+    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000001', 'video/10/10000000000000000000000000000001.mp4', 'video.mp4', 'video/mp4', 32, 'video')").await;
+    sql(&db, "INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000001')").await;
+
+    let error = migration::Migrator::up(&db, None).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("pending media cleanup jobs must be resolved"),
+        "unexpected migration error: {error}"
+    );
+    db.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_ownership_migration_rejects_shared_assets() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, Some(4)).await.unwrap();
+    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000002', 'poster/10/10000000000000000000000000000002.png', 'poster.png', 'image/png', 32, 'poster')").await;
+    sql(&db, "INSERT INTO movie (id, name, poster_asset_id, video_asset_id) VALUES ('20000000-0000-0000-0000-000000000001', 'Movie', '10000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000002')").await;
+
+    let error = migration::Migrator::up(&db, None).await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("shared media assets must be resolved"),
+        "unexpected migration error: {error}"
+    );
+    db.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_ownership_migration_enforces_exclusive_assets_and_is_reversible() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, Some(4)).await.unwrap();
+    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000003', 'poster/10/10000000000000000000000000000003.png', 'poster.png', 'image/png', 32, 'poster')").await;
+    migration::Migrator::up(&db, None).await.unwrap();
+    let cleanup = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT to_regclass('file_cleanup_job')::text AS relation",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cleanup.try_get::<Option<String>>("", "relation").unwrap(),
+        None
+    );
+
+    sql(&db, "INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000002', 'Movie', '10000000-0000-0000-0000-000000000003')").await;
+    rejects(&db, "UPDATE movie SET video_asset_id = poster_asset_id WHERE id = '20000000-0000-0000-0000-000000000002'", "23505").await;
+    sql(
+        &db,
+        "INSERT INTO series (id, name) VALUES ('30000000-0000-0000-0000-000000000001', 'Series')",
+    )
+    .await;
+    rejects(&db, "UPDATE series SET poster_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '30000000-0000-0000-0000-000000000001'", "23505").await;
+    sql(&db, "INSERT INTO season (id, series_id, number) VALUES ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 1); INSERT INTO episode (id, season_id, number, name) VALUES ('50000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000001', 1, 'Episode')").await;
+    rejects(&db, "UPDATE episode SET video_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '50000000-0000-0000-0000-000000000001'", "23505").await;
+    sql(&db, "DELETE FROM movie WHERE id = '20000000-0000-0000-0000-000000000002'; UPDATE series SET poster_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '30000000-0000-0000-0000-000000000001'").await;
+
+    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    sql(&db, "SELECT * FROM file_cleanup_job LIMIT 0").await;
+    sql(&db, "UPDATE episode SET video_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '50000000-0000-0000-0000-000000000001'").await;
+    db.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
+    let database = support::TestDatabase::migrated("ownership_concurrent").await;
+    let db = database.connection();
+    db.execute_unprepared("INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000004', 'poster/10/10000000000000000000000000000004.png', 'poster.png', 'image/png', 32, 'poster'); INSERT INTO series (id, name) VALUES ('30000000-0000-0000-0000-000000000004', 'Concurrent series')").await.unwrap();
+    let first = db.begin().await.unwrap();
+    first.execute_unprepared("INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000004', 'Concurrent movie', '10000000-0000-0000-0000-000000000004')").await.unwrap();
+
+    let competing_db = db.clone();
+    let competing = tokio::spawn(async move {
+        competing_db.execute_unprepared("UPDATE series SET poster_asset_id='10000000-0000-0000-0000-000000000004' WHERE id='30000000-0000-0000-0000-000000000004'").await
+    });
+    tokio::task::yield_now().await;
+    first.commit().await.unwrap();
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), competing)
+        .await
+        .expect("competing ownership claim remained blocked")
+        .unwrap()
+        .unwrap_err();
+    let sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(error)) = error else {
+        panic!("expected PostgreSQL unique violation");
+    };
+    assert_eq!(
+        error.as_database_error().unwrap().code().as_deref(),
+        Some("23505")
+    );
+}
+
+#[tokio::test]
 async fn core_schema_enforces_catalog_constraints() {
     let db = isolated_database().await;
     migration::Migrator::up(&db, None).await.unwrap();
@@ -146,7 +247,7 @@ async fn core_schema_enforces_catalog_constraints() {
 }
 
 #[tokio::test]
-async fn foreign_keys_protect_references_and_keep_cleanup_retryable() {
+async fn foreign_keys_protect_media_references() {
     let db = isolated_database().await;
     migration::Migrator::up(&db, None).await.unwrap();
     sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('00000000-0000-0000-0000-000000000021', 'video/21.mp4', 'video.mp4', 'video/mp4', 32, 'video')").await;
@@ -172,8 +273,6 @@ async fn foreign_keys_protect_references_and_keep_cleanup_retryable() {
     rejects(&db, "DELETE FROM genre", "23503").await;
     rejects(&db, "DELETE FROM media_asset", "23503").await;
     rejects(&db, "INSERT INTO movie (id, name, video_asset_id) VALUES (gen_random_uuid(), 'Movie', gen_random_uuid())", "23503").await;
-    sql(&db, "INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000021')").await;
-    rejects(&db, "INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000021')", "23505").await;
     sql(&db, "DELETE FROM series").await;
     for table in ["season", "episode", "series_genre"] {
         let row = db
@@ -186,26 +285,15 @@ async fn foreign_keys_protect_references_and_keep_cleanup_retryable() {
             .unwrap();
         assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
     }
-    // The queued job and its storage key survive deletion of the content tree.
-    let row = db.query_one(Statement::from_string(DbBackend::Postgres, "SELECT storage_key FROM file_cleanup_job JOIN media_asset ON media_asset.id = file_cleanup_job.media_asset_id")).await.unwrap().unwrap();
-    assert_eq!(
-        row.try_get::<String>("", "storage_key").unwrap(),
-        "video/21.mp4"
-    );
-    rejects(&db, "DELETE FROM media_asset", "23503").await;
-    sql(
-        &db,
-        "DELETE FROM file_cleanup_job; DELETE FROM media_asset; DELETE FROM genre",
-    )
-    .await;
+    sql(&db, "DELETE FROM media_asset; DELETE FROM genre").await;
     db.rollback().await.unwrap();
 }
 
 #[tokio::test]
 async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
     use movie_harbor_api::entities::{
-        admin_session, admin_user, episode, file_cleanup_job, genre, media_asset, movie,
-        movie_genre, season, series, series_genre,
+        admin_session, admin_user, episode, genre, media_asset, movie, movie_genre, season, series,
+        series_genre,
     };
     use sea_orm::{
         ColumnTrait, EntityTrait, JoinType, ModelTrait, QueryFilter, QuerySelect, RelationTrait,
@@ -215,11 +303,11 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
     migration::Migrator::up(&db, None).await.unwrap();
     sql(&db, "INSERT INTO admin_user (id, name, password_hash) VALUES ('00000000-0000-0000-0000-000000000041', 'Admin', 'password-hash')").await;
     sql(&db, "INSERT INTO admin_session (id, admin_user_id, token_hash, csrf_token_hash, expires_at) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000041', 'token-hash', 'csrf-hash', CURRENT_TIMESTAMP + INTERVAL '1 day')").await;
-    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('00000000-0000-0000-0000-000000000021', 'video/21.mp4', 'video.mp4', 'video/mp4', 32, 'video'), ('00000000-0000-0000-0000-000000000022', 'poster/22.png', 'poster.png', 'image/png', 16, 'poster')").await;
+    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('00000000-0000-0000-0000-000000000021', 'video/21.mp4', 'video.mp4', 'video/mp4', 32, 'video'), ('00000000-0000-0000-0000-000000000022', 'poster/22.png', 'poster.png', 'image/png', 16, 'poster'), ('00000000-0000-0000-0000-000000000023', 'poster/23.png', 'series.png', 'image/png', 16, 'poster'), ('00000000-0000-0000-0000-000000000024', 'video/24.mp4', 'episode.mp4', 'video/mp4', 32, 'video')").await;
     sql(&db, "INSERT INTO movie (id, name, poster_asset_id, video_asset_id) VALUES ('00000000-0000-0000-0000-000000000051', 'Movie', '00000000-0000-0000-0000-000000000022', '00000000-0000-0000-0000-000000000021')").await;
-    sql(&db, "INSERT INTO series (id, name, poster_asset_id) VALUES ('00000000-0000-0000-0000-000000000001', 'Series', '00000000-0000-0000-0000-000000000022')").await;
+    sql(&db, "INSERT INTO series (id, name, poster_asset_id) VALUES ('00000000-0000-0000-0000-000000000001', 'Series', '00000000-0000-0000-0000-000000000023')").await;
     sql(&db, "INSERT INTO season (id, series_id, number) VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000001', 1)").await;
-    sql(&db, "INSERT INTO episode (id, season_id, number, name, video_asset_id) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000011', 1, 'Pilot', '00000000-0000-0000-0000-000000000021')").await;
+    sql(&db, "INSERT INTO episode (id, season_id, number, name, video_asset_id) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000011', 1, 'Pilot', '00000000-0000-0000-0000-000000000024')").await;
     sql(
         &db,
         "INSERT INTO genre (id, name) VALUES ('00000000-0000-0000-0000-000000000031', 'Drama')",
@@ -227,7 +315,6 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
     .await;
     sql(&db, "INSERT INTO movie_genre (movie_id, genre_id) VALUES ('00000000-0000-0000-0000-000000000051', '00000000-0000-0000-0000-000000000031')").await;
     sql(&db, "INSERT INTO series_genre (series_id, genre_id) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000031')").await;
-    sql(&db, "INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000021')").await;
 
     let movie = movie::Entity::find().one(&db).await.unwrap().unwrap();
     assert_eq!(movie.status, "draft");
@@ -338,7 +425,7 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
             .unwrap()
             .unwrap()
             .storage_key,
-        "video/21.mp4"
+        "video/24.mp4"
     );
     assert_eq!(
         series
@@ -348,7 +435,7 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
             .unwrap()
             .unwrap()
             .storage_key,
-        "poster/22.png"
+        "poster/23.png"
     );
     for (relation, purpose) in [
         (movie::Relation::PosterAsset, "poster"),
@@ -380,29 +467,6 @@ async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
             .unwrap()
             .id,
         admin.id
-    );
-    let cleanup = file_cleanup_job::Entity::find()
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(cleanup.attempts, 0);
-    let media = cleanup
-        .find_related(media_asset::Entity)
-        .one(&db)
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(media.storage_key, "video/21.mp4");
-    assert_eq!(
-        media
-            .find_related(file_cleanup_job::Entity)
-            .one(&db)
-            .await
-            .unwrap()
-            .unwrap()
-            .id,
-        cleanup.id
     );
     db.rollback().await.unwrap();
 }

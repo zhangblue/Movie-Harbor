@@ -731,7 +731,7 @@ SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMEST
     .await;
 
     migration::Migrator::up(&db, None).await.unwrap();
-    migration::Migrator::down(&db, Some(2)).await.unwrap();
+    migration::Migrator::down(&db, Some(3)).await.unwrap();
     migration::Migrator::up(&db, None).await.unwrap();
 }
 
@@ -797,14 +797,14 @@ SELECT hash::uuid, 'poster/' || left(hash, 2) || '/' || hash || '.png',
        value || '.png', 'image/png', 1, 'poster'
 FROM (
     SELECT value, md5('catalog-asset-' || value::text) AS hash
-    FROM generate_series(1, 5000) value
+    FROM generate_series(1, 10000) value
 ) assets;
 UPDATE movie
 SET poster_asset_id = md5('catalog-asset-' || split_part(name, ' ', 2))::uuid
 WHERE name ~ '^Movie [0-9]+$'
   AND split_part(name, ' ', 2)::integer <= 5000;
 UPDATE series
-SET poster_asset_id = md5('catalog-asset-' || split_part(name, ' ', 2))::uuid
+SET poster_asset_id = md5('catalog-asset-' || (5000 + split_part(name, ' ', 2)::integer)::text)::uuid
 WHERE name ~ '^Series [0-9]+$'
   AND split_part(name, ' ', 2)::integer <= 5000;
 "#,
@@ -878,7 +878,7 @@ WHERE name ~ '^Series [0-9]+$'
         "{production_search_plan}"
     );
 
-    migration::Migrator::down(&db, Some(2)).await.unwrap();
+    migration::Migrator::down(&db, Some(3)).await.unwrap();
     let remaining = db
         .query_one(Statement::from_string(
             DatabaseBackend::Postgres,
