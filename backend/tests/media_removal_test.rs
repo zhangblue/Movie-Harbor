@@ -468,3 +468,122 @@ async fn recover_rejects_a_manifest_storage_key_escape_without_touching_external
     assert!(operation.join("00000000.data").is_file());
     let _ = std::fs::remove_file(outside);
 }
+
+#[tokio::test]
+async fn recover_cleans_safe_manifest_publication_and_close_crash_residue() {
+    let database = support::TestDatabase::migrated("removal_crash_residue").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let empty_after_mkdir = root
+        .as_ref()
+        .join(".operations")
+        .join(Uuid::new_v4().simple().to_string());
+    std::fs::create_dir(&empty_after_mkdir).unwrap();
+    let interrupted_manifest = root
+        .as_ref()
+        .join(".operations")
+        .join(Uuid::new_v4().simple().to_string());
+    std::fs::create_dir(&interrupted_manifest).unwrap();
+    std::fs::write(interrupted_manifest.join("manifest.part"), b"partial").unwrap();
+    let empty_after_close = root
+        .as_ref()
+        .join(".operations")
+        .join(Uuid::new_v4().simple().to_string());
+    std::fs::create_dir(&empty_after_close).unwrap();
+
+    removal::recover(&db, &storage).await.unwrap();
+    assert!(!empty_after_mkdir.exists());
+    assert!(!interrupted_manifest.exists());
+    assert!(!empty_after_close.exists());
+    removal::recover(&db, &storage).await.unwrap();
+}
+
+#[tokio::test]
+async fn recover_retains_manifestless_operations_that_contain_staged_evidence() {
+    let database = support::TestDatabase::migrated("removal_missing_manifest").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let operation = root
+        .as_ref()
+        .join(".operations")
+        .join(Uuid::new_v4().simple().to_string());
+    std::fs::create_dir(&operation).unwrap();
+    std::fs::write(operation.join("00000000.data"), b"evidence").unwrap();
+
+    assert!(removal::recover(&db, &storage).await.is_err());
+    assert_eq!(
+        std::fs::read(operation.join("00000000.data")).unwrap(),
+        b"evidence"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recover_rejects_a_referenced_staged_symlink_without_publishing_it() {
+    let database = support::TestDatabase::migrated("removal_staged_symlink").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let asset_id = Uuid::new_v4();
+    let storage_key = format!(
+        "poster/{}/{}.png",
+        &asset_id.simple().to_string()[..2],
+        asset_id.simple()
+    );
+    media_asset::ActiveModel {
+        id: Set(asset_id),
+        storage_key: Set(storage_key.clone()),
+        original_name: Set("poster.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(8),
+        purpose: Set("poster".into()),
+        checksum_sha256: Set(None),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Referenced symlink".into()),
+        poster_asset_id: Set(Some(asset_id)),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    std::fs::create_dir_all(root.as_ref().join(&storage_key).parent().unwrap()).unwrap();
+    let operation_id = Uuid::new_v4();
+    let operation = root
+        .as_ref()
+        .join(".operations")
+        .join(operation_id.simple().to_string());
+    std::fs::create_dir(&operation).unwrap();
+    let outside = root.as_ref().with_extension("symlink-target");
+    std::fs::write(&outside, b"external").unwrap();
+    std::os::unix::fs::symlink(&outside, operation.join("00000000.data")).unwrap();
+    std::fs::write(
+        operation.join("manifest.json"),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "operation_id": operation_id,
+            "reason": "hostile-staged-entry",
+            "entries": [{
+                "asset_id": asset_id,
+                "storage_key": storage_key,
+                "staged_name": "00000000.data"
+            }]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        removal::recover(&db, &storage).await,
+        Err(MediaError::InvalidStorageKey)
+    ));
+    assert!(!root.as_ref().join(&storage_key).exists());
+    assert_eq!(std::fs::read(&outside).unwrap(), b"external");
+    assert!(operation.join("manifest.json").is_file());
+    assert!(operation.join("00000000.data").is_symlink());
+    let _ = std::fs::remove_file(outside);
+}

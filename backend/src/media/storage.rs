@@ -851,13 +851,19 @@ impl LocalMediaStorage {
                 open_directory(&self.operations_fd, OsStr::new(&name))
                     .map_err(|_| MediaError::InvalidStorageKey)?,
             );
-            let manifest = openat(
+            let manifest = match openat(
                 &operation_directory,
                 "manifest.json",
                 OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
                 Mode::empty(),
-            )
-            .map_err(io::Error::from)?;
+            ) {
+                Ok(manifest) => manifest,
+                Err(rustix::io::Errno::NOENT) => {
+                    self.clean_unpublished_removal_operation(&name, &operation_directory)?;
+                    continue;
+                }
+                Err(_) => return Err(MediaError::InvalidStorageKey),
+            };
             let stat = rustix::fs::fstat(&manifest).map_err(io::Error::from)?;
             if rustix::fs::FileType::from_raw_mode(stat.st_mode)
                 != rustix::fs::FileType::RegularFile
@@ -881,20 +887,100 @@ impl LocalMediaStorage {
         Ok(operations)
     }
 
+    fn clean_unpublished_removal_operation(
+        &self,
+        name: &str,
+        operation: &OwnedFd,
+    ) -> Result<(), MediaError> {
+        let directory = rustix::fs::Dir::read_from(operation).map_err(io::Error::from)?;
+        let mut has_manifest_part = false;
+        for entry in directory {
+            let entry = entry.map_err(io::Error::from)?;
+            let entry_name = entry.file_name().to_string_lossy();
+            if entry_name == "." || entry_name == ".." {
+                continue;
+            }
+            if entry_name != "manifest.part" || has_manifest_part {
+                return Err(MediaError::InvalidStorageKey);
+            }
+            let part = openat(
+                operation,
+                "manifest.part",
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| MediaError::InvalidStorageKey)?;
+            let stat = rustix::fs::fstat(part).map_err(io::Error::from)?;
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                != rustix::fs::FileType::RegularFile
+            {
+                return Err(MediaError::InvalidStorageKey);
+            }
+            has_manifest_part = true;
+        }
+        if has_manifest_part {
+            remove_if_present(operation, "manifest.part")?;
+            sync_fd(operation)?;
+        }
+        unlinkat(&self.operations_fd, name, AtFlags::REMOVEDIR).map_err(io::Error::from)?;
+        sync_fd(&self.operations_fd)?;
+        Ok(())
+    }
+
+    pub(crate) fn validate_persisted_removal_entry(
+        &self,
+        operation: &RemovalOperation,
+        staged_name: &str,
+    ) -> Result<bool, MediaError> {
+        if !is_staged_removal_name(staged_name) {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        let staged = match openat(
+            &operation.directory,
+            staged_name,
+            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        ) {
+            Ok(staged) => staged,
+            Err(rustix::io::Errno::NOENT) => return Ok(false),
+            Err(_) => return Err(MediaError::InvalidStorageKey),
+        };
+        let stat = rustix::fs::fstat(staged).map_err(io::Error::from)?;
+        if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        Ok(true)
+    }
+
     pub(crate) fn restore_persisted_removal(
         &self,
         operation: &RemovalOperation,
         storage_key: &str,
         staged_name: &str,
     ) -> Result<(), MediaError> {
-        if !is_staged_removal_name(staged_name) {
-            return Err(MediaError::InvalidStorageKey);
-        }
+        let staged_exists = self.validate_persisted_removal_entry(operation, staged_name)?;
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = open_directory(&self.root_fd, OsStr::new(kind))
             .map_err(|_| MediaError::InvalidStorageKey)?;
         let shard_fd = open_directory(&kind_fd, OsStr::new(shard))
             .map_err(|_| MediaError::InvalidStorageKey)?;
+        if !staged_exists {
+            let existing = openat(
+                &shard_fd,
+                file,
+                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| MediaError::InvalidStorageKey)?;
+            let stat = rustix::fs::fstat(existing).map_err(io::Error::from)?;
+            return if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                == rustix::fs::FileType::RegularFile
+            {
+                Ok(())
+            } else {
+                Err(MediaError::InvalidStorageKey)
+            };
+        }
         match renameat_with(
             &operation.directory,
             staged_name,
@@ -907,23 +993,7 @@ impl LocalMediaStorage {
                 sync_fd(&shard_fd)?;
                 Ok(())
             }
-            Err(rustix::io::Errno::NOENT) => {
-                let existing = openat(
-                    &shard_fd,
-                    file,
-                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                    Mode::empty(),
-                )
-                .map_err(|_| MediaError::InvalidStorageKey)?;
-                let stat = rustix::fs::fstat(existing).map_err(io::Error::from)?;
-                if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                    == rustix::fs::FileType::RegularFile
-                {
-                    Ok(())
-                } else {
-                    Err(MediaError::InvalidStorageKey)
-                }
-            }
+            Err(rustix::io::Errno::NOENT) => Err(MediaError::InvalidStorageKey),
             Err(_) => Err(MediaError::InvalidStorageKey),
         }
     }

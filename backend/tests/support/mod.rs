@@ -11,6 +11,10 @@ pub struct TestDatabase {
 
 impl TestDatabase {
     pub async fn migrated(prefix: &str) -> Self {
+        Self::at_migration(prefix, None).await
+    }
+
+    pub async fn at_migration(prefix: &str, steps: Option<u32>) -> Self {
         let admin_url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
         let admin = Database::connect(&admin_url).await.unwrap();
         let schema = format!("{prefix}_{}", Uuid::new_v4().simple());
@@ -21,7 +25,7 @@ impl TestDatabase {
         let mut options = ConnectOptions::new(admin_url.clone());
         options.set_schema_search_path(schema.clone());
         let connection = Database::connect(options).await.unwrap();
-        migration::Migrator::up(&connection, None).await.unwrap();
+        migration::Migrator::up(&connection, steps).await.unwrap();
         Self {
             connection,
             admin_url,

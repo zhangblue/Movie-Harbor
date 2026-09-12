@@ -10,6 +10,11 @@ impl MigrationTrait for Migration {
             .get_connection()
             .execute_unprepared(
                 r#"
+-- Freeze every v4 writer before preflight and retain the locks through backfill/trigger install.
+LOCK TABLE movie, series, episode, file_cleanup_job IN ACCESS EXCLUSIVE MODE;
+-- Also serializes multiple migration runners and gives the upgrade-race test a deterministic seam.
+SELECT pg_advisory_xact_lock(5568785899137351989);
+
 DO $$ BEGIN
   IF EXISTS (SELECT 1 FROM file_cleanup_job) THEN
     RAISE EXCEPTION 'pending media cleanup jobs must be resolved';

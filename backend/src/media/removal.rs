@@ -103,6 +103,7 @@ pub async fn recover(
                 return Err(MediaError::InvalidStorageKey);
             }
             storage.validate_storage_key(&entry.storage_key)?;
+            storage.validate_persisted_removal_entry(&persisted.operation, &entry.staged_name)?;
         }
         for entry in &manifest.entries {
             if is_referenced(db, entry.asset_id, &entry.storage_key).await? {

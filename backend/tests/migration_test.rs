@@ -199,6 +199,64 @@ async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
 }
 
 #[tokio::test]
+async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_installation() {
+    const MIGRATION_BARRIER: i64 = 0x4d48_4d45_4449_4135;
+    let database = support::TestDatabase::at_migration("ownership_upgrade_lock", Some(4)).await;
+    let db = database.connection();
+    db.execute_unprepared("INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000005', 'poster/10/10000000000000000000000000000005.png', 'poster.png', 'image/png', 32, 'poster'); INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000005', 'Existing owner', '10000000-0000-0000-0000-000000000005'); INSERT INTO series (id, name) VALUES ('30000000-0000-0000-0000-000000000005', 'Competing owner')").await.unwrap();
+    let blocker = db.begin().await.unwrap();
+    blocker
+        .execute_unprepared(&format!(
+            "SELECT pg_advisory_xact_lock({MIGRATION_BARRIER})"
+        ))
+        .await
+        .unwrap();
+
+    let migration_db = db.clone();
+    let mut migration =
+        tokio::spawn(async move { migration::Migrator::up(&migration_db, None).await });
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let row = db.query_one(Statement::from_string(DbBackend::Postgres,
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE relation=to_regclass('movie') AND mode='AccessExclusiveLock' AND granted) AS locked")).await.unwrap().unwrap();
+            if row.try_get::<bool>("", "locked").unwrap() {
+                break;
+            }
+            assert!(!migration.is_finished(), "migration crossed the test barrier before locking v4 tables");
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("migration never acquired its v4 table locks");
+
+    let cleanup_db = db.clone();
+    let mut cleanup_write = tokio::spawn(async move {
+        cleanup_db.execute_unprepared("INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000005')").await
+    });
+    let shared_db = db.clone();
+    let mut shared_write = tokio::spawn(async move {
+        shared_db.execute_unprepared("UPDATE series SET poster_asset_id='10000000-0000-0000-0000-000000000005' WHERE id='30000000-0000-0000-0000-000000000005'").await
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut cleanup_write)
+            .await
+            .is_err()
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut shared_write)
+            .await
+            .is_err()
+    );
+
+    blocker.rollback().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), &mut migration)
+        .await
+        .expect("migration remained blocked")
+        .unwrap()
+        .unwrap();
+    assert!(cleanup_write.await.unwrap().is_err());
+    assert!(shared_write.await.unwrap().is_err());
+}
+
+#[tokio::test]
 async fn core_schema_enforces_catalog_constraints() {
     let db = isolated_database().await;
     migration::Migrator::up(&db, None).await.unwrap();
