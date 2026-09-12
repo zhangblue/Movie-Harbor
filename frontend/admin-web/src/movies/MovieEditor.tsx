@@ -70,12 +70,6 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
       setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
-    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_finalization_failed") {
-      try { await refreshAfterWrite(); } catch { setConflict(true); }
-      if (mounted.current) {
-        setPoster(null); setVideo(null);
-        setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
-      }
     } else if (cause instanceof ApiError && cause.status === 409) {
       setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。");
     } else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
@@ -106,7 +100,18 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     accept(saved);
     for (const [slot, file] of [["poster", poster], ["video", video]] as const) {
       if (!file) continue;
-      const uploaded = await uploadMedia({ kind: "movies", id: saved.id, slot }, file, saved.version);
+      let uploaded;
+      try {
+        uploaded = await uploadMedia({ kind: "movies", id: saved.id, slot }, file, saved.version);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+        try { await refreshAfterWrite(); } catch { setConflict(true); }
+        if (mounted.current) {
+          if (slot === "poster") setPoster(null); else setVideo(null);
+          setWarning("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
+        }
+        return null;
+      }
       if (!mounted.current) return null;
       // Upload already atomically associates the file; an extra association PUT would be incorrect.
       setMovie({ ...saved, version: uploaded.version });

@@ -278,9 +278,30 @@ it("reloads committed replacement state and warns when finalization fails", asyn
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
   await user.upload(screen.getByLabelText("海报文件"), new File(["new"], "new.png", { type: "image/png" }));
   await user.click(screen.getByRole("button", { name: "保存草稿" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
   expect(screen.getByRole("link", { name: /已保存海报/ })).toHaveAttribute("href", "/media/new-poster");
   expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
+});
+
+it("clears only the committed poster when video upload has not started", async () => {
+  let committed = false;
+  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const requests = fixture(movie(), (r) => {
+    if (r.url.includes("/poster?") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === "/api/admin/movies/movie-1" && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["new"], "new.png", { type: "image/png" }));
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "later.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  await screen.findByRole("alert");
+  expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
+  expect(screen.getByText(/待上传：later.mp4/)).toBeInTheDocument();
+  expect(screen.getByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
+  expect(requests.filter((r) => r.url.includes("/api/admin/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4"]);
 });
 
 it("does not permit deletion when the fresh impact detail cannot be loaded", async () => {

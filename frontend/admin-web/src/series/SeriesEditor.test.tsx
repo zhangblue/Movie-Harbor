@@ -139,7 +139,7 @@ it("reloads a committed series-poster replacement and shows the finalization war
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
   await user.upload(screen.getByLabelText("海报文件"), new File(["new"], "new.png", { type: "image/png" }));
   await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
   expect(screen.getByRole("link", { name: /已保存海报/ })).toHaveAttribute("href", "/media/new-poster");
   expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
 });
@@ -158,9 +158,49 @@ it("reloads a committed episode-video replacement and clears its pending file", 
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
   await user.upload(screen.getByLabelText("视频文件"), new File(["new"], "new.mp4", { type: "video/mp4" }));
   await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
   expect(screen.getByRole("link", { name: /已保存视频/ })).toHaveAttribute("href", "/media/new-video");
   expect(screen.queryByText(/待上传：new.mp4/)).not.toBeInTheDocument();
+});
+
+it("a series-poster finalization clears only that target and retains a pending episode video", async () => {
+  let committed = false;
+  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const requests = fixture(detail(), (r) => {
+    if (r.url.includes("/api/admin/media/series/") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === base && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["poster"], "new.png", { type: "image/png" }));
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "later.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
+  expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
+  expect(screen.getByText(/待上传：later.mp4/)).toBeInTheDocument();
+  expect(requests.filter((r) => r.url.includes("/api/admin/media/")).map((r) => r.url)).toEqual(["/api/admin/media/series/series-1/poster?version=4"]);
+});
+
+it("an episode finalization clears only its video and retains a pending series poster", async () => {
+  let committed = false;
+  const savedVideo = { id: "new-video", url: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
+  const authoritative = detail({ version: 5, seasons: [{ id: "s1", number: 1, episodes: [episode({ version: 4, video: savedVideo })] }] });
+  fixture(detail(), (r) => {
+    if (r.url.includes("/api/admin/media/episodes/") && r.method === "POST") {
+      committed = true;
+      return json({ error: "media replacement finalization failed", code: "media_replace_finalization_failed" }, 500);
+    }
+    if (committed && r.url === base && r.method === "GET") return json(authoritative);
+  });
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["poster"], "later.png", { type: "image/png" }));
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "new.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
+  expect(screen.queryByText(/待上传：new.mp4/)).not.toBeInTheDocument();
+  expect(screen.getByText(/待上传：later.png/)).toBeInTheDocument();
 });
 
 it("returns from a committed whole-series deletion and leaves a persistent warning", async () => {

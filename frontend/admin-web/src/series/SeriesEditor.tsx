@@ -79,12 +79,6 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
       setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
-    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_finalization_failed") {
-      try { await refresh(undefined, true); } catch { setConflict(true); }
-      if (mounted.current) {
-        setPoster(null);
-        setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
-      }
     } else if (cause instanceof ApiError && cause.status === 409) { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
     else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
       setInvalid(cause.details.fields.filter((f): f is string => typeof f === "string"));
@@ -117,7 +111,18 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     if (!mounted.current) return null;
     accept(saved, true);
     if (poster) {
-      const uploaded = await uploadMedia({ kind: "series", id: saved.id, slot: "poster" }, poster, saved.version);
+      let uploaded;
+      try {
+        uploaded = await uploadMedia({ kind: "series", id: saved.id, slot: "poster" }, poster, saved.version);
+      } catch (cause) {
+        if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+        try { await refresh(undefined, true); } catch { setConflict(true); }
+        if (mounted.current) {
+          setPoster(null);
+          setWarning("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
+        }
+        return null;
+      }
       if (!mounted.current) return null;
       const fresh = await refresh(uploaded.version, true);
       if (!fresh) return null;
@@ -141,7 +146,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           try { await refresh(); } catch { setConflict(true); }
           if (mounted.current) {
             onUploaded();
-            setWarning("媒体已更新，但旧文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
+            setWarning("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
           }
           return;
         }
