@@ -154,7 +154,6 @@ pub struct PublicEpisode {
     pub id: String,
     pub number: i32,
     pub name: String,
-    pub synopsis: String,
     pub duration_seconds: Option<i32>,
     pub video_url: Option<String>,
 }

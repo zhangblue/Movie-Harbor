@@ -8,7 +8,6 @@ pub struct Model {
     pub season_id: Uuid,
     pub number: i32,
     pub name: String,
-    pub synopsis: String,
     pub duration_seconds: Option<i32>,
     pub video_asset_id: Option<Uuid>,
     pub status: String,

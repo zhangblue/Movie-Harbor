@@ -153,10 +153,6 @@ pub async fn persist_episode(
         .col_expr(episode::Column::Number, Expr::value(value.number))
         .col_expr(episode::Column::Name, Expr::value(value.name.clone()))
         .col_expr(
-            episode::Column::Synopsis,
-            Expr::value(value.synopsis.clone()),
-        )
-        .col_expr(
             episode::Column::DurationSeconds,
             Expr::value(value.duration_seconds),
         )

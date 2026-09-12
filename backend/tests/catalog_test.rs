@@ -426,11 +426,11 @@ INSERT INTO season (id, series_id, number) VALUES
 ('63000000-0000-0000-0000-000000000002', '62000000-0000-0000-0000-000000000001', 2),
 ('63000000-0000-0000-0000-000000000001', '62000000-0000-0000-0000-000000000001', 1),
 ('63000000-0000-0000-0000-000000000003', '62000000-0000-0000-0000-000000000001', 3);
-INSERT INTO episode (id, season_id, number, name, synopsis, duration_seconds, video_asset_id, status, published_at) VALUES
-('64000000-0000-0000-0000-000000000002', '63000000-0000-0000-0000-000000000001', 2, 'Second', 'Visible 2', 120, NULL, 'published', '2026-01-02T00:00:00Z'),
-('64000000-0000-0000-0000-000000000001', '63000000-0000-0000-0000-000000000001', 1, 'First', 'Visible 1', 110, '61000000-0000-0000-0000-000000000002', 'published', '2026-01-01T00:00:00Z'),
-('64000000-0000-0000-0000-000000000003', '63000000-0000-0000-0000-000000000002', 1, 'Draft episode', 'Private', 100, NULL, 'draft', NULL),
-('64000000-0000-0000-0000-000000000004', '63000000-0000-0000-0000-000000000002', 2, 'Archived episode', 'Private', 100, NULL, 'archived', '2025-01-01T00:00:00Z');
+INSERT INTO episode (id, season_id, number, name, duration_seconds, video_asset_id, status, published_at) VALUES
+('64000000-0000-0000-0000-000000000002', '63000000-0000-0000-0000-000000000001', 2, 'Second', 120, NULL, 'published', '2026-01-02T00:00:00Z'),
+('64000000-0000-0000-0000-000000000001', '63000000-0000-0000-0000-000000000001', 1, 'Dulcinea', 2700, '61000000-0000-0000-0000-000000000002', 'published', '2026-01-01T00:00:00Z'),
+('64000000-0000-0000-0000-000000000003', '63000000-0000-0000-0000-000000000002', 1, 'Draft episode', 100, NULL, 'draft', NULL),
+('64000000-0000-0000-0000-000000000004', '63000000-0000-0000-0000-000000000002', 2, 'Archived episode', 100, NULL, 'archived', '2025-01-01T00:00:00Z');
 "#,
     )
     .await;
@@ -447,7 +447,10 @@ INSERT INTO episode (id, season_id, number, name, synopsis, duration_seconds, vi
         detail["seasons"][0]["episodes"].as_array().unwrap().len(),
         2
     );
-    assert_eq!(detail["seasons"][0]["episodes"][0]["name"], "First");
+    let episode = &detail["seasons"][0]["episodes"][0];
+    assert!(episode.get("synopsis").is_none());
+    assert_eq!(episode["name"], "Dulcinea");
+    assert_eq!(episode["duration_seconds"], 2700);
     assert_eq!(
         detail["seasons"][0]["episodes"][0]["video_url"],
         "/media/video/61/61000000000000000000000000000002.webm"
@@ -728,7 +731,7 @@ SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMEST
     .await;
 
     migration::Migrator::up(&db, None).await.unwrap();
-    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    migration::Migrator::down(&db, Some(2)).await.unwrap();
     migration::Migrator::up(&db, None).await.unwrap();
 }
 
@@ -875,7 +878,7 @@ WHERE name ~ '^Series [0-9]+$'
         "{production_search_plan}"
     );
 
-    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    migration::Migrator::down(&db, Some(2)).await.unwrap();
     let remaining = db
         .query_one(Statement::from_string(
             DatabaseBackend::Postgres,

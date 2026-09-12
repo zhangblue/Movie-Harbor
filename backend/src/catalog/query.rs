@@ -182,7 +182,7 @@ WHERE series.id = $1
 
 const SERIES_EPISODES_SQL: &str = r#"
 SELECT season.id AS season_id, season.number AS season_number,
-       episode.id, episode.number, episode.name, episode.synopsis, episode.duration_seconds,
+       episode.id, episode.number, episode.name, episode.duration_seconds,
        video.storage_key AS video_storage_key
 FROM season
 JOIN series parent ON parent.id = season.series_id
@@ -233,7 +233,6 @@ struct EpisodeRow {
     id: Uuid,
     number: i32,
     name: String,
-    synopsis: String,
     duration_seconds: Option<i32>,
     video_storage_key: Option<String>,
 }
@@ -415,7 +414,6 @@ async fn series_detail_on<C: ConnectionTrait>(
             id: episode.id.to_string(),
             number: episode.number,
             name: episode.name,
-            synopsis: episode.synopsis,
             duration_seconds: episode.duration_seconds,
             video_url: media_url(episode.video_storage_key, "video"),
         });

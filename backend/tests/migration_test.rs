@@ -78,6 +78,26 @@ async fn core_schema_is_reversible() {
 }
 
 #[tokio::test]
+async fn episode_synopsis_migration_is_reversible() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, Some(3)).await.unwrap();
+    sql(
+        &db,
+        "INSERT INTO series (id, name) VALUES ('00000000-0000-0000-0000-000000000001', 'Series')",
+    )
+    .await;
+    sql(&db, "INSERT INTO season (id, series_id, number) VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000001', 1)").await;
+    sql(&db, "INSERT INTO episode (id, season_id, number, name, synopsis) VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000011', 1, 'Pilot', 'remove me')").await;
+    migration::Migrator::up(&db, None).await.unwrap();
+    let row = db.query_one(Statement::from_string(DbBackend::Postgres,
+        "SELECT count(*)::bigint AS count FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='episode' AND column_name='synopsis'")).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    sql(&db, "INSERT INTO episode (id, season_id, number, name) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000011', 2, 'Second')").await;
+    db.rollback().await.unwrap();
+}
+
+#[tokio::test]
 async fn core_schema_enforces_catalog_constraints() {
     let db = isolated_database().await;
     migration::Migrator::up(&db, None).await.unwrap();

@@ -374,8 +374,37 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
     assert_eq!(episode_response.status(), StatusCode::CREATED);
     let hierarchy = body(episode_response).await;
     assert_eq!(hierarchy["version"], 3);
-    assert_eq!(hierarchy["seasons"][0]["episodes"][0]["name"], "Dulcinea");
-    assert_eq!(hierarchy["seasons"][0]["episodes"][0]["version"], 1);
+    let episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap();
+    let updated = write(
+        &app,
+        "PATCH",
+        &format!("/api/admin/series/{id}/seasons/{season_id}/episodes/{episode_id}"),
+        json!({"version": 1, "number": 1, "name": "Dulcinea", "duration_seconds": 2700}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(updated.status(), StatusCode::OK);
+    let hierarchy = body(
+        request(
+            &app,
+            "GET",
+            &format!("/api/admin/series/{id}"),
+            json!(null),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await,
+    )
+    .await;
+    let episode = &hierarchy["seasons"][0]["episodes"][0];
+    assert!(episode.get("synopsis").is_none());
+    assert_eq!(episode["name"], "Dulcinea");
+    assert_eq!(episode["duration_seconds"], 2700);
+    assert_eq!(episode["version"], 2);
     assert!(
         hierarchy["seasons"][0]["episodes"][0]
             .get("storage_key")
@@ -991,7 +1020,7 @@ async fn episode_writes_use_episode_versions_and_bump_the_parent_version_once() 
         &app,
         "PATCH",
         &first_path,
-        json!({"version":1,"synopsis":"first"}),
+        json!({"version":1,"name":"first"}),
         &cookie,
         &csrf,
     );
@@ -999,7 +1028,7 @@ async fn episode_writes_use_episode_versions_and_bump_the_parent_version_once() 
         &app,
         "PATCH",
         &first_path,
-        json!({"version":1,"synopsis":"second"}),
+        json!({"version":1,"name":"second"}),
         &cookie,
         &csrf,
     );

@@ -358,7 +358,6 @@ pub async fn create_episode(
         season_id: Set(season_id),
         number: Set(input.number),
         name: Set(name),
-        synopsis: Set(String::new()),
         status: Set("draft".into()),
         version: Set(1),
         ..Default::default()
@@ -414,7 +413,6 @@ pub async fn update_episode(
     }
     apply_required_number(&mut episode.number, input.number)?;
     apply_text(&mut episode.name, input.name, true)?;
-    apply_text(&mut episode.synopsis, input.synopsis, false)?;
     apply_optional_i32(&mut episode.duration_seconds, input.duration_seconds, true)?;
     let updated_episode = repository::persist_episode(&tx, &episode, input.version).await?;
     let updated_series = repository::bump_series(&tx, &series).await?;

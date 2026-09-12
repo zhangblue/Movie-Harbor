@@ -64,8 +64,6 @@ pub struct UpdateEpisodeRequest {
     #[serde(default)]
     pub name: Patch<String>,
     #[serde(default)]
-    pub synopsis: Patch<String>,
-    #[serde(default)]
     pub duration_seconds: Patch<i32>,
 }
 
@@ -81,7 +79,6 @@ pub struct EpisodeResponse {
     pub season_id: String,
     pub number: i32,
     pub name: String,
-    pub synopsis: String,
     pub duration_seconds: Option<i32>,
     pub status: String,
     pub version: i64,
@@ -99,7 +96,6 @@ impl EpisodeResponse {
             season_id: value.season_id.to_string(),
             number: value.number,
             name: value.name,
-            synopsis: value.synopsis,
             duration_seconds: value.duration_seconds,
             status: value.status,
             version: value.version,

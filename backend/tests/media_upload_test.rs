@@ -2513,7 +2513,6 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
         season_id: Set(season.id),
         number: Set(1),
         name: Set("Pilot".into()),
-        synopsis: Set(String::new()),
         status: Set("draft".into()),
         version: Set(1),
         ..Default::default()
@@ -2686,7 +2685,6 @@ async fn archived_series_poster_stays_read_only_while_draft_episode_video_is_edi
         season_id: Set(season.id),
         number: Set(1),
         name: Set("Draft episode".into()),
-        synopsis: Set(String::new()),
         status: Set("draft".into()),
         version: Set(1),
         ..Default::default()
