@@ -323,6 +323,35 @@ test("uses the three exact self-hosted image tags", () => {
   ]);
 });
 
+function assertDeploymentMounts(compose) {
+  for (const name of ["public-web", "admin-web"]) {
+    assert.equal(Object.hasOwn(compose.services[name], "volumes"), false, `${name} must not mount host files`);
+  }
+  for (const [name, service] of Object.entries(compose.services)) {
+    for (const volume of service.volumes ?? []) {
+      if (typeof volume === "string") {
+        assert.equal(name, "caddy", "only Caddy may use the configuration file mount");
+        assert.equal(volume, "./Caddyfile:/etc/caddy/Caddyfile:ro");
+        continue;
+      }
+      assert.equal(volume.source.includes("backend"), false);
+      assert.equal(volume.source.includes("frontend"), false);
+      assert.equal(volume.source.includes("src"), false);
+      assert.equal(volume.source.includes("node_modules"), false);
+      assert.equal(volume.source.includes("target"), false);
+    }
+  }
+}
+
+for (const service of ["public-web", "admin-web", "caddy"]) {
+  test(`deployment mount assertions reject short source mounts on ${service}`, () => {
+    const compose = JSON.parse(renderCompose(VERSION));
+    compose.services[service].volumes ??= [];
+    compose.services[service].volumes.push("./frontend:/app");
+    assert.throws(() => assertDeploymentMounts(compose), assert.AssertionError);
+  });
+}
+
 test("renders an image-only Compose deployment with the production topology", () => {
   const compose = JSON.parse(renderCompose(VERSION));
 
@@ -343,15 +372,8 @@ test("renders an image-only Compose deployment with the production topology", ()
 
   for (const service of Object.values(compose.services)) {
     assert.equal(Object.hasOwn(service, "build"), false);
-    for (const volume of service.volumes ?? []) {
-      if (typeof volume === "string") continue;
-      assert.equal(volume.source.includes("backend"), false);
-      assert.equal(volume.source.includes("frontend"), false);
-      assert.equal(volume.source.includes("src"), false);
-      assert.equal(volume.source.includes("node_modules"), false);
-      assert.equal(volume.source.includes("target"), false);
-    }
   }
+  assertDeploymentMounts(compose);
 
   assert.deepEqual(compose.services.postgres, {
     image: "postgres:17-alpine",
@@ -490,4 +512,26 @@ test("renders deployment guidance that keeps official images online", () => {
   assert.match(readme, /caddy:2\.10-alpine/);
   assert.match(readme, /linux\/arm64/);
   assert.match(readme, /test-v1/);
+});
+
+test("bundle guidance explains HTTPS termination and matching origin and cookie settings", () => {
+  const readme = renderBundleReadme(VERSION);
+
+  assert.match(readme, /Caddy[^\n]*仅提供 HTTP/);
+  assert.match(readme, /外部[^\n]*HTTPS[^\n]*终止/);
+  assert.match(readme, /PUBLIC_ORIGIN[^\n]*实际访问[^\n]*来源/);
+  assert.match(readme, /HTTPS[^\n]*COOKIE_SECURE=true/);
+  assert.match(readme, /HTTP[^\n]*COOKIE_SECURE=false/);
+  assert.match(readme, /http:\/\/localhost:8080/);
+});
+
+test("bundle guidance explains initial administrator credentials and independent proxy secrets", () => {
+  const readme = renderBundleReadme(VERSION);
+
+  assert.match(readme, /尚无管理员[^\n]*ADMIN_NAME[^\n]*ADMIN_INITIAL_PASSWORD/);
+  assert.match(readme, /不会覆盖已有管理员/);
+  assert.match(readme, /首次登录[^\n]*修改密码[^\n]*移除初始凭据/);
+  assert.match(readme, /每台部署[^\n]*TRUST_PROXY_SECRET[^\n]*至少 32 字节[^\n]*随机秘密/);
+  assert.match(readme, /不要复用[^\n]*密码/);
+  assert.match(readme, /\/admin\//);
 });
