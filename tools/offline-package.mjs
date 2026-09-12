@@ -1,5 +1,159 @@
+import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
+import { createReadStream, realpathSync } from "node:fs";
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
 const SUPPORTED_PLATFORM = "linux/arm64";
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
+const DELIVERY_FILES = [
+  ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
+];
+const USAGE = "Usage: ./tools/build-offline-package.sh [version]\nDefault version: Git short revision (12 characters). Output: dist/offline/";
+
+function run(command, args, { cwd = REPO_ROOT, signal, capture = true } = {}) {
+  signal?.throwIfAborted();
+  return new Promise((resolveResult, reject) => {
+    const child = spawn(command, args, {
+      cwd, env: { ...process.env, COPYFILE_DISABLE: "1" },
+      stdio: ["ignore", capture ? "pipe" : "inherit", "inherit"],
+    });
+    let output = "";
+    let failure;
+    const abort = () => child.kill("SIGTERM");
+    signal?.addEventListener("abort", abort, { once: true });
+    child.on("error", error => { failure = error; });
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", chunk => {
+      if (failure) return;
+      output += chunk;
+      if (output.length > 4 * 1024 * 1024) {
+        failure = new Error(`${command} output exceeds metadata limit`);
+        child.kill("SIGTERM");
+      }
+    });
+    child.on("close", (code, childSignal) => {
+      signal?.removeEventListener("abort", abort);
+      if (signal?.aborted) reject(signal.reason);
+      else if (failure) reject(failure);
+      else if (code !== 0) reject(new Error(`${command} ${args.join(" ")} failed (${childSignal ?? code})`));
+      else resolveResult(output.trim());
+    });
+  });
+}
+
+function requireExactEntries(actual, expected, description) {
+  if (JSON.stringify([...actual].sort()) !== JSON.stringify([...expected].sort())) {
+    throw new Error(`${description} does not match the allowlist`);
+  }
+}
+
+async function validateStaging(directory, files) {
+  requireExactEntries(await readdir(directory), files, "staging");
+  for (const file of files) {
+    if (!(await lstat(join(directory, file))).isFile()) {
+      throw new Error(`staging entry must be a regular file: ${file}`);
+    }
+  }
+}
+
+async function sha256(file, signal) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(file, { signal })) hash.update(chunk);
+  return hash.digest("hex");
+}
+
+async function main(args) {
+  if (args.length === 1 && args[0] === "--help") {
+    console.log(USAGE);
+    return;
+  }
+  if (args.length > 1 || args[0]?.startsWith("-")) throw new Error(USAGE);
+
+  const controller = new AbortController();
+  const { signal } = controller;
+  const interrupt = received => controller.abort(new Error(`Interrupted by ${received}`));
+  const onInt = () => interrupt("SIGINT");
+  const onTerm = () => interrupt("SIGTERM");
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
+  let staging;
+  let archiveDirectory;
+  try {
+    const version = validateVersion(args[0] ?? await run("git", ["rev-parse", "--short=12", "HEAD"], { signal }));
+    const tags = imageTags(version);
+    const outputDirectory = join(REPO_ROOT, "dist/offline");
+    const destination = join(outputDirectory, `movie-harbor-offline-linux-arm64-${version}.tar.gz`);
+    try {
+      await lstat(destination);
+      throw new Error(`Output already exists: ${destination}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+
+    const platform = await run("docker", ["info", "--format", "{{.OSType}}/{{.Architecture}}"], { signal });
+    const composeVersion = await run("docker", ["compose", "version", "--short"], { signal });
+    if (!/^v?2\./.test(composeVersion)) throw new Error("Docker Compose v2 is required");
+    normalizePlatform(...platform.split("/"));
+
+    const dockerfiles = ["backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile"];
+    for (const [index, file] of dockerfiles.entries()) {
+      await run("docker", ["build", "--platform", SUPPORTED_PLATFORM, "--file", file, "--tag", tags[index], "."], { signal, capture: false });
+    }
+    for (const tag of tags) {
+      const imagePlatform = await run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", tag], { signal });
+      if (imagePlatform !== SUPPORTED_PLATFORM) throw new Error(`Expected ${tag} to use ${SUPPORTED_PLATFORM}, found ${imagePlatform}`);
+    }
+
+    staging = await mkdtemp(join(tmpdir(), "movie-harbor-offline-"));
+    const bundle = join(staging, "movie-harbor");
+    await mkdir(bundle);
+    for (const file of ["Caddyfile", ".env.example"]) await copyFile(join(REPO_ROOT, file), join(bundle, file));
+    await writeFile(join(bundle, "compose.yml"), renderCompose(version));
+    await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version));
+    await chmod(join(bundle, "load-images.sh"), 0o755);
+    await writeFile(join(bundle, "README.md"), renderBundleReadme(version));
+    await mkdir(outputDirectory, { recursive: true });
+    await run("docker", ["image", "save", "--output", join(bundle, "images.tar"), ...tags], { signal, capture: false });
+    await validateStaging(bundle, DELIVERY_FILES);
+
+    const manifest = JSON.parse(await run("tar", ["-xOf", join(bundle, "images.tar"), "manifest.json"], { signal }));
+    if (!Array.isArray(manifest) || manifest.some(image => !Array.isArray(image?.RepoTags))) {
+      throw new Error("images.tar manifest must contain RepoTags arrays");
+    }
+    requireExactEntries(manifest.flatMap(image => image.RepoTags), tags, "images.tar RepoTags");
+    const checksums = [];
+    for (const file of DELIVERY_FILES) checksums.push(`${await sha256(join(bundle, file), signal)}  ${file}`);
+    await writeFile(join(bundle, "SHA256SUMS"), `${checksums.join("\n")}\n`);
+    await validateStaging(bundle, [...DELIVERY_FILES, "SHA256SUMS"]);
+
+    // Keep the completed archive on the destination filesystem for atomic publication.
+    archiveDirectory = await mkdtemp(join(outputDirectory, ".package-"));
+    const archive = join(archiveDirectory, "bundle.tar.gz");
+    await run("tar", ["-czf", archive, "-C", staging, "movie-harbor"], { signal, capture: false });
+    const entries = (await run("tar", ["-tzf", archive], { signal })).split("\n");
+    requireExactEntries(entries, ["movie-harbor/", ...DELIVERY_FILES.map(file => `movie-harbor/${file}`), "movie-harbor/SHA256SUMS"], "archive entries");
+    signal.throwIfAborted();
+    // link atomically creates the final name and fails with EEXIST, including races.
+    await link(archive, destination);
+    console.log(`Created ${destination}`);
+  } finally {
+    const cleanup = await Promise.allSettled([staging, archiveDirectory].filter(Boolean).map(directory => rm(directory, { recursive: true, force: true })));
+    process.removeListener("SIGINT", onInt);
+    process.removeListener("SIGTERM", onTerm);
+    for (const result of cleanup) if (result.status === "rejected") throw result.reason;
+  }
+}
+
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main(process.argv.slice(2)).catch(error => {
+    console.error(error.message);
+    process.exitCode = 1;
+  });
+}
 
 export function validateVersion(value) {
   if (typeof value !== "string" || !VERSION_PATTERN.test(value)) {

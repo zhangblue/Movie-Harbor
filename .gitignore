@@ -10,6 +10,7 @@ frontend/public-web/dist/
 frontend/admin-web/dist/
 /data/
 /media/
+/dist/offline/
 tests/e2e/.generated/
 test-results/
 playwright-report/

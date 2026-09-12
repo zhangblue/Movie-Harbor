@@ -10,7 +10,8 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",
-    "test:e2e": "node tests/e2e/run.mjs"
+    "test:e2e": "node tests/e2e/run.mjs",
+    "package:offline": "sh tools/build-offline-package.sh"
   },
   "devDependencies": {
     "@playwright/test": "1.61.0"
