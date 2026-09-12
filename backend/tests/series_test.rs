@@ -9,14 +9,13 @@ use http_body_util::BodyExt;
 use movie_harbor_api::{
     app,
     config::Config,
-    entities::{
-        episode, file_cleanup_job, genre, media_asset, movie, season, series, series_genre,
-    },
+    entities::{episode, file_cleanup_job, genre, media_asset, season, series, series_genre},
+    media::{LocalMediaStorage, StorageEvent, StorageHooks},
     series::service as series_service,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
-    DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
+    EntityTrait, PaginatorTrait, QueryFilter, Set,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
@@ -24,7 +23,12 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::{
+    io,
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tower::ServiceExt;
@@ -283,6 +287,24 @@ async fn attach_episode_video(db: &DatabaseConnection, id: Uuid, asset_id: Uuid)
         .into();
     active.video_asset_id = Set(Some(asset_id));
     active.update(db).await.unwrap();
+}
+
+struct FailSecondStage {
+    stages: AtomicUsize,
+}
+
+impl StorageHooks for FailSecondStage {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::BeforeStage(_))
+            && self.stages.fetch_add(1, Ordering::SeqCst) == 1
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected stage permission failure",
+            ));
+        }
+        Ok(())
+    }
 }
 
 async fn hierarchy_ids(value: &Value) -> (String, String) {
@@ -787,7 +809,7 @@ async fn published_series_is_read_only_but_accepts_new_draft_children() {
     .await;
     assert_eq!(deleted_draft_season.status(), StatusCode::OK);
     let deleted_draft_season = body(deleted_draft_season).await;
-    assert_eq!(deleted_draft_season["cleanup_pending"], false);
+    assert_eq!(deleted_draft_season, json!({"deleted_media_count":0}));
     let current = request(
         &app,
         "GET",
@@ -1108,9 +1130,9 @@ async fn episode_writes_use_episode_versions_and_bump_the_parent_version_once() 
     );
 }
 
-// Catches non-atomic cascades, omitted cleanup jobs, and deletion of shared assets.
+// Catches non-atomic cascades and media metadata surviving a successful content-tree delete.
 #[tokio::test]
-async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media() {
+async fn parent_and_episode_deletion_are_atomic_with_media_deletion() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1137,22 +1159,10 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
         .to_owned();
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
     let exclusive_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
-    let shared_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
     attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
     attach_episode_video(&db, first_episode_id.parse().unwrap(), exclusive_video.id).await;
-    attach_episode_video(&db, second_episode_id.parse().unwrap(), shared_video.id).await;
-    movie::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        name: Set("Shared owner".into()),
-        synopsis: Set(String::new()),
-        video_asset_id: Set(Some(shared_video.id)),
-        status: Set("draft".into()),
-        version: Set(1),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .unwrap();
+    attach_episode_video(&db, second_episode_id.parse().unwrap(), second_video.id).await;
 
     let deleted = write(
         &app,
@@ -1164,6 +1174,7 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
     )
     .await;
     assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(body(deleted).await, json!({"deleted_media_count":3}));
     assert!(
         series::Entity::find_by_id(series_id.parse::<Uuid>().unwrap())
             .one(&db)
@@ -1180,16 +1191,16 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
         0
     );
     assert_eq!(episode::Entity::find().count(&db).await.unwrap(), 0);
-    let cleanup_ids = file_cleanup_job::Entity::find()
-        .all(&db)
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|job| job.media_asset_id)
-        .collect::<Vec<_>>();
-    assert!(!cleanup_ids.contains(&poster.id));
-    assert!(!cleanup_ids.contains(&exclusive_video.id));
-    assert!(!cleanup_ids.contains(&shared_video.id));
+    for asset in [&poster, &exclusive_video, &second_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(&asset.storage_key).exists());
+    }
 
     let rollback = create_series(&app, &cookie, &csrf, "Rollback tree").await;
     let rollback_id = rollback["id"].as_str().unwrap().to_owned();
@@ -1219,13 +1230,11 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
     let rollback_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
     attach_series_poster(&db, rollback_id.parse().unwrap(), rollback_poster.id).await;
     attach_episode_video(&db, rollback_episode_id.parse().unwrap(), rollback_video.id).await;
-    db.execute_unprepared(&format!(
-        "CREATE FUNCTION reject_series_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.media_asset_id = '{}'::uuid THEN RAISE EXCEPTION 'forced cleanup failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_series_cleanup BEFORE INSERT ON file_cleanup_job FOR EACH ROW EXECUTE FUNCTION reject_series_cleanup()",
-        rollback_video.id,
-    ))
+    db.execute_unprepared(
+        "CREATE FUNCTION reject_series_media_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced media delete failure'; END $$; CREATE TRIGGER reject_series_media_delete BEFORE DELETE ON media_asset FOR EACH ROW EXECUTE FUNCTION reject_series_media_delete()",
+    )
     .await
     .unwrap();
-    let before_jobs = file_cleanup_job::Entity::find().count(&db).await.unwrap();
     let rejected = write(
         &app,
         "DELETE",
@@ -1236,6 +1245,7 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
     )
     .await;
     assert_eq!(rejected.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(rejected).await["code"], "media_delete_failed");
     assert!(
         series::Entity::find_by_id(rollback_id.parse::<Uuid>().unwrap())
             .one(&db)
@@ -1250,38 +1260,31 @@ async fn parent_and_episode_deletion_are_atomic_and_only_clean_exclusive_media()
             .unwrap()
             .is_some()
     );
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        before_jobs
-    );
+    for asset in [&rollback_poster, &rollback_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(root.as_ref().join(&asset.storage_key).is_file());
+    }
 }
 
-// Catches two last-reference removals both observing the other's uncommitted reference and
-// therefore leaving an orphaned media asset without a cleanup job.
+// Catches concurrent independent tree deletes violating the global storage serialization order.
 #[tokio::test]
-async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job() {
+async fn concurrent_series_deletes_remove_each_owned_asset_without_deadlock() {
     let db = database().await;
     let root = TempRoot::new();
-    let storage = movie_harbor_api::media::LocalMediaStorage::initialize(root.as_ref())
-        .await
-        .unwrap();
-    let asset = media_asset::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        storage_key: Set("poster/concurrent-shared.png".into()),
-        original_name: Set("concurrent-shared.png".into()),
-        mime_type: Set("image/png".into()),
-        byte_size: Set(1),
-        purpose: Set("poster".into()),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .unwrap();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let first_asset = create_asset(&db, root.as_ref(), "poster", "image/png").await;
+    let second_asset = create_asset(&db, root.as_ref(), "poster", "image/png").await;
     let first = series::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set("First shared owner".into()),
         synopsis: Set(String::new()),
-        poster_asset_id: Set(Some(asset.id)),
+        poster_asset_id: Set(Some(first_asset.id)),
         status: Set("draft".into()),
         version: Set(1),
         ..Default::default()
@@ -1293,7 +1296,7 @@ async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job
         id: Set(Uuid::new_v4()),
         name: Set("Second shared owner".into()),
         synopsis: Set(String::new()),
-        poster_asset_id: Set(Some(asset.id)),
+        poster_asset_id: Set(Some(second_asset.id)),
         status: Set("draft".into()),
         version: Set(1),
         ..Default::default()
@@ -1301,39 +1304,8 @@ async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job
     .insert(&db)
     .await
     .unwrap();
-    db.execute_unprepared(
-        "CREATE FUNCTION hold_series_delete_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(17070911); RETURN NULL; END $$; CREATE CONSTRAINT TRIGGER hold_series_delete_commit AFTER DELETE ON series DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION hold_series_delete_commit()",
-    )
-    .await
-    .unwrap();
-
-    let guard = db.begin().await.unwrap();
-    guard
-        .execute_unprepared("SELECT pg_advisory_xact_lock(17070911)")
-        .await
-        .unwrap();
-    let schema = db
-        .query_one(Statement::from_string(
-            DatabaseBackend::Postgres,
-            "SELECT current_schema() AS schema".to_owned(),
-        ))
-        .await
-        .unwrap()
-        .unwrap()
-        .try_get::<String>("", "schema")
-        .unwrap();
-    let suffix = Uuid::new_v4().simple().to_string();
-    let first_application = format!("task7_first_{suffix}");
-    let second_application = format!("task7_second_{suffix}");
-    let url = std::env::var("TEST_DATABASE_URL").unwrap();
-    let mut first_options =
-        ConnectOptions::new(format!("{url}?application_name={first_application}"));
-    first_options.set_schema_search_path(schema.clone());
-    let first_db = Database::connect(first_options).await.unwrap();
-    let mut second_options =
-        ConnectOptions::new(format!("{url}?application_name={second_application}"));
-    second_options.set_schema_search_path(schema);
-    let second_db = Database::connect(second_options).await.unwrap();
+    let first_db = db.clone();
+    let second_db = db.clone();
     let first_storage = storage.clone();
     let second_storage = storage;
     let first_delete = tokio::spawn(async move {
@@ -1342,39 +1314,25 @@ async fn concurrent_last_shared_reference_removals_queue_exactly_one_cleanup_job
     let second_delete = tokio::spawn(async move {
         series_service::delete_series(&second_db, &second_storage, second.id, 1).await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let waiting = db
-                .query_one(Statement::from_string(
-                    DatabaseBackend::Postgres,
-                    format!("SELECT count(*)::bigint AS count FROM pg_stat_activity WHERE application_name IN ('{first_application}', '{second_application}') AND wait_event_type='Lock'"),
-                ))
-                .await
-                .unwrap()
-                .unwrap()
-                .try_get::<i64>("", "count")
-                .unwrap();
-            if waiting == 2 {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+    let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(first_delete, second_delete)
     })
     .await
     .unwrap();
-    guard.commit().await.unwrap();
-    first_delete.await.unwrap().unwrap();
-    second_delete.await.unwrap().unwrap();
+    assert_eq!(first_result.unwrap().unwrap().deleted_media_count, 1);
+    assert_eq!(second_result.unwrap().unwrap().deleted_media_count, 1);
 
     assert_eq!(series::Entity::find().count(&db).await.unwrap(), 0);
-    assert_eq!(
-        file_cleanup_job::Entity::find()
-            .filter(file_cleanup_job::Column::MediaAssetId.eq(asset.id))
-            .count(&db)
-            .await
-            .unwrap(),
-        1
-    );
+    for asset in [&first_asset, &second_asset] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(&asset.storage_key).exists());
+    }
 }
 
 // Catches freezing descendant lifecycles merely because their containing series is archived.
@@ -1658,6 +1616,170 @@ async fn archived_series_preserves_independent_child_lifecycles() {
 
 // Catches delete confirmation flattening the hierarchy or using stale detail data.
 #[tokio::test]
+async fn series_delete_restores_all_media_when_a_later_stage_fails() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Stage rollback series").await;
+    let series_id = created["id"].as_str().unwrap();
+    let first = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let first_season = first["seasons"][0]["id"].as_str().unwrap();
+    let first = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (series_id, first_season),
+            2,
+            1,
+            "First",
+        )
+        .await,
+    )
+    .await;
+    let first_episode = first["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let second = body(add_season(&app, &cookie, &csrf, series_id, 3, 2).await).await;
+    let second_season = second["seasons"][1]["id"].as_str().unwrap();
+    let second = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (series_id, second_season),
+            4,
+            1,
+            "Second",
+        )
+        .await,
+    )
+    .await;
+    let second_episode = second["seasons"][1]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
+    let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
+    attach_episode_video(&db, first_episode, first_video.id).await;
+    attach_episode_video(&db, second_episode, second_video.id).await;
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(FailSecondStage {
+            stages: AtomicUsize::new(0),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = series_service::delete_series(&db, &storage, series_id.parse().unwrap(), 5)
+        .await
+        .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(response).await["code"], "media_delete_failed");
+    assert!(
+        series::Entity::find_by_id(series_id.parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    for asset in [&poster, &first_video, &second_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(root.as_ref().join(&asset.storage_key).is_file());
+    }
+}
+
+#[tokio::test]
+async fn season_delete_restores_all_videos_when_a_later_stage_fails() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Stage rollback season").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "One").await).await;
+    let first = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 3, 2, "Two").await).await;
+    let second = hierarchy["seasons"][0]["episodes"][1]["id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, first, first_video.id).await;
+    attach_episode_video(&db, second, second_video.id).await;
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(FailSecondStage {
+            stages: AtomicUsize::new(0),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = series_service::delete_season(
+        &db,
+        &storage,
+        series_service::DeleteSeasonCommand {
+            series_id: series_id.parse().unwrap(),
+            season_id: season_id.parse().unwrap(),
+            expected_series_version: 4,
+        },
+    )
+    .await
+    .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(response).await["code"], "media_delete_failed");
+    assert!(
+        season::Entity::find_by_id(season_id.parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(episode::Entity::find().count(&db).await.unwrap(), 2);
+    for asset in [&first_video, &second_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(root.as_ref().join(&asset.storage_key).is_file());
+    }
+}
+
+// Catches delete confirmation flattening the hierarchy or using stale detail data.
+#[tokio::test]
 async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1683,12 +1805,34 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
         .unwrap()
         .parse::<Uuid>()
         .unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 4, 2).await).await;
+    let second_season_id = hierarchy["seasons"][1]["id"].as_str().unwrap();
+    let hierarchy = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (series_id, second_season_id),
+            5,
+            1,
+            "Third",
+        )
+        .await,
+    )
+    .await;
+    let third_episode_id = hierarchy["seasons"][1]["episodes"][0]["id"]
+        .as_str()
+        .unwrap()
+        .parse::<Uuid>()
+        .unwrap();
     let poster = create_asset(&db, root.as_ref(), "poster", "image/png").await;
     let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
     let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let third_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
     attach_series_poster(&db, series_id.parse().unwrap(), poster.id).await;
     attach_episode_video(&db, first_episode_id, first_video.id).await;
     attach_episode_video(&db, second_episode_id, second_video.id).await;
+    attach_episode_video(&db, third_episode_id, third_video.id).await;
 
     let impact = request(
         &app,
@@ -1704,8 +1848,8 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
     assert_eq!(
         body(impact).await,
         json!({
-            "name":"Impact series", "version":4, "season_count":1, "episode_count":2,
-            "exclusive_media_count":3, "shared_media_count":0
+            "name":"Impact series", "version":6, "season_count":2, "episode_count":3,
+            "media_count":4
         })
     );
     assert_eq!(
@@ -1713,7 +1857,7 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
             &app,
             "DELETE",
             &format!("/api/admin/series/{series_id}"),
-            json!({"version":3}),
+            json!({"version":5}),
             &cookie,
             &csrf
         )
@@ -1725,28 +1869,27 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
         &app,
         "DELETE",
         &format!("/api/admin/series/{series_id}"),
-        json!({"version":4}),
+        json!({"version":6}),
         &cookie,
         &csrf,
     )
     .await;
     assert_eq!(deleted.status(), StatusCode::OK);
-    assert_eq!(
-        body(deleted).await,
-        json!({"cleanup_pending":false,"job_count":3,"warning":null})
-    );
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        0
-    );
-    assert!(!root.as_ref().join(poster.storage_key).exists());
-    assert!(!root.as_ref().join(first_video.storage_key).exists());
-    assert!(!root.as_ref().join(second_video.storage_key).exists());
+    assert_eq!(body(deleted).await, json!({"deleted_media_count":4}));
+    for asset in [&poster, &first_video, &second_video, &third_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(&asset.storage_key).exists());
+    }
 }
 
-#[cfg(unix)]
 #[tokio::test]
-async fn season_delete_reports_failed_exclusive_cleanup_and_preserves_shared_media() {
+async fn season_delete_removes_multiple_episode_videos_synchronously() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1771,30 +1914,10 @@ async fn season_delete_reports_failed_exclusive_cleanup_and_preserves_shared_med
         .unwrap()
         .parse()
         .unwrap();
-    let hierarchy =
-        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 4, 3, "Three").await).await;
-    let third = hierarchy["seasons"][0]["episodes"][2]["id"]
-        .as_str()
-        .unwrap()
-        .parse()
-        .unwrap();
-    let exclusive = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
-    let shared = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
-    attach_episode_video(&db, first, exclusive.id).await;
-    attach_episode_video(&db, third, exclusive.id).await;
-    attach_episode_video(&db, second, shared.id).await;
-    movie::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        name: Set("Shared".into()),
-        synopsis: Set(String::new()),
-        video_asset_id: Set(Some(shared.id)),
-        status: Set("draft".into()),
-        version: Set(1),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .unwrap();
+    let first_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    let second_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, first, first_video.id).await;
+    attach_episode_video(&db, second, second_video.id).await;
     let season_impact = request(
         &app,
         "GET",
@@ -1808,7 +1931,7 @@ async fn season_delete_reports_failed_exclusive_cleanup_and_preserves_shared_med
     assert_eq!(season_impact.status(), StatusCode::OK);
     assert_eq!(
         body(season_impact).await,
-        json!({"display_name":"第 1 季","version":5,"season_count":1,"episode_count":3,"exclusive_media_count":1,"shared_media_count":1})
+        json!({"display_name":"第 1 季","version":4,"season_count":1,"episode_count":2,"media_count":2})
     );
     let episode_impact = request(
         &app,
@@ -1825,39 +1948,33 @@ async fn season_delete_reports_failed_exclusive_cleanup_and_preserves_shared_med
     assert_eq!(episode_impact.status(), StatusCode::OK);
     assert_eq!(
         body(episode_impact).await,
-        json!({"display_name":"One","version":1,"season_count":0,"episode_count":1,"exclusive_media_count":0,"shared_media_count":1})
+        json!({"display_name":"One","version":1,"season_count":0,"episode_count":1,"media_count":1})
     );
-    let parent = root
-        .as_ref()
-        .join(&exclusive.storage_key)
-        .parent()
-        .unwrap()
-        .to_owned();
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
     let deleted = write(
         &app,
         "DELETE",
         &format!("/api/admin/series/{series_id}/seasons/{season_id}"),
-        json!({"version":5}),
+        json!({"version":4}),
         &cookie,
         &csrf,
     )
     .await;
-    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(deleted.status(), StatusCode::OK);
-    assert_eq!(
-        body(deleted).await,
-        json!({"cleanup_pending":true,"job_count":1,"warning":"media cleanup pending retry"})
-    );
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        1
-    );
-    assert!(root.as_ref().join(shared.storage_key).exists());
+    assert_eq!(body(deleted).await, json!({"deleted_media_count":2}));
+    for asset in [&first_video, &second_video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(&asset.storage_key).exists());
+    }
 }
 
 #[tokio::test]
-async fn episode_delete_recomputes_sharing_changed_after_the_impact_preview() {
+async fn episode_delete_removes_its_video_synchronously() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1889,20 +2006,10 @@ async fn episode_delete_recomputes_sharing_changed_after_the_impact_preview() {
     )
     .await;
     assert_eq!(impact.status(), StatusCode::OK);
-    assert_eq!(body(impact).await["exclusive_media_count"], 1);
-
-    movie::ActiveModel {
-        id: Set(Uuid::new_v4()),
-        name: Set("New shared owner".into()),
-        synopsis: Set(String::new()),
-        video_asset_id: Set(Some(asset.id)),
-        status: Set("draft".into()),
-        version: Set(1),
-        ..Default::default()
-    }
-    .insert(&db)
-    .await
-    .unwrap();
+    assert_eq!(
+        body(impact).await,
+        json!({"display_name":"One","version":1,"season_count":0,"episode_count":1,"media_count":1})
+    );
     let deleted = write(
         &app,
         "DELETE",
@@ -1913,11 +2020,15 @@ async fn episode_delete_recomputes_sharing_changed_after_the_impact_preview() {
     )
     .await;
     assert_eq!(deleted.status(), StatusCode::OK);
-    assert_eq!(
-        body(deleted).await,
-        json!({"cleanup_pending":false,"job_count":0,"warning":null})
+    assert_eq!(body(deleted).await, json!({"deleted_media_count":1}));
+    assert!(
+        media_asset::Entity::find_by_id(asset.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
     );
-    assert!(root.as_ref().join(asset.storage_key).exists());
+    assert!(!root.as_ref().join(asset.storage_key).exists());
 }
 
 // Catches malformed identifiers being confused with absent series resources.

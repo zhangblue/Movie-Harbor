@@ -10,6 +10,8 @@ use movie_harbor_api::{
     app,
     config::Config,
     entities::{file_cleanup_job, genre, media_asset, movie, movie_genre},
+    media::{LocalMediaStorage, StorageEvent, StorageHooks},
+    movies::service as movie_service,
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
@@ -20,8 +22,15 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -241,6 +250,24 @@ async fn associate(
         csrf,
     )
     .await
+}
+
+struct FailSecondStage {
+    stages: AtomicUsize,
+}
+
+impl StorageHooks for FailSecondStage {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::BeforeStage(_))
+            && self.stages.fetch_add(1, Ordering::SeqCst) == 1
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected stage permission failure",
+            ));
+        }
+        Ok(())
+    }
 }
 
 // Catches missing route registration and bypasses of session, CSRF, or configured-origin checks.
@@ -1051,9 +1078,9 @@ async fn stale_and_concurrent_writes_have_one_winner_and_deterministic_conflicts
     );
 }
 
-// Catches movie deletion committing before all unique cleanup jobs can be enqueued.
+// Catches a partial media stage deleting content or leaving the first file quarantined.
 #[tokio::test]
-async fn delete_rolls_back_movie_and_cleanup_jobs_on_failure() {
+async fn delete_restores_staged_movie_media_when_a_later_stage_fails() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1068,27 +1095,20 @@ async fn delete_rolls_back_movie_and_cleanup_jobs_on_failure() {
     assert_eq!(poster_response.status(), StatusCode::OK);
     let video_response = associate(&app, &cookie, &csrf, id, "video", video.id, 2).await;
     assert_eq!(video_response.status(), StatusCode::OK);
-    db.execute_unprepared(&format!(
-        "CREATE FUNCTION reject_video_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ \
-         BEGIN IF NEW.media_asset_id = '{video_id}'::uuid THEN \
-         RAISE EXCEPTION 'forced cleanup failure'; END IF; RETURN NEW; END $$; \
-         CREATE TRIGGER reject_video_cleanup BEFORE INSERT ON file_cleanup_job \
-         FOR EACH ROW EXECUTE FUNCTION reject_video_cleanup()",
-        video_id = video.id,
-    ))
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(FailSecondStage {
+            stages: AtomicUsize::new(0),
+        }),
+    )
     .await
     .unwrap();
-
-    let response = write(
-        &app,
-        "DELETE",
-        &format!("/api/admin/movies/{id}"),
-        json!({"version":3}),
-        &cookie,
-        &csrf,
-    )
-    .await;
+    let error = movie_service::delete(&db, &storage, id.parse().unwrap(), 3)
+        .await
+        .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(response).await["code"], "media_delete_failed");
     assert!(
         movie::Entity::find_by_id(id.parse::<Uuid>().unwrap())
             .one(&db)
@@ -1096,16 +1116,160 @@ async fn delete_rolls_back_movie_and_cleanup_jobs_on_failure() {
             .unwrap()
             .is_some()
     );
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        0
+    assert!(
+        media_asset::Entity::find_by_id(poster.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
     );
+    assert!(
+        media_asset::Entity::find_by_id(video.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(root.as_ref().join(poster.storage_key).is_file());
+    assert!(root.as_ref().join(video.storage_key).is_file());
+}
+
+#[tokio::test]
+async fn delete_restores_movie_media_when_the_database_transaction_fails() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Database rollback").await;
+    let id = created["id"].as_str().unwrap();
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(&app, &cookie, &csrf, id, "video", video.id, 1)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    db.execute_unprepared(
+        "CREATE FUNCTION reject_media_asset_delete() RETURNS trigger LANGUAGE plpgsql AS $$ \
+         BEGIN RAISE EXCEPTION 'forced media asset delete failure'; END $$; \
+         CREATE TRIGGER reject_media_asset_delete BEFORE DELETE ON media_asset \
+         FOR EACH ROW EXECUTE FUNCTION reject_media_asset_delete()",
+    )
+    .await
+    .unwrap();
+
+    let deleted = write(
+        &app,
+        "DELETE",
+        &format!("/api/admin/movies/{id}"),
+        json!({"version":2}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(deleted).await["code"], "media_delete_failed");
+    assert!(
+        movie::Entity::find_by_id(id.parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(video.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(root.as_ref().join(video.storage_key).is_file());
+}
+
+#[cfg(unix)]
+struct MakeOperationReadOnlyAfterStage {
+    root: PathBuf,
+}
+
+#[cfg(unix)]
+impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::AfterStageRename(_)) {
+            let operation = std::fs::read_dir(self.root.join(".operations"))?
+                .next()
+                .expect("the removal operation exists")?
+                .path();
+            std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o500))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn delete_reports_finish_failure_after_the_database_commit() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Finish failure").await;
+    let id = created["id"].as_str().unwrap();
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    assert_eq!(
+        associate(&app, &cookie, &csrf, id, "video", video.id, 1)
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(MakeOperationReadOnlyAfterStage {
+            root: root.as_ref().to_owned(),
+        }),
+    )
+    .await
+    .unwrap();
+
+    let error = movie_service::delete(&db, &storage, id.parse().unwrap(), 2)
+        .await
+        .unwrap_err();
+    let response = axum::response::IntoResponse::into_response(error);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(response).await["code"], "media_delete_failed");
+    assert!(
+        movie::Entity::find_by_id(id.parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(video.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(!root.as_ref().join(video.storage_key).exists());
+    let operation = std::fs::read_dir(root.as_ref().join(".operations"))
+        .unwrap()
+        .next()
+        .expect("the failed operation remains")
+        .unwrap()
+        .path();
+    assert!(operation.join("manifest.json").is_file());
+    assert!(operation.join("00000000.data").is_file());
+    std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 // Catches confirmation data being inferred from a stale detail response and shared media being
 // reported as files that deletion will remove.
 #[tokio::test]
-async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media() {
+async fn delete_impact_and_delete_cover_all_movie_media() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1113,9 +1277,8 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
         .unwrap();
     let (cookie, csrf) = credentials(&app).await;
     let first = create_movie(&app, &cookie, &csrf, "Impact movie").await;
-    let second = create_movie(&app, &cookie, &csrf, "Shared owner").await;
-    let shared = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
-    let exclusive = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
+    let poster = create_asset(&db, root.as_ref(), "poster", "image/png", true).await;
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4", true).await;
     assert_eq!(
         associate(
             &app,
@@ -1123,7 +1286,7 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
             &csrf,
             first["id"].as_str().unwrap(),
             "poster",
-            shared.id,
+            poster.id,
             1
         )
         .await
@@ -1137,28 +1300,13 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
             &csrf,
             first["id"].as_str().unwrap(),
             "video",
-            exclusive.id,
+            video.id,
             2
         )
         .await
         .status(),
         StatusCode::OK
     );
-    assert_eq!(
-        associate(
-            &app,
-            &cookie,
-            &csrf,
-            second["id"].as_str().unwrap(),
-            "poster",
-            shared.id,
-            1
-        )
-        .await
-        .status(),
-        StatusCode::OK
-    );
-
     let impact = request(
         &app,
         "GET",
@@ -1177,7 +1325,7 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
         body(impact).await,
         json!({
             "name":"Impact movie", "version":3, "season_count":0, "episode_count":0,
-            "exclusive_media_count":1, "shared_media_count":1
+            "media_count":2
         })
     );
     assert_eq!(
@@ -1203,25 +1351,22 @@ async fn delete_impact_is_authoritative_and_delete_cleans_only_exclusive_media()
     )
     .await;
     assert_eq!(deleted.status(), StatusCode::OK);
-    let deleted = body(deleted).await;
-    let cleanup_jobs = file_cleanup_job::Entity::find().all(&db).await.unwrap();
-    assert_eq!(
-        deleted,
-        json!({"cleanup_pending":false,"job_count":1,"warning":null}),
-        "cleanup jobs: {cleanup_jobs:?}"
-    );
-    assert!(!root.as_ref().join(&exclusive.storage_key).exists());
-    assert!(root.as_ref().join(&shared.storage_key).exists());
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        0
-    );
+    assert_eq!(body(deleted).await, json!({"deleted_media_count":2}));
+    for asset in [&poster, &video] {
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!root.as_ref().join(&asset.storage_key).exists());
+    }
 }
 
-// Catches an impact preview being treated as authoritative after another title starts sharing
-// the asset. The target version is intentionally unchanged by that external association.
+// Catches legacy shared data deleting one owner before the ownership migration rejects it.
 #[tokio::test]
-async fn delete_recomputes_cleanup_after_media_sharing_changes_since_the_impact_preview() {
+async fn delete_preserves_content_and_media_when_a_legacy_shared_asset_is_detected() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1250,7 +1395,7 @@ async fn delete_recomputes_cleanup_after_media_sharing_changes_since_the_impact_
     )
     .await;
     assert_eq!(impact.status(), StatusCode::OK);
-    assert_eq!(body(impact).await["exclusive_media_count"], 1);
+    assert_eq!(body(impact).await["media_count"], 1);
 
     assert_eq!(
         associate(
@@ -1275,18 +1420,29 @@ async fn delete_recomputes_cleanup_after_media_sharing_changes_since_the_impact_
         &csrf,
     )
     .await;
-    assert_eq!(deleted.status(), StatusCode::OK);
-    assert_eq!(
-        body(deleted).await,
-        json!({"cleanup_pending":false,"job_count":0,"warning":null})
+    assert_eq!(deleted.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body(deleted).await["code"], "media_delete_failed");
+    assert!(
+        movie::Entity::find_by_id(first_id.parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(poster.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
     );
     assert!(root.as_ref().join(&poster.storage_key).exists());
 }
 
-// Catches post-commit filesystem failures being hidden as an unconditional delete success.
+// Catches a pre-commit storage permission failure deleting content or media metadata.
 #[cfg(unix)]
 #[tokio::test]
-async fn delete_reports_pending_cleanup_when_the_immediate_attempt_fails() {
+async fn delete_preserves_content_when_media_staging_is_not_permitted() {
     let db = database().await;
     let root = TempRoot::new();
     let app = app::build(db.clone(), &config(root.as_ref()))
@@ -1326,15 +1482,24 @@ async fn delete_reports_pending_cleanup_when_the_immediate_attempt_fails() {
     )
     .await;
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
-    assert_eq!(deleted.status(), StatusCode::OK);
+    assert_eq!(deleted.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let result = body(deleted).await;
-    assert_eq!(result["cleanup_pending"], true);
-    assert_eq!(result["job_count"], 1);
-    assert!(result["warning"].as_str().unwrap().contains("pending"));
-    assert_eq!(
-        file_cleanup_job::Entity::find().count(&db).await.unwrap(),
-        1
+    assert_eq!(result["code"], "media_delete_failed");
+    assert!(
+        movie::Entity::find_by_id(created["id"].as_str().unwrap().parse::<Uuid>().unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
     );
+    assert!(
+        media_asset::Entity::find_by_id(asset.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(root.as_ref().join(asset.storage_key).is_file());
 }
 
 // Catches malformed identifiers being confused with absent resources.

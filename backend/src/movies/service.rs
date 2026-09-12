@@ -2,8 +2,9 @@ use crate::{
     entities::{media_asset, movie},
     genres,
     media::{
-        LocalMediaStorage, cleanup, is_publishable_asset,
+        LocalMediaStorage, is_publishable_asset,
         references::{lock_for_reference_removal, queue_locked_if_unreferenced, reference_count},
+        removal::{self, OwnedMedia},
     },
 };
 use axum::{
@@ -33,6 +34,7 @@ pub enum MovieError {
     NotFound,
     Conflict,
     Validation(Vec<&'static str>),
+    MediaDelete,
     Database,
 }
 
@@ -76,6 +78,14 @@ impl IntoResponse for MovieError {
             Self::Validation(fields) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({"error":"movie validation failed", "fields":fields})),
+            )
+                .into_response(),
+            Self::MediaDelete => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error":"media deletion failed",
+                    "code":"media_delete_failed"
+                })),
             )
                 .into_response(),
             Self::Database => (
@@ -301,26 +311,12 @@ pub async fn delete_impact(
         .into_iter()
         .flatten()
         .collect::<HashSet<_>>();
-    let mut exclusive_media_count = 0;
-    let mut shared_media_count = 0;
-    for asset_id in assets {
-        let within = [model.poster_asset_id, model.video_asset_id]
-            .into_iter()
-            .filter(|candidate| *candidate == Some(asset_id))
-            .count() as u64;
-        if reference_count(db, asset_id).await? > within {
-            shared_media_count += 1;
-        } else {
-            exclusive_media_count += 1;
-        }
-    }
     Ok(DeleteImpactResponse {
         name: model.name,
         version: model.version,
         season_count: 0,
         episode_count: 0,
-        exclusive_media_count,
-        shared_media_count,
+        media_count: assets.len() as u64,
     })
 }
 
@@ -342,20 +338,83 @@ pub async fn delete(
         .flatten()
         .collect::<HashSet<_>>();
     let locked_assets = lock_for_reference_removal(&tx, assets).await?;
-    repository::delete(&tx, id, expected_version).await?;
-    let queued_assets = queue_locked_if_unreferenced(&tx, &locked_assets).await?;
-    tx.commit().await?;
-    let job_count = queued_assets.len();
-    let cleanup = cleanup::run_for_assets(db, storage, &queued_assets).await;
-    let cleanup_pending = match cleanup {
-        Ok(outcome) => outcome.failed > 0,
-        Err(_) => job_count > 0,
-    };
+    ensure_exclusive_media(&tx, &locked_assets).await?;
+    let owned = load_owned_media(&tx, &locked_assets).await?;
+    let staged = removal::stage(storage, "delete-movie", &owned)
+        .await
+        .map_err(|_| MovieError::MediaDelete)?;
+    let database_result: Result<(), MovieError> = async {
+        repository::delete(&tx, id, expected_version).await?;
+        delete_media_assets(&tx, &locked_assets).await?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = database_result {
+        let _ = tx.rollback().await;
+        staged
+            .restore()
+            .await
+            .map_err(|_| MovieError::MediaDelete)?;
+        return Err(match error {
+            MovieError::Database => MovieError::MediaDelete,
+            other => other,
+        });
+    }
+    if tx.commit().await.is_err() {
+        staged
+            .restore()
+            .await
+            .map_err(|_| MovieError::MediaDelete)?;
+        return Err(MovieError::MediaDelete);
+    }
+    staged.finish().await.map_err(|_| MovieError::MediaDelete)?;
     Ok(DeleteResultResponse {
-        cleanup_pending,
-        job_count,
-        warning: cleanup_pending.then_some("media cleanup pending retry"),
+        deleted_media_count: owned.len() as u64,
     })
+}
+
+async fn load_owned_media<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    ids: &[Uuid],
+) -> Result<Vec<OwnedMedia>, MovieError> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(media_asset::Entity::find()
+        .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|asset| OwnedMedia {
+            asset_id: asset.id,
+            storage_key: asset.storage_key,
+        })
+        .collect())
+}
+
+async fn ensure_exclusive_media<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    ids: &[Uuid],
+) -> Result<(), MovieError> {
+    for id in ids {
+        if reference_count(db, *id).await? != 1 {
+            return Err(MovieError::MediaDelete);
+        }
+    }
+    Ok(())
+}
+
+async fn delete_media_assets<C: sea_orm::ConnectionTrait>(
+    db: &C,
+    ids: &[Uuid],
+) -> Result<(), MovieError> {
+    if !ids.is_empty() {
+        media_asset::Entity::delete_many()
+            .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
 }
 
 async fn response<C: sea_orm::ConnectionTrait>(
