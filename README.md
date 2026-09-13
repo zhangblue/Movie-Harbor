@@ -58,7 +58,7 @@ cp .env.example .env
 docker compose -p movie-harbor up -d --build --wait
 ```
 
-默认入口是 `http://服务器地址:8080`，可通过 `APP_PORT` 修改宿主端口。公开站位于 `/`，管理后台位于 `/admin/`，API 位于 `/api/`，媒体位于 `/media/`。PostgreSQL 不暴露宿主端口。
+默认本机入口是 `http://localhost:8080`。如果修改 `APP_PORT`，或实际使用其他主机名、IP、端口或协议访问，必须把 `PUBLIC_ORIGIN` 同步改为浏览器实际使用的完整来源。公开站位于 `/`，管理后台位于 `/admin/`，API 位于 `/api/`，媒体位于 `/media/`。PostgreSQL 不暴露宿主端口。
 
 首次启动时，API 自动执行数据库迁移。只有数据库内尚无管理员时，`ADMIN_NAME` 和 `ADMIN_INITIAL_PASSWORD` 才会创建初始账号；之后修改 `.env` 或重启容器都不会覆盖已有管理员名称和密码。首次登录并修改密码后，应从 `.env` 移除初始凭据或换成无意义的占位值，但其余必填变量仍须保留。
 
@@ -66,7 +66,7 @@ docker compose -p movie-harbor up -d --build --wait
 
 登录限流默认只信任 API 连接的对端地址，并忽略客户端提供的 `X-Forwarded-For`。标准 Compose 不向宿主机暴露 API，由 Caddy 覆盖该请求头为实际客户端地址，并用独立的 `TRUST_PROXY_SECRET` 向 API 认证代理身份。请把示例值替换为至少 32 字节的随机秘密且不要复用其他密码。仅当 API 只能由持有该秘密且会覆盖（而非追加）该请求头的受信反向代理访问时才可开启 `TRUST_PROXY_HEADERS`；直接暴露 API 时必须保持关闭。
 
-示例配置使用纯 HTTP 入口，因此 `COOKIE_SECURE=false` 只允许 `localhost` 或环回地址测试。正式部署应把 `PUBLIC_ORIGIN` 设为实际的 `https://` 来源并保持 `COOKIE_SECURE=true`，再由部署者用域名、上游反向代理或自己的 Caddy TLS 配置启用 HTTPS。不要在公网以明文 HTTP 提供管理后台。
+示例配置显式使用 `PUBLIC_ORIGIN=http://localhost:8080` 和 `COOKIE_SECURE=false`，只适用于通过 `localhost` 或环回地址进行本机 HTTP 访问；如果改用 `http://127.0.0.1:8080`，也必须把 `PUBLIC_ORIGIN` 改为该实际来源。使用域名、局域网地址或公网地址的正式部署必须配置实际的 `https://` 来源、设置 `COOKIE_SECURE=true`，并由部署者用域名、上游反向代理或自己的 TLS 终止层启用 HTTPS。不要在公网或局域网以明文 HTTP 提供管理后台。
 
 常用运维命令：
 
@@ -101,7 +101,7 @@ tar -xzf movie-harbor-offline-linux-arm64-<版本>.tar.gz
 cd movie-harbor
 ./load-images.sh
 cp .env.example .env
-# 编辑 .env：替换密码与代理秘密，配置 PUBLIC_ORIGIN、APP_PORT 和数据目录。
+# 编辑 .env：替换密码与代理秘密并核对数据目录；localhost 默认可直接使用，服务器地址或 HTTPS 入口必须显式调整 PUBLIC_ORIGIN、COOKIE_SECURE 和 APP_PORT。
 docker compose --env-file .env config
 docker compose up -d --no-build --wait
 ```
@@ -116,7 +116,7 @@ docker compose up -d --no-build --wait
 
 - 海报：JPEG、PNG、WebP。后端同时检查扩展名、MIME 和实际图片内容。
 - 视频：默认 MP4 (H.264) 和 WebM；浏览器必须能直接解码，服务端不会转码。
-- `MAX_UPLOAD_BYTES` 是单文件上限，默认示例为 5 GiB。规划磁盘时需同时预留正式媒体、上传临时文件和替换期间新旧文件的空间。
+- `MAX_UPLOAD_BYTES` 是单文件上限，默认值为 50 GiB（`53687091200` 字节），不是媒体库总容量或推荐文件大小。规划磁盘时需同时预留正式媒体、上传临时文件和替换期间新旧文件的空间。
 - `/media` 是公开 URL，支持浏览器 Range 请求，但不提供防下载、DRM 或可靠防盗链。
 
 ## 一致备份与恢复
