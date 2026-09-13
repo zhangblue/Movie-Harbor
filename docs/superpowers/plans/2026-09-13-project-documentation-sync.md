@@ -283,15 +283,17 @@ git commit -m "docs: 同步 AGENTS 工程事实与验证约定"
 两个实现提交完成后，由集成者运行以下命令；这些检查不构成第三个实现任务：
 
 ```bash
-git log -2 --format='%h %s'
-test "$(git diff --name-only HEAD~2..HEAD)" = $'AGENTS.md\nREADME.md'
-git diff --check HEAD~2..HEAD
+git log --format='%h %s' 6719d49..bb34404
+test "$(git log --format='%s' 6719d49..bb34404)" = $'docs: 同步 AGENTS 工程事实与验证约定\ndocs: 补齐 README 半离线文档入口'
+test "$(git diff --name-only 6719d49..bb34404)" = $'AGENTS.md\nREADME.md'
+git diff --check 6719d49..bb34404
+test "$(git diff --name-only d0c28ab..HEAD)" = $'AGENTS.md\nREADME.md\ndocs/superpowers/plans/2026-09-13-project-documentation-sync.md\ndocs/superpowers/specs/2026-09-13-project-documentation-sync-design.md'
 for doc_path in docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md docs/superpowers/plans/2026-09-12-media-ownership-and-publishing.md docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md; do test -f "$doc_path" || exit 1; done
 if rg -n '生产代码尚未开始|当前生产工程尚未初始化时|共享媒体|成功响应后.*异步' README.md AGENTS.md; then exit 1; fi
 if rg -n '周期清理队列' AGENTS.md; then exit 1; fi
 rg -n --fixed-strings '迁移 v5 会把媒体所有权改为全局独占，并移除旧的 `file_cleanup_job` 周期清理队列。' README.md
-if rg -n 'T[D]O|待[定]|后续实[现]|补充细[节]|类似任[务]' README.md AGENTS.md; then exit 1; fi
+if rg -n 'T[O]DO|待[定]|后续实[现]|补充细[节]|类似任[务]' README.md AGENTS.md; then exit 1; fi
 git status --short
 ```
 
-预期：最近两条提交分别是两个任务约定的标题；相对执行前基线的总 diff 只含 `AGENTS.md` 和 `README.md`；所有权威文档存在；两份入口文档均无失效、矛盾或未完成表述，且 `AGENTS.md` 不把周期清理队列描述为当前行为；README 保留“迁移 v5 移除旧 `file_cleanup_job` 周期清理队列”的历史升级警告；diff 检查通过；工作树干净。若任一检查失败，不合并或推送，先把问题交回对应文件的执行者修正并重新运行全部计划级验收。
+预期：`6719d49..bb34404` 的提交记录只包含两个任务约定的标题，该实现范围的 diff 只含 `AGENTS.md` 和 `README.md`；`d0c28ab..HEAD` 的整分支 diff 只含获准修改的 README、AGENTS、本设计规格和本实现计划，可在后续计划修正提交存在时重复执行；所有权威文档存在；两份入口文档均无失效、矛盾、`TODO` 或其他未完成表述，且 `AGENTS.md` 不把周期清理队列描述为当前行为；README 保留“迁移 v5 移除旧 `file_cleanup_job` 周期清理队列”的历史升级警告；diff 检查通过；工作树干净。若任一检查失败，不合并或推送，先把问题交回对应文件的执行者修正并重新运行全部计划级验收。
