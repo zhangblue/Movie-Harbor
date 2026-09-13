@@ -31,6 +31,8 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 
 - [产品设计规格](docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md)
 - [实现计划](docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md)
+- [半离线发布包设计](docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md)
+- [半离线发布包实现计划](docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md)
 - [协作约定](AGENTS.md)
 
 ## 媒体目录安全边界
@@ -188,6 +190,8 @@ frontend/admin-web/         管理后台 React 应用
 frontend/packages/          共享 API 客户端与 UI
 tests/e2e/                  Playwright 跨服务验收
 demo/                       已审核的静态 UI Demo
+tools/                      半离线发布包构建入口与核心工具
+dist/offline/               构建生成且被 Git 忽略的半离线归档输出目录
 docs/superpowers/           产品规格与实现计划
 ```
 
