@@ -2,10 +2,18 @@
 
 ## 当前阶段
 
-项目已完成需求设计、UI Demo 和实现计划，生产代码尚未开始。开始实现前必须先阅读：
+项目已完成需求设计、UI Demo、主实现计划、生产应用、Docker Compose 部署和半离线发布工具。任何变更前都必须先阅读主设计与主实现计划，以及以下增量设计与对应计划：
 
 - `docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md`
 - `docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md`
+- `docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md`
+- `docs/superpowers/plans/2026-09-12-media-ownership-and-publishing.md`
+- `docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md`
+- `docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md`
+- `docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md`
+- `docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md`
+
+当前实现与日期较新的增量规格覆盖主规格中的旧约定，发生冲突时以当前实现与日期较新的增量规格为准。
 
 `demo/` 是已通过用户审核的视觉与交互参考。实现生产页面时应保持其信息层级、深色主题、紧凑表单和操作按钮布局，但不要把 Demo 的原生 DOM 代码直接当作生产架构。
 
@@ -20,15 +28,20 @@
 
 使用库、框架、SDK、API 或 CLI 前，必须先通过 Context7 查询当前官方文档。优先采用稳定版本，除非任务明确要求预览版或候选版本。
 
-## 预期目录边界
+## 实际目录边界
 
 - `frontend/public-web/`：公开浏览、搜索、详情和播放。
 - `frontend/admin-web/`：认证、内容管理、题材配置和系统设置。
 - `frontend/packages/api-client/`：共享 API 类型与请求封装。
 - `frontend/packages/ui/`：共享主题和基础交互组件。
-- `backend/`：Axum API、SeaORM entities、迁移与后端测试。
+- `backend/`：Axum API、SeaORM entities 与后端测试。
+- `backend/migration/`：SeaORM 数据库迁移。
+- `tests/`：根 Node 契约测试。
+- `tests/e2e/`：Playwright 跨服务验收与安全 runner。
+- `tools/`：半离线发布包构建入口与核心工具。
+- `dist/offline/`：工具运行后构建生成且被 Git 忽略的半离线归档输出。
 - `demo/`：审核通过的静态 UI Demo，不参与生产构建。
-- `docs/superpowers/specs/`：已确认的产品设计。
+- `docs/superpowers/specs/`：已确认的产品与增量设计。
 - `docs/superpowers/plans/`：逐任务实现计划。
 
 ## 领域约束
@@ -44,6 +57,23 @@
 - 视频不自动转码，只接受浏览器可直接播放的文件；首版不管理外挂字幕。
 - 媒体文件保存在挂载目录，数据库只保存受控文件标识和元数据。
 - 发布后的媒体 URL 是公开地址，不承诺防下载或防盗链。
+- 媒体资产在电影海报、电影视频、剧集海报和单集视频槽位之间全局独占，不能共享。
+- 删除电影、剧集、季或单集以及替换媒体时，成功响应前必须同步移除对应数据库记录和物理文件。
+- 系统不运行周期媒体垃圾回收；启动恢复只处理带持久清单的中断删除或替换，不扫描并删除任意孤立文件。
+
+## 宿主数据目录
+
+- `DATABASE_HOST_DIR` 默认 `./data/postgres`，映射 PostgreSQL 的 `/var/lib/postgresql/data`。
+- `MEDIA_HOST_DIR` 默认 `./data/media`，同时映射 API 的 `/media` 和 Caddy 的只读 `/srv/media`。
+- 数据库与媒体目录必须作为同一一致性备份集；从既有命名卷部署切换到 bind mount 不会自动迁移数据。
+
+## 半离线发布边界
+
+- 首版只支持 `linux/arm64`。
+- 归档只内置 API、公开站、管理后台三个自研运行镜像。
+- 目标机仍须从 Docker Hub 获取固定版本 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`。
+- 包不包含源码、真实 `.env`、凭据、数据库或媒体数据。
+- 输出固定在被 Git 忽略的 `dist/offline/`，构建工具拒绝覆盖同名产物。
 
 ## 开发工作流
 
@@ -58,14 +88,18 @@
 
 ## 完成前验证
 
-根据变更范围运行相关命令；声称完成前必须读取并确认最新输出：
+根据变更范围执行以下命令的相关子集；只有运行并读取整组命令的最新输出后，才能声称完整交付通过：
 
 ```bash
+docker compose -f docker-compose.test.yml up -d postgres
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test' cargo test --workspace
 npm test --workspaces
 npm run build --workspaces
+node --test tests/*.test.mjs tests/e2e/run-safety.test.mjs
+npm run test:e2e
+git diff --check
 ```
 
-涉及跨服务流程或部署时，还必须运行计划中的 Docker Compose 和 Playwright 端到端测试。当前生产工程尚未初始化时，不要伪称上述命令已经可用或通过。
+涉及跨服务流程或部署时，还必须运行 Docker Compose 和 Playwright 端到端测试。E2E runner 自行创建隔离的 Compose 项目和数据目录，不得改用生产默认的 `data/postgres` 或 `data/media`。不在文档中加入固定的数据库测试服务强制清理命令，以免误伤并行任务。
