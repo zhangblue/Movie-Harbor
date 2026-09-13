@@ -287,9 +287,11 @@ git log -2 --format='%h %s'
 test "$(git diff --name-only HEAD~2..HEAD)" = $'AGENTS.md\nREADME.md'
 git diff --check HEAD~2..HEAD
 for doc_path in docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md docs/superpowers/plans/2026-09-12-media-ownership-and-publishing.md docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md; do test -f "$doc_path" || exit 1; done
-if rg -n '生产代码尚未开始|当前生产工程尚未初始化时|共享媒体|成功响应后.*异步|周期清理队列' README.md AGENTS.md; then exit 1; fi
+if rg -n '生产代码尚未开始|当前生产工程尚未初始化时|共享媒体|成功响应后.*异步' README.md AGENTS.md; then exit 1; fi
+if rg -n '周期清理队列' AGENTS.md; then exit 1; fi
+rg -n --fixed-strings '迁移 v5 会把媒体所有权改为全局独占，并移除旧的 `file_cleanup_job` 周期清理队列。' README.md
 if rg -n 'T[D]O|待[定]|后续实[现]|补充细[节]|类似任[务]' README.md AGENTS.md; then exit 1; fi
 git status --short
 ```
 
-预期：最近两条提交分别是两个任务约定的标题；相对执行前基线的总 diff 只含 `AGENTS.md` 和 `README.md`；所有权威文档存在；无失效、矛盾或未完成表述；diff 检查通过；工作树干净。若任一检查失败，不合并或推送，先把问题交回对应文件的执行者修正并重新运行全部计划级验收。
+预期：最近两条提交分别是两个任务约定的标题；相对执行前基线的总 diff 只含 `AGENTS.md` 和 `README.md`；所有权威文档存在；两份入口文档均无失效、矛盾或未完成表述，且 `AGENTS.md` 不把周期清理队列描述为当前行为；README 保留“迁移 v5 移除旧 `file_cleanup_job` 周期清理队列”的历史升级警告；diff 检查通过；工作树干净。若任一检查失败，不合并或推送，先把问题交回对应文件的执行者修正并重新运行全部计划级验收。
