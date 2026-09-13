@@ -534,6 +534,7 @@ test("bundle guidance explains HTTPS termination and matching origin and cookie 
   const readme = renderBundleReadme(VERSION);
 
   assert.match(readme, /默认本机入口为 `http:\/\/localhost:8080`/);
+  assert.match(readme, /修改 `APP_PORT`[^。\n]*localhost[^。\n]*必须同步[^。\n]*`PUBLIC_ORIGIN`[^。\n]*包含该端口[^。\n]*`http:\/\/localhost:9090`/);
   assert.doesNotMatch(readme, /默认入口为 `http:\/\/服务器地址:8080`/);
   assert.match(readme, /Caddy[^\n]*仅提供 HTTP/);
   assert.match(readme, /其他机器[^\n]*域名[^\n]*局域网[^\n]*公网/);

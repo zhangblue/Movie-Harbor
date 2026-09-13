@@ -355,7 +355,7 @@ export function renderBundleReadme(version) {
     "",
     "## 首次配置与访问",
     "",
-    "包内 Caddy 仅提供 HTTP，默认本机入口为 `http://localhost:8080`，宿主端口可用 `APP_PORT` 修改。此 HTTP 默认仅适用于 localhost 或环回地址的本机访问。",
+    "包内 Caddy 仅提供 HTTP，默认本机入口为 `http://localhost:8080`，宿主端口可用 `APP_PORT` 修改。修改 `APP_PORT` 时，即使仍通过 localhost 访问，也必须同步将 `PUBLIC_ORIGIN` 改为包含该端口的实际来源，例如 `http://localhost:9090`。此 HTTP 默认仅适用于 localhost 或环回地址的本机访问。",
     "",
     "通过其他机器、域名、局域网地址或公网地址访问时，必须把 `PUBLIC_ORIGIN` 设置为浏览器实际访问的 `https://` 来源（协议、主机名和非默认端口，不含路径），设置 `COOKIE_SECURE=true`，并由外部 TLS 终止层把请求转发到包内 Caddy。本机 HTTP 默认显式使用 `PUBLIC_ORIGIN=http://localhost:8080` 和 `COOKIE_SECURE=false`；不要通过公网或局域网明文 HTTP 提供管理后台。",
     "",
