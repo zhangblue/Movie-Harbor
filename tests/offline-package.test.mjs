@@ -533,12 +533,13 @@ test("renders deployment guidance that keeps official images online", () => {
 test("bundle guidance explains HTTPS termination and matching origin and cookie settings", () => {
   const readme = renderBundleReadme(VERSION);
 
+  assert.match(readme, /默认本机入口为 `http:\/\/localhost:8080`/);
+  assert.doesNotMatch(readme, /默认入口为 `http:\/\/服务器地址:8080`/);
   assert.match(readme, /Caddy[^\n]*仅提供 HTTP/);
-  assert.match(readme, /外部[^\n]*HTTPS[^\n]*终止/);
-  assert.match(readme, /PUBLIC_ORIGIN[^\n]*实际访问[^\n]*来源/);
-  assert.match(readme, /HTTPS[^\n]*COOKIE_SECURE=true/);
+  assert.match(readme, /其他机器[^\n]*域名[^\n]*局域网[^\n]*公网/);
+  assert.match(readme, /`PUBLIC_ORIGIN`[^\n]*实际访问[^\n]*`https:\/\/` 来源/);
+  assert.match(readme, /`COOKIE_SECURE=true`[^\n]*外部 TLS 终止层/);
   assert.match(readme, /HTTP[^\n]*COOKIE_SECURE=false/);
-  assert.match(readme, /http:\/\/localhost:8080/);
 });
 
 test("bundle guidance explains initial administrator credentials and independent proxy secrets", () => {

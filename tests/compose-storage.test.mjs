@@ -25,6 +25,11 @@ function parseEnvExample() {
 }
 
 function composeConfig(environment = {}) {
+  const cleanEnvironment = { ...process.env };
+  for (const name of Object.keys(expectedDefaults)) {
+    delete cleanEnvironment[name];
+  }
+
   return JSON.parse(
     execFileSync(
       "docker",
@@ -32,7 +37,7 @@ function composeConfig(environment = {}) {
       {
         cwd: projectRoot,
         encoding: "utf8",
-        env: { ...process.env, ...environment },
+        env: { ...cleanEnvironment, ...environment },
       },
     ),
   );

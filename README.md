@@ -51,7 +51,7 @@ Compose 会先用一次性初始化容器把媒体卷根目录交给专用的 AP
 
 ## 生产部署
 
-要求安装 Docker Engine 与 Docker Compose v2。复制环境变量示例并替换所有密码和域名：
+要求安装 Docker Engine 与 Docker Compose v2。复制环境变量示例并替换密码与代理秘密；非本机部署还需按实际入口配置来源和 Cookie 安全选项：
 
 ```bash
 cp .env.example .env
