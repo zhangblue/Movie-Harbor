@@ -352,6 +352,22 @@ for (const service of ["public-web", "admin-web", "caddy"]) {
   });
 }
 
+test("renders the same local configuration fallbacks in the offline Compose", () => {
+  const environment = JSON.parse(renderCompose(VERSION)).services.api.environment;
+  assert.deepEqual(
+    {
+      PUBLIC_ORIGIN: environment.PUBLIC_ORIGIN,
+      COOKIE_SECURE: environment.COOKIE_SECURE,
+      MAX_UPLOAD_BYTES: environment.MAX_UPLOAD_BYTES,
+    },
+    {
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}",
+      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-53687091200}",
+    },
+  );
+});
+
 test("renders an image-only Compose deployment with the production topology", () => {
   const compose = JSON.parse(renderCompose(VERSION));
 
@@ -424,11 +440,11 @@ test("renders an image-only Compose deployment with the production topology", ()
       POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER}",
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}",
       MEDIA_DIR: "/media",
-      COOKIE_SECURE: "${COOKIE_SECURE:-true}",
-      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN}",
+      COOKIE_SECURE: "${COOKIE_SECURE:-false}",
+      PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
       TRUST_PROXY_HEADERS: "true",
       TRUST_PROXY_SECRET: "${TRUST_PROXY_SECRET:?set TRUST_PROXY_SECRET}",
-      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-5368709120}",
+      MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-53687091200}",
       VIDEO_MIME_ALLOWLIST: "${VIDEO_MIME_ALLOWLIST:-video/mp4,video/webm}",
       ADMIN_NAME: "${ADMIN_NAME:-}",
       ADMIN_INITIAL_PASSWORD: "${ADMIN_INITIAL_PASSWORD:-}",

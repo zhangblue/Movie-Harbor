@@ -1,10 +1,28 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+const expectedDefaults = {
+  PUBLIC_ORIGIN: "http://localhost:8080",
+  COOKIE_SECURE: "false",
+  MAX_UPLOAD_BYTES: "53687091200",
+};
+
+function parseEnvExample() {
+  return Object.fromEntries(
+    readFileSync(path.join(projectRoot, ".env.example"), "utf8")
+      .split(/\r?\n/)
+      .filter((line) => line && !line.startsWith("#"))
+      .map((line) => {
+        const separator = line.indexOf("=");
+        return [line.slice(0, separator), line.slice(separator + 1)];
+      }),
+  );
+}
 
 function composeConfig(environment = {}) {
   return JSON.parse(
@@ -23,6 +41,38 @@ function composeConfig(environment = {}) {
 function mountAt(config, service, target) {
   return config.services[service].volumes.find((mount) => mount.target === target);
 }
+
+test("declares the local deployment defaults in the root environment example", () => {
+  const example = parseEnvExample();
+  for (const [name, value] of Object.entries(expectedDefaults)) {
+    assert.equal(example[name], value);
+  }
+});
+
+test("production Compose owns the same fallback expressions", () => {
+  const source = readFileSync(path.join(projectRoot, "docker-compose.yml"), "utf8");
+  assert.match(source, /PUBLIC_ORIGIN: \$\{PUBLIC_ORIGIN:-http:\/\/localhost:8080\}/);
+  assert.match(source, /COOKIE_SECURE: \$\{COOKIE_SECURE:-false\}/);
+  assert.match(source, /MAX_UPLOAD_BYTES: \$\{MAX_UPLOAD_BYTES:-53687091200\}/);
+});
+
+test("production Compose resolves the local defaults for the API", () => {
+  const environment = composeConfig().services.api.environment;
+  for (const [name, value] of Object.entries(expectedDefaults)) {
+    assert.equal(environment[name], value);
+  }
+});
+
+test("explicit environment values override the production defaults", () => {
+  const environment = composeConfig({
+    PUBLIC_ORIGIN: "https://media.example.com",
+    COOKIE_SECURE: "true",
+    MAX_UPLOAD_BYTES: "1073741824",
+  }).services.api.environment;
+  assert.equal(environment.PUBLIC_ORIGIN, "https://media.example.com");
+  assert.equal(environment.COOKIE_SECURE, "true");
+  assert.equal(environment.MAX_UPLOAD_BYTES, "1073741824");
+});
 
 test("defaults PostgreSQL storage to a host data directory", () => {
   const config = composeConfig();
