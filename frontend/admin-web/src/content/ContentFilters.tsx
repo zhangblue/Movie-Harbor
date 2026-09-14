@@ -5,8 +5,8 @@ import { Button, Field } from "@movie-harbor/ui";
 export type Filters = { kind: CatalogKind; status: ContentStatus | "all"; name: string };
 export const initialFilters: Filters = { kind: "all", status: "all", name: "" };
 
-export function ContentFilters({ onQuery, disabled }: { onQuery: (filters: Filters) => void; disabled: boolean }) {
-  const [filters, setFilters] = useState(initialFilters);
+export function ContentFilters({ initialValue, onQuery, disabled }: { initialValue: Filters; onQuery: (filters: Filters) => void; disabled: boolean }) {
+  const [filters, setFilters] = useState(initialValue);
   return <form className="filter-bar" aria-label="内容查询" onSubmit={(event) => {
     event.preventDefault();
     if (!disabled) onQuery({ ...filters, name: filters.name.trim() });

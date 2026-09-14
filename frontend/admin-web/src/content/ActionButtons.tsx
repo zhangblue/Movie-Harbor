@@ -1,15 +1,15 @@
-import type { ContentKind, MovieResponse, SeriesResponse } from "@movie-harbor/api-client";
+import type { AdminContentListItem } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 
 export type ContentAction = "edit" | "view" | "publish" | "archive" | "draft" | "delete";
-export type ContentRow = (MovieResponse | SeriesResponse) & { kind: ContentKind; allowed_actions?: string[] };
+export type ContentRow = AdminContentListItem;
 const actions: Record<string, ContentAction[]> = {
   draft: ["edit", "publish", "delete"],
   published: ["view", "archive"],
   archived: ["view", "publish", "draft", "delete"],
 };
 export function availableActions(row: ContentRow): ContentAction[] {
-  return (actions[row.status] ?? []).filter((action) => row.allowed_actions === undefined || row.allowed_actions.includes(action));
+  return actions[row.status] ?? [];
 }
 
 export function ActionButtons({ row, disabled, onAction }: {

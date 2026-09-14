@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { MovieResponse, SeriesResponse } from "@movie-harbor/api-client";
+import type { AdminContentListItem, AdminContentPage, MovieResponse, SeriesResponse } from "@movie-harbor/api-client";
 
 export const session = { name: "港口管理员", csrf_token: "session-csrf" };
 export function json(body: unknown, status = 200) {
@@ -23,6 +23,18 @@ export function series(overrides: Partial<SeriesResponse> = {}): SeriesResponse 
   const { duration_seconds: _duration, video: _video, ...base } = movie();
   return { ...base, id: "series-1", name: "长夜航线", status: "published", seasons: [], ...overrides };
 }
+export function adminContentItem(overrides: Partial<AdminContentListItem> = {}): AdminContentListItem {
+  return {
+    id: "movie-1", kind: "movie", name: "潮汐尽头", status: "draft", version: 3,
+    created_at: "2026-09-01T00:00:00Z", poster_url: "/media/poster.webp", ...overrides,
+  };
+}
+export function adminContentPage(items = [
+  adminContentItem(),
+  adminContentItem({ id: "series-1", kind: "series", name: "长夜航线", status: "published" }),
+], total = items.length, page = 1): AdminContentPage {
+  return { items, total, page, size: 20 };
+}
 export type Request = { url: string; method: string; body: unknown; headers: Headers; credentials: RequestCredentials | undefined };
 export function server(handler?: (request: Request) => Response | Promise<Response> | undefined) {
   const requests: Request[] = [];
@@ -32,8 +44,11 @@ export function server(handler?: (request: Request) => Response | Promise<Respon
     const custom = handler?.(request);
     if (custom) return custom;
     if (url === "/api/admin/session") return json(session);
-    if (url.startsWith("/api/admin/movies") && request.method === "GET") return json([movie()]);
-    if (url.startsWith("/api/admin/series") && request.method === "GET") return json([series()]);
+    if (url.startsWith("/api/admin/contents") && request.method === "GET") return json(adminContentPage());
+    if (url === "/api/admin/movies" && request.method === "GET") return json([movie()]);
+    if (url === "/api/admin/series" && request.method === "GET") return json([series()]);
+    if (url === "/api/admin/movies/movie-1" && request.method === "GET") return json(movie());
+    if (url === "/api/admin/series/series-1" && request.method === "GET") return json(series());
     throw new Error(`Unexpected request: ${request.method} ${url}`);
   });
   return requests;

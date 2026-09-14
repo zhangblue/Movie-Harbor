@@ -41,9 +41,18 @@ p { color: var(--mh-color-text-muted); }
 .content-table :is(td, th) { padding: 11px 14px; border-bottom: 1px solid var(--mh-color-border); }
 .content-table thead { background: #222a39; color: #aeb7c6; font-size: 12px; }
 .content-table tbody tr:last-child > * { border-bottom: 0; }
+.content-table .sequence-cell { width: 1%; white-space: nowrap; text-align: center; }
 .content-table th[scope="row"] { min-width: 150px; max-width: 260px; overflow-wrap: anywhere; }
 .content-table .action-cell { text-align: right; padding-right: 32px; min-width: 330px; }
 .row-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.content-pagination-slot { min-height: 54px; }
+.content-pagination { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 2px 0; }
+.content-pagination__summary { color: var(--mh-color-text-muted); white-space: nowrap; }
+.content-pagination__controls { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.content-pagination__page { min-width: 32px; padding-inline: 8px; }
+.content-pagination__page[aria-current="page"] { border-color: var(--mh-color-accent); background: var(--mh-color-accent); color: var(--mh-color-accent-ink); font-weight: 700; }
+.content-pagination__page[aria-current="page"]:disabled { opacity: 0.72; }
+.content-pagination__ellipsis { min-width: 20px; color: var(--mh-color-text-muted); text-align: center; }
 .table-poster { display: block; width: 42px; height: 63px; object-fit: cover; border-radius: 6px; background: var(--mh-color-surface-hover); }
 .poster-placeholder { display: grid; place-content: center; text-align: center; color: var(--mh-color-text-muted); font-size: 10px; }
 .status { white-space: nowrap; font-size: 12px; }
@@ -89,6 +98,7 @@ p { color: var(--mh-color-text-muted); }
   .filter-bar .mh-field { flex: 1 1 125px; }
   .filter-bar .mh-field :is(input, select) { width: 100%; }
   .admin-title-row { gap: 12px; }
+  .content-pagination { flex-wrap: wrap; }
 }
 .series-section { margin-top: 24px; max-width: 1050px; }
 .series-section > h2 { font-size: 19px; margin-bottom: 16px; }
