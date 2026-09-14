@@ -35,6 +35,10 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const [revision, setRevision] = useState(0);
   const [newSeasons, setNewSeasons] = useState<string[]>([]);
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(() => new Set());
+  const viewOnly = !!series && series.status !== "draft";
+  useEffect(() => {
+    if (viewOnly) setExpandedSeasons(new Set());
+  }, [viewOnly]);
   const [deleting, setDeleting] = useState<Deletion | null>(null);
   const [confirmation, setConfirmation] = useState("");
   const operation = useRef(false);

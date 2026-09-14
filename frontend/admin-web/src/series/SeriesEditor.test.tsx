@@ -108,6 +108,22 @@ it("defaults existing seasons to independent accessible collapses without losing
   expect(within(screen.getByRole("form", { name: "新单集草稿" })).getByLabelText("单集名称")).toHaveValue("新草稿");
 });
 
+it("collapses existing seasons when a draft enters view mode without resetting later view refreshes", async () => {
+  fixture();
+  const user = userEvent.setup();
+  editor();
+  await user.click(await screen.findByRole("button", { name: "展开第 1 季" }));
+  expect(screen.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+
+  await user.click(screen.getByRole("button", { name: "发布剧集" }));
+  await screen.findByRole("heading", { name: "查看剧集" });
+  expect(await screen.findByRole("button", { name: "展开第 1 季" })).toHaveAttribute("aria-expanded", "false");
+
+  await user.click(screen.getByRole("button", { name: "展开第 1 季" }));
+  await user.click(screen.getByRole("button", { name: "归档剧集" }));
+  expect(await screen.findByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+});
+
 it("opens only a newly added season and keeps opened seasons across hierarchy updates", async () => {
   fixture();
   const user = userEvent.setup();
@@ -548,6 +564,16 @@ it("uses the renewed CSRF token only after an explicit retry of a forbidden writ
   await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
   await screen.findByText("单集草稿已保存。");
   expect(requests.filter((r) => r.method === "PATCH").map((r) => r.headers.get("X-CSRF-Token"))).toEqual(["session-csrf", "renewed-csrf"]);
+});
+
+it.each(["published", "archived"] as const)("opens a %s series from the content list with its seasons collapsed", async (status) => {
+  fixture(detail({ status }));
+  const user = userEvent.setup();
+  render(<App />);
+  const row = within(await screen.findByRole("row", { name: /长夜航线/ }));
+  await user.click(row.getByRole("button", { name: "查看" }));
+  expect(await screen.findByRole("heading", { name: "查看剧集" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "展开第 1 季" })).toHaveAttribute("aria-expanded", "false");
 });
 
 it("opens series creation from the content kind selector and deletion from a list row", async () => {

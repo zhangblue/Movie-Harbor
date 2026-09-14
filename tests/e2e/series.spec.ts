@@ -36,8 +36,14 @@ test("a series publishes episodes incrementally and archives immediately", async
   expect(firstVideoFiles).toHaveLength(1);
   await page.getByRole("button", { name: "发布剧集" }).click();
   await expect(page.getByRole("heading", { name: "查看剧集" })).toBeVisible();
-
+  const publishedSeason = page.getByRole("article", { name: "第 1 季" });
+  await expect(publishedSeason.getByRole("button", { name: "展开第 1 季" })).toHaveAttribute("aria-expanded", "false");
+  await page.getByRole("button", { name: "返回列表" }).click();
+  const publishedRow = page.getByRole("row", { name: new RegExp(name) });
+  await publishedRow.getByRole("button", { name: "查看" }).click();
   const seasonCard = page.getByRole("article", { name: "第 1 季" });
+  await expect(seasonCard.getByRole("button", { name: "展开第 1 季" })).toHaveAttribute("aria-expanded", "false");
+  await seasonCard.getByRole("button", { name: "展开第 1 季" }).click();
   await seasonCard.getByRole("button", { name: "添加一集" }).click();
   const secondDraft = seasonCard.getByRole("form", { name: "新单集草稿" });
   await secondDraft.getByLabel("单集名称").fill("Second Wave");
