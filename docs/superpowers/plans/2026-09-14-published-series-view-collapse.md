@@ -71,31 +71,7 @@ it.each(["published", "archived"] as const)("opens a %s series from the content 
 });
 ```
 
-- [ ] **步骤 4：实现最小查看态重置**
-
-紧接 `expandedSeasons` state 声明加入以下代码：
-
-```tsx
-const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(() => new Set());
-const viewOnly = !!series && series.status !== "draft";
-useEffect(() => {
-  if (viewOnly) setExpandedSeasons(new Set());
-}, [viewOnly]);
-```
-
-保留现有 `accept` 的 ID 过滤，不在发布处理器中直接重置，也不得把 `series.status`、版本、季数组、`series` 或 `accept` 放入依赖数组。不得重建编辑器、改动 `newSeasons` 或修改 `SeasonCard`。
-
-- [ ] **步骤 5：运行 GREEN、管理后台回归和构建**
-
-```bash
-npm test --workspace @movie-harbor/admin-web -- src/series/SeriesEditor.test.tsx
-npm test --workspace @movie-harbor/admin-web
-npm run build --workspace @movie-harbor/admin-web
-```
-
-预期：全部通过。发布后显示“展开第 1 季”；手动展开后归档仍显示“折叠第 1 季”；两类列表“查看”均折叠，首季/新增季的既有自动展开测试继续通过。
-
-- [ ] **步骤 6：扩展 E2E，并先 RED 后 GREEN**
+- [ ] **步骤 4：扩展 E2E 并在实现前记录聚焦 RED**
 
 在 `series.spec.ts` 的发布成功后替换为以下入口流程，再继续原有“添加一集”操作：
 
@@ -112,18 +88,44 @@ await expect(seasonCard.getByRole("button", { name: "展开第 1 季" })).toHave
 await seasonCard.getByRole("button", { name: "展开第 1 季" }).click();
 ```
 
-保留归档后列表“查看”中的“展开第 1 季”断言和点击；不删除公开目录 404、单集状态转换、确认删除或媒体文件删除断言，也不增加超时。先在步骤 4 前运行：
+保留归档后列表“查看”中的“展开第 1 季”断言和点击；不删除公开目录 404、单集状态转换、确认删除或媒体文件删除断言，也不增加超时。完成 Vitest RED 后、写任何生产代码前运行：
 
 ```bash
 npm run test:e2e -- --grep "a series publishes episodes incrementally and archives immediately"
 ```
 
-预期：RED，发布后的页面找不到“展开第 1 季”。步骤 4 后重跑同一命令，预期 PASS；随后运行：
+预期：RED，发布后的页面找不到“展开第 1 季”，因为当前实现保留草稿时的展开集合。这与步骤 2 的 Vitest RED 共同证明问题发生在查看态边界，而非 E2E 流程或后端接口。
+
+- [ ] **步骤 5：实现最小查看态重置**
+
+紧接 `expandedSeasons` state 声明加入以下代码：
+
+```tsx
+const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(() => new Set());
+const viewOnly = !!series && series.status !== "draft";
+useEffect(() => {
+  if (viewOnly) setExpandedSeasons(new Set());
+}, [viewOnly]);
+```
+
+保留现有 `accept` 的 ID 过滤，不在发布处理器中直接重置，也不得把 `series.status`、版本、季数组、`series` 或 `accept` 放入依赖数组。不得重建编辑器、改动 `newSeasons` 或修改 `SeasonCard`。
+
+- [ ] **步骤 6：运行 GREEN、管理后台回归、构建和 E2E**
+
+运行：
 
 ```bash
+npm test --workspace @movie-harbor/admin-web -- src/series/SeriesEditor.test.tsx
+npm test --workspace @movie-harbor/admin-web
+npm run build --workspace @movie-harbor/admin-web
+npm run test:e2e -- --grep "a series publishes episodes incrementally and archives immediately"
 npm run test:e2e
 node --test tests/e2e/run-safety.test.mjs
 ```
+
+此前步骤 4 的聚焦 E2E 命令也必须重跑并通过。
+
+预期：全部通过。发布后显示“展开第 1 季”；手动展开后归档仍显示“折叠第 1 季”；两类列表“查看”均折叠，首季/新增季的既有自动展开测试继续通过；完整 Playwright 流程在显式展开季后完成所有生命周期和媒体清理断言。
 
 - [ ] **步骤 7：运行完整相关验证**
 
@@ -145,7 +147,7 @@ git status --short
 - [ ] **步骤 8：提交**
 
 ```bash
-git add frontend/admin-web/src/series/SeriesEditor.tsx frontend/admin-web/src/series/SeriesEditor.test.tsx tests/e2e/series.spec.ts docs/superpowers/plans/2026-09-14-published-series-view-collapse.md
+git add frontend/admin-web/src/series/SeriesEditor.tsx frontend/admin-web/src/series/SeriesEditor.test.tsx tests/e2e/series.spec.ts
 git commit -m "fix: 折叠剧集查看态已有季"
 git status --short
 ```
