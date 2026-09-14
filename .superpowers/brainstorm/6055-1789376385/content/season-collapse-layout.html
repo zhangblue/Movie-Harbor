@@ -1,0 +1,51 @@
+<h2>季折叠栏布局选择</h2>
+<p class="subtitle">三种方案都满足：已有季默认折叠，新添加的季自动展开；“保存季序号”和“删除本季”严格等高。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#111827">
+      <div style="display:flex;align-items:center;gap:10px;padding:14px;border:1px solid #334155;border-radius:10px;background:#1b2636;color:#e5e7eb">
+        <button class="mock-button" style="width:38px;height:38px;padding:0">›</button>
+        <strong style="margin-right:auto">第 1 季</strong>
+        <span style="color:#94a3b8;font-size:12px">12 集</span>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>A · 紧凑标题栏（推荐）</h3>
+      <p>折叠时只显示展开按钮、季名称和集数；季序号、保存、删除及单集都在展开后出现。最能缩短长页面。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#111827">
+      <div style="display:flex;align-items:end;gap:9px;padding:14px;border:1px solid #334155;border-radius:10px;background:#1b2636;color:#e5e7eb;flex-wrap:wrap">
+        <button class="mock-button" style="width:38px;height:38px;padding:0">›</button>
+        <strong style="margin:auto auto 9px 0">第 1 季</strong>
+        <label style="font-size:11px;color:#94a3b8">季序号<br><input class="mock-input" value="1" style="width:70px;height:38px"></label>
+        <button class="mock-button" style="height:38px">保存季序号</button>
+        <button class="mock-button" style="height:38px;color:#fda4af">删除本季</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>B · 折叠时保留操作</h3>
+      <p>只隐藏单集列表，季序号和操作始终可见。操作更直接，但每季标题栏更高，季很多时仍占较多空间。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#111827">
+      <div style="display:flex;align-items:center;gap:10px;padding:14px;border:1px solid #334155;border-radius:10px;background:#1b2636;color:#e5e7eb">
+        <strong style="margin-right:auto">第 1 季 · 12 集</strong>
+        <button class="mock-button" style="height:38px">展开编辑</button>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:14px;margin-top:8px;border:1px solid #334155;border-radius:10px;background:#1b2636;color:#e5e7eb;opacity:.75">
+        <strong style="margin-right:auto">第 2 季 · 8 集</strong>
+        <button class="mock-button" style="height:38px">展开编辑</button>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>C · 手风琴模式</h3>
+      <p>始终最多展开一季，展开另一季会自动收起当前季。页面最可控，但不方便同时对照两个季。</p>
+    </div>
+  </div>
+</div>
