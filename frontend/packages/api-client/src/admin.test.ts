@@ -112,3 +112,18 @@ it("loads the unified admin content page with filters", async () => {
     .toMatchObject({ page: 2, size: 20, total: 21 });
   expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
 });
+
+it("does not forward unknown runtime query fields", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+    urls.push(String(url));
+    return new Response('{"page":1,"size":20,"total":0,"items":[]}', {
+      headers: { "content-type": "application/json" },
+    });
+  }));
+
+  const query = { kind: "series", status: "archived", name: "长 夜", page: 2, size: 100, unknown: "ignored" } as const;
+  await listAdminContent(query);
+
+  expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
+});

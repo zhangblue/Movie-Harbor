@@ -41,7 +41,8 @@ export async function listGenres(): Promise<GenreResponse[]> {
   return required(await apiRequest<GenreResponse[]>("/api/admin/genres"));
 }
 export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
-  return required(await apiRequest<AdminContentPage>("/api/admin/contents", { query: { ...query } }));
+  const params = { kind: query.kind, status: query.status, name: query.name, page: query.page };
+  return required(await apiRequest<AdminContentPage>("/api/admin/contents", { query: params }));
 }
 export async function createGenre(name: string): Promise<GenreResponse> {
   return required(await apiRequest<GenreResponse>("/api/admin/genres", { method: "POST", json: { name } }));
