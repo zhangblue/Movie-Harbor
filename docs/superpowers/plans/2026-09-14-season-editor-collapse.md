@@ -254,18 +254,12 @@ git commit -m "feat: 添加剧集季折叠交互"
 - 修改：`frontend/admin-web/src/series/SeriesEditor.test.tsx`
 - 修改：`frontend/admin-web/src/styles.css`
 
-- [ ] **步骤 1：编写按钮结构与 CSS 契约的失败测试**
+- [ ] **步骤 1：编写按钮实际计算样式的失败测试**
 
-在 `frontend/admin-web/src/series/SeriesEditor.test.tsx` 顶部加入：
-
-```tsx
-import { readFileSync } from "node:fs";
-```
-
-增加测试：
+`SeriesEditor.test.tsx` 已通过 `App` 加载真实管理后台样式。在该文件增加测试，直接验证渲染按钮及其布局容器的浏览器计算样式，不读取或匹配 CSS 源码文本：
 
 ```tsx
-it("gives the season save and delete actions one explicit height contract", async () => {
+it("renders the season save and delete actions at the same explicit height and bottom alignment", async () => {
   fixture();
   const user = userEvent.setup();
   editor();
@@ -273,13 +267,15 @@ it("gives the season save and delete actions one explicit height contract", asyn
 
   const save = screen.getByRole("button", { name: "保存季序号" });
   const remove = screen.getByRole("button", { name: "删除本季" });
-  expect(save).toHaveClass("series-season-action");
-  expect(remove).toHaveClass("series-season-action");
+  const numberForm = save.closest("form");
+  const controls = numberForm?.parentElement;
 
-  const styles = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
-  expect(styles).toMatch(/\.series-season-controls\s*\{[^}]*align-items:\s*flex-end/);
-  expect(styles).toMatch(/\.series-season-number-form\s*\{[^}]*align-items:\s*flex-end/);
-  expect(styles).toMatch(/\.series-season-action\s*\{[^}]*height:\s*38px/);
+  expect(numberForm).not.toBeNull();
+  expect(controls).not.toBeNull();
+  expect(getComputedStyle(save).height).toBe("38px");
+  expect(getComputedStyle(remove).height).toBe("38px");
+  expect(getComputedStyle(numberForm as HTMLElement).alignItems).toBe("flex-end");
+  expect(getComputedStyle(controls as HTMLElement).alignItems).toBe("flex-end");
 });
 ```
 
@@ -289,7 +285,7 @@ it("gives the season save and delete actions one explicit height contract", asyn
 npm test --workspace @movie-harbor/admin-web -- src/series/SeriesEditor.test.tsx
 ```
 
-预期：FAIL。两个按钮还没有共享 `series-season-action` 类，控制区仍使用居中对齐，也没有明确的 `38px` 高度契约。
+预期：FAIL。两个按钮还没有明确的 `38px` 计算高度，控制区也没有两层底部对齐。失败来自真实渲染结果，而不是对 CSS 源码文本的检查。
 
 - [ ] **步骤 3：实现最小按钮对齐修复**
 
@@ -331,7 +327,7 @@ git diff --check
 git status --short
 ```
 
-预期：所有命令退出码为 0；状态只包含本 Task 的三个文件；测试锁定两个按钮共享类、`38px` 高度及两层底部对齐。
+预期：所有命令退出码为 0；状态只包含本 Task 的三个文件；测试通过真实计算样式锁定两个按钮的 `38px` 高度及两层底部对齐。
 
 - [ ] **步骤 5：独立提交 Task 2**
 
