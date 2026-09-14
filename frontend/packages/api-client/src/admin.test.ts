@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { apiErrorCode, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession } from "./admin";
+import { apiErrorCode, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession, listAdminContent } from "./admin";
 import { ApiError, clearCsrfToken } from "./http";
 
 afterEach(() => {
@@ -97,4 +97,18 @@ it("reads stable API error codes only from object details with a string code", (
   for (const details of [undefined, null, "media_delete_failed", 1, { code: 1 }, { code: null }]) {
     expect(apiErrorCode(new ApiError(500, "Error", "failed", details))).toBeUndefined();
   }
+});
+
+it("loads the unified admin content page with filters", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
+    urls.push(String(url));
+    return new Response('{"page":2,"size":20,"total":21,"items":[]}', {
+      headers: { "content-type": "application/json" },
+    });
+  }));
+
+  expect(await listAdminContent({ kind: "series", status: "archived", name: "长 夜", page: 2 }))
+    .toMatchObject({ page: 2, size: 20, total: 21 });
+  expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
 });

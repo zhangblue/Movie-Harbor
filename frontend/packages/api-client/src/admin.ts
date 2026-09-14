@@ -1,6 +1,6 @@
 import { ApiError, apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
 import type {
-  ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
+  AdminContentListQuery, AdminContentPage, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
 } from "./types";
@@ -39,6 +39,9 @@ export async function changePassword(input: ChangePasswordRequest): Promise<void
 
 export async function listGenres(): Promise<GenreResponse[]> {
   return required(await apiRequest<GenreResponse[]>("/api/admin/genres"));
+}
+export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
+  return required(await apiRequest<AdminContentPage>("/api/admin/contents", { query: { ...query } }));
 }
 export async function createGenre(name: string): Promise<GenreResponse> {
   return required(await apiRequest<GenreResponse>("/api/admin/genres", { method: "POST", json: { name } }));
