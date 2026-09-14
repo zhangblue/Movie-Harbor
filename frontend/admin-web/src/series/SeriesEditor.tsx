@@ -34,6 +34,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const [warning, setWarning] = useState("");
   const [revision, setRevision] = useState(0);
   const [newSeasons, setNewSeasons] = useState<string[]>([]);
+  const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(() => new Set());
   const [deleting, setDeleting] = useState<Deletion | null>(null);
   const [confirmation, setConfirmation] = useState("");
   const operation = useRef(false);
@@ -41,11 +42,12 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const current = useRef<SeriesResponse | null>(null);
   function accept(value: SeriesResponse, resetFields = false) {
     current.current = value; setSeries(value);
+    setExpandedSeasons((ids) => new Set([...ids].filter((id) => value.seasons.some((season) => season.id === id))));
     if (resetFields) setFields(fieldsOf(value));
   }
   useEffect(() => {
     let ignore = false;
-    setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setPoster(null); setDeleting(null); setNewSeasons([]);
+    setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setPoster(null); setDeleting(null); setNewSeasons([]); setExpandedSeasons(new Set());
     const watch = <T,>(request: Promise<T>) => request.catch((cause: unknown) => {
       if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
       throw cause;
@@ -56,7 +58,10 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       setGenres(choices); setConflict(false);
       if (value) {
         accept(value, true);
-        if (resumeCreation) setNewSeasons(value.seasons.filter((season) => season.episodes.length === 0).map((season) => season.id));
+        if (resumeCreation) {
+          const seasonIds = value.seasons.filter((season) => season.episodes.length === 0).map((season) => season.id);
+          setNewSeasons(seasonIds); setExpandedSeasons(new Set(seasonIds));
+        }
         if (initialDelete && revision === 0 && deletionAllowed({ series: value })) {
           const impact = await watch(getSeriesDeleteImpact(value.id));
           if (!ignore) { setDeleting({ series: value, impact }); setConfirmation(""); }
@@ -204,7 +209,8 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           const created = await createSeries(fields.name); if (!mounted.current) return;
           accept(created, true); onCreated(created.id);
           const saved = await createSeason(created.id, 1, created.version); if (!mounted.current) return;
-          setNewSeasons(saved.seasons.map((s) => s.id)); accept(saved);
+          const seasonIds = saved.seasons.map((season) => season.id);
+          setNewSeasons(seasonIds); setExpandedSeasons(new Set(seasonIds)); accept(saved);
         });
       }}><Field label="剧集名称" className="movie-field-medium"><input required disabled={locked} value={fields.name} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><Button type="submit" disabled={locked} variant="primary">创建草稿</Button></form> : <>
         <section className="series-section" aria-labelledby="series-basic-title"><h2 id="series-basic-title">基本信息</h2>
@@ -231,14 +237,21 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           </div>
         </section>
         <section className="series-section" aria-labelledby="series-structure-title"><h2 id="series-structure-title">季与单集</h2><p>季只填写序号；每一集必须输入名称，独立保存草稿和上传视频。</p>
-          {series.seasons.map((season) => <SeasonCard key={`${revision}:${season.id}`} series={series} season={season} disabled={locked} initialEpisode={newSeasons.includes(season.id)}
+          {series.seasons.map((season) => <SeasonCard key={`${revision}:${season.id}`} series={series} season={season} disabled={locked} initialEpisode={newSeasons.includes(season.id)} expanded={expandedSeasons.has(season.id)} onToggle={() => setExpandedSeasons((ids) => {
+            const next = new Set(ids);
+            if (next.has(season.id)) next.delete(season.id); else next.add(season.id);
+            return next;
+          })}
             actions={{ save: saveEpisode, transition: (episode, action) => { if (canAct(episode, action)) void run(async () => { await transitionEpisode(series.id, season.id, episode.id, action, episode.version); await refresh(); }); }, remove: (episode) => { void prepareDelete(season.id, episode.id); } }}
             create={(number, name) => run(async () => { if (!knownStatus(series.status) || !permits(series, "add_episode") || !permits(season, "add_episode")) return; const saved = await createEpisode(series.id, season.id, { version: series.version, number, name }); if (mounted.current) { accept(saved); setNotice("单集草稿已保存。"); } })}
             update={(number) => { if (canChangeSeason(series, season, "edit")) void run(async () => { const saved = await updateSeason(series.id, season.id, number, series.version); if (mounted.current) accept(saved); }); }}
             remove={() => { void prepareDelete(season.id); }} />)}
           <Button disabled={locked || !knownStatus(series.status) || !permits(series, "add_season")} onClick={() => { void run(async () => {
             const saved = await createSeason(series.id, Math.max(0, ...series.seasons.map((s) => s.number)) + 1, series.version);
-            if (mounted.current) { setNewSeasons((ids) => [...ids, ...saved.seasons.filter((s) => !series.seasons.some((old) => old.id === s.id)).map((s) => s.id)]); accept(saved); }
+            if (mounted.current) {
+              const createdIds = saved.seasons.filter((candidate) => !series.seasons.some((old) => old.id === candidate.id)).map((candidate) => candidate.id);
+              accept(saved); setNewSeasons((ids) => [...ids, ...createdIds]); setExpandedSeasons((ids) => new Set([...ids, ...createdIds]));
+            }
           }); }}>添加一季</Button>
         </section>
       </>}

@@ -63,11 +63,60 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
 beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() })); });
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
+async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
+
+it("defaults existing seasons to independent accessible collapses without losing input", async () => {
+  fixture(detail({ seasons: [
+    { id: "s1", number: 1, episodes: [episode()] },
+    { id: "s2", number: 2, episodes: [episode({ id: "e2", season_id: "s2", name: "回声" })] },
+  ] }));
+  const user = userEvent.setup();
+  editor();
+
+  const first = await screen.findByRole("button", { name: "展开第 1 季" });
+  const second = screen.getByRole("button", { name: "展开第 2 季" });
+  const firstCard = screen.getByRole("article", { name: "第 1 季" });
+  expect(first).toHaveAttribute("aria-expanded", "false");
+  expect(first).toHaveAttribute("aria-controls");
+  expect(second).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getAllByText("1 集")).toHaveLength(2);
+  expect(within(firstCard).getByLabelText("季序号")).not.toBeVisible();
+
+  await user.click(first);
+  expect(screen.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+  const name = within(firstCard).getByLabelText("单集名称");
+  await user.type(name, "未保存");
+  await user.click(second);
+  expect(screen.getByRole("button", { name: "折叠第 2 季" })).toHaveAttribute("aria-expanded", "true");
+
+  await user.click(screen.getByRole("button", { name: "折叠第 1 季" }));
+  expect(screen.getByRole("button", { name: "折叠第 2 季" })).toHaveAttribute("aria-expanded", "true");
+  await user.click(screen.getByRole("button", { name: "展开第 1 季" }));
+  expect(within(firstCard).getByLabelText("单集名称")).toHaveValue("来信未保存");
+});
+
+it("opens only a newly added season and keeps opened seasons across hierarchy updates", async () => {
+  fixture();
+  const user = userEvent.setup();
+  editor();
+
+  await user.click(await screen.findByRole("button", { name: "展开第 1 季" }));
+  await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
+  await screen.findByText("单集草稿已保存。");
+  expect(screen.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+
+  await user.click(screen.getByRole("button", { name: "添加一季" }));
+  expect(await screen.findByRole("button", { name: "折叠第 2 季" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByText("0 集")).toBeInTheDocument();
+  expect(screen.getByRole("form", { name: "新单集草稿" })).toBeVisible();
+});
 
 it("stays on the series page, reports synchronous child deletion, and refreshes", async () => {
   const requests = fixture();
   const user = userEvent.setup();
   render(<SeriesEditor seriesId="series-1" onBack={() => {}} onExpired={() => {}} />);
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
   await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
@@ -82,6 +131,7 @@ it("requires the authoritative child impact and deletes with its returned versio
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
     ? json({ display_name: "服务器最新单集名", version: 9, season_count: 0, episode_count: 1, media_count: 1 }) : undefined);
   const user = userEvent.setup(); editor();
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
   expect(dialog.getByText("媒体文件：1")).toBeInTheDocument();
@@ -96,6 +146,7 @@ it("keeps a child deletion dialog and its form when media deletion fails", async
     ? json({ error: "media deletion failed", code: "media_delete_failed" }, 500)
     : undefined);
   const user = userEvent.setup(); editor();
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
   await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
@@ -115,6 +166,7 @@ it("refreshes a committed child deletion and warns instead of offering a retry",
     if (committed && r.url === base && r.method === "GET") return json(detail({ version: 4, seasons: [] }));
   });
   const user = userEvent.setup(); editor();
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   const dialog = within(await screen.findByRole("dialog", { name: "永久删除单集" }));
   await user.type(dialog.getByLabelText("输入完整内容名称"), "来信");
@@ -156,6 +208,7 @@ it("reloads a committed episode-video replacement and clears its pending file", 
     if (committed && r.url === base && r.method === "GET") return json(authoritative);
   });
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.upload(screen.getByLabelText("视频文件"), new File(["new"], "new.mp4", { type: "video/mp4" }));
   await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
@@ -195,6 +248,7 @@ it("an episode finalization clears only its video and retains a pending series p
     if (committed && r.url === base && r.method === "GET") return json(authoritative);
   });
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.upload(screen.getByLabelText("海报文件"), new File(["poster"], "later.png", { type: "image/png" }));
   await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "new.mp4", { type: "video/mp4" }));
   await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
@@ -238,6 +292,7 @@ it("does not open child deletion confirmation when authoritative impact cannot l
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
     ? json({ error: "offline" }, 503) : undefined);
   const user = userEvent.setup(); editor();
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "删除单集" }));
   await screen.findByRole("alert");
   expect(screen.queryByRole("dialog", { name: "永久删除单集" })).not.toBeInTheDocument();
@@ -339,6 +394,7 @@ it("explains that a series needs a published playable episode without requiring 
 it("saves one episode and its video independently, retaining another episode's unsaved input", async () => {
   const requests = fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [episode(), episode({ id: "e2", number: 2, name: "回信" })] }] }));
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.type(screen.getAllByLabelText("单集名称")[1], "未保存");
   await user.upload(screen.getAllByLabelText("视频文件")[0], new File(["v"], "one.mp4", { type: "video/mp4" }));
   await user.click(screen.getAllByRole("button", { name: "保存单集草稿" })[0]);
@@ -355,6 +411,7 @@ it("does not render or submit an episode synopsis", async () => {
   const requests = fixture(detail());
   const user = userEvent.setup();
   editor();
+  await expandFirst(user);
   await screen.findByLabelText("单集名称");
   expect(screen.queryByLabelText("单集简介")).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
@@ -365,6 +422,7 @@ it("does not render or submit an episode synopsis", async () => {
 it("locks published series fields and seasons with published episodes while permitting new drafts", async () => {
   fixture(detail({ status: "published", seasons: [{ id: "s1", number: 1, episodes: [episode({ status: "published" })] }] }));
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.click(screen.getByRole("button", { name: "展开第 1 季" }));
   expect(screen.getByLabelText("剧集名称")).toBeDisabled(); expect(screen.queryByLabelText("海报文件")).not.toBeInTheDocument();
   expect(screen.getByLabelText("季序号")).toBeDisabled(); expect(screen.getByRole("button", { name: "删除本季" })).toBeDisabled();
   expect(screen.getByLabelText("单集名称")).toBeDisabled();
@@ -376,6 +434,7 @@ it("locks published series fields and seasons with published episodes while perm
 it("keeps an archived parent's fields read-only while preserving draft child editing", async () => {
   fixture(detail({ status: "archived" })); const user = userEvent.setup(); editor();
   await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   expect(screen.getByLabelText("剧集名称")).toBeDisabled();
   expect(screen.queryByLabelText("海报文件")).not.toBeInTheDocument();
   expect(screen.getByLabelText("单集名称")).toBeEnabled();
@@ -386,7 +445,7 @@ it("keeps an archived parent's fields read-only while preserving draft child edi
 
 // Catches calculating the next draft number from stale initial values after an unsaved edit.
 it("numbers the next unsaved episode after the highest currently entered draft number", async () => {
-  fixture(); const user = userEvent.setup(); editor(); await screen.findByLabelText("单集名称");
+  fixture(); const user = userEvent.setup(); editor(); await expandFirst(user); await screen.findByLabelText("单集名称");
   await user.click(screen.getByRole("button", { name: "添加一集" }));
   const numbers = screen.getAllByLabelText("集序号");
   await user.clear(numbers[1]); await user.type(numbers[1], "5");
@@ -395,7 +454,7 @@ it("numbers the next unsaved episode after the highest currently entered draft n
 });
 
 it("reloads the full hierarchy after episode transitions and derives season locks from the result", async () => {
-  const requests = fixture(); const user = userEvent.setup(); editor(); await screen.findByLabelText("单集名称");
+  const requests = fixture(); const user = userEvent.setup(); editor(); await expandFirst(user); await screen.findByLabelText("单集名称");
   await user.click(screen.getByRole("button", { name: "发布单集" }));
   await waitFor(() => expect(screen.getByLabelText("季序号")).toBeDisabled());
   await user.click(screen.getByRole("button", { name: "归档单集" }));
@@ -412,6 +471,7 @@ it("reloads the parent lifecycle and locks all writes if its follow-up read fail
 
 it("adds and removes season and episode drafts with fresh, name-confirmed deletion scope", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.click(screen.getByRole("button", { name: "删除单集" }));
   let dialog = within(await screen.findByRole("dialog")); expect(dialog.getByText("单集：1")).toBeInTheDocument();
   await user.type(dialog.getByLabelText("输入完整内容名称"), "来信"); await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
@@ -424,7 +484,7 @@ it("adds and removes season and episode drafts with fresh, name-confirmed deleti
 
 it("locks on conflict and only restores editing after an explicit reload", async () => {
   const requests = fixture(detail(), (r) => r.method === "PATCH" ? json({ error: "changed" }, 409) : undefined);
-  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称"); await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称"); await expandFirst(user); await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
   await screen.findByRole("alert"); expect(screen.getByRole("button", { name: "添加一季" })).toBeDisabled();
   await user.click(screen.getByRole("button", { name: "重新加载" })); await waitFor(() => expect(screen.getByRole("button", { name: "添加一季" })).toBeEnabled());
   expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
@@ -434,6 +494,7 @@ it.each([401, 403])("recovers %s without replaying the rejected write", async (s
   const requests = fixture(detail(), (r) => r.method === "PATCH" ? json({ error: "denied" }, status) : undefined);
   const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /长夜航线/ })).getByRole("button", { name: "编辑" }));
+  await expandFirst(user);
   await user.click(await screen.findByRole("button", { name: "保存单集草稿" }));
   if (status === 401) await screen.findByRole("heading", { name: "管理员登录" }); else expect(await screen.findByRole("alert")).toHaveTextContent(/重新执行/);
   expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
@@ -447,6 +508,7 @@ it("uses the renewed CSRF token only after an explicit retry of a forbidden writ
   });
   const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /长夜航线/ })).getByRole("button", { name: "编辑" }));
+  await expandFirst(user);
   token = "renewed-csrf";
   await user.click(await screen.findByRole("button", { name: "保存单集草稿" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/重新执行/);
@@ -481,6 +543,7 @@ it("does not permit deletion when the fresh hierarchy cannot be loaded", async (
 it("stops publication if an upload's authoritative parent version differs", async () => {
   let reads = 0; const requests = fixture(detail(), (r) => r.url === base && r.method === "GET" && ++reads > 1 ? json(detail({ version: 99 })) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.upload(screen.getByLabelText("视频文件"), new File(["v"], "v.mp4", { type: "video/mp4" })); await user.click(screen.getByRole("button", { name: "发布单集" }));
   expect(await screen.findByRole("alert")).toHaveTextContent(/刷新/); expect(requests.some((r) => r.url.endsWith("/publish"))).toBe(false);
 });
@@ -488,6 +551,7 @@ it("stops publication if an upload's authoritative parent version differs", asyn
 it("does not continue an upload chain after the editor is unmounted", async () => {
   const pending = deferred<Response>(); const requests = fixture(detail(), (r) => r.method === "PATCH" ? pending.promise : undefined);
   const user = userEvent.setup(); const view = editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.upload(screen.getByLabelText("视频文件"), new File(["v"], "v.mp4", { type: "video/mp4" })); await user.click(screen.getByRole("button", { name: "保存单集草稿" })); view.unmount();
   await act(async () => pending.resolve(json({ series_version: 4, episode: episode({ version: 3 }) })));
   expect(requests.some((r) => r.url.includes("/media/"))).toBe(false);
@@ -497,6 +561,7 @@ it("does not continue an upload chain after the editor is unmounted", async () =
 it("retains the saved video and retries only publication after a validation failure", async () => {
   const requests = fixture(detail(), (r) => r.url.endsWith("/publish") ? json({ error: "validation", fields: ["video"] }, 422) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await expandFirst(user);
   await user.upload(screen.getByLabelText("视频文件"), new File(["v"], "ready.mp4", { type: "video/mp4" }));
   await user.click(screen.getByRole("button", { name: "发布单集" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("可播放视频");
