@@ -168,6 +168,16 @@ fn ffmpeg_high_h264_mp4() -> Vec<u8> {
     ))
 }
 
+fn ffmpeg_high_h264_mp4_without_avcc_extensions() -> Vec<u8> {
+    let bytes = ffmpeg_high_h264_mp4();
+    let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
+    let size = u32::from_be_bytes(bytes[avcc - 4..avcc].try_into().unwrap()) as usize;
+    let mut payload = bytes[avcc + 4..avcc - 4 + size].to_vec();
+    assert_eq!(&payload[payload.len() - 4..], &[0xfd, 0xf8, 0xf8, 0x00]);
+    payload.truncate(payload.len() - 4);
+    replace_mp4_avcc(bytes, payload)
+}
+
 fn valid_webp() -> Vec<u8> {
     let mut bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
@@ -1748,6 +1758,10 @@ async fn mp4_validation_accepts_ffmpeg_baseline_with_aac_and_high_profile() {
     for (name, bytes) in [
         ("baseline-aac.mp4", ffmpeg_baseline_h264_aac_mp4()),
         ("high.mp4", ffmpeg_high_h264_mp4()),
+        (
+            "high-without-extensions.mp4",
+            ffmpeg_high_h264_mp4_without_avcc_extensions(),
+        ),
     ] {
         let (source, _) = Chunks::bytes(bytes);
         storage

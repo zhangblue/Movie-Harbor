@@ -1051,7 +1051,7 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
         }
         cursor += length;
     }
-    if is_high_avc_profile(payload[1]) {
+    if is_high_avc_profile(payload[1]) && cursor < payload.len() {
         let chroma_format = *payload.get(cursor)?;
         let bit_depth_luma = *payload.get(cursor.checked_add(1)?)?;
         let bit_depth_chroma = *payload.get(cursor.checked_add(2)?)?;
@@ -1238,6 +1238,24 @@ mod tests {
             validate_avcc(&avcc).map(|configuration| configuration.nal_length_bytes),
             Some(4)
         );
+    }
+
+    #[test]
+    fn accepts_high_profile_avcc_without_extensions_but_rejects_partial_extensions() {
+        let avcc = [
+            0x01, 0x64, 0x00, 0x0a, 0xff, 0xe1, 0x00, 0x18, 0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9,
+            0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xc8,
+            0x3c, 0x48, 0x96, 0x58, 0x01, 0x00, 0x06, 0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0, 0xfd,
+            0xf8, 0xf8, 0x00,
+        ];
+        let core = &avcc[..avcc.len() - 4];
+        assert_eq!(
+            validate_avcc(core).map(|configuration| configuration.nal_length_bytes),
+            Some(4),
+        );
+        for trailing_length in 1..4 {
+            assert!(validate_avcc(&avcc[..core.len() + trailing_length]).is_none());
+        }
     }
 
     #[test]
