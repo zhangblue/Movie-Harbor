@@ -16,15 +16,16 @@
 - 修改 `frontend/admin-web/src/series/SeasonCard.tsx`：呈现紧凑折叠标题栏、可访问切换按钮和不卸载的季内容区。
 - 修改 `frontend/admin-web/src/series/SeriesEditor.test.tsx`：锁定默认折叠、独立展开、输入保留、新季自动展开、刷新保持、权限与按钮样式契约。
 - 修改 `frontend/admin-web/src/styles.css`：提供季标题、内容区、控制区和等高操作按钮的局部样式。
+- 修改 `tests/e2e/series.spec.ts`：重新进入已有剧集后先展开对应季，再继续生命周期与媒体删除验收。
 
 ## 全局约束
 
 - 设计规格是 `docs/superpowers/specs/2026-09-14-season-editor-collapse-design.md`。
-- 只修改上述四个管理后台文件；不修改 API、后端、数据库、公开站、Demo 或部署文件。
+- 生产代码只修改上述四个管理后台文件；另允许调整 `tests/e2e/series.spec.ts` 以适配已确认的默认折叠交互。不修改 API、后端、数据库、公开站、Demo 或部署文件。
 - 已有季默认折叠；当前流程中新创建或恢复的空季自动展开；多个季可以同时展开。
 - 季内容必须始终保留在 React 树中，只使用 `hidden` 控制可见性，折叠不得丢失未保存输入。
 - 折叠按钮不受业务编辑权限限制；所有现有保存、删除、添加、生命周期与错误处理权限保持不变。
-- 两个任务分别由不同的全新子代理顺序执行并独立提交；Task 2 基于已审查通过的 Task 1。
+- 三个任务分别由不同的全新子代理顺序执行并独立提交；Task 2 基于已审查通过的 Task 1，Task 3 基于前两项通过后的完整 E2E 失败证据。
 
 ### 任务 1：实现季的受控折叠交互
 
@@ -336,9 +337,53 @@ git add frontend/admin-web/src/series/SeasonCard.tsx frontend/admin-web/src/seri
 git commit -m "fix: 对齐剧集季操作按钮"
 ```
 
+### 任务 3：适配端到端剧集生命周期流程
+
+**文件：**
+- 修改：`tests/e2e/series.spec.ts`
+
+- [ ] **步骤 1：复现并确认 RED 根因**
+
+```bash
+npm run test:e2e
+```
+
+预期：`a series publishes episodes incrementally and archives immediately` 在重新进入已归档剧集后等待“归档单集”超时。失败快照显示页面存在“展开第 1 季”按钮，季内表单因默认折叠不可见；其他已运行用例通过。这证明根因是测试仍依赖旧的默认展开交互，而不是生产接口或生命周期失败。
+
+- [ ] **步骤 2：在重新进入剧集后显式展开季**
+
+在点击归档列表行的“查看”后、首次获取 `firstForDelete` 之前，增加可访问交互与状态断言：
+
+```tsx
+const archivedSeason = page.getByRole("article", { name: "第 1 季" });
+const expandSeason = archivedSeason.getByRole("button", { name: "展开第 1 季" });
+await expandSeason.click();
+await expect(archivedSeason.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+```
+
+后续 `firstForDelete`、`secondForDelete` 与“删除本季”定位均限制在 `archivedSeason` 内，保持原有归档、转草稿、删除和物理媒体文件消失断言不变。不得修改生产代码、放宽超时或删除任何既有断言。
+
+- [ ] **步骤 3：运行 GREEN 与回归**
+
+```bash
+npm run test:e2e
+node --test tests/e2e/run-safety.test.mjs
+git diff --check
+git status --short
+```
+
+预期：Playwright 5/5 通过，E2E runner 安全测试通过；状态仅包含 `tests/e2e/series.spec.ts`；失败用例经过 RED/GREEN，完整生命周期与媒体删除断言保持不变。
+
+- [ ] **步骤 4：独立提交 Task 3**
+
+```bash
+git add tests/e2e/series.spec.ts
+git commit -m "test: 适配剧集季默认折叠流程"
+```
+
 ## 最终集成验证
 
-两个 Task 分别审查通过后，在整个分支上运行：
+三个 Task 分别审查通过后，在整个分支上运行：
 
 ```bash
 docker compose -f docker-compose.test.yml up -d postgres

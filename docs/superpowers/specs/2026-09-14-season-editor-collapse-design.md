@@ -85,12 +85,16 @@
 
 ## 8. 修改范围
 
-预计只修改：
+生产实现预计只修改：
 
 - `frontend/admin-web/src/series/SeriesEditor.tsx`
 - `frontend/admin-web/src/series/SeasonCard.tsx`
 - `frontend/admin-web/src/series/SeriesEditor.test.tsx`
 - `frontend/admin-web/src/styles.css`
+
+现有端到端剧集生命周期流程会在离开并重新进入编辑器后操作季内单集；该流程必须先显式展开默认折叠的季，因此同时调整：
+
+- `tests/e2e/series.spec.ts`
 
 不修改后端、数据库迁移、共享 API 类型、公开站、静态 Demo 或部署配置。
 
@@ -108,6 +112,8 @@
 - 服务端层级刷新后当前展开季保持展开；已删除季不留下可见或可操作入口。
 - 只读或存在已发布单集的季仍能展开查看，但现有保存、删除和添加权限保持不变。
 - “保存季序号”和“删除本季”同时带有统一的季操作按钮类；样式表为该类提供明确相同高度和底部对齐规则。
+
+Playwright 端到端测试在重新进入已有剧集后必须通过可访问名称点击“展开第 N 季”，再继续归档、转草稿和删除单集及季，验证默认折叠没有破坏完整生命周期流程。
 
 定向验证命令：
 
