@@ -68,7 +68,11 @@ test("a series publishes episodes incrementally and archives immediately", async
   await page.goto("/admin/");
   const archivedRow = page.getByRole("row", { name: new RegExp(name) });
   await archivedRow.getByRole("button", { name: "查看" }).click();
-  const firstForDelete = page.getByRole("form", { name: /第 1 集 · Pilot/ });
+  const archivedSeason = page.getByRole("article", { name: "第 1 季" });
+  const expandSeason = archivedSeason.getByRole("button", { name: "展开第 1 季" });
+  await expandSeason.click();
+  await expect(archivedSeason.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+  const firstForDelete = archivedSeason.getByRole("form", { name: /第 1 集 · Pilot/ });
   await firstForDelete.getByRole("button", { name: "归档单集" }).click();
   await firstForDelete.getByRole("button", { name: "单集转为草稿" }).click();
   await firstForDelete.getByRole("button", { name: "删除单集" }).click();
@@ -77,10 +81,10 @@ test("a series publishes episodes incrementally and archives immediately", async
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
   for (const path of firstVideoFiles) await expect.poll(() => existsSync(path)).toBe(false);
 
-  const secondForDelete = page.getByRole("form", { name: /第 2 集 · Second Wave/ });
+  const secondForDelete = archivedSeason.getByRole("form", { name: /第 2 集 · Second Wave/ });
   await secondForDelete.getByRole("button", { name: "归档单集" }).click();
   await secondForDelete.getByRole("button", { name: "单集转为草稿" }).click();
-  await page.getByRole("button", { name: "删除本季" }).click();
+  await archivedSeason.getByRole("button", { name: "删除本季" }).click();
   await page.getByLabel("输入完整内容名称").fill("第 1 季");
   await page.getByRole("button", { name: "确认永久删除" }).click();
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
