@@ -1259,6 +1259,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_malformed_high_profile_avcc_extensions() {
+        let avcc = [
+            0x01, 0x64, 0x00, 0x0a, 0xff, 0xe1, 0x00, 0x18, 0x67, 0x64, 0x00, 0x0a, 0xac, 0xd9,
+            0x44, 0x26, 0xc0, 0x44, 0x00, 0x00, 0x03, 0x00, 0x04, 0x00, 0x00, 0x03, 0x00, 0xc8,
+            0x3c, 0x48, 0x96, 0x58, 0x01, 0x00, 0x06, 0x68, 0xeb, 0xe3, 0xcb, 0x22, 0xc0, 0xfd,
+            0xf8, 0xf8, 0x00,
+        ];
+        let core = &avcc[..avcc.len() - 4];
+        let mut valid = core.to_vec();
+        valid.extend([0xfd, 0xf8, 0xf8, 1, 0, 2, 0x0d, 0]);
+        assert_eq!(
+            validate_avcc(&valid).map(|configuration| configuration.nal_length_bytes),
+            Some(4)
+        );
+
+        for (name, extension) in [
+            ("trailing-after-header", vec![0xfd, 0xf8, 0xf8, 0, 0]),
+            ("truncated-length", vec![0xfd, 0xf8, 0xf8, 1, 0]),
+            ("truncated-content", vec![0xfd, 0xf8, 0xf8, 1, 0, 2, 0x0d]),
+            ("zero-length", vec![0xfd, 0xf8, 0xf8, 1, 0, 0]),
+            ("wrong-nal-type", vec![0xfd, 0xf8, 0xf8, 1, 0, 2, 0x01, 0]),
+            (
+                "forbidden-nal-bit",
+                vec![0xfd, 0xf8, 0xf8, 1, 0, 2, 0x8d, 0],
+            ),
+            ("invalid-chroma-reserved-bits", vec![0xf9, 0xf8, 0xf8, 0]),
+            ("invalid-luma-reserved-bits", vec![0xfd, 0xf0, 0xf8, 0]),
+            (
+                "invalid-chroma-bit-depth-reserved-bits",
+                vec![0xfd, 0xf8, 0xf0, 0],
+            ),
+        ] {
+            let mut payload = core.to_vec();
+            payload.extend(extension);
+            assert!(
+                validate_avcc(&payload).is_none(),
+                "malformed extension accepted: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_type_only_or_forbidden_h264_parameter_sets() {
         for avcc in [
             vec![1, 66, 0, 30, 0xff, 0xe1, 0, 1, 0x67, 1, 0, 2, 0x68, 0xc0],
