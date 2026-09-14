@@ -30,7 +30,10 @@ test("admin and public content lists paginate after twenty items", async ({ page
     await expect(page.locator(".content-table tbody tr")).toHaveCount(20);
     await expect(page.getByText("共 21 条 · 第 1/2 页")).toBeVisible();
     await page.getByRole("button", { name: "第 2 页" }).click();
-    const adminRow = page.getByRole("row", { name: new RegExp(adminSecond.items[0].name) });
+    const adminRows = page.locator(".content-table tbody tr");
+    await expect(adminRows).toHaveCount(1);
+    const adminRow = adminRows.first();
+    await expect(adminRow.getByRole("rowheader", { name: adminSecond.items[0].name })).toBeVisible();
     await expect(adminRow.getByRole("cell", { name: "21" })).toBeVisible();
 
     await page.goto(`/?kind=movie&q=${encoded}`);
