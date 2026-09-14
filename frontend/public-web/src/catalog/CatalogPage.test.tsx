@@ -1,11 +1,17 @@
 import "@testing-library/jest-dom/vitest";
+// @ts-expect-error Vitest runs this test in Node while the application tsconfig intentionally excludes Node globals.
+import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { catalog, deferred, json, movie, movieCard, seriesCard, serve } from "../test/fixtures";
 import { CatalogPagination } from "./CatalogPagination";
-import "../styles.css";
+
+const styleElement = document.createElement("style");
+const publicStyles = readFileSync("src/styles.css", "utf8");
+styleElement.textContent = publicStyles.replace(/^@import[^;]+;/, "");
+document.head.append(styleElement);
 
 beforeEach(() => window.history.replaceState(null, "", "/"));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -197,7 +203,7 @@ it("replaces an out-of-range empty catalog URL with the first-page URL", async (
   expect(await screen.findByText("没有找到匹配内容")).toBeInTheDocument();
 });
 
-it("keeps an empty pagination slot in the layout while the catalog is loading", async () => {
+it("reserves the full desktop pagination height while the catalog is loading", async () => {
   const response = deferred<Response>();
   serve(() => response.promise);
   render(<App />);
@@ -205,11 +211,24 @@ it("keeps an empty pagination slot in the layout while the catalog is loading", 
   const slot = document.querySelector<HTMLElement>(".pagination-slot");
   expect(slot).toBeInTheDocument();
   expect(slot).toBeEmptyDOMElement();
-  expect(getComputedStyle(slot!).minHeight).not.toBe("0px");
+  const loadingStyle = getComputedStyle(slot!);
+  expect(loadingStyle.minHeight).toBe("91px");
+  expect(loadingStyle.paddingTop).toBe("30px");
 
   await act(async () => response.resolve(json({ items: [movieCard], total: 221, page: 1, size: 20 })));
   await screen.findByRole("link", { name: "查看远方来信详情" });
-  expect(within(slot!).getByRole("navigation", { name: "目录分页" })).toBeInTheDocument();
+  const navigation = within(slot!).getByRole("navigation", { name: "目录分页" });
+  expect(getComputedStyle(navigation).marginTop).toBe("0px");
+  expect(getComputedStyle(slot!).minHeight).toBe(loadingStyle.minHeight);
+});
+
+it("reserves the wrapped pagination height on narrow screens", () => {
+  const mediaRule = Array.from(document.styleSheets)
+    .flatMap((sheet) => Array.from(sheet.cssRules))
+    .find((rule): rule is CSSMediaRule => "conditionText" in rule && rule.conditionText === "(max-width: 620px)");
+  const slotRule = Array.from(mediaRule?.cssRules ?? [])
+    .find((rule): rule is CSSStyleRule => "selectorText" in rule && rule.selectorText === ".pagination-slot");
+  expect(slotRule?.style.minHeight).toBe("96px");
 });
 
 it("disables every catalog pagination action when navigation is unavailable", () => {
