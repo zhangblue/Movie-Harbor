@@ -118,6 +118,16 @@ it("preserves old media and pending selection after a synchronous replacement fa
   expect(requests.filter((r) => r.url.includes("/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4", "/api/admin/media/movies/movie-1/poster?version=5"]);
 });
 
+it("shows a localized upload message for a media content mismatch", async () => {
+  fixture(movie(), (r) => r.url.includes("/media/")
+    ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
+    : undefined);
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["not an image"], "broken.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+});
+
 it.each(["published", "archived"] as const)("keeps all %s fields and media read-only", async (status) => {
   fixture(movie({ status })); editor(); await screen.findByLabelText("名称");
   for (const label of ["名称", "年份", "时长（分钟）", "简介", "题材"]) expect(screen.getByLabelText(label)).toBeDisabled();

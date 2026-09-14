@@ -102,6 +102,16 @@ impl From<sea_orm::DbErr> for MediaError {
 
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
+        if matches!(self, Self::ContentMismatch) {
+            return (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(serde_json::json!({
+                    "error": "media content does not match its declared type",
+                    "code": "media_content_mismatch"
+                })),
+            )
+                .into_response();
+        }
         if matches!(self, Self::ReplacementFailed) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

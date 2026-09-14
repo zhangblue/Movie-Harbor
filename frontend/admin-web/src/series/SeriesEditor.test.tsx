@@ -336,6 +336,16 @@ it("uses the fixed replacement failure message and keeps the original series pos
   expect(screen.getByRole("link", { name: /已保存海报/ })).toBeInTheDocument();
 });
 
+it("shows a localized upload message for a media content mismatch", async () => {
+  fixture(detail(), (r) => r.url.includes("/media/series/")
+    ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
+    : undefined);
+  const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["not an image"], "broken.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+});
+
 it("does not open child deletion confirmation when authoritative impact cannot load", async () => {
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
     ? json({ error: "offline" }, 503) : undefined);

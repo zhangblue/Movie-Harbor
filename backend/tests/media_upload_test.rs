@@ -3101,6 +3101,40 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
     assert_eq!(missing_version.status(), StatusCode::BAD_REQUEST);
 }
 
+// Catches dropping or renaming the stable client-facing code for declared/actual content mismatches.
+#[tokio::test]
+async fn content_mismatch_response_has_stable_code() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let movie = draft_movie(&db, None).await;
+    let app = app::build(db, &config(root.as_ref())).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+
+    let response = app
+        .oneshot(multipart_file_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+            "invalid.mp4",
+            "video/mp4",
+            b"not an mp4".to_vec(),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body,
+        json!({
+            "error": "media content does not match its declared type",
+            "code": "media_content_mismatch"
+        })
+    );
+}
+
 // Characterizes every registered attachment target before their handlers share one upload path.
 #[tokio::test]
 async fn movie_series_and_episode_routes_share_the_attachment_contract() {

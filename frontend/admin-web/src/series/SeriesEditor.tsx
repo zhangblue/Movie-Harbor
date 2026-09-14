@@ -88,6 +88,8 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
     } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
       setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
+    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_content_mismatch") {
+      setError("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
     } else if (cause instanceof ApiError && cause.status === 409) { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
     else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
       setInvalid(cause.details.fields.filter((f): f is string => typeof f === "string"));
