@@ -76,14 +76,19 @@ it("defaults existing seasons to independent accessible collapses without losing
   const first = await screen.findByRole("button", { name: "展开第 1 季" });
   const second = screen.getByRole("button", { name: "展开第 2 季" });
   const firstCard = screen.getByRole("article", { name: "第 1 季" });
+  const firstBodyId = first.getAttribute("aria-controls");
+  const firstBody = firstBodyId ? document.getElementById(firstBodyId) : null;
   expect(first).toHaveAttribute("aria-expanded", "false");
-  expect(first).toHaveAttribute("aria-controls");
+  expect(firstBodyId).not.toBeNull();
+  expect(firstCard).toContainElement(firstBody);
+  expect(firstBody).toHaveAttribute("hidden");
   expect(second).toHaveAttribute("aria-expanded", "false");
   expect(screen.getAllByText("1 集")).toHaveLength(2);
   expect(within(firstCard).getByLabelText("季序号")).not.toBeVisible();
 
   await user.click(first);
   expect(screen.getByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
+  expect(firstBody).not.toHaveAttribute("hidden");
   const name = within(firstCard).getByLabelText("单集名称");
   await user.type(name, "未保存");
   await user.click(second);
@@ -93,6 +98,14 @@ it("defaults existing seasons to independent accessible collapses without losing
   expect(screen.getByRole("button", { name: "折叠第 2 季" })).toHaveAttribute("aria-expanded", "true");
   await user.click(screen.getByRole("button", { name: "展开第 1 季" }));
   expect(within(firstCard).getByLabelText("单集名称")).toHaveValue("来信未保存");
+
+  await user.click(within(firstCard).getByRole("button", { name: "添加一集" }));
+  const draft = within(firstCard).getByRole("form", { name: "新单集草稿" });
+  const draftName = within(draft).getByLabelText("单集名称");
+  await user.type(draftName, "新草稿");
+  await user.click(screen.getByRole("button", { name: "折叠第 1 季" }));
+  await user.click(screen.getByRole("button", { name: "展开第 1 季" }));
+  expect(within(screen.getByRole("form", { name: "新单集草稿" })).getByLabelText("单集名称")).toHaveValue("新草稿");
 });
 
 it("opens only a newly added season and keeps opened seasons across hierarchy updates", async () => {
