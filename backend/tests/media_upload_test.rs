@@ -1814,6 +1814,62 @@ async fn mp4_validation_accepts_hvc1_and_hev1_hevc() {
     }
 }
 
+fn shift_mp4_chunk_offsets_after_removal(
+    bytes: &mut [u8],
+    removed_start: usize,
+    removed_length: usize,
+) {
+    let boxes = bytes
+        .windows(4)
+        .enumerate()
+        .filter_map(|(index, kind)| match kind {
+            b"stco" => Some((index, 4_usize)),
+            b"co64" => Some((index, 8_usize)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    for (box_type, width) in boxes {
+        let box_size = u32::from_be_bytes(bytes[box_type - 4..box_type].try_into().unwrap());
+        let entry_count =
+            u32::from_be_bytes(bytes[box_type + 8..box_type + 12].try_into().unwrap()) as usize;
+        assert!(
+            16 + entry_count * width <= box_size as usize,
+            "fixture contains an invalid chunk offset box",
+        );
+        let mut cursor = box_type + 12;
+        for _ in 0..entry_count {
+            let offset = if width == 4 {
+                u64::from(u32::from_be_bytes(
+                    bytes[cursor..cursor + width].try_into().unwrap(),
+                ))
+            } else {
+                u64::from_be_bytes(bytes[cursor..cursor + width].try_into().unwrap())
+            };
+            let shifted = if offset >= (removed_start + removed_length) as u64 {
+                offset
+                    .checked_sub(removed_length as u64)
+                    .expect("chunk offset must not underflow")
+            } else {
+                assert!(
+                    offset <= removed_start as u64,
+                    "chunk offset must not point inside removed configuration data",
+                );
+                offset
+            };
+            if width == 4 {
+                bytes[cursor..cursor + width].copy_from_slice(
+                    &u32::try_from(shifted)
+                        .expect("stco entry must stay within u32")
+                        .to_be_bytes(),
+                );
+            } else {
+                bytes[cursor..cursor + width].copy_from_slice(&shifted.to_be_bytes());
+            }
+            cursor += width;
+        }
+    }
+}
+
 fn remove_hevc_configuration_array(mut bytes: Vec<u8>, removed_type: u8) -> Vec<u8> {
     let hvcc = bytes
         .windows(4)
@@ -1857,7 +1913,20 @@ fn remove_hevc_configuration_array(mut bytes: Vec<u8>, removed_type: u8) -> Vec<
                     }
                 }
             }
+            shift_mp4_chunk_offsets_after_removal(&mut bytes, array_header, removed_length);
             bytes.drain(array_header..cursor);
+            let stco = bytes
+                .windows(4)
+                .position(|window| window == b"stco")
+                .expect("fixture must contain stco");
+            let first_chunk_offset =
+                u32::from_be_bytes(bytes[stco + 12..stco + 16].try_into().unwrap()) as usize;
+            let mdat_payload = bytes
+                .windows(4)
+                .position(|window| window == b"mdat")
+                .expect("fixture must contain mdat")
+                + 4;
+            assert_eq!(first_chunk_offset, mdat_payload);
             return bytes;
         }
     }
