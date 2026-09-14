@@ -100,8 +100,9 @@ p { color: var(--mh-color-text-muted); }
 .series-season-toggle:hover { background: var(--mh-color-surface-hover); }
 .series-season-toggle:focus-visible { outline: none; box-shadow: var(--mh-focus-ring); }
 .series-season-body { padding: 18px; border-top: 1px solid var(--mh-color-border); }
-.series-season-controls { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.series-season-controls .movie-inline-fields { align-items: end; }
+.series-season-controls { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+.series-season-number-form { align-items: flex-end; }
+.series-season-action { height: 38px; }
 .series-episode { display: grid; gap: 12px; padding: 18px 0; border-top: 1px solid var(--mh-border, #2c3c50); margin: 16px 0; }
 .series-episode > p { margin: 0; }
 .series-episode .movie-inline-fields { flex-wrap: wrap; }

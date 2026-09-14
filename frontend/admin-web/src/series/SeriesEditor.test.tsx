@@ -112,6 +112,25 @@ it("opens only a newly added season and keeps opened seasons across hierarchy up
   expect(screen.getByRole("form", { name: "新单集草稿" })).toBeVisible();
 });
 
+it("renders the season save and delete actions at the same explicit height and bottom alignment", async () => {
+  fixture();
+  const user = userEvent.setup();
+  editor();
+  await user.click(await screen.findByRole("button", { name: "展开第 1 季" }));
+
+  const save = screen.getByRole("button", { name: "保存季序号" });
+  const remove = screen.getByRole("button", { name: "删除本季" });
+  const numberForm = save.closest("form");
+  const controls = numberForm?.parentElement;
+
+  expect(numberForm).not.toBeNull();
+  expect(controls).not.toBeNull();
+  expect(getComputedStyle(save).height).toBe("38px");
+  expect(getComputedStyle(remove).height).toBe("38px");
+  expect(getComputedStyle(numberForm as HTMLElement).alignItems).toBe("flex-end");
+  expect(getComputedStyle(controls as HTMLElement).alignItems).toBe("flex-end");
+});
+
 it("stays on the series page, reports synchronous child deletion, and refreshes", async () => {
   const requests = fixture();
   const user = userEvent.setup();

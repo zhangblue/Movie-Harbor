@@ -31,11 +31,11 @@ export function SeasonCard({ series, season, disabled, initialEpisode, expanded,
     </div>
     <div id={bodyId} className="series-season-body" hidden={!expanded}>
       <div className="series-season-controls">
-        <form className="movie-inline-fields" onSubmit={(e) => { e.preventDefault(); update(Number(number)); }}>
+        <form className="movie-inline-fields series-season-number-form" onSubmit={(e) => { e.preventDefault(); update(Number(number)); }}>
           <Field label="季序号" className="movie-field-short"><input type="number" min="1" required value={number} disabled={disabled || !canChangeSeason(series, season, "edit")} onChange={(e) => setNumber(e.target.value)} /></Field>
-          <Button type="submit" disabled={disabled || !canChangeSeason(series, season, "edit")}>保存季序号</Button>
+          <Button className="series-season-action" type="submit" disabled={disabled || !canChangeSeason(series, season, "edit")}>保存季序号</Button>
         </form>
-        <Button variant="danger" disabled={disabled || !canChangeSeason(series, season, "delete")} onClick={remove}>删除本季</Button>
+        <Button className="series-season-action" variant="danger" disabled={disabled || !canChangeSeason(series, season, "delete")} onClick={remove}>删除本季</Button>
       </div>
       {!canChangeSeason(series, season, "edit") && <p>存在已发布单集或权限受限，季序号与删除已锁定。</p>}
       {season.episodes.map((episode) => <EpisodeRow key={episode.id} episode={episode} disabled={disabled || !knownStatus(series.status)} actions={actions} />)}
