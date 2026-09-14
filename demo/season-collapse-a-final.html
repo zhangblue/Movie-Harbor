@@ -1,0 +1,53 @@
+<h2>A 方案最终交互</h2>
+<p class="subtitle">进入编辑页时所有已有季折叠；点击“添加一季”后，新季自动展开。</p>
+
+<div class="split">
+  <div class="mockup">
+    <div class="mockup-header">默认折叠态</div>
+    <div class="mockup-body" style="background:#101722">
+      <div style="display:flex;align-items:center;gap:11px;padding:13px 15px;border:1px solid #334155;border-radius:11px;background:#1b2636;color:#e5e7eb">
+        <button class="mock-button" aria-label="展开第 1 季" style="display:grid;place-items:center;width:38px;height:38px;padding:0;font-size:20px">›</button>
+        <strong style="margin-right:auto">第 1 季</strong>
+        <span style="color:#94a3b8;font-size:12px">12 集</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:11px;padding:13px 15px;margin-top:9px;border:1px solid #334155;border-radius:11px;background:#1b2636;color:#e5e7eb">
+        <button class="mock-button" aria-label="展开第 2 季" style="display:grid;place-items:center;width:38px;height:38px;padding:0;font-size:20px">›</button>
+        <strong style="margin-right:auto">第 2 季</strong>
+        <span style="color:#94a3b8;font-size:12px">8 集</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="mockup">
+    <div class="mockup-header">展开态</div>
+    <div class="mockup-body" style="background:#101722">
+      <div style="border:1px solid #334155;border-radius:11px;background:#1b2636;color:#e5e7eb;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:11px;padding:13px 15px;border-bottom:1px solid #334155">
+          <button class="mock-button" aria-label="折叠第 1 季" style="display:grid;place-items:center;width:38px;height:38px;padding:0;font-size:20px">⌄</button>
+          <strong style="margin-right:auto">第 1 季</strong>
+          <span style="color:#94a3b8;font-size:12px">12 集</span>
+        </div>
+        <div style="padding:15px">
+          <div style="display:flex;align-items:end;gap:9px;flex-wrap:wrap">
+            <label style="font-size:11px;color:#94a3b8">季序号<br><input class="mock-input" value="1" style="width:75px;height:38px"></label>
+            <button class="mock-button" style="height:38px">保存季序号</button>
+            <button class="mock-button" style="height:38px;color:#fda4af">删除本季</button>
+          </div>
+          <div style="margin-top:14px;padding:13px;border-top:1px solid #334155;color:#cbd5e1">第 1 集 · 启程　<span style="color:#94a3b8">45 分钟</span></div>
+          <div style="padding:13px;border-top:1px solid #334155;color:#cbd5e1">第 2 集 · 回声　<span style="color:#94a3b8">48 分钟</span></div>
+          <button class="mock-button" style="height:38px;margin-top:12px">添加一集</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="section" style="margin-top:22px">
+  <h3>行为规则</h3>
+  <ul>
+    <li>各季独立展开或折叠，可同时展开多季。</li>
+    <li>折叠只影响显示，不清空尚未保存的输入。</li>
+    <li>展开按钮带明确的可访问名称和 <code>aria-expanded</code> 状态。</li>
+    <li>保存与删除按钮共享 38px 高度规则，在桌面和换行布局下保持一致。</li>
+  </ul>
+</div>
