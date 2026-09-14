@@ -426,6 +426,8 @@ fn validate_webp(file: &mut File, byte_size: u64) -> bool {
 
 const MAX_MP4_TABLE_ENTRIES: usize = 1_000_000;
 const MAX_CONTAINER_ELEMENTS: usize = 100_000;
+const MAX_HEVC_CONFIGURATION_ARRAYS: usize = 64;
+const MAX_HEVC_NAL_UNITS: usize = 10_000;
 
 #[derive(Default)]
 struct Mp4State {
@@ -438,7 +440,7 @@ struct Mp4State {
 #[derive(Default)]
 struct Mp4Track {
     video_handler: bool,
-    h264: Option<H264Configuration>,
+    codec_configuration: Option<Mp4CodecConfiguration>,
     sample_description: Option<(u64, u64)>,
     sample_sizes: Mp4SampleSizes,
     chunk_offsets: Vec<u64>,
@@ -449,6 +451,20 @@ struct Mp4Track {
 struct H264Configuration {
     nal_length_bytes: usize,
     context: H264Context,
+}
+
+enum Mp4CodecConfiguration {
+    H264(H264Configuration),
+    Hevc { nal_length_bytes: usize },
+}
+
+impl Mp4CodecConfiguration {
+    fn nal_length_bytes(&self) -> usize {
+        match self {
+            Self::H264(config) => config.nal_length_bytes,
+            Self::Hevc { nal_length_bytes } => *nal_length_bytes,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -681,17 +697,21 @@ fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     }
     let configuration =
         validate_mp4_codec_configuration(file, &entry[4..8], entry_start + 86, entry_end);
-    if configuration.as_ref().is_none_or(|configuration| {
-        !configuration.context.sps().all(|sps| {
-            sps.pixel_dimensions().is_ok_and(|(width, height)| {
-                width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION
-            })
+    if configuration
+        .as_ref()
+        .is_none_or(|configuration| match configuration {
+            Mp4CodecConfiguration::H264(configuration) => !configuration.context.sps().all(|sps| {
+                sps.pixel_dimensions().is_ok_and(|(width, height)| {
+                    width > 0 && height > 0 && width <= MAX_DIMENSION && height <= MAX_DIMENSION
+                })
+            }),
+            Mp4CodecConfiguration::Hevc { .. } => false,
         })
-    }) {
+    {
         return false;
     }
-    track.h264 = configuration;
-    track.h264.is_some()
+    track.codec_configuration = configuration;
+    track.codec_configuration.is_some()
 }
 
 fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Option<usize> {
@@ -810,10 +830,10 @@ fn parse_mp4_chunk_offsets(
 }
 
 fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -> bool {
-    let Some(h264) = track.h264.as_ref() else {
+    let Some(configuration) = track.codec_configuration.as_ref() else {
         return false;
     };
-    let nal_width = h264.nal_length_bytes;
+    let nal_width = configuration.nal_length_bytes();
     if !track.video_handler
         || track.sample_sizes.len() == 0
         || track.chunk_offsets.is_empty()
@@ -865,7 +885,14 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
                 || !mdats
                     .iter()
                     .any(|&(mdat_start, mdat_end)| offset >= mdat_start && end <= mdat_end)
-                || !validate_length_prefixed_sample(file, offset, size, h264)
+                || !match configuration {
+                    Mp4CodecConfiguration::H264(h264) => {
+                        validate_length_prefixed_sample(file, offset, size, h264)
+                    }
+                    Mp4CodecConfiguration::Hevc { nal_length_bytes } => {
+                        validate_hevc_sample(file, offset, size, *nal_length_bytes)
+                    }
+                }
             {
                 return false;
             }
@@ -874,6 +901,45 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
         }
     }
     sample_index == track.sample_sizes.len()
+}
+
+fn validate_hevc_sample(file: &mut File, offset: u64, size: u32, width: usize) -> bool {
+    let Some(sample_end) = offset.checked_add(u64::from(size)) else {
+        return false;
+    };
+    let mut cursor = offset;
+    let mut nal_units = 0_usize;
+    let mut saw_vcl = false;
+    while cursor < sample_end {
+        nal_units += 1;
+        if nal_units > MAX_HEVC_NAL_UNITS || sample_end - cursor <= width as u64 {
+            return false;
+        }
+        let mut prefix = [0_u8; 4];
+        if file.seek(SeekFrom::Start(cursor)).is_err() || !read_exact(file, &mut prefix[..width]) {
+            return false;
+        }
+        let length = prefix[..width]
+            .iter()
+            .fold(0_u32, |value, byte| (value << 8) | u32::from(*byte));
+        cursor += width as u64;
+        let Some(next) = cursor.checked_add(u64::from(length)) else {
+            return false;
+        };
+        let mut nal_header = [0_u8; 2];
+        if length < nal_header.len() as u32
+            || next > sample_end
+            || file.seek(SeekFrom::Start(cursor)).is_err()
+            || !read_exact(file, &mut nal_header)
+            || nal_header[0] & 0x80 != 0
+            || nal_header[1] & 0x07 == 0
+        {
+            return false;
+        }
+        saw_vcl |= (nal_header[0] >> 1) & 0x3f <= 31;
+        cursor = next;
+    }
+    cursor == sample_end && saw_vcl
 }
 
 fn validate_length_prefixed_sample(
@@ -974,9 +1040,10 @@ fn validate_mp4_codec_configuration(
     codec: &[u8],
     mut position: u64,
     end: u64,
-) -> Option<H264Configuration> {
+) -> Option<Mp4CodecConfiguration> {
     let expected = match codec {
         b"avc1" | b"avc3" => b"avcC",
+        b"hvc1" | b"hev1" => b"hvcC",
         _ => return None,
     };
     while position < end {
@@ -1000,11 +1067,86 @@ fn validate_mp4_codec_configuration(
             if !read_exact(file, &mut payload) {
                 return None;
             }
-            return validate_avcc(&payload);
+            return match expected {
+                b"avcC" => validate_avcc(&payload).map(Mp4CodecConfiguration::H264),
+                b"hvcC" => validate_hvcc(&payload)
+                    .map(|nal_length_bytes| Mp4CodecConfiguration::Hevc { nal_length_bytes }),
+                _ => None,
+            };
         }
         position += size;
     }
     None
+}
+
+fn validate_hvcc(payload: &[u8]) -> Option<usize> {
+    if payload.len() < 23
+        || payload[0] != 1
+        || payload[13] & 0xf0 != 0xf0
+        || payload[15] & 0xfc != 0xfc
+        || payload[16] & 0xfc != 0xfc
+        || payload[17] & 0xf8 != 0xf8
+        || payload[18] & 0xf8 != 0xf8
+        || (payload[21] >> 3) & 0x07 == 0
+    {
+        return None;
+    }
+    let width = usize::from((payload[21] & 0x03) + 1);
+    if width == 3 {
+        return None;
+    }
+    let array_count = usize::from(payload[22]);
+    if array_count == 0 || array_count > MAX_HEVC_CONFIGURATION_ARRAYS {
+        return None;
+    }
+    let mut cursor = 23_usize;
+    let mut nal_units = 0_usize;
+    let mut saw_vps = false;
+    let mut saw_sps = false;
+    let mut saw_pps = false;
+    for _ in 0..array_count {
+        let array_header = *payload.get(cursor)?;
+        if array_header & 0x40 != 0 {
+            return None;
+        }
+        let declared_type = array_header & 0x3f;
+        let count = usize::from(u16::from_be_bytes([
+            *payload.get(cursor.checked_add(1)?)?,
+            *payload.get(cursor.checked_add(2)?)?,
+        ]));
+        if count == 0 {
+            return None;
+        }
+        cursor = cursor.checked_add(3)?;
+        for _ in 0..count {
+            nal_units = nal_units.checked_add(1)?;
+            if nal_units > MAX_HEVC_NAL_UNITS {
+                return None;
+            }
+            let length = usize::from(u16::from_be_bytes([
+                *payload.get(cursor)?,
+                *payload.get(cursor.checked_add(1)?)?,
+            ]));
+            cursor = cursor.checked_add(2)?;
+            let end = cursor.checked_add(length)?;
+            let nal = payload.get(cursor..end)?;
+            if length < 2
+                || nal[0] & 0x80 != 0
+                || nal[1] & 0x07 == 0
+                || (nal[0] >> 1) & 0x3f != declared_type
+            {
+                return None;
+            }
+            match declared_type {
+                32 => saw_vps = true,
+                33 => saw_sps = true,
+                34 => saw_pps = true,
+                _ => {}
+            }
+            cursor = end;
+        }
+    }
+    (cursor == payload.len() && saw_vps && saw_sps && saw_pps).then_some(width)
 }
 
 fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
@@ -1224,7 +1366,147 @@ fn is_high_avc_profile(profile: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_avcc;
+    use super::{validate_avcc, validate_hvcc};
+
+    fn minimal_hvcc(length_size_minus_one: u8, parameter_set_types: &[u8]) -> Vec<u8> {
+        let mut payload = vec![
+            0x01,
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x1e,
+            0xf0,
+            0x00,
+            0xfc,
+            0xfd,
+            0xf8,
+            0xf8,
+            0x00,
+            0x00,
+            0x0c | length_size_minus_one,
+            parameter_set_types.len() as u8,
+        ];
+        for &nal_type in parameter_set_types {
+            payload.push(0x80 | nal_type);
+            payload.extend_from_slice(&1_u16.to_be_bytes());
+            payload.extend_from_slice(&2_u16.to_be_bytes());
+            payload.extend_from_slice(&[nal_type << 1, 0x01]);
+        }
+        payload
+    }
+
+    #[test]
+    fn accepts_hvcc_with_one_two_or_four_byte_nal_lengths() {
+        for (length_size_minus_one, expected_width) in [(0, 1), (1, 2), (3, 4)] {
+            let payload = minimal_hvcc(length_size_minus_one, &[32, 33, 34]);
+            assert_eq!(validate_hvcc(&payload), Some(expected_width));
+        }
+    }
+
+    #[test]
+    fn rejects_reserved_three_byte_hevc_nal_length_prefix() {
+        let payload = minimal_hvcc(2, &[32, 33, 34]);
+        assert_eq!(validate_hvcc(&payload), None);
+    }
+
+    #[test]
+    fn rejects_hvcc_missing_vps_sps_or_pps() {
+        for parameter_set_types in [&[33, 34][..], &[32, 34], &[32, 33]] {
+            let payload = minimal_hvcc(3, parameter_set_types);
+            assert_eq!(validate_hvcc(&payload), None);
+        }
+    }
+
+    #[test]
+    fn rejects_truncated_or_not_fully_consumed_hvcc_arrays() {
+        let valid = minimal_hvcc(3, &[32, 33, 34]);
+        for truncated_length in [22, 23, 24, 25, 26, valid.len() - 1] {
+            assert_eq!(validate_hvcc(&valid[..truncated_length]), None);
+        }
+
+        let mut oversized_nal = valid.clone();
+        oversized_nal[26..28].copy_from_slice(&u16::MAX.to_be_bytes());
+        assert_eq!(validate_hvcc(&oversized_nal), None);
+
+        let mut trailing = valid;
+        trailing.push(0);
+        assert_eq!(validate_hvcc(&trailing), None);
+    }
+
+    #[test]
+    fn rejects_hvcc_array_type_that_differs_from_nal_header() {
+        let mut payload = minimal_hvcc(3, &[32, 33, 34]);
+        payload[28] = 33 << 1;
+        assert_eq!(validate_hvcc(&payload), None);
+    }
+
+    #[test]
+    fn rejects_invalid_hevc_parameter_set_nal_headers() {
+        let valid = minimal_hvcc(3, &[32, 33, 34]);
+        let mut forbidden = valid.clone();
+        forbidden[28] |= 0x80;
+        assert_eq!(validate_hvcc(&forbidden), None);
+
+        let mut missing_temporal_id = valid;
+        missing_temporal_id[29] = 0;
+        assert_eq!(validate_hvcc(&missing_temporal_id), None);
+    }
+
+    #[test]
+    fn rejects_invalid_hvcc_reserved_bits_and_zero_temporal_layers() {
+        for index in [13, 15, 16, 17, 18] {
+            let mut payload = minimal_hvcc(3, &[32, 33, 34]);
+            payload[index] = 0;
+            assert_eq!(validate_hvcc(&payload), None, "accepted byte {index}");
+        }
+
+        let mut array_reserved_bit = minimal_hvcc(3, &[32, 33, 34]);
+        array_reserved_bit[23] |= 0x40;
+        assert_eq!(validate_hvcc(&array_reserved_bit), None);
+
+        let mut zero_temporal_layers = minimal_hvcc(3, &[32, 33, 34]);
+        zero_temporal_layers[21] = 0x07;
+        assert_eq!(validate_hvcc(&zero_temporal_layers), None);
+    }
+
+    #[test]
+    fn rejects_hvcc_with_excessive_array_or_nal_counts() {
+        let mut array_types = vec![32, 33, 34];
+        array_types.resize(65, 39);
+        assert_eq!(validate_hvcc(&minimal_hvcc(3, &array_types)), None);
+
+        let mut payload = minimal_hvcc(3, &[]);
+        payload[22] = 3;
+        payload.push(0x80 | 32);
+        payload.extend_from_slice(&10_001_u16.to_be_bytes());
+        for _ in 0..10_001 {
+            payload.extend_from_slice(&[0, 2, 32 << 1, 1]);
+        }
+        for nal_type in [33, 34] {
+            payload.push(0x80 | nal_type);
+            payload.extend_from_slice(&1_u16.to_be_bytes());
+            payload.extend_from_slice(&[0, 2, nal_type << 1, 1]);
+        }
+        assert_eq!(validate_hvcc(&payload), None);
+    }
+
+    #[test]
+    fn malformed_hvcc_never_panics() {
+        for length in 0..512_usize {
+            let payload = (0..length)
+                .map(|index| (index.wrapping_mul(193) ^ length.wrapping_mul(29)) as u8)
+                .collect::<Vec<_>>();
+            assert!(std::panic::catch_unwind(|| validate_hvcc(&payload)).is_ok());
+        }
+    }
 
     #[test]
     fn accepts_ffmpeg_high_profile_avcc_extensions() {

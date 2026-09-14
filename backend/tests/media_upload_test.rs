@@ -46,6 +46,8 @@ const PNG: &[u8] = &[
     0xae, 0x42, 0x60, 0x82,
 ];
 
+const HEVC_HVC1_MP4: &[u8] = include_bytes!("fixtures/hevc-hvc1.mp4");
+
 fn jpeg() -> &'static [u8] {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BYTES.get_or_init(|| {
@@ -1776,6 +1778,165 @@ async fn mp4_validation_accepts_ffmpeg_baseline_with_aac_and_high_profile() {
             .await
             .unwrap_or_else(|error| panic!("ffmpeg fixture {name} rejected: {error}"));
     }
+}
+
+// Catches rejecting structurally valid HEVC MP4 video sample entries.
+#[tokio::test]
+async fn mp4_validation_accepts_hvc1_and_hev1_hevc() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let video_policy = UploadPolicy::new(1024 * 1024, ["video/mp4"]).unwrap();
+    let mut hev1 = HEVC_HVC1_MP4.to_vec();
+    let sample_entry = hev1
+        .windows(4)
+        .position(|window| window == b"hvc1")
+        .expect("fixture must contain an hvc1 sample entry");
+    assert_eq!(
+        hev1.windows(4).filter(|window| *window == b"hvc1").count(),
+        1,
+        "fixture must contain exactly one hvc1 sample entry",
+    );
+    hev1[sample_entry..sample_entry + 4].copy_from_slice(b"hev1");
+
+    for (name, bytes) in [("hvc1.mp4", HEVC_HVC1_MP4.to_vec()), ("hev1.mp4", hev1)] {
+        let (source, _) = Chunks::bytes(bytes);
+        storage
+            .store(
+                Uuid::new_v4(),
+                MediaKind::Video,
+                name,
+                "video/mp4",
+                &video_policy,
+                source,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("HEVC fixture {name} rejected: {error:?}"));
+    }
+}
+
+fn remove_hevc_configuration_array(mut bytes: Vec<u8>, removed_type: u8) -> Vec<u8> {
+    let hvcc = bytes
+        .windows(4)
+        .position(|window| window == b"hvcC")
+        .expect("fixture must contain hvcC");
+    let box_size = u32::from_be_bytes(bytes[hvcc - 4..hvcc].try_into().unwrap()) as usize;
+    let payload_start = hvcc + 4;
+    let payload_end = hvcc - 4 + box_size;
+    let mut cursor = payload_start + 23;
+    for _ in 0..bytes[payload_start + 22] {
+        let array_header = cursor;
+        let nal_type = bytes[array_header] & 0x3f;
+        let nal_count = usize::from(u16::from_be_bytes(
+            bytes[array_header + 1..array_header + 3]
+                .try_into()
+                .unwrap(),
+        ));
+        cursor += 3;
+        for _ in 0..nal_count {
+            let nal_length = usize::from(u16::from_be_bytes(
+                bytes[cursor..cursor + 2].try_into().unwrap(),
+            ));
+            cursor += 2;
+            cursor += nal_length;
+        }
+        if nal_type == removed_type {
+            assert!(cursor <= payload_end);
+            let removed_length = cursor - array_header;
+            bytes[payload_start + 22] -= 1;
+            for index in 4..=hvcc {
+                if [
+                    b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd", b"hvc1", b"hvcC",
+                ]
+                .iter()
+                .any(|kind| bytes[index..index + 4] == **kind)
+                {
+                    let size = u32::from_be_bytes(bytes[index - 4..index].try_into().unwrap());
+                    if index - 4 + size as usize > hvcc {
+                        bytes[index - 4..index]
+                            .copy_from_slice(&(size - removed_length as u32).to_be_bytes());
+                    }
+                }
+            }
+            bytes.drain(array_header..cursor);
+            return bytes;
+        }
+    }
+    panic!("fixture does not contain HEVC NAL array type {removed_type}");
+}
+
+async fn assert_hevc_fixture_rejected(name: &str, bytes: Vec<u8>) {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let (source, _) = Chunks::bytes(bytes);
+    let result = storage
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            name,
+            "video/mp4",
+            &policy(1024 * 1024),
+            source,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(MediaError::ContentMismatch)),
+        "malformed HEVC fixture {name} was not rejected: {result:?}",
+    );
+}
+
+// Catches accepting truncated configuration or HEVC tracks without every required parameter set.
+#[tokio::test]
+async fn hevc_configuration_requires_complete_hvcc_vps_sps_and_pps() {
+    let mut truncated_hvcc = HEVC_HVC1_MP4.to_vec();
+    let hvcc = truncated_hvcc
+        .windows(4)
+        .position(|window| window == b"hvcC")
+        .unwrap();
+    truncated_hvcc[hvcc - 4..hvcc].copy_from_slice(&30_u32.to_be_bytes());
+
+    assert_hevc_fixture_rejected("truncated-hvcc.mp4", truncated_hvcc).await;
+    for missing_type in [32, 33, 34] {
+        assert_hevc_fixture_rejected(
+            &format!("missing-{missing_type}.mp4"),
+            remove_hevc_configuration_array(HEVC_HVC1_MP4.to_vec(), missing_type),
+        )
+        .await;
+    }
+}
+
+// Catches trusting HEVC sample sizes without validating each length-prefixed NAL header.
+#[tokio::test]
+async fn hevc_samples_reject_length_overflow_and_invalid_nal_headers() {
+    let mdat_payload = HEVC_HVC1_MP4
+        .windows(4)
+        .position(|window| window == b"mdat")
+        .unwrap()
+        + 4;
+
+    let mut length_overflow = HEVC_HVC1_MP4.to_vec();
+    length_overflow[mdat_payload..mdat_payload + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert_hevc_fixture_rejected("nal-length-overflow.mp4", length_overflow).await;
+
+    let mut forbidden = HEVC_HVC1_MP4.to_vec();
+    forbidden[mdat_payload + 4] |= 0x80;
+    assert_hevc_fixture_rejected("forbidden-nal-header.mp4", forbidden).await;
+
+    let mut missing_temporal_id = HEVC_HVC1_MP4.to_vec();
+    missing_temporal_id[mdat_payload + 5] &= 0xf8;
+    assert_hevc_fixture_rejected("missing-temporal-id.mp4", missing_temporal_id).await;
+
+    let mut no_vcl = HEVC_HVC1_MP4.to_vec();
+    no_vcl[mdat_payload + 4] = 32 << 1;
+    assert_hevc_fixture_rejected("sample-without-vcl.mp4", no_vcl).await;
+}
+
+// Catches broadening MP4 acceptance to unimplemented video codecs.
+#[tokio::test]
+async fn hevc_support_does_not_accept_av1_sample_entries() {
+    let mut av1 = HEVC_HVC1_MP4.to_vec();
+    let sample_entry = av1.windows(4).position(|window| window == b"hvc1").unwrap();
+    av1[sample_entry..sample_entry + 4].copy_from_slice(b"av01");
+    assert_hevc_fixture_rejected("unsupported-av1.mp4", av1).await;
 }
 
 // Catches trusting only H.264 NAL types or allocating per an untrusted fixed sample count.
