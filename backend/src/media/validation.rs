@@ -1087,7 +1087,6 @@ fn validate_hvcc(payload: &[u8]) -> Option<usize> {
         || payload[16] & 0xfc != 0xfc
         || payload[17] & 0xf8 != 0xf8
         || payload[18] & 0xf8 != 0xf8
-        || (payload[21] >> 3) & 0x07 == 0
     {
         return None;
     }
@@ -1461,7 +1460,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_hvcc_reserved_bits_and_zero_temporal_layers() {
+    fn rejects_invalid_hvcc_reserved_bits() {
         for index in [13, 15, 16, 17, 18] {
             let mut payload = minimal_hvcc(3, &[32, 33, 34]);
             payload[index] = 0;
@@ -1471,10 +1470,15 @@ mod tests {
         let mut array_reserved_bit = minimal_hvcc(3, &[32, 33, 34]);
         array_reserved_bit[23] |= 0x40;
         assert_eq!(validate_hvcc(&array_reserved_bit), None);
+    }
 
-        let mut zero_temporal_layers = minimal_hvcc(3, &[32, 33, 34]);
-        zero_temporal_layers[21] = 0x07;
-        assert_eq!(validate_hvcc(&zero_temporal_layers), None);
+    #[test]
+    fn accepts_hvcc_with_unknown_temporal_layers() {
+        for (length_size_minus_one, expected_width) in [(0, 1), (1, 2), (3, 4)] {
+            let mut payload = minimal_hvcc(length_size_minus_one, &[32, 33, 34]);
+            payload[21] &= !0x38;
+            assert_eq!(validate_hvcc(&payload), Some(expected_width));
+        }
     }
 
     #[test]

@@ -1814,6 +1814,64 @@ async fn mp4_validation_accepts_hvc1_and_hev1_hevc() {
     }
 }
 
+// Catches rejecting an otherwise unchanged real HEVC fixture when temporal scalability is unknown.
+#[tokio::test]
+async fn hevc_hvc1_upload_accepts_unknown_temporal_layers() {
+    assert_hevc_upload_accepts_unknown_temporal_layers(b"hvc1").await;
+}
+
+#[tokio::test]
+async fn hevc_hev1_upload_accepts_unknown_temporal_layers() {
+    assert_hevc_upload_accepts_unknown_temporal_layers(b"hev1").await;
+}
+
+async fn assert_hevc_upload_accepts_unknown_temporal_layers(sample_entry: &[u8; 4]) {
+    let mut bytes = HEVC_HVC1_MP4.to_vec();
+    let hvcc = bytes
+        .windows(4)
+        .position(|window| window == b"hvcC")
+        .expect("fixture must contain hvcC");
+    assert_eq!(
+        bytes.windows(4).filter(|window| *window == b"hvcC").count(),
+        1
+    );
+    let temporal_layers = hvcc + 4 + 21;
+    assert_ne!(bytes[temporal_layers] & 0x38, 0);
+    bytes[temporal_layers] &= !0x38;
+
+    let entry = bytes
+        .windows(4)
+        .position(|window| window == b"hvc1")
+        .expect("fixture must contain an hvc1 sample entry");
+    assert_eq!(
+        bytes.windows(4).filter(|window| *window == b"hvc1").count(),
+        1
+    );
+    bytes[entry..entry + 4].copy_from_slice(sample_entry);
+
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let video_policy = UploadPolicy::new(1024 * 1024, ["video/mp4"]).unwrap();
+    let (source, _) = Chunks::bytes(bytes.clone());
+    let stored = storage
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            "unknown-temporal-layers.mp4",
+            "video/mp4",
+            &video_policy,
+            source,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("HEVC {sample_entry:?} fixture rejected: {error:?}"));
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(&stored.storage_key))
+            .await
+            .unwrap(),
+        bytes,
+    );
+}
+
 fn shift_mp4_chunk_offsets_after_removal(
     bytes: &mut [u8],
     removed_start: usize,
