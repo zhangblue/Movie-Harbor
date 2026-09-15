@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -366,6 +367,10 @@ test("startup rejects symlinked volume roots and markers before calling Docker",
     assert.notEqual(rootResult.status, 0);
     assert.equal(existsSync(dockerLog), false);
 
+    const trailingSlashRootResult = run(`${rootLink}${path.sep}`);
+    assert.notEqual(trailingSlashRootResult.status, 0);
+    assert.equal(existsSync(dockerLog), false);
+
     const markerTarget = path.join(root, "marker-target.json");
     writeFileSync(markerTarget, '{"version":1,"volume":0}');
     symlinkSync(markerTarget, path.join(target, ".movie-harbor-volume.json"));
@@ -378,6 +383,14 @@ test("startup rejects symlinked volume roots and markers before calling Docker",
     const directoryMarkerResult = run(target);
     assert.notEqual(directoryMarkerResult.status, 0);
     assert.equal(existsSync(dockerLog), false);
+
+    const danglingMarkerRoot = makeDirectory(root, "dangling-marker-volume");
+    const danglingMarker = path.join(danglingMarkerRoot, ".movie-harbor-volume.json");
+    symlinkSync(path.join(root, "missing-marker-target.json"), danglingMarker);
+    const danglingMarkerResult = run(danglingMarkerRoot);
+    assert.notEqual(danglingMarkerResult.status, 0);
+    assert.equal(existsSync(dockerLog), false);
+    assert.equal(lstatSync(danglingMarker).isSymbolicLink(), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

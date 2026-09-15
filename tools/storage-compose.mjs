@@ -1,6 +1,5 @@
 import {
   closeSync,
-  existsSync,
   fchmodSync,
   fsyncSync,
   lstatSync,
@@ -19,10 +18,19 @@ function fail(message) {
   throw new Error(`Invalid MEDIA_HOST_DIR: ${message}`);
 }
 
+function pathForNoFollowCheck(value) {
+  const root = path.parse(value).root;
+  let checked = value;
+  while (checked.length > root.length && checked.endsWith(path.sep)) {
+    checked = checked.slice(0, -path.sep.length);
+  }
+  return checked;
+}
+
 function verifyHostDirectory(value) {
   let stat;
   try {
-    stat = lstatSync(value);
+    stat = lstatSync(pathForNoFollowCheck(value));
   } catch {
     fail("directory does not exist");
   }
@@ -106,6 +114,16 @@ export function readVolumeMarker(directory, volume) {
   return marker;
 }
 
+function markerEntryExists(markerPath) {
+  try {
+    lstatSync(markerPath);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 function parseDotenvMediaHostDir(envPath) {
   const lines = readFileSync(envPath, "utf8").split(/\r?\n/);
   for (const line of lines) {
@@ -144,7 +162,7 @@ function initializeMarkers(hostDirs) {
       readVolumeMarker(directory, volume);
       continue;
     } catch (error) {
-      if (existsSync(markerPath)) throw error;
+      if (markerEntryExists(markerPath)) throw error;
     }
 
     if (volume > 0 && readdirSync(directory).length !== 0) {
