@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type EpisodeResponse, type SeriesResponse } from "@movie-harbor/api-client";
 import { SeriesEditor } from "./SeriesEditor";
 import { App } from "../app/App";
-import { deferred, json, series, session } from "../test/server";
+import { adminContentItem, adminContentPage, deferred, json, series, session } from "../test/server";
 
 const base = "/api/admin/series/series-1";
 const episodePath = `${base}/seasons/s1/episodes/e1`;
@@ -22,6 +22,9 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     requests.push(r); const custom = intercept?.(r); if (custom) return custom;
     if (url.endsWith("/session")) return json(session);
     if (url.endsWith("/genres")) return json([{ id: "g1", name: "剧情", enabled: true, sort_order: 1 }]);
+    if (url.startsWith("/api/admin/contents") && r.method === "GET") return json(adminContentPage([
+      adminContentItem({ id: current.id, kind: "series", name: current.name, status: current.status, version: current.version, created_at: current.created_at, poster_url: current.poster?.url ?? null }),
+    ]));
     if (url === "/api/admin/movies") return json([]);
     if (url === "/api/admin/series" && r.method === "GET") return json([current]);
     if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: r.body.name, version: 1, seasons: [], poster: null }); return json(current, 201); }
@@ -312,7 +315,7 @@ it("returns from a committed whole-series deletion and leaves a persistent warni
       committed = true;
       return json({ error: "media deletion finalization failed", code: "media_delete_finalization_failed" }, 500);
     }
-    if (committed && r.url === "/api/admin/series" && r.method === "GET") return json([]);
+    if (committed && r.url.startsWith("/api/admin/contents") && r.method === "GET") return json(adminContentPage([]));
   });
   const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /长夜航线/ })).getByRole("button", { name: "编辑" }));

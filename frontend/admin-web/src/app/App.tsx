@@ -4,7 +4,7 @@ import { Button, Field } from "@movie-harbor/ui";
 import { LoginPage } from "../auth/LoginPage";
 import { AccountMenu } from "../auth/AccountMenu";
 import { ChangePasswordDialog } from "../auth/ChangePasswordDialog";
-import { ContentPage } from "../content/ContentPage";
+import { ContentPage, initialContentListState } from "../content/ContentPage";
 import { MovieEditor } from "../movies/MovieEditor";
 import { SeriesEditor } from "../series/SeriesEditor";
 import { GenrePage } from "../genres/GenrePage";
@@ -25,6 +25,7 @@ export function App() {
   const [moviePage, setMoviePage] = useState<{ id: string | null; deleting: boolean } | null>(null);
   const [seriesPage, setSeriesPage] = useState<{ id: string | null; deleting: boolean } | null>(null);
   const [creating, setCreating] = useState(false);
+  const [contentList, setContentList] = useState(initialContentListState);
   const mounted = useMounted();
 
   const expire = useCallback((message = "会话已失效，请重新登录。") => {
@@ -99,7 +100,7 @@ export function App() {
           if (event.target.value === "series") { setMoviePage(null); setSeriesPage({ id: null, deleting: false }); }
           else { setSeriesPage(null); setMoviePage({ id: null, deleting: false }); }
         }}><option value="movie">电影</option><option value="series">剧集</option></select></Field>}
-        {section === "内容管理" ? seriesPage ? <SeriesEditor seriesId={seriesPage.id} initialDelete={seriesPage.deleting} resumeCreation={creating} onCreated={(id) => setSeriesPage({ id, deleting: false })} onDeleteSuccess={() => setDeletionNotice({ message: "内容及其媒体文件已删除", warning: false })} onDeleteFinalization={() => setDeletionNotice({ message: "内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。", warning: true })} onBack={() => { setSeriesPage(null); setCreating(false); }} onExpired={onExpired} /> : moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onDeleteSuccess={() => setDeletionNotice({ message: "内容及其媒体文件已删除", warning: false })} onDeleteFinalization={() => setDeletionNotice({ message: "内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。", warning: true })} onBack={() => { setMoviePage(null); setCreating(false); }} onExpired={onExpired} /> : <ContentPage onExpired={onExpired} onOpen={(row, action) => {
+        {section === "内容管理" ? seriesPage ? <SeriesEditor seriesId={seriesPage.id} initialDelete={seriesPage.deleting} resumeCreation={creating} onCreated={(id) => setSeriesPage({ id, deleting: false })} onDeleteSuccess={() => { setDeletionNotice({ message: "内容及其媒体文件已删除", warning: false }); setContentList((value) => ({ ...value, revision: value.revision + 1 })); }} onDeleteFinalization={() => { setDeletionNotice({ message: "内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。", warning: true }); setContentList((value) => ({ ...value, revision: value.revision + 1 })); }} onBack={() => { setSeriesPage(null); setCreating(false); }} onExpired={onExpired} /> : moviePage ? <MovieEditor key={moviePage.id ?? "new"} movieId={moviePage.id} initialDelete={moviePage.deleting} onDeleteSuccess={() => { setDeletionNotice({ message: "内容及其媒体文件已删除", warning: false }); setContentList((value) => ({ ...value, revision: value.revision + 1 })); }} onDeleteFinalization={() => { setDeletionNotice({ message: "内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。", warning: true }); setContentList((value) => ({ ...value, revision: value.revision + 1 })); }} onBack={() => { setMoviePage(null); setCreating(false); }} onExpired={onExpired} /> : <ContentPage state={contentList} setState={setContentList} onExpired={onExpired} onOpen={(row, action) => {
           if (!row) { setCreating(true); setMoviePage({ id: null, deleting: false }); return; }
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });

@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type MovieResponse } from "@movie-harbor/api-client";
 import { MovieEditor } from "./MovieEditor";
 import { App } from "../app/App";
-import { deferred, json, movie, session } from "../test/server";
+import { adminContentItem, adminContentPage, deferred, json, movie, session } from "../test/server";
 import styles from "../styles.css?raw";
 
 type Request = { url: string; method: string; body: any; headers: Headers };
@@ -19,6 +19,9 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
     if (response) return response;
     if (url === "/api/admin/session") return json(session);
     if (url === "/api/admin/genres") return json([{ id: "g1", name: "剧情", enabled: true, sort_order: 1 }, { id: "g2", name: "旧题材", enabled: false, sort_order: 2 }]);
+    if (url.startsWith("/api/admin/contents") && r.method === "GET") return json(adminContentPage([
+      adminContentItem({ id: current.id, name: current.name, status: current.status, version: current.version, created_at: current.created_at, poster_url: current.poster?.url ?? null }),
+    ]));
     if (url === "/api/admin/series") return json([]);
     if (url === "/api/admin/movies" && r.method === "GET") return json([current]);
     if (url === "/api/admin/movies" && r.method === "POST") { current = movie({ name: r.body.name, poster: null, version: 1 }); return json(current, 201); }
@@ -261,7 +264,7 @@ it("coordinates a committed deletion finalization failure as deleted and warns o
       committed = true;
       return json({ error: "media deletion finalization failed", code: "media_delete_finalization_failed" }, 500);
     }
-    if (committed && r.url === "/api/admin/movies" && r.method === "GET") return json([]);
+    if (committed && r.url.startsWith("/api/admin/contents") && r.method === "GET") return json(adminContentPage([]));
   });
   const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /潮汐/ })).getByRole("button", { name: "编辑" }));

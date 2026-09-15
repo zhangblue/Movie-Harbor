@@ -116,7 +116,7 @@ it("opens the account menu by keyboard and closes on Escape and outside click", 
   await user.click(account);
   await user.click(screen.getByRole("heading", { name: "内容管理" }));
   expect(screen.queryByRole("menu")).not.toBeInTheDocument();
-  expect(within(screen.getByRole("navigation")).queryByText("退出登录")).not.toBeInTheDocument();
+  expect(within(screen.getByRole("navigation", { name: "后台导航" })).queryByText("退出登录")).not.toBeInTheDocument();
 });
 
 // Catches missing current-password verification payload, CSRF attachment, and retained credentials.

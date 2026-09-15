@@ -1,3 +1,4 @@
+pub mod admin_content;
 pub mod app;
 pub mod auth;
 pub mod catalog;

@@ -89,5 +89,22 @@ export async function createPublishableMovie(api: AdminApi, name: string) {
   return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: uploadedVideo.version });
 }
 
+export async function createPublishableMovieWithoutPoster(api: AdminApi, name: string) {
+  let movie = await api.write<Movie>("post", "/api/admin/movies", { name });
+  movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
+    version: movie.version,
+    name,
+    synopsis: `${name} pagination fixture`,
+    year: 2026,
+    duration_seconds: 1,
+    genre_ids: [],
+  });
+  const uploaded = await api.upload<{ version: number }>(
+    `/api/admin/media/movies/${movie.id}/video?version=${movie.version}`,
+    video(),
+  );
+  return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: uploaded.version });
+}
+
 export function saveState(state: Record<string, unknown>) { writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 }); }
 export function loadState<T>() { return JSON.parse(readFileSync(statePath, "utf8")) as T; }

@@ -8,6 +8,27 @@ export interface CatalogCard {
   published_at: string; genres: PublicGenre[]; genre_count: number;
 }
 export interface CatalogPage { page: number; size: number; total: number; items: CatalogCard[] }
+export interface AdminContentListItem {
+  id: string;
+  kind: ContentKind;
+  name: string;
+  status: ContentStatus;
+  version: number;
+  created_at: string;
+  poster_url: string | null;
+}
+export interface AdminContentPage {
+  page: number;
+  size: number;
+  total: number;
+  items: AdminContentListItem[];
+}
+export interface AdminContentListQuery {
+  kind?: CatalogKind;
+  status?: ContentStatus;
+  name?: string;
+  page?: number;
+}
 export interface MovieDetail {
   id: string; kind: "movie"; name: string; synopsis: string; year: number | null;
   duration_seconds: number | null; poster_url: string | null; video_url: string | null; genres: PublicGenre[];
