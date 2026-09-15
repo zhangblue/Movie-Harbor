@@ -343,6 +343,36 @@ struct QuarantineClaim {
     checksum_sha256: String,
 }
 
+fn verify_volume_identity(root_fd: &OwnedFd, volume_id: i32) -> Result<(), MediaError> {
+    #[derive(Deserialize)]
+    struct VolumeIdentity {
+        version: u32,
+        volume: i32,
+    }
+
+    let fd = openat(
+        root_fd,
+        ".movie-harbor-volume.json",
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(io::Error::from)?;
+    let stat = rustix::fs::fstat(&fd).map_err(io::Error::from)?;
+    if rustix::fs::FileType::from_raw_mode(stat.st_mode) != rustix::fs::FileType::RegularFile {
+        return Err(io::Error::other("volume identity must be a regular file").into());
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::from(fd).take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(io::Error::other("volume identity is too large").into());
+    }
+    let identity: VolumeIdentity = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    if identity.version != 1 || identity.volume != volume_id {
+        return Err(io::Error::other("volume identity does not match configuration").into());
+    }
+    Ok(())
+}
+
 impl LocalMediaStorage {
     pub(crate) fn validate_storage_key(&self, storage_key: &str) -> Result<(), MediaError> {
         parse_storage_key(storage_key).map(|_| ())
@@ -356,10 +386,30 @@ impl LocalMediaStorage {
         root: impl AsRef<Path>,
         hooks: Arc<dyn StorageHooks>,
     ) -> Result<Self, MediaError> {
+        Self::initialize_with_options(root, hooks, Arc::new(AsyncMutex::new(())), None).await
+    }
+
+    pub(crate) async fn initialize_for_volume(
+        root: impl AsRef<Path>,
+        volume_id: i32,
+        mutations: Arc<AsyncMutex<()>>,
+    ) -> Result<Self, MediaError> {
+        Self::initialize_with_options(root, Arc::new(NoopHooks), mutations, Some(volume_id)).await
+    }
+
+    async fn initialize_with_options(
+        root: impl AsRef<Path>,
+        hooks: Arc<dyn StorageHooks>,
+        mutations: Arc<AsyncMutex<()>>,
+        volume_id: Option<i32>,
+    ) -> Result<Self, MediaError> {
         tokio::fs::create_dir_all(root.as_ref()).await?;
         let canonical = tokio::fs::canonicalize(root.as_ref()).await?;
         let root_fd = open_directory(&CWD, canonical.as_os_str())?;
         verify_exclusive_directory(&root_fd, false)?;
+        if let Some(volume_id) = volume_id {
+            verify_volume_identity(&root_fd, volume_id)?;
+        }
         let incoming_fd = match open_directory(&root_fd, OsStr::new(".incoming")) {
             Ok(fd) => fd,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -398,13 +448,20 @@ impl LocalMediaStorage {
             incoming_fd: Arc::new(incoming_fd),
             quarantine_fd: Arc::new(quarantine_fd),
             operations_fd: Arc::new(operations_fd),
-            mutations: Arc::new(AsyncMutex::new(())),
+            mutations,
             hooks,
         })
     }
 
     pub fn root(&self) -> &Path {
         self.root.as_ref()
+    }
+
+    pub(crate) fn available_bytes(&self) -> Result<u64, MediaError> {
+        let stat = rustix::fs::fstatvfs(&self.root_fd).map_err(io::Error::from)?;
+        stat.f_bavail
+            .checked_mul(stat.f_frsize)
+            .ok_or_else(|| io::Error::other("media filesystem capacity overflow").into())
     }
 
     /// Resolve a persisted key through directory capabilities and verify it names a readable

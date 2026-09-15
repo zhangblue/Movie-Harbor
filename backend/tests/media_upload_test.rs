@@ -12,8 +12,8 @@ use movie_harbor_api::{
     config::Config,
     entities::{episode, media_asset, movie, season, series},
     media::{
-        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, StorageEvent,
-        StorageHooks, UploadPolicy, replace_attachment, store_new_asset,
+        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, MediaStorageSet,
+        StorageEvent, StorageHooks, UploadPolicy, replace_attachment, store_new_asset,
     },
 };
 use sea_orm::{
@@ -840,6 +840,136 @@ fn raw_multipart_request(
         "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
     ));
     request
+}
+
+fn volume_root(volume: i32) -> TempRoot {
+    let root = TempRoot::new();
+    std::fs::write(
+        root.as_ref().join(".movie-harbor-volume.json"),
+        serde_json::to_vec(&json!({"version": 1, "volume": volume})).unwrap(),
+    )
+    .unwrap();
+    root
+}
+
+// Catches accepting an empty set, which could silently leave the application without storage.
+#[tokio::test]
+async fn allocator_rejects_empty_configuration() {
+    assert!(MediaStorageSet::initialize(&[], 0).await.is_err());
+}
+
+// Catches accepting duplicated roots, including two names resolving to one directory.
+#[tokio::test]
+async fn allocator_rejects_duplicate_canonical_roots() {
+    let root = volume_root(0);
+    let error =
+        MediaStorageSet::initialize(&[root.as_ref().to_path_buf(), root.as_ref().join(".")], 0)
+            .await
+            .err()
+            .expect("duplicate roots must fail");
+    assert!(error.to_string().contains("volume 1"));
+    assert!(!format!("{error:?}").contains(&root.as_ref().display().to_string()));
+}
+
+// Catches trusting missing, malformed, reordered or unsupported volume identity files.
+#[tokio::test]
+async fn allocator_requires_matching_versioned_volume_identity() {
+    for marker in [
+        None,
+        Some("not json"),
+        Some(r#"{"version":2,"volume":1}"#),
+        Some(r#"{"version":1,"volume":0}"#),
+    ] {
+        let first = volume_root(0);
+        let second = TempRoot::new();
+        if let Some(marker) = marker {
+            std::fs::write(second.as_ref().join(".movie-harbor-volume.json"), marker).unwrap();
+        }
+        let error = MediaStorageSet::initialize(
+            &[first.as_ref().to_path_buf(), second.as_ref().to_path_buf()],
+            0,
+        )
+        .await
+        .err()
+        .expect("invalid volume identity must fail");
+        assert!(error.to_string().contains("volume 1"));
+        assert!(!format!("{error:?}").contains(&second.as_ref().display().to_string()));
+    }
+}
+
+// Catches probing a reopened root path instead of the already validated directory capability.
+#[tokio::test]
+async fn allocator_real_capacity_probe_survives_root_path_rename() {
+    let root = volume_root(0);
+    let set = MediaStorageSet::initialize(&[root.as_ref().to_path_buf()], 0)
+        .await
+        .unwrap();
+    let parent = TempRoot::new();
+    let moved = parent.as_ref().join("moved-volume");
+    std::fs::rename(root.as_ref(), &moved).unwrap();
+    let reservation = set.reserve_for_upload(1).await.unwrap();
+    assert_eq!(reservation.volume_id(), 0);
+    assert!(matches!(
+        set.reserve_for_upload(u64::MAX).await,
+        Err(MediaError::InsufficientStorage)
+    ));
+}
+
+// Catches assigning each volume its own lock or releasing the shared lock before ownership resolves.
+#[tokio::test]
+async fn allocator_serializes_cross_volume_mutations_until_promoted_file_is_resolved() {
+    let roots = [volume_root(0), volume_root(1)];
+    let set = MediaStorageSet::initialize(
+        &roots
+            .iter()
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>(),
+        0,
+    )
+    .await
+    .unwrap();
+    let (source, _) = Chunks::new([PNG]);
+    let first = set
+        .volume(0)
+        .unwrap()
+        .storage()
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Poster,
+            "first.png",
+            "image/png",
+            &policy(1024),
+            source,
+        )
+        .await
+        .unwrap();
+    let (source, polls) = Chunks::new([PNG]);
+    let second_storage = set.volume(1).unwrap().storage();
+    let upload_policy = policy(1024);
+    let second = second_storage.store(
+        Uuid::new_v4(),
+        MediaKind::Poster,
+        "second.png",
+        "image/png",
+        &upload_policy,
+        source,
+    );
+    tokio::pin!(second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), &mut second)
+            .await
+            .is_err()
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+    drop(first);
+    let stored = tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read(roots[1].as_ref().join(&stored.storage_key)).unwrap(),
+        PNG
+    );
 }
 
 // Catches buffering the entire body before writing and using the user filename as a disk path.

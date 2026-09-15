@@ -3,6 +3,7 @@ pub mod routes;
 pub mod storage;
 pub mod upload;
 pub mod validation;
+pub mod volumes;
 
 use axum::{
     Json,
@@ -14,6 +15,7 @@ use std::{fmt, io};
 pub use storage::{ChunkSource, LocalMediaStorage, StorageEvent, StorageHooks, StoredFile};
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
+pub use volumes::{MediaStorageSet, MediaVolume, UploadReservation};
 
 /// Validate a registered asset at the publication boundary without opening special files.
 pub fn is_publishable_asset<S: AsRef<str>>(
@@ -41,6 +43,12 @@ pub enum MediaError {
     UnsupportedType,
     ContentMismatch,
     TooLarge,
+    InsufficientStorage,
+    InvalidStorageConfiguration,
+    VolumeInitialization {
+        volume_id: usize,
+        reason: &'static str,
+    },
     Empty,
     TargetNotFound,
     ReadOnly,
@@ -62,6 +70,14 @@ impl fmt::Display for MediaError {
             Self::UnsupportedType => "unsupported media type",
             Self::ContentMismatch => "media content does not match its declared type",
             Self::TooLarge => "upload exceeds configured byte limit",
+            Self::InsufficientStorage => "insufficient media storage capacity",
+            Self::InvalidStorageConfiguration => "no media storage volumes configured",
+            Self::VolumeInitialization { volume_id, reason } => {
+                return write!(
+                    formatter,
+                    "media volume {volume_id} initialization failed: {reason}"
+                );
+            }
             Self::Empty => "upload is empty",
             Self::TargetNotFound => "media attachment target not found",
             Self::ReadOnly => "only draft content can replace media",
@@ -138,9 +154,12 @@ impl IntoResponse for MediaError {
             }
             Self::UnsupportedType | Self::ContentMismatch => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::InsufficientStorage => StatusCode::INSUFFICIENT_STORAGE,
             Self::TargetNotFound => StatusCode::NOT_FOUND,
             Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
             Self::InvalidStorageKey
+            | Self::InvalidStorageConfiguration
+            | Self::VolumeInitialization { .. }
             | Self::ReplacementFailed
             | Self::ReplacementFinalizationFailed
             | Self::Io(_)
