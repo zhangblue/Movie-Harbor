@@ -1,6 +1,7 @@
 use crate::{
     auth::{self, AuthState},
     media::LocalMediaStorage,
+    route_params::parse_uuid,
 };
 use axum::{
     Json, Router,
@@ -10,7 +11,6 @@ use axum::{
     routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
-use uuid::Uuid;
 
 use super::{
     dto::{
@@ -75,7 +75,9 @@ async fn detail(
     State(state): State<MovieState>,
     Path(id): Path<String>,
 ) -> Result<Json<MovieResponse>, MovieError> {
-    Ok(Json(service::detail(&state.db, parse_id(id)?).await?))
+    Ok(Json(
+        service::detail(&state.db, parse_uuid(id, MovieError::Invalid)?).await?,
+    ))
 }
 
 async fn update(
@@ -84,7 +86,7 @@ async fn update(
     Json(input): Json<UpdateMovieRequest>,
 ) -> Result<Json<MovieResponse>, MovieError> {
     Ok(Json(
-        service::update(&state.db, parse_id(id)?, input).await?,
+        service::update(&state.db, parse_uuid(id, MovieError::Invalid)?, input).await?,
     ))
 }
 
@@ -123,7 +125,7 @@ async fn transition(
             &state.db,
             &state.storage,
             &state.allowed_video_mime_types,
-            parse_id(id)?,
+            parse_uuid(id, MovieError::Invalid)?,
             input.version,
             target,
         )
@@ -137,7 +139,13 @@ async fn delete_movie(
     Json(input): Json<VersionRequest>,
 ) -> Result<Json<DeleteResultResponse>, MovieError> {
     Ok(Json(
-        service::delete(&state.db, &state.storage, parse_id(id)?, input.version).await?,
+        service::delete(
+            &state.db,
+            &state.storage,
+            parse_uuid(id, MovieError::Invalid)?,
+            input.version,
+        )
+        .await?,
     ))
 }
 
@@ -146,10 +154,6 @@ async fn delete_impact(
     Path(id): Path<String>,
 ) -> Result<Json<DeleteImpactResponse>, MovieError> {
     Ok(Json(
-        service::delete_impact(&state.db, parse_id(id)?).await?,
+        service::delete_impact(&state.db, parse_uuid(id, MovieError::Invalid)?).await?,
     ))
-}
-
-fn parse_id(value: String) -> Result<Uuid, MovieError> {
-    value.parse().map_err(|_| MovieError::Invalid)
 }

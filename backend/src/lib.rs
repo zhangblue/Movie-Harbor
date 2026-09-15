@@ -8,4 +8,5 @@ pub mod error;
 pub mod genres;
 pub mod media;
 pub mod movies;
+pub mod route_params;
 pub mod series;

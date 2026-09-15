@@ -2,6 +2,7 @@ use super::{AttachmentTarget, LocalMediaStorage, MediaError, UploadPolicy};
 use crate::{
     auth::{self, AuthState},
     entities::media_asset,
+    route_params::parse_uuid,
 };
 use axum::{
     Json, Router,
@@ -11,7 +12,6 @@ use axum::{
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 #[derive(Clone)]
 struct MediaState {
@@ -88,7 +88,7 @@ async fn movie_poster(
     upload(
         state,
         AttachmentTarget::MoviePoster {
-            id: parse_id(id)?,
+            id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
         multipart,
@@ -105,7 +105,7 @@ async fn movie_video(
     upload(
         state,
         AttachmentTarget::MovieVideo {
-            id: parse_id(id)?,
+            id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
         multipart,
@@ -122,7 +122,7 @@ async fn series_poster(
     upload(
         state,
         AttachmentTarget::SeriesPoster {
-            id: parse_id(id)?,
+            id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
         multipart,
@@ -139,16 +139,12 @@ async fn episode_video(
     upload(
         state,
         AttachmentTarget::EpisodeVideo {
-            id: parse_id(id)?,
+            id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
         multipart,
     )
     .await
-}
-
-fn parse_id(id: String) -> Result<Uuid, MediaError> {
-    id.parse().map_err(|_| MediaError::TargetNotFound)
 }
 
 async fn upload(

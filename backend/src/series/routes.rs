@@ -2,6 +2,7 @@ use crate::{
     auth::{self, AuthState},
     media::LocalMediaStorage,
     movies::dto::{DeleteImpactResponse, DeleteResultResponse},
+    route_params::parse_uuid,
 };
 use axum::{
     Json, Router,
@@ -11,7 +12,6 @@ use axum::{
     routing::{get, patch, post},
 };
 use sea_orm::DatabaseConnection;
-use uuid::Uuid;
 
 use super::{
     dto::{
@@ -124,7 +124,7 @@ async fn detail(
     Path(series_id): Path<String>,
 ) -> Result<Json<SeriesResponse>, SeriesError> {
     Ok(Json(
-        service::detail(&state.db, parse_id(series_id)?).await?,
+        service::detail(&state.db, parse_uuid(series_id, SeriesError::Invalid)?).await?,
     ))
 }
 
@@ -134,7 +134,12 @@ async fn update(
     Json(input): Json<UpdateSeriesRequest>,
 ) -> Result<Json<SeriesResponse>, SeriesError> {
     Ok(Json(
-        service::update(&state.db, parse_id(series_id)?, input).await?,
+        service::update(
+            &state.db,
+            parse_uuid(series_id, SeriesError::Invalid)?,
+            input,
+        )
+        .await?,
     ))
 }
 
@@ -149,7 +154,7 @@ async fn create_season(
             service::create_season(
                 &state.db,
                 CreateSeasonCommand {
-                    series_id: parse_id(series_id)?,
+                    series_id: parse_uuid(series_id, SeriesError::Invalid)?,
                     expected_series_version: input.version,
                     number: input.number,
                 },
@@ -168,8 +173,8 @@ async fn update_season(
         service::update_season(
             &state.db,
             UpdateSeasonCommand {
-                series_id: parse_id(series_id)?,
-                season_id: parse_id(season_id)?,
+                series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+                season_id: parse_uuid(season_id, SeriesError::Invalid)?,
                 expected_series_version: input.version,
                 number: input.number,
             },
@@ -188,8 +193,8 @@ async fn delete_season(
             &state.db,
             &state.storage,
             DeleteSeasonCommand {
-                series_id: parse_id(series_id)?,
-                season_id: parse_id(season_id)?,
+                series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+                season_id: parse_uuid(season_id, SeriesError::Invalid)?,
                 expected_series_version: input.version,
             },
         )
@@ -202,8 +207,12 @@ async fn season_delete_impact(
     Path((series_id, season_id)): Path<(String, String)>,
 ) -> Result<Json<ChildDeleteImpactResponse>, SeriesError> {
     Ok(Json(
-        service::season_delete_impact(&state.db, parse_id(series_id)?, parse_id(season_id)?)
-            .await?,
+        service::season_delete_impact(
+            &state.db,
+            parse_uuid(series_id, SeriesError::Invalid)?,
+            parse_uuid(season_id, SeriesError::Invalid)?,
+        )
+        .await?,
     ))
 }
 
@@ -218,8 +227,8 @@ async fn create_episode(
             service::create_episode(
                 &state.db,
                 CreateEpisodeCommand {
-                    series_id: parse_id(series_id)?,
-                    season_id: parse_id(season_id)?,
+                    series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+                    season_id: parse_uuid(season_id, SeriesError::Invalid)?,
                     input,
                 },
             )
@@ -235,9 +244,9 @@ async fn episode_detail(
     Ok(Json(
         service::episode_detail(
             &state.db,
-            parse_id(series_id)?,
-            parse_id(season_id)?,
-            parse_id(episode_id)?,
+            parse_uuid(series_id, SeriesError::Invalid)?,
+            parse_uuid(season_id, SeriesError::Invalid)?,
+            parse_uuid(episode_id, SeriesError::Invalid)?,
         )
         .await?,
     ))
@@ -252,9 +261,9 @@ async fn update_episode(
         service::update_episode(
             &state.db,
             UpdateEpisodeCommand {
-                series_id: parse_id(series_id)?,
-                season_id: parse_id(season_id)?,
-                episode_id: parse_id(episode_id)?,
+                series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+                season_id: parse_uuid(season_id, SeriesError::Invalid)?,
+                episode_id: parse_uuid(episode_id, SeriesError::Invalid)?,
                 input,
             },
         )
@@ -297,7 +306,7 @@ async fn transition_series(
             &state.db,
             &state.storage,
             &state.allowed_video_mime_types,
-            parse_id(series_id)?,
+            parse_uuid(series_id, SeriesError::Invalid)?,
             input.version,
             target,
         )
@@ -341,9 +350,9 @@ async fn transition_episode(
             &state.storage,
             &state.allowed_video_mime_types,
             TransitionEpisodeCommand {
-                series_id: parse_id(ids.0)?,
-                season_id: parse_id(ids.1)?,
-                episode_id: parse_id(ids.2)?,
+                series_id: parse_uuid(ids.0, SeriesError::Invalid)?,
+                season_id: parse_uuid(ids.1, SeriesError::Invalid)?,
+                episode_id: parse_uuid(ids.2, SeriesError::Invalid)?,
                 expected_episode_version: input.version,
                 target,
             },
@@ -361,9 +370,9 @@ async fn delete_episode(
         &state.db,
         &state.storage,
         DeleteEpisodeCommand {
-            series_id: parse_id(series_id)?,
-            season_id: parse_id(season_id)?,
-            episode_id: parse_id(episode_id)?,
+            series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+            season_id: parse_uuid(season_id, SeriesError::Invalid)?,
+            episode_id: parse_uuid(episode_id, SeriesError::Invalid)?,
             expected_episode_version: input.version,
         },
     )
@@ -378,9 +387,9 @@ async fn episode_delete_impact(
     Ok(Json(
         service::episode_delete_impact(
             &state.db,
-            parse_id(series_id)?,
-            parse_id(season_id)?,
-            parse_id(episode_id)?,
+            parse_uuid(series_id, SeriesError::Invalid)?,
+            parse_uuid(season_id, SeriesError::Invalid)?,
+            parse_uuid(episode_id, SeriesError::Invalid)?,
         )
         .await?,
     ))
@@ -395,7 +404,7 @@ async fn delete_series(
         service::delete_series(
             &state.db,
             &state.storage,
-            parse_id(series_id)?,
+            parse_uuid(series_id, SeriesError::Invalid)?,
             input.version,
         )
         .await?,
@@ -407,10 +416,6 @@ async fn delete_impact(
     Path(series_id): Path<String>,
 ) -> Result<Json<DeleteImpactResponse>, SeriesError> {
     Ok(Json(
-        service::delete_impact(&state.db, parse_id(series_id)?).await?,
+        service::delete_impact(&state.db, parse_uuid(series_id, SeriesError::Invalid)?).await?,
     ))
-}
-
-fn parse_id(value: String) -> Result<Uuid, SeriesError> {
-    value.parse().map_err(|_| SeriesError::Invalid)
 }

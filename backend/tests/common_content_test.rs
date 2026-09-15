@@ -4,6 +4,20 @@ use movie_harbor_api::content::{
     ensure_transition, normalize_required, parse_target, parse_unique_uuids, require_positive_i32,
     require_positive_i64, require_version,
 };
+use movie_harbor_api::route_params::parse_uuid;
+
+#[test]
+fn uuid_parser_preserves_the_callers_error_value() {
+    let valid = parse_uuid(
+        "00000000-0000-0000-0000-000000000001".to_string(),
+        "invalid",
+    );
+    assert_eq!(
+        valid.unwrap().to_string(),
+        "00000000-0000-0000-0000-000000000001"
+    );
+    assert_eq!(parse_uuid("bad".to_string(), "invalid"), Err("invalid"));
+}
 
 #[test]
 fn normalizes_shared_content_fields() {
