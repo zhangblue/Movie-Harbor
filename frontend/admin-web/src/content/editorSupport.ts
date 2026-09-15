@@ -8,13 +8,12 @@ export type EditorWriteError =
 export type GenreChoice = Pick<GenreResponse, "id" | "name" | "enabled">;
 
 export function mergeGenreChoices(available: GenreChoice[], linked: GenreChoice[]): GenreChoice[] {
-  const seen = new Set(available.map((genre) => genre.id));
-  const extras = linked.filter((genre) => {
+  const seen = new Set<string>();
+  return [...available, ...linked].filter((genre) => {
     if (seen.has(genre.id)) return false;
     seen.add(genre.id);
     return true;
   });
-  return [...available, ...extras];
 }
 
 export function classifyEditorWriteError(cause: unknown): EditorWriteError {

@@ -14,6 +14,16 @@ test("mergeGenreChoices keeps available order and appends linked inactive genres
   expect(linked.map((genre) => genre.id)).toEqual(["g1", "g3"]);
 });
 
+test("mergeGenreChoices removes duplicate available genre IDs while preserving first occurrence order", () => {
+  const available = [
+    { id: "g1", name: "剧情", enabled: true },
+    { id: "g1", name: "重复剧情", enabled: false },
+    { id: "g2", name: "科幻", enabled: true },
+  ];
+
+  expect(mergeGenreChoices(available, []).map((genre) => genre.id)).toEqual(["g1", "g2"]);
+});
+
 test("classifyEditorWriteError preserves stable media and validation outcomes", () => {
   expect(classifyEditorWriteError(new ApiError(500, "", "", { code: "media_delete_failed" })))
     .toEqual({ kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" });
