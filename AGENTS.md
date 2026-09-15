@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-项目已完成需求设计、UI Demo、生产应用、Docker Compose 部署、半离线发布工具、管理与公开内容分页，以及前后端公共函数整理。任何变更前都必须先阅读主设计与主实现计划：
+项目已完成需求设计、UI Demo、生产应用、Docker Compose 部署、半离线发布工具、管理与公开内容分页、前后端公共函数整理，以及源码部署的多存储卷媒体支持。任何变更前都必须先阅读主设计与主实现计划：
 
 - `docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md`
 - `docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md`
@@ -34,6 +34,8 @@
 - `docs/superpowers/plans/2026-09-14-hevc-mp4-upload-and-localized-error.md`
 - `docs/superpowers/specs/2026-09-14-high-profile-avcc-compatibility-design.md`
 - `docs/superpowers/plans/2026-09-14-high-profile-avcc-compatibility.md`
+- `docs/superpowers/specs/2026-09-16-multi-volume-media-storage-design.md`
+- `docs/superpowers/plans/2026-09-16-multi-volume-media-storage.md`
 
 ### 工程与文档
 
@@ -70,10 +72,12 @@
 - `backend/src/content.rs`：电影、剧集和单集共用的字段、Patch 与生命周期基础规则。
 - `backend/src/route_params.rs`：保留各领域错误语义的公共 UUID 路由参数解析。
 - `backend/src/media/removal.rs`：媒体暂存、恢复、同步删除及删除事务收尾。
+- `backend/src/media/volumes.rs`：卷身份、容量探针、上传预留和多卷存储协调；`storage.rs` 负责单卷内的受控文件操作。
 - `backend/migration/`：SeaORM 数据库迁移。
 - `tests/`：根 Node 契约测试。
 - `tests/e2e/`：Playwright 跨服务验收与安全 runner。
 - `tools/`：半离线发布包构建入口与核心工具。
+- `tools/storage-compose.mjs` 与 `tools/start-compose.sh`：源码部署的媒体卷标记初始化、Compose 存储覆盖文件生成及启动。
 - `dist/offline/`：工具运行后构建生成且被 Git 忽略的半离线归档输出。
 - `demo/`：审核通过的静态 UI Demo，不参与生产构建。
 - `docs/superpowers/specs/`：已确认的产品与增量设计。
@@ -94,16 +98,21 @@
 - 单集不保存简介；公开剧集详情按季、集序号展示名称和时长。
 - 管理内容列表和公开内容目录固定每页 20 条，并使用数字页码；管理列表通过 `/api/admin/contents` 统一分页电影与剧集。
 - 媒体文件保存在挂载目录，数据库只保存受控文件标识和元数据。
+- 文件定位使用 `(storage_volume, storage_key)`；不得按容量或文件存在性猜测所属卷，公开 URL 为 `/media/v<编号>/<受控键>`。
+- 各媒体类型按实际可用容量、每卷保留空间和进程内上传预留选择健康卷；相同容量优先小编号，临时文件与正式文件始终位于同卷。
 - 发布后的媒体 URL 是公开地址，不承诺防下载或防盗链。
 - 媒体资产在电影海报、电影视频、剧集海报和单集视频槽位之间全局独占，不能共享。
 - 删除电影、剧集、季或单集以及替换媒体时，成功响应前必须同步移除对应数据库记录和物理文件。
 - 系统不运行周期媒体垃圾回收；启动恢复只处理带持久清单的中断删除或替换，不扫描并删除任意孤立文件。
+- 跨卷替换和删除必须按数据库卷编号执行，预提交失败时恢复已隔离的旧文件；启动恢复扫描全部配置卷的持久清单，不跨卷复制文件。
 
 ## 宿主数据目录
 
 - `DATABASE_HOST_DIR` 默认 `./data/postgres`，映射 PostgreSQL 的 `/var/lib/postgresql/data`。
-- `MEDIA_HOST_DIR` 默认 `./data/media`，同时映射 API 的 `/media` 和 Caddy 的只读 `/srv/media`。
-- 数据库与媒体目录必须作为同一一致性备份集；从既有命名卷部署切换到 bind mount 不会自动迁移数据。
+- `MEDIA_HOST_DIR` 默认 `./data/media`，支持分号分隔的有序目录数组；多卷使用绝对路径，禁止空项、重复、替换、删除或重排已有项，只允许在末尾追加。
+- 各卷映射 API 的 `/media/volumes/<编号>` 与 Caddy 只读的 `/srv/media/volumes/<编号>`，API 的 `MEDIA_DIRS` 由生成配置写入；每卷必须有匹配的 `.movie-harbor-volume.json` 标记。
+- `MEDIA_DISK_RESERVE_BYTES` 必须为正整数，默认每卷 10 GiB。缺盘、卷标记错误或数据库引用未配置卷时拒绝启动，不自动创建空卷冒充原盘。
+- 数据库与全部媒体卷（含标记与恢复清单）必须作为同一一致性备份集；从既有命名卷部署切换到 bind mount 不会自动迁移数据。既有单目录升级为卷 0，不移动原文件。
 
 ## 半离线发布边界
 
@@ -141,4 +150,4 @@ npm run test:e2e
 git diff --check
 ```
 
-涉及跨服务流程或部署时，还必须运行 Docker Compose 和 Playwright 端到端测试。E2E runner 自行创建隔离的 Compose 项目和数据目录，不得改用生产默认的 `data/postgres` 或 `data/media`。不在文档中加入固定的数据库测试服务强制清理命令，以免误伤并行任务。
+涉及跨服务流程或部署时，还必须运行 Docker Compose 和 Playwright 端到端测试。E2E runner 自行创建带随机所有权标记的 Compose 项目、数据库目录、`media-0` 和 `media-1`，生成卷身份与覆盖文件，必须覆盖全部生产存储变量；清理仅允许本次运行根目录内已验证身份的目录，不得改用生产默认的 `data/postgres` 或 `data/media`。相同文件系统的真实容量按卷 0 确定性选择；跨卷容量差异由 Rust 注入 `CapacityProbe` 验证，不向生产增加伪造容量环境变量或 API。不在文档中加入固定的数据库测试服务强制清理命令，以免误伤并行任务。

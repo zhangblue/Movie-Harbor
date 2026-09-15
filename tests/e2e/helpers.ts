@@ -1,6 +1,8 @@
 import { expect, type APIRequestContext, type Playwright } from "@playwright/test";
 import { existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { execFile, execFileSync } from "node:child_process";
+import { promisify } from "node:util";
 
 export const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080";
 export const adminName = process.env.E2E_ADMIN_NAME ?? "task15-admin";
@@ -10,12 +12,35 @@ const generated = process.env.E2E_RUN_DIR;
 if (!generated || !isAbsolute(generated)) throw new Error("E2E_RUN_DIR must be the runner's absolute isolated directory");
 const statePath = resolve(generated, "state.json");
 const configuredMediaHostDir = process.env.MEDIA_HOST_DIR;
-if (!configuredMediaHostDir || !isAbsolute(configuredMediaHostDir)) throw new Error("MEDIA_HOST_DIR must be the runner's absolute isolated media directory");
+export const mediaHostDirs = configuredMediaHostDir?.split(";") ?? [];
+if (mediaHostDirs.length !== 2 || mediaHostDirs.some((directory, volume) => directory !== join(generated, `media-${volume}`))) {
+  throw new Error("MEDIA_HOST_DIR must contain the runner's two absolute isolated media directories");
+}
 const configuredDatabaseHostDir = process.env.DATABASE_HOST_DIR;
 if (!configuredDatabaseHostDir || !isAbsolute(configuredDatabaseHostDir)) throw new Error("DATABASE_HOST_DIR must be the runner's absolute isolated database directory");
-export const mediaHostDir = configuredMediaHostDir;
+const project = process.env.E2E_COMPOSE_PROJECT;
+if (!project?.endsWith(`-${generated.split("/").at(-1)}`) || !/^mh-task15-e2e(?:-[a-z0-9-]+)?$/.test(project)) throw new Error("invalid isolated Compose project");
+const composeArgs = ["compose", "-p", project, "--env-file", join(generated, "e2e.env"), "-f", "docker-compose.yml", "-f", join(generated, "compose.storage.generated.json")];
+export function storageComposeConfig() {
+  return JSON.parse(execFileSync("docker", [...composeArgs, "config", "--format", "json"], { encoding: "utf8" }));
+}
+export async function restartCompose() {
+  const execute = promisify(execFile);
+  await execute("docker", [...composeArgs, "restart"], { timeout: 60_000 });
+  await execute("docker", [...composeArgs, "up", "-d", "--wait"], { timeout: 60_000 });
+}
+export async function withPrivateMediaSentinels(check: () => Promise<void>) {
+  const execute = promisify(execFile);
+  const paths = [0, 1].flatMap((volume) => [".incoming", ".quarantine"].map((area) => `/media/volumes/${volume}/${area}/e2e-private-sentinel`));
+  try {
+    await execute("docker", [...composeArgs, "exec", "-T", "--user", "10001", "api", "sh", "-ec", 'for file do printf private > "$file"; done', "sh", ...paths]);
+    await check();
+  } finally {
+    await execute("docker", [...composeArgs, "exec", "-T", "--user", "10001", "api", "rm", "-f", ...paths]);
+  }
+}
 
-export function snapshotMediaFiles(directory = mediaHostDir): Set<string> {
+export function snapshotMediaFiles(): Set<string> {
   const files = new Set<string>();
   function visit(path: string) {
     if (!existsSync(path)) return;
@@ -26,7 +51,7 @@ export function snapshotMediaFiles(directory = mediaHostDir): Set<string> {
       else if (entry.isFile() && lstatSync(child).isFile()) files.add(child);
     }
   }
-  visit(directory);
+  for (const directory of mediaHostDirs) visit(directory);
   return files;
 }
 

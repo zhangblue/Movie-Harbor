@@ -54,6 +54,18 @@ function request(url) {
   });
 }
 
+test("Compose passes the default and configured per-volume reserve to the API", () => {
+  for (const [configured, expected] of [[undefined, "10737418240"], ["21474836480", "21474836480"]]) {
+    const environment = { ...process.env };
+    delete environment.MEDIA_DISK_RESERVE_BYTES;
+    if (configured !== undefined) environment.MEDIA_DISK_RESERVE_BYTES = configured;
+    const config = JSON.parse(execFileSync("docker", ["compose", "--env-file", ".env.example", "-f", "docker-compose.yml", "config", "--format", "json"], {
+      cwd: projectRoot, env: environment, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    }));
+    assert.equal(config.services.api.environment.MEDIA_DISK_RESERVE_BYTES, expected);
+  }
+});
+
 test("parses existing semicolon-delimited host directories and renders isolated volume mounts", () => {
   const root = tempRoot();
   try {

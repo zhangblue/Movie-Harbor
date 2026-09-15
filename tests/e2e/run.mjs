@@ -3,7 +3,7 @@ import { writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { buildBindCleanupPlan, buildE2EEnvironment, cleanupE2ERun, createE2ERun } from "./run-safety.mjs";
+import { buildBindCleanupPlan, buildE2EEnvironment, cleanupE2ERun, createE2ERun, prepareE2EStorage } from "./run-safety.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const generated = resolve(import.meta.dirname, ".generated");
@@ -20,7 +20,7 @@ const port = process.env.E2E_PORT ?? "18080";
 const initialPassword = "task15-initial-password";
 const changedPassword = "task15-changed-password";
 const envFile = resolve(isolatedRun.runDir, "e2e.env");
-const compose = ["compose", "-p", project, "--env-file", envFile, "-f", "docker-compose.yml"];
+const compose = ["compose", "-p", project, "--env-file", envFile, "-f", "docker-compose.yml", "-f", isolatedRun.composeOverride];
 const runEnvironment = buildE2EEnvironment(process.env, isolatedRun);
 const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: root,
@@ -48,9 +48,10 @@ const testEnv = {
 
 let containerStartAttempted = false;
 try {
+  prepareE2EStorage(isolatedRun);
   writeFileSync(envFile, [
     `APP_PORT=${port}`,
-    `MEDIA_HOST_DIR=${isolatedRun.mediaDir}`,
+    `MEDIA_HOST_DIR=${isolatedRun.mediaDirs.join(";")}`,
     `DATABASE_HOST_DIR=${isolatedRun.databaseDir}`,
     "POSTGRES_DB=movie_harbor",
     "POSTGRES_USER=movie_harbor",
@@ -77,14 +78,13 @@ try {
   await assertPortAvailable();
   containerStartAttempted = true;
   run("docker", [...compose, "up", "-d", "--build", "--wait"]);
-  run("docker", [...compose, "exec", "-T", "--user", "10001", "api", "sh", "-c", "printf private > /media/.incoming/e2e-private-sentinel"]);
   run("npx", ["playwright", "test", "--project=admin"], { env: testEnv });
   run("docker", [...compose, "restart"]);
   run("docker", [...compose, "up", "-d", "--wait"]);
   run("npx", ["playwright", "test", "tests/e2e/persistence.spec.ts", "--project=persistence", "--no-deps"], { env: testEnv });
 } finally {
   if (process.env.E2E_KEEP === "1") {
-    console.error(`E2E_KEEP=1: kept project ${project}, run directory ${isolatedRun.runDir}, media directory ${isolatedRun.mediaDir}, and database directory ${isolatedRun.databaseDir}`);
+    console.error(`E2E_KEEP=1: kept project ${project}, run directory ${isolatedRun.runDir}, media directories ${isolatedRun.mediaDirs.join("; ")}, and database directory ${isolatedRun.databaseDir}`);
   } else if (!containerStartAttempted) {
     cleanupE2ERun(isolatedRun);
   } else {

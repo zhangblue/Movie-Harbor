@@ -10,7 +10,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - UI Demo：已确认，保存在 `demo/`。
 - 生产应用：已实现，可通过 Docker Compose 自托管。
 - 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
-- 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
+- 媒体能力：支持多存储卷、同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
 - 发布工具：支持生成 `linux/arm64` 半离线 Docker 部署包。
 
 ## 核心设计
@@ -50,12 +50,13 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [HEVC MP4 上传与中文错误反馈](docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md)
 - [管理与公开内容列表分页](docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md)
 - [前后端公共函数提取](docs/superpowers/specs/2026-09-15-common-function-extraction-design.md)
+- [多存储卷媒体设计](docs/superpowers/specs/2026-09-16-multi-volume-media-storage-design.md)与[实现计划](docs/superpowers/plans/2026-09-16-multi-volume-media-storage.md)
 
 完整设计和实施记录位于 `docs/superpowers/specs/` 与 `docs/superpowers/plans/`。
 
 ## 媒体目录安全边界
 
-`MEDIA_DIR` 必须由后端进程的 OS 账号拥有，且不可对组用户或其他用户开放写权限。后端会在启动时验证该条件，并以 `0700` 创建私有 `.quarantine` 目录；权限不安全时会拒绝启动。部署时不得让其他服务共享该 OS 账号或获得媒体目录写权限。同一 OS 账号下运行的恶意进程能够修改应用自有文件，因此位于本地文件存储的信任边界内。
+`MEDIA_DIRS` 中的每个媒体目录必须由后端进程的 OS 账号拥有，且不可对组用户或其他用户开放写权限。后端会在启动时验证该条件，并以 `0700` 创建私有 `.quarantine` 目录；权限不安全时会拒绝启动。部署时不得让其他服务共享该 OS 账号或获得媒体目录写权限。同一 OS 账号下运行的恶意进程能够修改应用自有文件，因此位于本地文件存储的信任边界内。直接运行后端时使用分号分隔的 `MEDIA_DIRS`；旧的单卷 `MEDIA_DIR` 仅作为未设置 `MEDIA_DIRS` 时的兼容配置。
 
 Compose 会先用一次性初始化容器把媒体卷根目录交给专用的 API 用户，并设为 `0700`。API 以 UID `10001` 读写媒体卷；入口 Caddy 仅以只读方式挂载同一卷。若改用宿主机目录绑定，请先执行 `chown 10001:10001 <目录>` 和 `chmod 0700 <目录>`，且不要把该目录写权限授予其他服务。
 
@@ -69,11 +70,13 @@ Compose 会先用一次性初始化容器把媒体卷根目录交给专用的 AP
 
 ## 生产部署
 
-要求安装 Docker Engine 与 Docker Compose v2。复制环境变量示例并替换密码与代理秘密；非本机部署还需按实际入口配置来源和 Cookie 安全选项：
+要求安装 Docker Engine、Docker Compose v2 和 Node.js 24 或更新版本。复制环境变量示例并替换密码与代理秘密；非本机部署还需按实际入口配置来源和 Cookie 安全选项。媒体目录必须事先存在；新部署使用空目录，升级使用原目录：
 
 ```bash
 cp .env.example .env
-docker compose -p movie-harbor up -d --build --wait
+# 仅新部署：按 .env 中配置的路径创建目录；默认配置如下。
+mkdir -p data/media
+./tools/start-compose.sh
 ```
 
 默认本机入口是 `http://localhost:8080`。如果修改 `APP_PORT`，或实际使用其他主机名、IP、端口或协议访问，必须把 `PUBLIC_ORIGIN` 同步改为浏览器实际使用的完整来源。公开站位于 `/`，管理后台位于 `/admin/`，API 位于 `/api/`，媒体位于 `/media/`。PostgreSQL 不暴露宿主端口。
@@ -86,7 +89,8 @@ docker compose -p movie-harbor up -d --build --wait
 | --- | --- | --- |
 | `APP_PORT` | `8080` | 宿主机入口端口；修改后同步调整 `PUBLIC_ORIGIN`。 |
 | `DATABASE_HOST_DIR` | `./data/postgres` | PostgreSQL 宿主机持久目录。 |
-| `MEDIA_HOST_DIR` | `./data/media` | 海报和视频宿主机持久目录。 |
+| `MEDIA_HOST_DIR` | `./data/media` | 分号分隔的有序宿主媒体目录列表；多卷必须使用绝对路径。 |
+| `MEDIA_DISK_RESERVE_BYTES` | `10737418240` | 每卷安全保留空间，默认 10 GiB，必须是正整数。 |
 | `POSTGRES_DB` / `POSTGRES_USER` | `movie_harbor` | Compose 使用的数据库名与账号。 |
 | `POSTGRES_PASSWORD` | 无安全默认值 | 必须替换为随机数据库密码。 |
 | `ADMIN_NAME` / `ADMIN_INITIAL_PASSWORD` | `admin` / 无安全默认值 | 仅在空库首次创建管理员时使用。 |
@@ -105,16 +109,30 @@ docker compose -p movie-harbor up -d --build --wait
 常用运维命令：
 
 ```bash
-docker compose -p movie-harbor ps
-docker compose -p movie-harbor logs -f api caddy
-docker compose -p movie-harbor restart
-docker compose -p movie-harbor pull
-docker compose -p movie-harbor up -d --build --wait
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env ps
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env logs -f api caddy
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env restart
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env pull
+./tools/start-compose.sh
 ```
 
 `docker compose down` 不会删除当前通过 bind mount 保存的数据库和媒体目录；真正的数据边界是 `DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 指向的宿主机路径。不要在未完成一致备份时删除、清空或改指这两个目录。
 
+### 多卷初始化与扩容
+
+`.env` 没有原生数组类型，`MEDIA_HOST_DIR` 使用分号表达有序数组，例如 `MEDIA_HOST_DIR=/mnt/disk1/movie-harbor;/mnt/disk2/movie-harbor`。单路径仍有效；禁止空项、重复目录、符号链接根目录和包含分号的目录名。列表位置就是稳定卷编号 `0、1、2…`，上线后只能在末尾追加，不能删除、替换或重排已有项。Windows Docker Desktop 路径使用正斜杠（如 `D:/MovieHarbor/media;E:/MovieHarbor/media`），需在相应 Windows 环境完成多物理盘验收；当前源码启动入口是 POSIX shell。
+
+`./tools/start-compose.sh` 先检查现有目录并初始化 `.movie-harbor-volume.json` 身份标记，再生成被 Git 忽略的 `compose.storage.generated.json`，然后使用基础与覆盖文件共同启动。已有单目录部署保持原路径作为卷 0，入口只补标记，数据库迁移把旧记录归到卷 0，不移动原文件。新追加卷必须为空；已有标记必须与列表位置一致，不能手工改编号来绕过错误。
+
+每个目录分别映射到 API/初始化容器的 `/media/volumes/<编号>` 和 Caddy 只读的 `/srv/media/volumes/<编号>`。公开地址形如 `/media/v0/video/ab/<文件标识>.mp4`；卷标记、`.incoming`、`.quarantine` 与操作清单不会公开。
+
+扩容时先用上述两个 Compose 文件停止服务，确认所有原盘在线，在配置末尾追加已挂载且为空的新目录，再运行启动入口重新创建容器。新上传会选择扣除安全保留空间与进行中上传预留量后，可用空间最多的健康卷；容量相同时优先编号较小的卷。系统不热插拔、不拆分单文件、不迁移或重新平衡旧文件。
+
+遇到缺盘、标记不符、顺序变化或数据库引用未配置卷时，API 拒绝启动。应停止服务，检查磁盘挂载和原始配置，并从同一备份点恢复身份标记与数据；不要在缺盘挂载点创建空目录冒充原盘。运行中某卷不可用时，新上传可以选择其他健康卷，但涉及故障卷旧文件的替换或删除会失败并保留数据库状态。收到存储空间不足提示时，先释放空间、恢复卷或按上述流程追加卷；不要直接删除受管理的媒体文件或清空内部恢复目录。
+
 ## 半离线发布包
+
+当前分支的多卷存储初始化尚未同步到包内发布入口；这项适配会在后续发布任务中完成。以下保留既有 ARM64 打包器的使用说明，当前多卷版本请使用上文源码部署入口。
 
 构建机与目标机首版都必须使用 `linux/arm64` Docker 平台，并安装 Docker Engine 与 Docker Compose v2。构建机还需要 Node.js、Git 和 tar，并能下载构建依赖。在仓库根目录执行：
 
@@ -142,7 +160,7 @@ docker compose up -d --no-build --wait
 
 `load-images.sh` 先用 `sha256sum` 校验包内文件，再导入镜像并验证 `linux/arm64` 平台；目标机需要提供该命令。校验用于检查文件完整性，分发时还应通过可信渠道核对外层归档的 SHA-256。公开站、管理后台及 HTTPS、初始管理员和代理秘密要求与上述生产部署说明一致。
 
-`DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`，`MEDIA_HOST_DIR` 映射到 API 的 `/media` 和 Caddy 的只读 `/srv/media`。默认分别为解压目录下的 `./data/postgres` 和 `./data/media`；建议改为固定的宿主机绝对路径，以便升级时复用同一套数据。初始化容器会设置媒体目录的属主和权限。
+`DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`。媒体卷映射规则见上文；源码部署支持生成多卷覆盖配置。当前半离线打包器仍沿用单卷发布入口，尚未包含新的存储初始化工具，不能直接套用本次源码多卷启动步骤；多卷部署请先使用源码入口。默认数据目录为 `./data/postgres` 和 `./data/media`，建议使用固定绝对路径以便升级复用。
 
 升级前停止写入，并将数据库和媒体目录作为同一个一致性备份集保存；新包导入后，复用原有数据目录、部署项目名和经过核对的环境配置，再执行启动命令。包不包含真实 `.env`、密码、数据库、媒体数据、源码或开发依赖；备份与秘密须由部署者单独保管。停止本部署使用 `docker compose down`，不要删除仍需保留的数据目录。
 
@@ -154,21 +172,23 @@ docker compose up -d --no-build --wait
 - 支持 HEVC MP4 的 `hvc1`、`hev1` 样本项。
 - 实际播放能力仍取决于访问者浏览器和操作系统对 HEVC 的支持；服务不会自动转码。
 - `MAX_UPLOAD_BYTES` 是单文件上限，默认值为 50 GiB（`53687091200` 字节），不是媒体库总容量或推荐文件大小。规划磁盘时需同时预留正式媒体、上传临时文件和替换期间新旧文件的空间。
+- `MEDIA_DISK_RESERVE_BYTES` 对每卷保留 10 GiB（可配置正整数），缺少请求长度时按 `MAX_UPLOAD_BYTES` 为本次上传预留容量；即使文件很小，也必须有足够的保守预留空间。
 - `/media` 是公开 URL，支持浏览器 Range 请求，但不提供防下载、DRM 或可靠防盗链。
 
 ## 一致备份与恢复
 
-数据库元数据和 `MEDIA_HOST_DIR` 媒体目录必须作为同一个一致性备份集处理，只备份其中一项会产生丢失引用或孤立文件。稳妥的单机流程是在维护窗口停止 API 写入，同时导出数据库并归档媒体目录。下面假设 `.env` 中的 `MEDIA_HOST_DIR` 已改为宿主机绝对路径：
+数据库元数据和 `MEDIA_HOST_DIR` 中的全部媒体卷必须作为同一个一致性备份集处理，只备份部分卷会产生丢失引用或孤立文件。维护窗口中先停止 API 写入，导出数据库，逐卷归档全部内容（包括隐藏的身份标记与恢复清单），并记录卷顺序和配置。所有卷归档完成后才能恢复写入。下面展示卷 0 的备份命令；多卷部署需为每个实际目录重复归档步骤，并使用各自独立文件名：
 
 ```bash
-docker compose -p movie-harbor stop api
-docker compose -p movie-harbor exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > movie-harbor-db.dump
-MEDIA_BACKUP_SOURCE=/absolute/path/from-MEDIA_HOST_DIR
-docker run --rm --mount type=bind,src="$MEDIA_BACKUP_SOURCE",dst=/source,readonly --mount type=bind,src="$PWD",dst=/backup alpine:3.22 tar -C /source -czf /backup/movie-harbor-media.tgz .
-docker compose -p movie-harbor start api
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env stop api
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > movie-harbor-db.dump
+MEDIA_BACKUP_SOURCE=/absolute/path/to/volume-0
+docker run --rm --mount type=bind,src="$MEDIA_BACKUP_SOURCE",dst=/source,readonly --mount type=bind,src="$PWD",dst=/backup alpine:3.22 tar -C /source -czf /backup/movie-harbor-media-v0.tgz .
+# 此时继续归档其余所有媒体卷，全部完成后再启动 API。
+docker compose -f docker-compose.yml -f compose.storage.generated.json --env-file .env start api
 ```
 
-恢复时先停止 API，将数据库恢复到空库，并把媒体归档解压回 `MEDIA_HOST_DIR` 指向的目录；确认两者来自同一备份点、媒体目录属主仍为 UID/GID `10001:10001` 且权限为 `0700` 后再启动 API。备份文件包含私有内容与密码哈希，应加密保存并定期演练恢复。`DATABASE_HOST_DIR` 的 PostgreSQL 文件不能替代逻辑导出直接跨版本复制。
+恢复时先停止 API，将数据库恢复到空库，把每卷归档解压回对应的原逻辑卷位置，恢复全部身份标记和配置顺序；确认数据库与全部媒体卷来自同一备份点、媒体目录属主仍为 UID/GID `10001:10001` 且权限为 `0700` 后，重新生成覆盖配置并启动。启动恢复只处理有持久清单的中断操作，不会扫描或删除普通孤立文件。备份文件包含私有内容与密码哈希，应加密保存并定期演练恢复。`DATABASE_HOST_DIR` 的 PostgreSQL 文件不能替代逻辑导出直接跨版本复制。
 
 ## 开发与验收
 
@@ -191,7 +211,7 @@ npm run build --workspaces
 
 旧版测试曾在中断时遗留按测试套件命名的 schema。确认没有 Movie Harbor 测试正在运行后，可用 `psql "$TEST_DATABASE_URL" -f backend/tests/cleanup_test_schemas.sql` 仅清理本项目已知前缀的遗留 schema；脚本不会匹配其他项目或普通业务 schema。
 
-完整 E2E 会为每次运行生成以 `mh-task15-e2e-` 开头的唯一 Compose 项目名，并在被忽略的 `tests/e2e/.generated/runs/` 下创建带所有权标记的唯一运行目录。该目录内的 PostgreSQL 与媒体子目录会被显式传给 Compose 和 Playwright；验证生命周期与持久化后，runner 先正常停止该轮服务，再用只挂载这两个已验证 bind 目录的临时 root 容器清空容器属主文件。该步骤成功后才会 down 精确项目，并由宿主重新验证所有权标记和路径后删除已清空的本轮目录。测试不会读取或修改生产默认的 `data/postgres` 和 `data/media`；若容器内清理失败，runner 会保留已停止的项目与目录并明确报错，不会尝试宿主权限兜底。
+完整 E2E 会为每次运行生成以 `mh-task15-e2e-` 开头的唯一 Compose 项目名，并在被忽略的 `tests/e2e/.generated/runs/` 下创建带所有权标记的唯一运行目录。该目录内包含 PostgreSQL、`media-0`、`media-1`、卷标记和 Compose 存储覆盖配置，显式覆盖继承的生产存储变量。真实浏览器验证上传、播放、替换、删除和重启；两个媒体目录位于同一文件系统时，同容量按规则落到卷 0。跨卷容量差异与回滚由 Rust 测试注入容量探针覆盖，真实不同物理盘的 Linux/Windows 验收另行执行，不向生产环境添加伪造容量开关。验证后 runner 停止该轮服务，再用只挂载三个已验证 bind 目录的临时 root 容器清空容器属主文件；成功后才 down 精确项目并重新验证所有权、路径和目录身份，删除本轮目录。测试不会读取或修改生产默认的 `data/postgres` 和 `data/media`；清理失败会保留项目与目录并明确报错。
 
 ```bash
 npx playwright install chromium
