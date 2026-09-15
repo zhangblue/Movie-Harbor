@@ -4,12 +4,9 @@ use crate::{
         ensure_transition, normalize_required, parse_target, parse_unique_uuids,
         require_positive_i64, require_version,
     },
-    entities::{media_asset, movie},
+    entities::movie,
     genres,
-    media::{
-        LocalMediaStorage, is_publishable_asset,
-        removal::{self, OwnedMedia},
-    },
+    media::{LocalMediaStorage, is_publishable_asset, removal},
 };
 use axum::{
     Json,
@@ -289,73 +286,29 @@ pub async fn delete(
         .flatten()
         .collect::<HashSet<_>>();
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-movie", &owned)
         .map_err(|_| MovieError::MediaDelete)?;
     let database_result: Result<(), MovieError> = async {
         repository::delete(&tx, id, expected_version).await?;
-        delete_media_assets(&tx, &asset_ids).await?;
+        removal::delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
-    if let Err(error) = database_result {
-        let _ = tx.rollback().await;
-        staged
-            .restore()
-            .await
-            .map_err(|_| MovieError::MediaDelete)?;
-        return Err(match error {
-            MovieError::Database => MovieError::MediaDelete,
-            other => other,
-        });
+    match removal::finish_delete_transaction(tx, staged, owned.len(), database_result).await {
+        Ok(count) => Ok(DeleteResultResponse {
+            deleted_media_count: count,
+        }),
+        Err(removal::FinishDeleteError::Operation(MovieError::Database)) => {
+            Err(MovieError::MediaDelete)
+        }
+        Err(removal::FinishDeleteError::Operation(error)) => Err(error),
+        Err(removal::FinishDeleteError::Restore | removal::FinishDeleteError::Commit) => {
+            Err(MovieError::MediaDelete)
+        }
+        Err(removal::FinishDeleteError::Finalize) => Err(MovieError::MediaDeleteFinalization),
     }
-    if tx.commit().await.is_err() {
-        staged
-            .restore()
-            .await
-            .map_err(|_| MovieError::MediaDelete)?;
-        return Err(MovieError::MediaDelete);
-    }
-    staged
-        .finish()
-        .await
-        .map_err(|_| MovieError::MediaDeleteFinalization)?;
-    Ok(DeleteResultResponse {
-        deleted_media_count: owned.len() as u64,
-    })
-}
-
-async fn load_owned_media<C: sea_orm::ConnectionTrait>(
-    db: &C,
-    ids: &[Uuid],
-) -> Result<Vec<OwnedMedia>, MovieError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(media_asset::Entity::find()
-        .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|asset| OwnedMedia {
-            asset_id: asset.id,
-            storage_key: asset.storage_key,
-        })
-        .collect())
-}
-
-async fn delete_media_assets<C: sea_orm::ConnectionTrait>(
-    db: &C,
-    ids: &[Uuid],
-) -> Result<(), MovieError> {
-    if !ids.is_empty() {
-        media_asset::Entity::delete_many()
-            .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
-            .exec(db)
-            .await?;
-    }
-    Ok(())
 }
 
 async fn response<C: sea_orm::ConnectionTrait>(

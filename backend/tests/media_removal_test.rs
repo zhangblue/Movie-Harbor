@@ -3,7 +3,7 @@ use movie_harbor_api::media::{
     LocalMediaStorage, MediaError, StorageEvent, StorageHooks,
     removal::{self, OwnedMedia},
 };
-use sea_orm::{ActiveModelTrait, Set};
+use sea_orm::{ActiveModelTrait, EntityTrait, Set, TransactionTrait};
 use serde_json::json;
 use std::{
     io,
@@ -57,6 +57,25 @@ async fn registered_file(root: &Path, storage_key: &str, bytes: &[u8]) -> OwnedM
     }
 }
 
+async fn registered_asset(
+    db: &sea_orm::DatabaseConnection,
+    storage_key: &str,
+) -> media_asset::Model {
+    media_asset::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        storage_key: Set(storage_key.to_owned()),
+        original_name: Set("asset.bin".into()),
+        mime_type: Set("application/octet-stream".into()),
+        byte_size: Set(1),
+        purpose: Set("video".into()),
+        checksum_sha256: Set(None),
+        ..Default::default()
+    }
+    .insert(db)
+    .await
+    .unwrap()
+}
+
 async fn operation_directories(root: &Path) -> Vec<PathBuf> {
     let mut reader = tokio::fs::read_dir(root.join(".operations")).await.unwrap();
     let mut entries = Vec::new();
@@ -66,6 +85,185 @@ async fn operation_directories(root: &Path) -> Vec<PathBuf> {
         }
     }
     entries
+}
+
+#[tokio::test]
+async fn common_delete_helpers_load_and_delete_media_assets() {
+    let database = support::TestDatabase::migrated("removal_common_database_helpers").await;
+    let db = database.connection();
+    let first = registered_asset(&db, "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4").await;
+    let second = registered_asset(&db, "video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4").await;
+
+    let loaded = removal::load_owned_media(&db, &[first.id, second.id])
+        .await
+        .unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert!(
+        loaded
+            .iter()
+            .any(|item| item.storage_key == first.storage_key)
+    );
+
+    removal::delete_media_assets(&db, &[first.id, second.id])
+        .await
+        .unwrap();
+    assert!(
+        media_asset::Entity::find_by_id(first.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(second.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn common_delete_helpers_roll_back_and_restore_when_database_operation_fails() {
+    let database = support::TestDatabase::migrated("removal_common_operation_failure").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let file = registered_file(
+        root.as_ref(),
+        "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4",
+        b"video",
+    )
+    .await;
+    let staged = removal::stage(&storage, "delete-movie", std::slice::from_ref(&file))
+        .await
+        .unwrap();
+    let inserted_id = Uuid::new_v4();
+    let tx = db.begin().await.unwrap();
+    media_asset::ActiveModel {
+        id: Set(inserted_id),
+        storage_key: Set("video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4".into()),
+        original_name: Set("rolled-back.mp4".into()),
+        mime_type: Set("video/mp4".into()),
+        byte_size: Set(1),
+        purpose: Set("video".into()),
+        checksum_sha256: Set(None),
+        ..Default::default()
+    }
+    .insert(&tx)
+    .await
+    .unwrap();
+
+    let result = removal::finish_delete_transaction(
+        tx,
+        staged,
+        1,
+        Err::<(), _>("injected database failure"),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(removal::FinishDeleteError::Operation(
+            "injected database failure"
+        ))
+    ));
+    assert_eq!(
+        tokio::fs::read(root.as_ref().join(&file.storage_key))
+            .await
+            .unwrap(),
+        b"video"
+    );
+    assert!(
+        media_asset::Entity::find_by_id(inserted_id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn common_delete_helpers_commit_and_return_deleted_media_count() {
+    let database = support::TestDatabase::migrated("removal_common_commit").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let file = registered_file(
+        root.as_ref(),
+        "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4",
+        b"video",
+    )
+    .await;
+    let staged = removal::stage(&storage, "delete-movie", std::slice::from_ref(&file))
+        .await
+        .unwrap();
+
+    let deleted =
+        removal::finish_delete_transaction::<()>(db.begin().await.unwrap(), staged, 3, Ok(()))
+            .await
+            .unwrap();
+    assert_eq!(deleted, 3);
+    assert!(!root.as_ref().join(&file.storage_key).exists());
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+}
+
+#[cfg(unix)]
+struct MakeOperationReadOnlyAfterStage {
+    root: PathBuf,
+}
+
+#[cfg(unix)]
+impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::AfterStageRename(_)) {
+            use std::os::unix::fs::PermissionsExt;
+
+            let operation = std::fs::read_dir(self.root.join(".operations"))?
+                .next()
+                .expect("the removal operation exists")?
+                .path();
+            std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o500))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn common_delete_helpers_classify_post_commit_cleanup_failure_as_finalize() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let database = support::TestDatabase::migrated("removal_common_finalize").await;
+    let db = database.connection();
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(MakeOperationReadOnlyAfterStage {
+            root: root.as_ref().to_owned(),
+        }),
+    )
+    .await
+    .unwrap();
+    let file = registered_file(
+        root.as_ref(),
+        "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4",
+        b"video",
+    )
+    .await;
+    let staged = removal::stage(&storage, "delete-movie", std::slice::from_ref(&file))
+        .await
+        .unwrap();
+
+    let result =
+        removal::finish_delete_transaction::<()>(db.begin().await.unwrap(), staged, 1, Ok(()))
+            .await;
+    assert!(matches!(result, Err(removal::FinishDeleteError::Finalize)));
+    let operation = operation_directories(root.as_ref())
+        .await
+        .into_iter()
+        .next()
+        .expect("the failed operation remains");
+    assert!(operation.join("manifest.json").is_file());
+    assert!(operation.join("00000000.data").is_file());
+    std::fs::set_permissions(operation, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 #[tokio::test]

@@ -2,7 +2,11 @@ use super::{
     LocalMediaStorage, MediaError,
     storage::{RemovalOperation, RemovalSource},
 };
-use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
+use crate::entities::media_asset;
+use sea_orm::{
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
+    EntityTrait, QueryFilter, Statement,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
@@ -37,6 +41,14 @@ pub struct StagedRemoval {
     storage: LocalMediaStorage,
     staged: StagedOperation,
     _guard: OwnedMutexGuard<()>,
+}
+
+#[derive(Debug)]
+pub enum FinishDeleteError<E> {
+    Operation(E),
+    Restore,
+    Commit,
+    Finalize,
 }
 
 pub(crate) struct StagedOperation {
@@ -82,6 +94,63 @@ pub async fn stage(
     assets: &[OwnedMedia],
 ) -> Result<StagedRemoval, MediaError> {
     acquire(storage).await?.stage(reason, assets)
+}
+
+pub async fn load_owned_media<C: ConnectionTrait>(
+    db: &C,
+    ids: &[Uuid],
+) -> Result<Vec<OwnedMedia>, DbErr> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(media_asset::Entity::find()
+        .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|asset| OwnedMedia {
+            asset_id: asset.id,
+            storage_key: asset.storage_key,
+        })
+        .collect())
+}
+
+pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), DbErr> {
+    if !ids.is_empty() {
+        media_asset::Entity::delete_many()
+            .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
+            .exec(db)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn finish_delete_transaction<E>(
+    tx: DatabaseTransaction,
+    staged: StagedRemoval,
+    deleted_media_count: usize,
+    database_result: Result<(), E>,
+) -> Result<u64, FinishDeleteError<E>> {
+    if let Err(error) = database_result {
+        let _ = tx.rollback().await;
+        staged
+            .restore()
+            .await
+            .map_err(|_| FinishDeleteError::Restore)?;
+        return Err(FinishDeleteError::Operation(error));
+    }
+    if tx.commit().await.is_err() {
+        staged
+            .restore()
+            .await
+            .map_err(|_| FinishDeleteError::Restore)?;
+        return Err(FinishDeleteError::Commit);
+    }
+    staged
+        .finish()
+        .await
+        .map_err(|_| FinishDeleteError::Finalize)?;
+    Ok(deleted_media_count as u64)
 }
 
 pub async fn recover(

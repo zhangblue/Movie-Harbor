@@ -4,12 +4,9 @@ use crate::{
         ensure_transition, normalize_required, parse_target, parse_unique_uuids,
         require_positive_i32, require_positive_i64, require_version,
     },
-    entities::{episode, media_asset, season, series},
+    entities::{episode, season, series},
     genres,
-    media::{
-        LocalMediaStorage, is_publishable_asset,
-        removal::{self, OwnedMedia},
-    },
+    media::{LocalMediaStorage, is_publishable_asset, removal},
     movies::dto::{DeleteImpactResponse, DeleteResultResponse},
 };
 use axum::{
@@ -355,14 +352,14 @@ pub async fn delete_season(
         .filter_map(|episode| episode.video_asset_id)
         .collect::<HashSet<_>>();
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-season", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         season::Entity::delete_by_id(season_id).exec(&tx).await?;
         repository::bump_series(&tx, &model).await?;
-        delete_media_assets(&tx, &asset_ids).await?;
+        removal::delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -555,14 +552,14 @@ pub async fn delete_episode(
         return Err(SeriesError::Conflict);
     }
     let asset_ids = episode.video_asset_id.into_iter().collect::<Vec<_>>();
-    let owned = load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-episode", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_episode(&tx, episode_id, expected_version).await?;
         repository::bump_series(&tx, &series).await?;
-        delete_media_assets(&tx, &asset_ids).await?;
+        removal::delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -604,13 +601,13 @@ pub async fn delete_series(
         );
     }
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
     let staged = removal
         .stage("delete-series", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
     let database_result: Result<(), SeriesError> = async {
         repository::delete_series(&tx, id, expected_version).await?;
-        delete_media_assets(&tx, &asset_ids).await?;
+        removal::delete_media_assets(&tx, &asset_ids).await?;
         Ok(())
     }
     .await;
@@ -623,31 +620,20 @@ async fn finish_delete_transaction(
     deleted_media_count: usize,
     database_result: Result<(), SeriesError>,
 ) -> Result<DeleteResultResponse, SeriesError> {
-    if let Err(error) = database_result {
-        let _ = tx.rollback().await;
-        staged
-            .restore()
-            .await
-            .map_err(|_| SeriesError::MediaDelete)?;
-        return Err(match error {
-            SeriesError::Database => SeriesError::MediaDelete,
-            other => other,
-        });
+    match removal::finish_delete_transaction(tx, staged, deleted_media_count, database_result).await
+    {
+        Ok(count) => Ok(DeleteResultResponse {
+            deleted_media_count: count,
+        }),
+        Err(removal::FinishDeleteError::Operation(SeriesError::Database)) => {
+            Err(SeriesError::MediaDelete)
+        }
+        Err(removal::FinishDeleteError::Operation(error)) => Err(error),
+        Err(removal::FinishDeleteError::Restore | removal::FinishDeleteError::Commit) => {
+            Err(SeriesError::MediaDelete)
+        }
+        Err(removal::FinishDeleteError::Finalize) => Err(SeriesError::MediaDeleteFinalization),
     }
-    if tx.commit().await.is_err() {
-        staged
-            .restore()
-            .await
-            .map_err(|_| SeriesError::MediaDelete)?;
-        return Err(SeriesError::MediaDelete);
-    }
-    staged
-        .finish()
-        .await
-        .map_err(|_| SeriesError::MediaDeleteFinalization)?;
-    Ok(DeleteResultResponse {
-        deleted_media_count: deleted_media_count as u64,
-    })
 }
 
 pub async fn delete_impact(
@@ -743,35 +729,6 @@ pub async fn episode_delete_impact(
     };
     tx.commit().await?;
     Ok(result)
-}
-
-async fn load_owned_media<C: ConnectionTrait>(
-    db: &C,
-    ids: &[Uuid],
-) -> Result<Vec<OwnedMedia>, SeriesError> {
-    if ids.is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(media_asset::Entity::find()
-        .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
-        .all(db)
-        .await?
-        .into_iter()
-        .map(|asset| OwnedMedia {
-            asset_id: asset.id,
-            storage_key: asset.storage_key,
-        })
-        .collect())
-}
-
-async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), SeriesError> {
-    if !ids.is_empty() {
-        media_asset::Entity::delete_many()
-            .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
-            .exec(db)
-            .await?;
-    }
-    Ok(())
 }
 
 async fn response<C: ConnectionTrait>(
