@@ -92,6 +92,7 @@ WITH candidates AS (
     LIMIT $2 OFFSET $3
 )
 SELECT page.id, page.kind, page.name, page.year, page.published_at,
+       poster.storage_volume AS poster_storage_volume,
        poster.storage_key AS poster_storage_key
 FROM page
 LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
@@ -152,6 +153,7 @@ WITH candidates AS (
     LIMIT $3 OFFSET $4
 )
 SELECT page.id, page.kind, page.name, page.year, page.published_at,
+       poster.storage_volume AS poster_storage_volume,
        poster.storage_key AS poster_storage_key
 FROM page
 LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
@@ -160,7 +162,9 @@ ORDER BY page.published_at DESC, page.kind, page.id
 
 const MOVIE_DETAIL_SQL: &str = r#"
 SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.duration_seconds,
+       poster.storage_volume AS poster_storage_volume,
        poster.storage_key AS poster_storage_key,
+       video.storage_volume AS video_storage_volume,
        video.storage_key AS video_storage_key
 FROM movie
 LEFT JOIN media_asset poster ON poster.id = movie.poster_asset_id
@@ -172,6 +176,7 @@ WHERE movie.id = $1
 
 const SERIES_DETAIL_SQL: &str = r#"
 SELECT series.id, series.name, series.synopsis, series.year,
+       poster.storage_volume AS poster_storage_volume,
        poster.storage_key AS poster_storage_key
 FROM series
 LEFT JOIN media_asset poster ON poster.id = series.poster_asset_id
@@ -183,6 +188,7 @@ WHERE series.id = $1
 const SERIES_EPISODES_SQL: &str = r#"
 SELECT season.id AS season_id, season.number AS season_number,
        episode.id, episode.number, episode.name, episode.duration_seconds,
+       video.storage_volume AS video_storage_volume,
        video.storage_key AS video_storage_key
 FROM season
 JOIN series parent ON parent.id = season.series_id
@@ -203,6 +209,7 @@ struct CatalogRow {
     name: String,
     year: Option<i32>,
     published_at: DateTime<FixedOffset>,
+    poster_storage_volume: Option<i32>,
     poster_storage_key: Option<String>,
 }
 
@@ -213,7 +220,9 @@ struct MovieRow {
     synopsis: String,
     year: Option<i32>,
     duration_seconds: Option<i32>,
+    poster_storage_volume: Option<i32>,
     poster_storage_key: Option<String>,
+    video_storage_volume: Option<i32>,
     video_storage_key: Option<String>,
 }
 
@@ -223,6 +232,7 @@ struct SeriesRow {
     name: String,
     synopsis: String,
     year: Option<i32>,
+    poster_storage_volume: Option<i32>,
     poster_storage_key: Option<String>,
 }
 
@@ -234,6 +244,7 @@ struct EpisodeRow {
     number: i32,
     name: String,
     duration_seconds: Option<i32>,
+    video_storage_volume: Option<i32>,
     video_storage_key: Option<String>,
 }
 
@@ -326,7 +337,7 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
                 kind: row.kind,
                 name: row.name,
                 year: row.year,
-                poster_url: media_url(row.poster_storage_key, "poster"),
+                poster_url: media_url(row.poster_storage_volume, row.poster_storage_key, "poster"),
                 published_at: published_at_string(row.published_at),
                 genres: all_genres.into_iter().take(3).collect(),
                 genre_count,
@@ -368,8 +379,8 @@ async fn movie_detail_on<C: ConnectionTrait>(
         synopsis: row.synopsis,
         year: row.year,
         duration_seconds: row.duration_seconds,
-        poster_url: media_url(row.poster_storage_key, "poster"),
-        video_url: media_url(row.video_storage_key, "video"),
+        poster_url: media_url(row.poster_storage_volume, row.poster_storage_key, "poster"),
+        video_url: media_url(row.video_storage_volume, row.video_storage_key, "video"),
         genres: genres.remove(&("movie".into(), id)).unwrap_or_default(),
     }))
 }
@@ -415,7 +426,11 @@ async fn series_detail_on<C: ConnectionTrait>(
             number: episode.number,
             name: episode.name,
             duration_seconds: episode.duration_seconds,
-            video_url: media_url(episode.video_storage_key, "video"),
+            video_url: media_url(
+                episode.video_storage_volume,
+                episode.video_storage_key,
+                "video",
+            ),
         });
     }
     Ok(Some(SeriesDetail {
@@ -424,7 +439,7 @@ async fn series_detail_on<C: ConnectionTrait>(
         name: row.name,
         synopsis: row.synopsis,
         year: row.year,
-        poster_url: media_url(row.poster_storage_key, "poster"),
+        poster_url: media_url(row.poster_storage_volume, row.poster_storage_key, "poster"),
         genres: genres.remove(&("series".into(), id)).unwrap_or_default(),
         seasons,
     }))

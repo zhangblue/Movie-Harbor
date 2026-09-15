@@ -78,7 +78,7 @@ impl From<media_asset::Model> for MediaSummary {
     fn from(value: media_asset::Model) -> Self {
         Self {
             id: value.id.to_string(),
-            url: format!("/media/{}", value.storage_key),
+            url: format!("/media/v{}/{}", value.storage_volume, value.storage_key),
             original_name: value.original_name,
             mime_type: value.mime_type,
             byte_size: value.byte_size,

@@ -1,6 +1,6 @@
 use crate::{
     auth::{self, AuthState},
-    media::LocalMediaStorage,
+    media::MediaStorageSet,
     movies::dto::{DeleteImpactResponse, DeleteResultResponse},
     route_params::parse_uuid,
 };
@@ -28,13 +28,13 @@ use super::{
 #[derive(Clone)]
 struct SeriesState {
     db: DatabaseConnection,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     allowed_video_mime_types: Vec<String>,
 }
 
 pub fn router(
     auth_state: AuthState,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     allowed_video_mime_types: Vec<String>,
 ) -> Router {
     let state = SeriesState {

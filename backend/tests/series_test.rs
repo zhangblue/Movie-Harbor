@@ -59,6 +59,11 @@ impl Drop for TempRoot {
 }
 
 fn config(root: &Path) -> Config {
+    std::fs::write(
+        root.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":0}"#,
+    )
+    .unwrap();
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
@@ -1313,10 +1318,11 @@ async fn concurrent_series_deletes_remove_each_owned_asset_without_deadlock() {
     let first_storage = storage.clone();
     let second_storage = storage;
     let first_delete = tokio::spawn(async move {
-        series_service::delete_series(&first_db, &first_storage, first.id, 1).await
+        series_service::delete_series(&first_db, &first_storage.clone().into(), first.id, 1).await
     });
     let second_delete = tokio::spawn(async move {
-        series_service::delete_series(&second_db, &second_storage, second.id, 1).await
+        series_service::delete_series(&second_db, &second_storage.clone().into(), second.id, 1)
+            .await
     });
     let (first_result, second_result) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(first_delete, second_delete)
@@ -1684,9 +1690,10 @@ async fn series_delete_restores_all_media_when_a_later_stage_fails() {
     .await
     .unwrap();
 
-    let error = series_service::delete_series(&db, &storage, series_id.parse().unwrap(), 5)
-        .await
-        .unwrap_err();
+    let error =
+        series_service::delete_series(&db, &storage.clone().into(), series_id.parse().unwrap(), 5)
+            .await
+            .unwrap_err();
     let response = axum::response::IntoResponse::into_response(error);
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(body(response).await["code"], "media_delete_failed");
@@ -1750,7 +1757,7 @@ async fn season_delete_restores_all_videos_when_a_later_stage_fails() {
 
     let error = series_service::delete_season(
         &db,
-        &storage,
+        &storage.clone().into(),
         series_service::DeleteSeasonCommand {
             series_id: series_id.parse().unwrap(),
             season_id: season_id.parse().unwrap(),
@@ -1815,7 +1822,7 @@ async fn episode_delete_reports_finish_failure_after_the_database_commit() {
 
     let error = series_service::delete_episode(
         &db,
-        &storage,
+        &storage.clone().into(),
         series_service::DeleteEpisodeCommand {
             series_id: series_id.parse().unwrap(),
             season_id: season_id.parse().unwrap(),

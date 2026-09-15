@@ -1,4 +1,4 @@
-use super::{AttachmentTarget, LocalMediaStorage, MediaError, UploadPolicy};
+use super::{AttachmentTarget, MediaError, MediaStorageSet, UploadPolicy};
 use crate::{
     auth::{self, AuthState},
     entities::media_asset,
@@ -7,6 +7,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    http::{HeaderMap, header::CONTENT_LENGTH},
     middleware,
     routing::post,
 };
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone)]
 struct MediaState {
     db: DatabaseConnection,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     policy: UploadPolicy,
 }
 
@@ -54,7 +55,7 @@ const MAX_FILE_NAME_BYTES: usize = 255;
 
 pub fn router(
     auth_state: AuthState,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     policy: UploadPolicy,
 ) -> Result<Router, MediaError> {
     let body_limit = usize::try_from(policy.max_bytes())
@@ -83,6 +84,7 @@ async fn movie_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
@@ -91,6 +93,7 @@ async fn movie_poster(
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
+        headers,
         multipart,
     )
     .await
@@ -100,6 +103,7 @@ async fn movie_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
@@ -108,6 +112,7 @@ async fn movie_video(
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
+        headers,
         multipart,
     )
     .await
@@ -117,6 +122,7 @@ async fn series_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
@@ -125,6 +131,7 @@ async fn series_poster(
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
+        headers,
         multipart,
     )
     .await
@@ -134,6 +141,7 @@ async fn episode_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
+    headers: HeaderMap,
     multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload(
@@ -142,6 +150,7 @@ async fn episode_video(
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
+        headers,
         multipart,
     )
     .await
@@ -150,6 +159,7 @@ async fn episode_video(
 async fn upload(
     state: MediaState,
     target: AttachmentTarget,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     let field = multipart
@@ -171,12 +181,18 @@ async fn upload(
         .content_type()
         .ok_or(MediaError::UnsupportedType)?
         .to_owned();
+    let required_bytes = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(state.policy.max_bytes());
     let pending = super::upload::prepare_attachment(
         &state.storage,
         target,
         &original_name,
         &declared_mime,
         &state.policy,
+        required_bytes,
         field,
     )
     .await?;

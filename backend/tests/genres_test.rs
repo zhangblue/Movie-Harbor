@@ -37,10 +37,21 @@ const DEFAULT_GENRES: [&str; 12] = [
 ];
 
 fn config() -> Config {
+    static MEDIA_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let media_root = MEDIA_ROOT.get_or_init(|| {
+        let root = std::env::temp_dir().join(format!("movie_harbor_genres_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(".movie-harbor-volume.json"),
+            r#"{"version":1,"volume":0}"#,
+        )
+        .unwrap();
+        root
+    });
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
-        media_dirs: vec!["/tmp/media".into()],
+        media_dirs: vec![media_root.clone()],
         media_disk_reserve_bytes: 1,
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),

@@ -523,6 +523,11 @@ async fn database() -> DatabaseConnection {
 }
 
 fn config(root: &Path) -> Config {
+    std::fs::write(
+        root.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":0}"#,
+    )
+    .unwrap();
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
@@ -842,6 +847,470 @@ fn raw_multipart_request(
     request
 }
 
+// Catches ignoring all but the first configured volume in actual upload routes.
+#[tokio::test]
+async fn multi_volume_all_attachment_slots_persist_the_selected_volume() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let mut config = config(roots[0].as_ref());
+    config.media_dirs.push(roots[1].as_ref().to_path_buf());
+    let app = app::build(db.clone(), &config).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    // Removing write permission makes volume 0 unavailable without simulating capacity.
+    std::fs::set_permissions(roots[0].as_ref(), std::fs::Permissions::from_mode(0o500)).unwrap();
+    let movie = draft_movie(&db, None).await;
+    let series = series::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set("Series".into()),
+        synopsis: Set(String::new()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season = season::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        series_id: Set(series.id),
+        number: Set(1),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let episode = episode::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        season_id: Set(season.id),
+        number: Set(1),
+        name: Set("Episode".into()),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    for (path, filename, mime, bytes) in [
+        (
+            format!("/api/admin/media/movies/{}/poster?version=1", movie.id),
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ),
+        (
+            format!("/api/admin/media/movies/{}/video?version=2", movie.id),
+            "movie.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+        (
+            format!("/api/admin/media/series/{}/poster?version=1", series.id),
+            "poster.png",
+            "image/png",
+            PNG.to_vec(),
+        ),
+        (
+            format!("/api/admin/media/episodes/{}/video?version=1", episode.id),
+            "episode.mp4",
+            "video/mp4",
+            valid_mp4(),
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(multipart_file_request(
+                path,
+                Some(&cookie),
+                Some(&csrf),
+                "https://harbor.test",
+                filename,
+                mime,
+                bytes,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    let assets = media_asset::Entity::find().all(&db).await.unwrap();
+    assert_eq!(assets.len(), 4);
+    for asset in &assets {
+        assert_eq!(asset.storage_volume, 1);
+        assert!(roots[1].as_ref().join(&asset.storage_key).is_file());
+        assert!(!roots[0].as_ref().join(&asset.storage_key).is_file());
+    }
+    let published = json_request(
+        &app,
+        "POST",
+        &format!("/api/admin/movies/{}/publish", movie.id),
+        json!({"version":3,"status":"published"}),
+        Some(&cookie),
+        Some(&csrf),
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(published.status(), StatusCode::OK);
+    let detail = json_request(
+        &app,
+        "GET",
+        &format!("/api/catalog/movies/{}", movie.id),
+        json!(null),
+        None,
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let detail: Value =
+        serde_json::from_slice(&detail.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let movie = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let video = assets
+        .iter()
+        .find(|asset| Some(asset.id) == movie.video_asset_id)
+        .unwrap();
+    assert_eq!(
+        detail["video_url"],
+        format!("/media/v1/{}", video.storage_key)
+    );
+    std::fs::set_permissions(roots[0].as_ref(), std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+// Catches returning a generic filesystem failure or accepting uploads without capacity.
+#[tokio::test]
+async fn multi_volume_no_capacity_returns_stable_507_without_paths() {
+    let db = database().await;
+    let root = volume_root(0);
+    let mut config = config(root.as_ref());
+    config.media_disk_reserve_bytes = u64::MAX;
+    let app = app::build(db.clone(), &config).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let movie = draft_movie(&db, None).await;
+    let response = app
+        .oneshot(multipart_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(
+        body,
+        json!({"error":"media storage is unavailable or full","code":"media_storage_insufficient"})
+    );
+    assert!(
+        media_asset::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+// Catches reserving only the observed body length when Content-Length is absent.
+#[tokio::test]
+async fn multi_volume_missing_content_length_reserves_policy_limit() {
+    let db = database().await;
+    let root = volume_root(0);
+    let mut config = config(root.as_ref());
+    config.max_upload_bytes = i64::MAX as u64;
+    let app = app::build(db.clone(), &config).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let movie = draft_movie(&db, None).await;
+    let response = app
+        .clone()
+        .oneshot(multipart_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    let mut request = multipart_request(
+        format!("/api/admin/media/movies/{}/video?version=1", movie.id),
+        Some(&cookie),
+        Some(&csrf),
+        "https://harbor.test",
+    );
+    use axum::body::HttpBody;
+    let length = request.body().size_hint().exact().unwrap().to_string();
+    request
+        .headers_mut()
+        .insert("content-length", length.parse().unwrap());
+    assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::OK);
+}
+
+// Catches dropping a nonzero-volume asset record while leaving its physical file behind.
+#[tokio::test]
+async fn multi_volume_delete_rejects_nonzero_assets_without_mutation() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let mut cfg = config(roots[0].as_ref());
+    cfg.media_dirs.push(roots[1].as_ref().to_path_buf());
+    let app = app::build(db.clone(), &cfg).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let id = Uuid::new_v4();
+    let key = format!(
+        "poster/{}/{}.png",
+        &id.simple().to_string()[..2],
+        id.simple()
+    );
+    std::fs::create_dir_all(roots[1].as_ref().join(&key).parent().unwrap()).unwrap();
+    std::fs::create_dir_all(roots[0].as_ref().join(&key).parent().unwrap()).unwrap();
+    std::fs::write(roots[0].as_ref().join(&key), b"unrelated same-key file").unwrap();
+    std::fs::write(roots[1].as_ref().join(&key), PNG).unwrap();
+    let asset = media_asset::ActiveModel {
+        id: Set(id),
+        storage_volume: Set(1),
+        storage_key: Set(key.clone()),
+        original_name: Set("poster.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(PNG.len() as i64),
+        purpose: Set("poster".into()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(asset.id)).await;
+    let response = json_request(
+        &app,
+        "DELETE",
+        &format!("/api/admin/movies/{}", movie.id),
+        json!({"version":1}),
+        Some(&cookie),
+        Some(&csrf),
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(asset.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(std::fs::read(roots[1].as_ref().join(&key)).unwrap(), PNG);
+    assert_eq!(
+        std::fs::read(roots[0].as_ref().join(&key)).unwrap(),
+        b"unrelated same-key file"
+    );
+}
+
+// Catches treating a record with the same key on another volume as ownership of an interrupted upload.
+#[tokio::test]
+async fn multi_volume_recovery_matches_both_volume_and_key() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let storage = MediaStorageSet::initialize(
+        &roots
+            .iter()
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>(),
+        0,
+    )
+    .await
+    .unwrap();
+    let id = Uuid::new_v4();
+    let key = format!(
+        "poster/{}/{}.png",
+        &id.simple().to_string()[..2],
+        id.simple()
+    );
+    for root in &roots {
+        let path = root.as_ref().join(&key);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, PNG).unwrap();
+        write_pending_marker(root.as_ref(), id, &key, &path);
+    }
+    media_asset::ActiveModel {
+        id: Set(id),
+        storage_volume: Set(0),
+        storage_key: Set(key.clone()),
+        original_name: Set("poster.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(PNG.len() as i64),
+        purpose: Set("poster".into()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(roots[0].as_ref().join(&key).is_file());
+    assert!(!roots[1].as_ref().join(&key).exists());
+    for root in &roots {
+        assert_eq!(
+            std::fs::read_dir(root.as_ref().join(".incoming"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+}
+
+// Catches staging the old key in the new file's volume during a cross-volume replacement.
+#[tokio::test]
+async fn multi_volume_replacement_removes_only_the_old_recorded_volume_file() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let set = MediaStorageSet::initialize(
+        &roots
+            .iter()
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>(),
+        0,
+    )
+    .await
+    .unwrap();
+    let held = set.reserve_for_upload(1024 * 1024 * 1024).await.unwrap();
+    let new_volume = held.volume_id();
+    let old_volume = 1 - new_volume;
+    let (source, _) = Chunks::new([PNG]);
+    let old = store_new_asset(
+        &db,
+        &set,
+        MediaKind::Poster,
+        "old.png",
+        "image/png",
+        &policy(4096),
+        source,
+    )
+    .await
+    .unwrap();
+    assert_eq!(old.storage_volume, old_volume);
+    drop(held);
+    let same_key = roots[new_volume as usize].as_ref().join(&old.storage_key);
+    std::fs::set_permissions(
+        roots[old_volume as usize].as_ref(),
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
+    std::fs::create_dir_all(same_key.parent().unwrap()).unwrap();
+    std::fs::write(&same_key, b"unrelated").unwrap();
+    let movie = draft_movie(&db, Some(old.id)).await;
+    let (source, _) = Chunks::new([jpeg()]);
+    let new = tokio::time::timeout(
+        Duration::from_secs(5),
+        replace_attachment(
+            &db,
+            &set,
+            AttachmentTarget::MoviePoster {
+                id: movie.id,
+                version: 1,
+            },
+            "new.jpg",
+            "image/jpeg",
+            &policy(4096),
+            source,
+        ),
+    )
+    .await
+    .expect("shared lock was reacquired")
+    .unwrap();
+    std::fs::set_permissions(
+        roots[old_volume as usize].as_ref(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    assert_eq!(new.storage_volume, new_volume);
+    assert_eq!(std::fs::read(same_key).unwrap(), b"unrelated");
+    assert!(
+        !roots[old_volume as usize]
+            .as_ref()
+            .join(&old.storage_key)
+            .exists()
+    );
+    assert!(
+        roots[new_volume as usize]
+            .as_ref()
+            .join(&new.storage_key)
+            .is_file()
+    );
+    assert!(
+        media_asset::Entity::find_by_id(old.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .poster_asset_id,
+        Some(new.id)
+    );
+}
+
+// Catches publication scanning other volumes when the recorded volume lacks the file.
+#[tokio::test]
+async fn multi_volume_publication_never_falls_back_to_a_same_key_in_another_volume() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let set = MediaStorageSet::initialize(
+        &roots
+            .iter()
+            .map(|root| root.as_ref().to_path_buf())
+            .collect::<Vec<_>>(),
+        0,
+    )
+    .await
+    .unwrap();
+    let (source, _) = Chunks::bytes(valid_mp4());
+    let mut asset = store_new_asset(
+        &db,
+        &set,
+        MediaKind::Video,
+        "movie.mp4",
+        "video/mp4",
+        &policy(4096),
+        source,
+    )
+    .await
+    .unwrap();
+    // The allocator observes a live filesystem; put the publication fixture explicitly
+    // on volume 0 so concurrent tests cannot change the intended wrong-volume case.
+    if asset.storage_volume == 1 {
+        let target = roots[0].as_ref().join(&asset.storage_key);
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::rename(roots[1].as_ref().join(&asset.storage_key), target).unwrap();
+    }
+    asset.storage_volume = 1;
+    assert!(!movie_harbor_api::media::is_publishable_asset(
+        &set,
+        Some(&asset),
+        "video",
+        &["video/mp4"]
+    ));
+    asset.storage_volume = 9;
+    assert!(!movie_harbor_api::media::is_publishable_asset(
+        &set,
+        Some(&asset),
+        "video",
+        &["video/mp4"]
+    ));
+}
 fn volume_root(volume: i32) -> TempRoot {
     let root = TempRoot::new();
     std::fs::write(
@@ -1246,7 +1715,7 @@ async fn durable_promotion_syncs_created_parents_source_and_destination_in_order
     let (source, _) = Chunks::new([PNG]);
     let asset = store_new_asset(
         &db,
-        &storage,
+        &storage.clone().into(),
         MediaKind::Poster,
         "cover.png",
         "image/png",
@@ -1351,7 +1820,7 @@ async fn recovery_sweeps_only_stale_incoming_part_files() {
 
     movie_harbor_api::media::upload::recover_stale_uploads(
         &db,
-        &storage,
+        &storage.clone().into(),
         Duration::from_secs(3600),
     )
     .await
@@ -1381,9 +1850,13 @@ async fn invalid_recovery_markers_are_retained_without_aborting_the_sweep() {
     make_stale(&invalid);
     make_stale(&stale_part);
 
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage.clone().into(),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
 
     assert!(invalid.exists());
     assert!(!stale_part.exists());
@@ -1410,9 +1883,13 @@ async fn recovery_requires_marker_identity_before_deleting_a_formal_file() {
     let marker = write_pending_marker(root.as_ref(), id, &key, &owner);
     make_stale(&marker);
 
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage.clone().into(),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
 
     assert_eq!(std::fs::read(formal).unwrap(), b"unrelated collision");
     assert!(
@@ -1444,9 +1921,13 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
     std::fs::write(&formal, PNG).unwrap();
     let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
 
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage.clone().into(),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
 
     assert!(hooks.replaced.load(Ordering::SeqCst));
     assert!(hooks.no_quarantine_data_before_claim.load(Ordering::SeqCst));
@@ -1477,7 +1958,7 @@ async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
     assert!(matches!(
         replace_attachment(
             &db,
-            &storage,
+            &storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: Uuid::new_v4(),
                 version: 1,
@@ -1517,9 +1998,13 @@ async fn recovery_marker_name_must_match_its_formal_resource_key() {
     let marker = write_pending_marker(root.as_ref(), Uuid::new_v4(), &key, &formal);
     make_stale(&marker);
 
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage.clone().into(),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
 
     assert!(formal.exists());
     assert!(marker.exists());
@@ -1540,7 +2025,7 @@ async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
     assert!(matches!(
         replace_attachment(
             &db,
-            &storage,
+            &storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: Uuid::new_v4(),
                 version: 1,
@@ -1559,9 +2044,13 @@ async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
     );
 
     let recovered = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &recovered, Duration::from_secs(0))
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &recovered.clone().into(),
+        Duration::from_secs(0),
+    )
+    .await
+    .unwrap();
     assert_eq!(count_files(root.as_ref()), 0);
 }
 
@@ -1582,7 +2071,7 @@ async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliatio
     let task = tokio::spawn(async move {
         store_new_asset(
             &task_db,
-            &task_storage,
+            &task_storage.clone().into(),
             MediaKind::Poster,
             "cover.png",
             "image/png",
@@ -1608,9 +2097,13 @@ async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliatio
                 .to_string_lossy()
                 .ends_with(".pending"))
     );
-    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-        .await
-        .unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage.clone().into(),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
     assert!(root.as_ref().join(asset.storage_key).is_file());
 }
 
@@ -1623,7 +2116,7 @@ async fn cancellation_after_replacement_commit_preserves_new_reference_and_file(
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &base_storage,
+        &base_storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -1646,7 +2139,7 @@ async fn cancellation_after_replacement_commit_preserves_new_reference_and_file(
     let task = tokio::spawn(async move {
         replace_attachment(
             &task_db,
-            &task_storage,
+            &task_storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: movie_id,
                 version: 1,
@@ -2592,7 +3085,7 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &base_storage,
+        &base_storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -2614,7 +3107,7 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     let (new_source, _) = Chunks::new([jpeg()]);
     let error = replace_attachment(
         &db,
-        &storage,
+        &storage.clone().into(),
         AttachmentTarget::MoviePoster {
             id: movie.id,
             version: 1,
@@ -2655,7 +3148,7 @@ async fn replacement_registration_failure_reports_committed_state() {
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &base_storage,
+        &base_storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -2677,7 +3170,7 @@ async fn replacement_registration_failure_reports_committed_state() {
     let (new_source, _) = Chunks::new([jpeg()]);
     let error = replace_attachment(
         &db,
-        &storage,
+        &storage.clone().into(),
         AttachmentTarget::MoviePoster {
             id: movie.id,
             version: 1,
@@ -2728,7 +3221,7 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &storage,
+        &storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -2751,7 +3244,7 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
     let (new_source, _) = Chunks::new([jpeg()]);
     let error = replace_attachment(
         &db,
-        &storage,
+        &storage.clone().into(),
         AttachmentTarget::MoviePoster {
             id: movie.id,
             version: 1,
@@ -2798,7 +3291,7 @@ async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error(
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &base_storage,
+        &base_storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -2819,7 +3312,7 @@ async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error(
     let (new_source, _) = Chunks::new([jpeg()]);
     let error = replace_attachment(
         &db,
-        &storage,
+        &storage.clone().into(),
         AttachmentTarget::MoviePoster {
             id: movie.id,
             version: 1,
@@ -2879,7 +3372,7 @@ async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
     let (old_source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
-        &storage,
+        &storage.clone().into(),
         MediaKind::Poster,
         "old.png",
         "image/png",
@@ -2896,7 +3389,7 @@ async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
     assert!(
         replace_attachment(
             &db,
-            &storage,
+            &storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: published.id,
                 version: 1,
@@ -2953,9 +3446,17 @@ async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot(
     ] {
         let (source, _) = Chunks::bytes(bytes);
         old_assets.push(
-            store_new_asset(&db, &storage, kind, name, mime, &policy(4096), source)
-                .await
-                .unwrap(),
+            store_new_asset(
+                &db,
+                &storage.clone().into(),
+                kind,
+                name,
+                mime,
+                &policy(4096),
+                source,
+            )
+            .await
+            .unwrap(),
         );
     }
     let movie = movie::ActiveModel {
@@ -3044,9 +3545,17 @@ async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot(
     ];
     for ((target, name, mime, bytes), old) in replacements.into_iter().zip(&old_assets) {
         let (source, _) = Chunks::bytes(bytes);
-        let new = replace_attachment(&db, &storage, target, name, mime, &policy(4096), source)
-            .await
-            .unwrap();
+        let new = replace_attachment(
+            &db,
+            &storage.clone().into(),
+            target,
+            name,
+            mime,
+            &policy(4096),
+            source,
+        )
+        .await
+        .unwrap();
         assert!(only_file(root.as_ref(), &new.storage_key).await);
         assert!(!root.as_ref().join(&old.storage_key).exists());
         assert!(
@@ -3095,7 +3604,7 @@ async fn run_recovery_during_uncommitted_replacement() {
     let mut upload = tokio::spawn(async move {
         replace_attachment(
             &upload_db,
-            &upload_storage,
+            &upload_storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: movie_id,
                 version: 1,
@@ -3135,7 +3644,7 @@ async fn run_recovery_during_uncommitted_replacement() {
     let mut recovery = tokio::spawn(async move {
         movie_harbor_api::media::upload::recover_stale_uploads(
             &recovery_db,
-            &recovery_storage,
+            &recovery_storage.clone().into(),
             Duration::ZERO,
         )
         .await

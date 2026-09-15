@@ -103,16 +103,24 @@ pub async fn load_owned_media<C: ConnectionTrait>(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    Ok(media_asset::Entity::find()
+    media_asset::Entity::find()
         .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
         .all(db)
         .await?
         .into_iter()
-        .map(|asset| OwnedMedia {
-            asset_id: asset.id,
-            storage_key: asset.storage_key,
+        .map(|asset| {
+            // Task 4 will replace this temporary gate with grouped volume deletion.
+            if asset.storage_volume != 0 {
+                return Err(DbErr::Custom(
+                    "multi-volume deletion is not available".into(),
+                ));
+            }
+            Ok(OwnedMedia {
+                asset_id: asset.id,
+                storage_key: asset.storage_key,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>, DbErr>>()
 }
 
 pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), DbErr> {
@@ -234,6 +242,15 @@ pub(crate) fn continue_with_guard(
 }
 
 impl RemovalSession {
+    pub(crate) fn storage(&self) -> &LocalMediaStorage {
+        &self.storage
+    }
+
+    // The caller must hold the shared storage-set guard for both volumes.
+    pub(crate) fn use_storage(&mut self, storage: &LocalMediaStorage) {
+        self.storage = storage.clone();
+    }
+
     pub(crate) fn stage(
         self,
         reason: &str,

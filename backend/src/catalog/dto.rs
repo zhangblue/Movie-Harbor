@@ -158,10 +158,15 @@ pub struct PublicEpisode {
     pub video_url: Option<String>,
 }
 
-pub(crate) fn media_url(storage_key: Option<String>, expected_kind: &str) -> Option<String> {
+pub(crate) fn media_url(
+    volume: Option<i32>,
+    storage_key: Option<String>,
+    expected_kind: &str,
+) -> Option<String> {
+    let volume = volume.filter(|value| *value >= 0)?;
     storage_key
         .filter(|key| controlled_storage_key(key, expected_kind))
-        .map(|key| format!("/media/{key}"))
+        .map(|key| format!("/media/v{volume}/{key}"))
 }
 
 fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {

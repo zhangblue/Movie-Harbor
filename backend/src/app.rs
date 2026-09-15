@@ -33,17 +33,24 @@ pub async fn build(
         limits: Default::default(),
         password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
     };
-    let media_dir = config
-        .media_dirs
-        .first()
-        .ok_or(crate::config::ConfigError::Invalid("MEDIA_DIRS"))?;
-    let storage = crate::media::LocalMediaStorage::initialize(media_dir).await?;
+    let storage = crate::media::MediaStorageSet::initialize(
+        &config.media_dirs,
+        config.media_disk_reserve_bytes,
+    )
+    .await?;
     let policy = crate::media::UploadPolicy::new(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
     )?;
     crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
-    crate::media::removal::recover(&db, &storage).await?;
+    crate::media::removal::recover(
+        &db,
+        storage
+            .volume(0)
+            .ok_or(crate::media::MediaError::InvalidStorageConfiguration)?
+            .storage(),
+    )
+    .await?;
     Ok(router()
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))

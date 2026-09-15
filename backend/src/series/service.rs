@@ -6,7 +6,7 @@ use crate::{
     },
     entities::{episode, season, series},
     genres,
-    media::{LocalMediaStorage, is_publishable_asset, removal},
+    media::{MediaStorageSet, is_publishable_asset, removal},
     movies::dto::{DeleteImpactResponse, DeleteResultResponse},
 };
 use axum::{
@@ -327,7 +327,7 @@ pub async fn update_season(
 
 pub async fn delete_season(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     command: DeleteSeasonCommand,
 ) -> Result<DeleteResultResponse, SeriesError> {
     let DeleteSeasonCommand {
@@ -336,7 +336,8 @@ pub async fn delete_season(
         expected_series_version: expected_version,
     } = command;
     require_positive_i64(expected_version)?;
-    let removal = removal::acquire(storage)
+    let guard = storage
+        .lock_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -352,7 +353,13 @@ pub async fn delete_season(
         .filter_map(|episode| episode.video_asset_id)
         .collect::<HashSet<_>>();
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(
+        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
+        guard,
+    );
     let staged = removal
         .stage("delete-season", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -452,7 +459,7 @@ pub async fn update_episode(
 
 pub async fn transition_series(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     id: Uuid,
     expected_version: i64,
@@ -487,7 +494,7 @@ pub async fn transition_series(
 
 pub async fn transition_episode(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     command: TransitionEpisodeCommand<'_>,
 ) -> Result<EpisodeEnvelope, SeriesError> {
@@ -530,7 +537,7 @@ pub async fn transition_episode(
 
 pub async fn delete_episode(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     command: DeleteEpisodeCommand,
 ) -> Result<DeleteResultResponse, SeriesError> {
     let DeleteEpisodeCommand {
@@ -540,7 +547,8 @@ pub async fn delete_episode(
         expected_episode_version: expected_version,
     } = command;
     require_positive_i64(expected_version)?;
-    let removal = removal::acquire(storage)
+    let guard = storage
+        .lock_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -552,7 +560,13 @@ pub async fn delete_episode(
         return Err(SeriesError::Conflict);
     }
     let asset_ids = episode.video_asset_id.into_iter().collect::<Vec<_>>();
-    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(
+        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
+        guard,
+    );
     let staged = removal
         .stage("delete-episode", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -568,12 +582,13 @@ pub async fn delete_episode(
 
 pub async fn delete_series(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     id: Uuid,
     expected_version: i64,
 ) -> Result<DeleteResultResponse, SeriesError> {
     require_positive_i64(expected_version)?;
-    let removal = removal::acquire(storage)
+    let guard = storage
+        .lock_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -601,7 +616,13 @@ pub async fn delete_series(
         );
     }
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids)
+        .await
+        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(
+        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
+        guard,
+    );
     let staged = removal
         .stage("delete-series", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -763,7 +784,7 @@ async fn episode_envelope<C: ConnectionTrait>(
 
 async fn validate_series_publish<C: ConnectionTrait>(
     db: &C,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     model: &series::Model,
 ) -> Result<(), SeriesError> {
@@ -799,7 +820,7 @@ async fn validate_series_publish<C: ConnectionTrait>(
 
 async fn validate_episode_publish<C: ConnectionTrait>(
     db: &C,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     model: &episode::Model,
 ) -> Result<(), SeriesError> {

@@ -20,6 +20,8 @@ export function classifyEditorWriteError(cause: unknown): EditorWriteError {
   if (!(cause instanceof ApiError)) return { kind: "message", message: "操作失败，请检查网络后重试。" };
 
   switch (apiErrorCode(cause)) {
+    case "media_storage_insufficient":
+      return { kind: "message", message: "媒体存储空间不足或不可用，请检查硬盘连接和剩余空间后重试。" };
     case "media_delete_failed":
       return { kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" };
     case "media_replace_failed":

@@ -44,6 +44,7 @@ WITH candidates AS (
 )
 SELECT candidates.id, candidates.kind, candidates.name, candidates.status,
        candidates.version, candidates.created_at,
+       poster.storage_volume AS poster_storage_volume,
        poster.storage_key AS poster_storage_key
 FROM candidates
 LEFT JOIN media_asset poster ON poster.id = candidates.poster_asset_id
@@ -59,6 +60,7 @@ struct AdminContentRow {
     status: String,
     version: i64,
     created_at: DateTime<FixedOffset>,
+    poster_storage_volume: Option<i32>,
     poster_storage_key: Option<String>,
 }
 
@@ -111,7 +113,11 @@ pub async fn list(
             status: row.status,
             version: row.version,
             created_at: row.created_at.to_rfc3339(),
-            poster_url: crate::catalog::dto::media_url(row.poster_storage_key, "poster"),
+            poster_url: crate::catalog::dto::media_url(
+                row.poster_storage_volume,
+                row.poster_storage_key,
+                "poster",
+            ),
         })
         .collect();
     transaction.commit().await?;

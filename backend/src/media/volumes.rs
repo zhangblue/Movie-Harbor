@@ -1,4 +1,4 @@
-use super::{LocalMediaStorage, MediaError};
+use super::{ChunkSource, LocalMediaStorage, MediaError, MediaKind, StoredFile, UploadPolicy};
 use std::{
     cmp::Reverse,
     collections::{HashMap, HashSet},
@@ -44,7 +44,55 @@ impl CapacityProbe for FilesystemCapacity {
     }
 }
 
+pub struct VolumeStoredFile {
+    pub volume_id: i32,
+    pub stored: StoredFile,
+    _reservation: UploadReservation,
+}
+
+// Preserve the lock and hooks when embedding an existing single-volume storage.
+impl From<LocalMediaStorage> for MediaStorageSet {
+    fn from(storage: LocalMediaStorage) -> Self {
+        Self {
+            mutations: storage.mutation_lock(),
+            volumes: Arc::new(vec![MediaVolume {
+                volume_id: 0,
+                storage,
+            }]),
+            reserve_bytes: 0,
+            reservations: Arc::new(Mutex::new(HashMap::new())),
+            capacity: Arc::new(FilesystemCapacity),
+        }
+    }
+}
+
 impl MediaStorageSet {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn store<S: ChunkSource + Send>(
+        &self,
+        required_bytes: u64,
+        id: uuid::Uuid,
+        kind: MediaKind,
+        original_name: &str,
+        declared_mime: &str,
+        policy: &UploadPolicy,
+        source: S,
+    ) -> Result<VolumeStoredFile, MediaError> {
+        let reservation = self.reserve_for_upload(required_bytes).await?;
+        let volume_id = reservation.volume_id();
+        let stored = self
+            .volume(volume_id)
+            .ok_or(MediaError::InvalidStorageConfiguration)?
+            .storage()
+            .store(id, kind, original_name, declared_mime, policy, source)
+            .await?;
+        Ok(VolumeStoredFile {
+            volume_id,
+            stored,
+            _reservation: reservation,
+        })
+    }
+
     pub async fn initialize(paths: &[PathBuf], reserve_bytes: u64) -> Result<Self, MediaError> {
         let last = paths
             .len()
@@ -98,6 +146,16 @@ impl MediaStorageSet {
 
     /// Acquire once for an operation spanning volumes. Callers must transfer this guard
     /// to storage operations rather than attempting to acquire the same lock again.
+    pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
+        // This only emits the existing lock hook and acquires the shared mutex; it does
+        // not access volume 0 files before the caller validates the deletion targets.
+        self.volume(0)
+            .ok_or(MediaError::InvalidStorageConfiguration)?
+            .storage()
+            .lock_removal()
+            .await
+    }
+
     pub async fn lock_mutations(&self) -> OwnedMutexGuard<()> {
         self.mutations.clone().lock_owned().await
     }
@@ -192,6 +250,73 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    struct OneChunk(Option<axum::body::Bytes>);
+
+    impl ChunkSource for OneChunk {
+        fn next_chunk(
+            &mut self,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = Result<Option<axum::body::Bytes>, MediaError>>
+                    + Send
+                    + '_,
+            >,
+        > {
+            Box::pin(async move { Ok(self.0.take()) })
+        }
+    }
+
+    // Catches releasing or skipping the capacity reservation after promotion but before ownership resolves.
+    #[tokio::test]
+    async fn stored_file_holds_capacity_until_registration_or_rollback_resolves() {
+        use image::ImageEncoder;
+        let mut bytes = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut bytes)
+            .write_image(&[20, 40, 60], 1, 1, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let (set, _root) = storage_set(&[(0, Some(200))], 0).await;
+        let policy = UploadPolicy::new(1024, ["video/mp4"]).unwrap();
+        let stored = set
+            .store(
+                100,
+                uuid::Uuid::new_v4(),
+                MediaKind::Poster,
+                "poster.png",
+                "image/png",
+                &policy,
+                OneChunk(Some(bytes.into())),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            set.reserve_for_upload(101).await,
+            Err(MediaError::InsufficientStorage)
+        ));
+        let key = stored.stored.storage_key.clone();
+        drop(stored);
+        assert!(
+            !set.volume(0)
+                .unwrap()
+                .storage()
+                .is_accessible_regular_file(&key)
+                .unwrap()
+        );
+        assert!(set.reserve_for_upload(200).await.is_ok());
+        assert!(
+            set.store(
+                100,
+                uuid::Uuid::new_v4(),
+                MediaKind::Poster,
+                "bad.png",
+                "image/png",
+                &policy,
+                OneChunk(Some(axum::body::Bytes::from_static(b"invalid")))
+            )
+            .await
+            .is_err()
+        );
+        assert!(set.reserve_for_upload(200).await.is_ok());
+    }
     struct TestRoot(PathBuf);
 
     impl Drop for TestRoot {

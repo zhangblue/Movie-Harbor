@@ -2,6 +2,11 @@ import { ApiError } from "@movie-harbor/api-client";
 import { expect, test } from "vitest";
 import { classifyEditorWriteError, mergeGenreChoices } from "./editorSupport";
 
+test("storage exhaustion uses a localized message without exposing server paths", () => {
+  expect(classifyEditorWriteError(new ApiError(507, "", "/private/disk unavailable", { code: "media_storage_insufficient" })))
+    .toEqual({ kind: "message", message: "媒体存储空间不足或不可用，请检查硬盘连接和剩余空间后重试。" });
+});
+
 test("mergeGenreChoices keeps available order and appends linked inactive genres once", () => {
   const available = [
     { id: "g1", name: "剧情", enabled: true, sort_order: 1 },

@@ -65,6 +65,11 @@ impl Drop for TempRoot {
 }
 
 fn config(root: &Path) -> Config {
+    std::fs::write(
+        root.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":0}"#,
+    )
+    .unwrap();
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
@@ -384,7 +389,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let mut upload = tokio::spawn(async move {
         replace_attachment(
             &upload_db,
-            &upload_storage,
+            &upload_storage.clone().into(),
             AttachmentTarget::MoviePoster {
                 id: upload_id,
                 version: 1,
@@ -405,7 +410,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let delete_storage = storage;
     let delete_id = delete_movie.id;
     let mut deletion = tokio::spawn(async move {
-        movie_service::delete(&delete_db, &delete_storage, delete_id, 1).await
+        movie_service::delete(&delete_db, &delete_storage.clone().into(), delete_id, 1).await
     });
     removal_entered.notified().await;
     source_release_tx.send(()).unwrap();
@@ -1248,7 +1253,7 @@ async fn delete_restores_staged_movie_media_when_a_later_stage_fails() {
     )
     .await
     .unwrap();
-    let error = movie_service::delete(&db, &storage, id.parse().unwrap(), 3)
+    let error = movie_service::delete(&db, &storage.clone().into(), id.parse().unwrap(), 3)
         .await
         .unwrap_err();
     let response = axum::response::IntoResponse::into_response(error);
@@ -1375,7 +1380,7 @@ async fn delete_reports_finish_failure_after_the_database_commit() {
     .await
     .unwrap();
 
-    let error = movie_service::delete(&db, &storage, id.parse().unwrap(), 2)
+    let error = movie_service::delete(&db, &storage.clone().into(), id.parse().unwrap(), 2)
         .await
         .unwrap_err();
     let response = axum::response::IntoResponse::into_response(error);

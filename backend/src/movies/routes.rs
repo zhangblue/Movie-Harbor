@@ -1,6 +1,6 @@
 use crate::{
     auth::{self, AuthState},
-    media::LocalMediaStorage,
+    media::MediaStorageSet,
     route_params::parse_uuid,
 };
 use axum::{
@@ -23,13 +23,13 @@ use super::{
 #[derive(Clone)]
 struct MovieState {
     db: DatabaseConnection,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     allowed_video_mime_types: Vec<String>,
 }
 
 pub fn router(
     auth_state: AuthState,
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     allowed_video_mime_types: Vec<String>,
 ) -> Router {
     let state = MovieState {

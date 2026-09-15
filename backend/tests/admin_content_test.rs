@@ -47,6 +47,11 @@ impl Drop for TempRoot {
 }
 
 fn config(root: &Path) -> Config {
+    std::fs::write(
+        root.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":0}"#,
+    )
+    .unwrap();
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
@@ -383,9 +388,9 @@ async fn admin_content_only_exposes_controlled_poster_urls() {
     let db = TestDatabase::migrated("admin_content_posters").await;
     db.execute_unprepared(
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('30000000-0000-0000-0000-000000000001', 'poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png', 'valid.png', 'image/png', 1, 'poster'),
-('30000000-0000-0000-0000-000000000002', 'poster/bb/../broken.png', 'broken.png', 'image/png', 1, 'poster');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('30000000-0000-0000-0000-000000000001', 1, 'poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png', 'valid.png', 'image/png', 1, 'poster'),
+('30000000-0000-0000-0000-000000000002', 1, 'poster/bb/../broken.png', 'broken.png', 'image/png', 1, 'poster');
 INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
 ('30000000-0000-0000-0000-000000000003', 'Valid poster', '30000000-0000-0000-0000-000000000001', 'draft', '2026-02-02T00:00:00Z'),
 ('30000000-0000-0000-0000-000000000004', 'Broken poster', '30000000-0000-0000-0000-000000000002', 'draft', '2026-02-01T00:00:00Z');
@@ -403,7 +408,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
     assert_eq!(payload["items"][0]["name"], "Valid poster");
     assert_eq!(
         payload["items"][0]["poster_url"],
-        "/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png"
+        "/media/v1/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png"
     );
     assert_eq!(payload["items"][1]["name"], "Broken poster");
     assert!(payload["items"][1]["poster_url"].is_null());
@@ -414,8 +419,8 @@ async fn admin_content_total_and_items_share_one_snapshot() {
     let db = TestDatabase::migrated("admin_content_snapshot").await;
     db.execute_unprepared(
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('40000000-0000-0000-0000-000000000001', 'poster/44/44444444444444444444444444444444.png', 'old.png', 'image/png', 1, 'poster');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('40000000-0000-0000-0000-000000000001', 1, 'poster/44/44444444444444444444444444444444.png', 'old.png', 'image/png', 1, 'poster');
 INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
 ('40000000-0000-0000-0000-000000000002', 'Old movie', '40000000-0000-0000-0000-000000000001', 'draft', '2026-01-01T00:00:00Z');
 "#,

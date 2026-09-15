@@ -6,7 +6,7 @@ use crate::{
     },
     entities::movie,
     genres,
-    media::{LocalMediaStorage, is_publishable_asset, removal},
+    media::{MediaStorageSet, is_publishable_asset, removal},
 };
 use axum::{
     Json,
@@ -214,7 +214,7 @@ pub async fn update(
 
 pub async fn transition(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     id: Uuid,
     expected_version: i64,
@@ -267,12 +267,13 @@ pub async fn delete_impact(
 
 pub async fn delete(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     id: Uuid,
     expected_version: i64,
 ) -> Result<DeleteResultResponse, MovieError> {
     require_positive_i64(expected_version)?;
-    let removal = removal::acquire(storage)
+    let guard = storage
+        .lock_removal()
         .await
         .map_err(|_| MovieError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -286,7 +287,13 @@ pub async fn delete(
         .flatten()
         .collect::<HashSet<_>>();
     let asset_ids = assets.into_iter().collect::<Vec<_>>();
-    let owned = removal::load_owned_media(&tx, &asset_ids).await?;
+    let owned = removal::load_owned_media(&tx, &asset_ids)
+        .await
+        .map_err(|_| MovieError::MediaDelete)?;
+    let removal = removal::continue_with_guard(
+        storage.volume(0).ok_or(MovieError::MediaDelete)?.storage(),
+        guard,
+    );
     let staged = removal
         .stage("delete-movie", &owned)
         .map_err(|_| MovieError::MediaDelete)?;
@@ -323,7 +330,7 @@ async fn response<C: sea_orm::ConnectionTrait>(
 
 async fn validate_publish<C: sea_orm::ConnectionTrait>(
     db: &C,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     allowed_video_mime_types: &[String],
     model: &movie::Model,
 ) -> Result<(), MovieError> {

@@ -374,6 +374,10 @@ fn verify_volume_identity(root_fd: &OwnedFd, volume_id: i32) -> Result<(), Media
 }
 
 impl LocalMediaStorage {
+    pub(crate) fn mutation_lock(&self) -> Arc<AsyncMutex<()>> {
+        self.mutations.clone()
+    }
+
     pub(crate) fn validate_storage_key(&self, storage_key: &str) -> Result<(), MediaError> {
         parse_storage_key(storage_key).map(|_| ())
     }

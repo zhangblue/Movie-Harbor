@@ -50,6 +50,11 @@ impl Drop for TempRoot {
 }
 
 fn config(root: &Path) -> Config {
+    std::fs::write(
+        root.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":0}"#,
+    )
+    .unwrap();
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
@@ -306,9 +311,9 @@ async fn cards_include_safe_poster_and_first_three_ordered_genres_with_total_cou
     sql(
         &db,
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('41000000-0000-0000-0000-000000000001', 'poster/41/41000000000000000000000000000001.png', 'private.png', 'image/png', 99, 'poster'),
-('41000000-0000-0000-0000-000000000002', '../private/secret.png', 'secret.png', 'image/png', 99, 'poster');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('41000000-0000-0000-0000-000000000001', 1, 'poster/41/41000000000000000000000000000001.png', 'private.png', 'image/png', 99, 'poster'),
+('41000000-0000-0000-0000-000000000002', 1, '../private/secret.png', 'secret.png', 'image/png', 99, 'poster');
 INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
 ('42000000-0000-0000-0000-000000000001', 'Safe card', '41000000-0000-0000-0000-000000000001', 'published', '2026-02-02T00:00:00Z'),
 ('42000000-0000-0000-0000-000000000002', 'Corrupt key card', '41000000-0000-0000-0000-000000000002', 'published', '2026-02-01T00:00:00Z');
@@ -327,7 +332,7 @@ INSERT INTO movie_genre (movie_id, genre_id) SELECT '42000000-0000-0000-0000-000
 
     assert_eq!(
         payload["items"][0]["poster_url"],
-        "/media/poster/41/41000000000000000000000000000001.png"
+        "/media/v1/poster/41/41000000000000000000000000000001.png"
     );
     assert_eq!(payload["items"][0]["genre_count"], 4);
     assert_eq!(payload["items"][0]["genres"][0]["name"], "First");
@@ -344,9 +349,9 @@ async fn movie_detail_returns_only_public_fields_and_hidden_movies_are_not_found
     sql(
         &db,
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('51000000-0000-0000-0000-000000000001', 'poster/51/51000000000000000000000000000001.webp', 'poster-private.webp', 'image/webp', 11, 'poster'),
-('51000000-0000-0000-0000-000000000002', 'video/51/51000000000000000000000000000002.mp4', 'video-private.mp4', 'video/mp4', 22, 'video');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('51000000-0000-0000-0000-000000000001', 1, 'poster/51/51000000000000000000000000000001.webp', 'poster-private.webp', 'image/webp', 11, 'poster'),
+('51000000-0000-0000-0000-000000000002', 1, 'video/51/51000000000000000000000000000002.mp4', 'video-private.mp4', 'video/mp4', 22, 'video');
 INSERT INTO movie (id, name, synopsis, year, duration_seconds, poster_asset_id, video_asset_id, status, version, published_at) VALUES
 ('52000000-0000-0000-0000-000000000001', 'Public movie', 'Visible synopsis', 2026, 7200, '51000000-0000-0000-0000-000000000001', '51000000-0000-0000-0000-000000000002', 'published', 9, '2026-01-01T00:00:00Z'),
 ('52000000-0000-0000-0000-000000000002', 'Draft movie', 'Private', 2026, 1, NULL, NULL, 'draft', 2, NULL),
@@ -375,11 +380,11 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
     assert_eq!(detail["duration_seconds"], 7200);
     assert_eq!(
         detail["poster_url"],
-        "/media/poster/51/51000000000000000000000000000001.webp"
+        "/media/v1/poster/51/51000000000000000000000000000001.webp"
     );
     assert_eq!(
         detail["video_url"],
-        "/media/video/51/51000000000000000000000000000002.mp4"
+        "/media/v1/video/51/51000000000000000000000000000002.mp4"
     );
     assert_eq!(detail["genres"][0]["name"], "Earlier");
     assert_eq!(detail["genres"][1]["name"], "Later");
@@ -416,9 +421,9 @@ async fn series_detail_groups_only_published_episodes_and_parent_visibility_is_e
     sql(
         &db,
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('61000000-0000-0000-0000-000000000001', 'poster/61/61000000000000000000000000000001.png', 'poster.png', 'image/png', 10, 'poster'),
-('61000000-0000-0000-0000-000000000002', 'video/61/61000000000000000000000000000002.webm', 'episode.webm', 'video/webm', 20, 'video');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('61000000-0000-0000-0000-000000000001', 1, 'poster/61/61000000000000000000000000000001.png', 'poster.png', 'image/png', 10, 'poster'),
+('61000000-0000-0000-0000-000000000002', 1, 'video/61/61000000000000000000000000000002.webm', 'episode.webm', 'video/webm', 20, 'video');
 INSERT INTO series (id, name, synopsis, year, poster_asset_id, status, version, published_at) VALUES
 ('62000000-0000-0000-0000-000000000001', 'Public series', 'Visible synopsis', 2025, '61000000-0000-0000-0000-000000000001', 'published', 7, '2026-01-01T00:00:00Z'),
 ('62000000-0000-0000-0000-000000000002', 'Draft series', 'Private', 2025, NULL, 'draft', 1, NULL),
@@ -454,7 +459,7 @@ INSERT INTO episode (id, season_id, number, name, duration_seconds, video_asset_
     assert_eq!(episode["duration_seconds"], 2700);
     assert_eq!(
         detail["seasons"][0]["episodes"][0]["video_url"],
-        "/media/video/61/61000000000000000000000000000002.webm"
+        "/media/v1/video/61/61000000000000000000000000000002.webm"
     );
     assert_eq!(detail["seasons"][0]["episodes"][1]["name"], "Second");
     assert!(detail["seasons"][0]["episodes"][1]["video_url"].is_null());
@@ -624,8 +629,8 @@ async fn catalog_total_and_items_share_a_snapshot_during_publication_changes() {
     sql(
         &db,
         r#"
-INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
-('66000000-0000-0000-0000-000000000001', 'poster/66/66000000000000000000000000000001.png', 'poster.png', 'image/png', 1, 'poster');
+INSERT INTO media_asset (id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('66000000-0000-0000-0000-000000000001', 1, 'poster/66/66000000000000000000000000000001.png', 'poster.png', 'image/png', 1, 'poster');
 INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
 ('66000000-0000-0000-0000-000000000002', 'Old public movie', '66000000-0000-0000-0000-000000000001', 'published', '2026-01-01T00:00:00Z'),
 ('66000000-0000-0000-0000-000000000003', 'New movie one', NULL, 'draft', NULL),
@@ -732,7 +737,7 @@ SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMEST
     .await;
 
     migration::Migrator::up(&db, None).await.unwrap();
-    migration::Migrator::down(&db, Some(3)).await.unwrap();
+    migration::Migrator::down(&db, Some(4)).await.unwrap();
     migration::Migrator::up(&db, None).await.unwrap();
 }
 
@@ -879,7 +884,7 @@ WHERE name ~ '^Series [0-9]+$'
         "{production_search_plan}"
     );
 
-    migration::Migrator::down(&db, Some(3)).await.unwrap();
+    migration::Migrator::down(&db, Some(4)).await.unwrap();
     let remaining = db
         .query_one(Statement::from_string(
             DatabaseBackend::Postgres,

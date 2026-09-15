@@ -15,11 +15,11 @@ use std::{fmt, io};
 pub use storage::{ChunkSource, LocalMediaStorage, StorageEvent, StorageHooks, StoredFile};
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
-pub use volumes::{MediaStorageSet, MediaVolume, UploadReservation};
+pub use volumes::{MediaStorageSet, MediaVolume, UploadReservation, VolumeStoredFile};
 
 /// Validate a registered asset at the publication boundary without opening special files.
 pub fn is_publishable_asset<S: AsRef<str>>(
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     asset: Option<&crate::entities::media_asset::Model>,
     purpose: &str,
     allowed_mime_types: &[S],
@@ -31,9 +31,12 @@ pub fn is_publishable_asset<S: AsRef<str>>(
         && allowed_mime_types
             .iter()
             .any(|mime| mime.as_ref() == asset.mime_type)
-        && storage
-            .is_accessible_regular_file(&asset.storage_key)
-            .unwrap_or(false)
+        && storage.volume(asset.storage_volume).is_some_and(|volume| {
+            volume
+                .storage()
+                .is_accessible_regular_file(&asset.storage_key)
+                .unwrap_or(false)
+        })
 }
 
 #[derive(Debug)]
@@ -118,6 +121,12 @@ impl From<sea_orm::DbErr> for MediaError {
 
 impl IntoResponse for MediaError {
     fn into_response(self) -> Response {
+        if matches!(self, Self::InsufficientStorage) {
+            return (
+                StatusCode::INSUFFICIENT_STORAGE,
+                Json(serde_json::json!({"error":"media storage is unavailable or full","code":"media_storage_insufficient"})),
+            ).into_response();
+        }
         if matches!(self, Self::ContentMismatch) {
             return (
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,

@@ -1,5 +1,5 @@
 use super::{
-    ChunkSource, LocalMediaStorage, MediaError, StoredFile,
+    ChunkSource, MediaError, MediaStorageSet, VolumeStoredFile,
     removal::{self, OwnedMedia, RemovalSession, StagedOperation},
     validation::{MediaKind, UploadPolicy},
 };
@@ -42,8 +42,8 @@ pub(crate) struct PendingAttachment {
     target: AttachmentTarget,
     kind: MediaKind,
     original_name: String,
-    stored: StoredFile,
-    storage: LocalMediaStorage,
+    stored: VolumeStoredFile,
+    storage: MediaStorageSet,
     expected_version: i64,
 }
 
@@ -60,7 +60,7 @@ struct SwitchOutcome {
 
 pub async fn store_new_asset<S: ChunkSource + Send>(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     kind: MediaKind,
     original_name: &str,
     declared_mime: &str,
@@ -69,75 +69,87 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
 ) -> Result<media_asset::Model, MediaError> {
     let id = Uuid::new_v4();
     let mut stored = storage
-        .store(id, kind, original_name, declared_mime, policy, source)
+        .store(
+            policy.max_bytes(),
+            id,
+            kind,
+            original_name,
+            declared_mime,
+            policy,
+            source,
+        )
         .await?;
-    stored.begin_database_write();
+    stored.stored.begin_database_write();
     let asset = match insert_asset(db, id, kind, original_name, &stored).await {
         Ok(asset) => asset,
         Err(error) => {
             if media_asset::Entity::find_by_id(id).one(db).await?.is_none() {
-                stored.database_failure_is_known();
+                stored.stored.database_failure_is_known();
             }
             return Err(error);
         }
     };
-    stored.notify_database_committed()?;
+    stored.stored.notify_database_committed()?;
     tokio::task::yield_now().await;
-    stored.mark_registered()?;
+    stored.stored.mark_registered()?;
     Ok(asset)
 }
 
 pub async fn recover_stale_uploads(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     stale_age: Duration,
 ) -> Result<(), MediaError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    for entry in storage.incoming_entries()? {
-        let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
-        if now.saturating_sub(modified) < stale_age.as_secs() {
-            continue;
-        }
-        if entry.name.ends_with(".part") {
-            storage.remove_incoming(&entry.name).await?;
-            continue;
-        }
-        if entry.name.ends_with(".pending") {
-            let marker = match storage.read_pending_marker(&entry.name) {
-                Ok(marker) => marker,
-                Err(error) => {
-                    eprintln!("retaining invalid media recovery marker: {error}");
-                    continue;
-                }
-            };
-            let registered = media_asset::Entity::find()
-                .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
-                .one(db)
-                .await?
-                .is_some();
-            if !registered {
-                match storage.remove_pending_owned(&marker).await {
-                    Ok(true) => {}
-                    Ok(false) => continue,
+    for volume in storage.volumes() {
+        let storage = volume.storage();
+        for entry in storage.incoming_entries()? {
+            let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
+            if now.saturating_sub(modified) < stale_age.as_secs() {
+                continue;
+            }
+            if entry.name.ends_with(".part") {
+                storage.remove_incoming(&entry.name).await?;
+                continue;
+            }
+            if entry.name.ends_with(".pending") {
+                let marker = match storage.read_pending_marker(&entry.name) {
+                    Ok(marker) => marker,
                     Err(error) => {
-                        eprintln!("retaining unproven media recovery marker: {error}");
+                        eprintln!("retaining invalid media recovery marker: {error}");
                         continue;
                     }
+                };
+                let registered = media_asset::Entity::find()
+                    .filter(media_asset::Column::StorageVolume.eq(volume.volume_id()))
+                    .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
+                    .one(db)
+                    .await?
+                    .is_some();
+                if !registered {
+                    match storage.remove_pending_owned(&marker).await {
+                        Ok(true) => {}
+                        Ok(false) => continue,
+                        Err(error) => {
+                            eprintln!("retaining unproven media recovery marker: {error}");
+                            continue;
+                        }
+                    }
                 }
+                storage.remove_incoming(&entry.name).await?;
             }
-            storage.remove_incoming(&entry.name).await?;
         }
+        storage.notify_recovery_cycle_completed()?;
     }
-    storage.notify_recovery_cycle_completed()?;
     Ok(())
 }
 
 pub async fn replace_attachment<S: ChunkSource + Send>(
     db: &DatabaseConnection,
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     target: AttachmentTarget,
     original_name: &str,
     declared_mime: &str,
@@ -150,6 +162,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
         original_name,
         declared_mime,
         policy,
+        policy.max_bytes(),
         source,
     )
     .await?;
@@ -157,11 +170,12 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
 }
 
 pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     target: AttachmentTarget,
     original_name: &str,
     declared_mime: &str,
     policy: &UploadPolicy,
+    required_bytes: u64,
     source: S,
 ) -> Result<PendingAttachment, MediaError> {
     let expected_version = target.expected_version();
@@ -171,7 +185,15 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     let id = Uuid::new_v4();
     let kind = target.kind();
     let stored = storage
-        .store(id, kind, original_name, declared_mime, policy, source)
+        .store(
+            required_bytes,
+            id,
+            kind,
+            original_name,
+            declared_mime,
+            policy,
+            source,
+        )
         .await?;
     Ok(PendingAttachment {
         id,
@@ -188,55 +210,73 @@ pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
 ) -> Result<CommittedAttachment, MediaError> {
-    let guard = pending.stored.take_mutation_guard()?;
-    let removal = removal::continue_with_guard(&pending.storage, guard);
+    let guard = pending.stored.stored.take_mutation_guard()?;
+    let mut removal = removal::continue_with_guard(
+        pending
+            .storage
+            .volume(pending.stored.volume_id)
+            .ok_or(MediaError::InvalidStorageConfiguration)?
+            .storage(),
+        guard,
+    );
     let mut staged = None;
     let tx = match db.begin().await {
         Ok(tx) => tx,
         Err(error) => {
-            pending.stored.return_mutation_guard(removal.into_guard())?;
+            pending
+                .stored
+                .stored
+                .return_mutation_guard(removal.into_guard())?;
             return Err(error.into());
         }
     };
-    pending.stored.begin_database_write();
-    let result = replace_before_commit(&tx, &pending, &removal, &mut staged).await;
+    pending.stored.stored.begin_database_write();
+    let result = replace_before_commit(&tx, &pending, &mut removal, &mut staged).await;
     let committed = match result {
         Ok(committed) => committed,
         Err(error) => {
             if tx.rollback().await.is_ok() {
-                pending.stored.database_failure_is_known();
+                pending.stored.stored.database_failure_is_known();
             }
             let restore_result = staged
                 .take()
-                .map(|staged| staged.restore(&pending.storage))
+                .map(|staged| staged.restore(removal.storage()))
                 .transpose();
-            pending.stored.return_mutation_guard(removal.into_guard())?;
+            pending
+                .stored
+                .stored
+                .return_mutation_guard(removal.into_guard())?;
             restore_result.map_err(|_| MediaError::ReplacementFailed)?;
             return Err(error);
         }
     };
     if tx.commit().await.is_err() {
-        pending.stored.database_failure_is_known();
+        pending.stored.stored.database_failure_is_known();
         let restore_result = staged
             .take()
-            .map(|staged| staged.restore(&pending.storage))
+            .map(|staged| staged.restore(removal.storage()))
             .transpose();
-        pending.stored.return_mutation_guard(removal.into_guard())?;
+        pending
+            .stored
+            .stored
+            .return_mutation_guard(removal.into_guard())?;
         restore_result.map_err(|_| MediaError::ReplacementFailed)?;
         return Err(MediaError::ReplacementFailed);
     }
     pending
+        .stored
         .stored
         .notify_database_committed()
         .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     tokio::task::yield_now().await;
     pending
         .stored
+        .stored
         .mark_registered()
         .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     if let Some(staged) = staged {
         staged
-            .finish(&pending.storage)
+            .finish(removal.storage())
             .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     }
     Ok(CommittedAttachment {
@@ -249,7 +289,7 @@ pub(crate) async fn commit_attachment(
 async fn replace_before_commit(
     tx: &DatabaseTransaction,
     pending: &PendingAttachment,
-    removal: &RemovalSession,
+    removal: &mut RemovalSession,
     staged: &mut Option<StagedOperation>,
 ) -> Result<CommittedAttachment, MediaError> {
     let asset = insert_asset(
@@ -265,6 +305,7 @@ async fn replace_before_commit(
         pending.target,
         asset.id,
         pending.expected_version,
+        &pending.storage,
         removal,
         staged,
     )
@@ -282,16 +323,17 @@ async fn insert_asset<C: sea_orm::ConnectionTrait>(
     id: Uuid,
     kind: MediaKind,
     original_name: &str,
-    stored: &StoredFile,
+    stored: &VolumeStoredFile,
 ) -> Result<media_asset::Model, MediaError> {
     Ok(media_asset::ActiveModel {
         id: Set(id),
-        storage_key: Set(stored.storage_key.clone()),
+        storage_volume: Set(stored.volume_id),
+        storage_key: Set(stored.stored.storage_key.clone()),
         original_name: Set(original_name.to_owned()),
-        mime_type: Set(stored.mime_type.clone()),
-        byte_size: Set(stored.byte_size),
+        mime_type: Set(stored.stored.mime_type.clone()),
+        byte_size: Set(stored.stored.byte_size),
         purpose: Set(kind.purpose().to_owned()),
-        checksum_sha256: Set(Some(stored.checksum_sha256.clone())),
+        checksum_sha256: Set(Some(stored.stored.checksum_sha256.clone())),
         ..Default::default()
     }
     .insert(db)
@@ -303,7 +345,8 @@ async fn switch_reference(
     target: AttachmentTarget,
     new_id: Uuid,
     expected_version: i64,
-    removal: &RemovalSession,
+    storage: &MediaStorageSet,
+    removal: &mut RemovalSession,
     staged: &mut Option<StagedOperation>,
 ) -> Result<SwitchOutcome, MediaError> {
     match target {
@@ -323,7 +366,7 @@ async fn switch_reference(
                 AttachmentTarget::MoviePoster { .. } => model.poster_asset_id,
                 _ => model.video_asset_id,
             };
-            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            let old_to_delete = stage_old_asset(tx, storage, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let result = match target {
                     AttachmentTarget::MoviePoster { .. } => {
@@ -379,7 +422,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.poster_asset_id;
-            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            let old_to_delete = stage_old_asset(tx, storage, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let result = series::Entity::update_many()
                     .col_expr(series::Column::PosterAssetId, Expr::value(Some(new_id)))
@@ -441,7 +484,7 @@ async fn switch_reference(
                 return Err(MediaError::VersionConflict);
             }
             let old = model.video_asset_id;
-            let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            let old_to_delete = stage_old_asset(tx, storage, removal, staged, old).await?;
             let database_result: Result<(), MediaError> = async {
                 let episode_result = episode::Entity::update_many()
                     .col_expr(episode::Column::VideoAssetId, Expr::value(Some(new_id)))
@@ -484,7 +527,8 @@ async fn switch_reference(
 
 async fn stage_old_asset(
     tx: &DatabaseTransaction,
-    removal: &RemovalSession,
+    storage: &MediaStorageSet,
+    removal: &mut RemovalSession,
     staged: &mut Option<StagedOperation>,
     old_id: Option<Uuid>,
 ) -> Result<Option<Uuid>, MediaError> {
@@ -495,6 +539,11 @@ async fn stage_old_asset(
         .one(tx)
         .await?
         .ok_or(MediaError::TargetNotFound)?;
+    let old_storage = storage
+        .volume(old.storage_volume)
+        .ok_or(MediaError::ReplacementFailed)?
+        .storage();
+    removal.use_storage(old_storage);
     *staged = Some(
         removal
             .stage_retaining(
