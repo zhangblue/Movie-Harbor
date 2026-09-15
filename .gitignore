@@ -6,6 +6,7 @@ target/
 .env
 .env.*
 !/.env.example
+compose.storage.generated.json
 frontend/public-web/dist/
 frontend/admin-web/dist/
 /data/

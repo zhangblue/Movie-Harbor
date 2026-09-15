@@ -87,14 +87,16 @@ test("defaults PostgreSQL storage to a host data directory", () => {
   assert.equal(mount.source, path.join(projectRoot, "data/postgres"));
 });
 
-test("shares one writable media directory with read-only serving", () => {
+test("maps the single-directory fallback into logical volume zero", () => {
   const config = composeConfig();
   const expected = path.join(projectRoot, "data/media");
 
-  assert.equal(mountAt(config, "media-init", "/media").source, expected);
-  assert.equal(mountAt(config, "api", "/media").source, expected);
-  assert.equal(mountAt(config, "caddy", "/srv/media").source, expected);
-  assert.equal(mountAt(config, "caddy", "/srv/media").read_only, true);
+  assert.equal(mountAt(config, "media-init", "/media/volumes/0").source, expected);
+  assert.equal(mountAt(config, "api", "/media/volumes/0").source, expected);
+  assert.equal(mountAt(config, "caddy", "/srv/media/volumes/0").source, expected);
+  assert.equal(mountAt(config, "caddy", "/srv/media/volumes/0").read_only, true);
+  assert.equal(config.services.api.environment.MEDIA_DIRS, "/media/volumes/0");
+  assert.equal(mountAt(config, "api", "/media/volumes/0").bind.create_host_path, false);
 });
 
 test("host storage directories can be overridden", () => {
@@ -108,7 +110,7 @@ test("host storage directories can be overridden", () => {
     "/tmp/movie-harbor-db-override",
   );
   assert.equal(
-    mountAt(config, "api", "/media").source,
+    mountAt(config, "api", "/media/volumes/0").source,
     "/tmp/movie-harbor-media-override",
   );
 });

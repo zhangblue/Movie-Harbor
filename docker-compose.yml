@@ -24,13 +24,13 @@ services:
   media-init:
     image: alpine:3.22
     restart: "no"
-    command: ["sh", "-c", "chown 10001:10001 /media && chmod 0700 /media"]
+    command: ["sh", "-c", "for directory in /media/volumes/*; do chown 10001:10001 \"$$directory\" && chmod 0700 \"$$directory\"; done"]
     volumes:
       - type: bind
         source: ${MEDIA_HOST_DIR:-./data/media}
-        target: /media
+        target: /media/volumes/0
         bind:
-          create_host_path: true
+          create_host_path: false
 
   api:
     build:
@@ -49,7 +49,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
-      MEDIA_DIR: /media
+      MEDIA_DIRS: /media/volumes/0
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:8080}
       TRUST_PROXY_HEADERS: "true"
@@ -61,9 +61,9 @@ services:
     volumes:
       - type: bind
         source: ${MEDIA_HOST_DIR:-./data/media}
-        target: /media
+        target: /media/volumes/0
         bind:
-          create_host_path: true
+          create_host_path: false
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/api/health"]
       interval: 5s
@@ -111,10 +111,10 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - type: bind
         source: ${MEDIA_HOST_DIR:-./data/media}
-        target: /srv/media
+        target: /srv/media/volumes/0
         read_only: true
         bind:
-          create_host_path: true
+          create_host_path: false
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/api/health"]
       interval: 5s

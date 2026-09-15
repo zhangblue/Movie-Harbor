@@ -9,12 +9,13 @@
 		}
 	}
 
-    @public_media path /media/poster/* /media/video/*
-    handle @public_media {
-        header X-Content-Type-Options nosniff
-        root * /srv
-        file_server
-    }
+	@public_media path_regexp public_media ^/media/v([0-9]+)/(poster|video)/([0-9a-f]{2}/[0-9a-f]{32}\.[A-Za-z0-9]+)$
+	handle @public_media {
+		header X-Content-Type-Options nosniff
+		rewrite * /media/volumes/{re.public_media.1}/{re.public_media.2}/{re.public_media.3}
+		root * /srv
+		file_server
+	}
 
     @other_media path /media /media/*
     handle @other_media {
