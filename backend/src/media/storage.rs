@@ -459,9 +459,17 @@ impl LocalMediaStorage {
 
     pub(crate) fn available_bytes(&self) -> Result<u64, MediaError> {
         let stat = rustix::fs::fstatvfs(&self.root_fd).map_err(io::Error::from)?;
-        stat.f_bavail
-            .checked_mul(stat.f_frsize)
-            .ok_or_else(|| io::Error::other("media filesystem capacity overflow").into())
+        let available = filesystem_available_bytes(&stat)?;
+        // Use effective credentials (including OS ACL checks), and require directory
+        // search permission as well as write permission. Never reopen the host path.
+        rustix::fs::accessat(
+            &self.root_fd,
+            ".",
+            rustix::fs::Access::WRITE_OK | rustix::fs::Access::EXEC_OK,
+            AtFlags::EACCESS,
+        )
+        .map_err(io::Error::from)?;
+        Ok(available)
     }
 
     /// Resolve a persisted key through directory capabilities and verify it names a readable
@@ -1588,6 +1596,19 @@ fn is_uuid_suffix(name: &str, suffix: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn filesystem_available_bytes(stat: &rustix::fs::StatVfs) -> Result<u64, MediaError> {
+    if stat.f_flag.contains(rustix::fs::StatVfsMountFlags::RDONLY) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "media filesystem is read-only",
+        )
+        .into());
+    }
+    stat.f_bavail
+        .checked_mul(stat.f_frsize)
+        .ok_or_else(|| io::Error::other("media filesystem capacity overflow").into())
+}
+
 fn parse_storage_key(key: &str) -> Result<(&str, &str, &str), MediaError> {
     if key.contains(['\\', '\0']) {
         return Err(MediaError::InvalidStorageKey);
@@ -1630,4 +1651,26 @@ fn validate_storage_key_parts(kind: &str, shard: &str, file: &str) -> Result<(),
     valid_extension
         .then_some(())
         .ok_or(MediaError::InvalidStorageKey)
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+
+    // Catches treating successful filesystem statistics as writable after a read-only remount.
+    #[test]
+    fn capacity_rejects_read_only_filesystem_with_free_blocks() {
+        let directory = std::fs::File::open(std::env::temp_dir()).unwrap();
+        let mut stat = rustix::fs::fstatvfs(&directory).unwrap();
+        stat.f_bavail = 80;
+        stat.f_frsize = 4096;
+        stat.f_flag.remove(rustix::fs::StatVfsMountFlags::RDONLY);
+        assert_eq!(filesystem_available_bytes(&stat).unwrap(), 327_680);
+
+        stat.f_flag.insert(rustix::fs::StatVfsMountFlags::RDONLY);
+        assert!(matches!(
+            filesystem_available_bytes(&stat),
+            Err(MediaError::Io(error)) if error.kind() == io::ErrorKind::PermissionDenied
+        ));
+    }
 }

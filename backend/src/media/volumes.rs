@@ -280,6 +280,38 @@ mod tests {
         ));
     }
 
+    // Catches selecting a volume whose real write/search permissions were revoked after startup,
+    // even when that volume reports more free bytes than its healthy peer.
+    #[tokio::test]
+    async fn allocator_skips_unwritable_volume_despite_larger_reported_capacity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if rustix::process::geteuid().as_raw() == 0 {
+            eprintln!("permission-revocation fixture requires an unprivileged API process");
+            return;
+        }
+        struct RealAccessFixedCapacity;
+        impl CapacityProbe for RealAccessFixedCapacity {
+            fn available_bytes(&self, volume: &MediaVolume) -> Result<u64, MediaError> {
+                // Preserve actual filesystem and permission checks; only free-byte quantities
+                // are fixed so concurrent host writes cannot make the selection test flaky.
+                volume.storage.available_bytes()?;
+                Ok(if volume.volume_id == 0 { 200 } else { 100 })
+            }
+        }
+        let (mut set, _root) = storage_set(&[(0, Some(200)), (1, Some(100))], 20).await;
+        set.capacity = Arc::new(RealAccessFixedCapacity);
+        let path = set.volume(0).unwrap().storage().root();
+        let original_permissions = std::fs::metadata(path).unwrap().permissions();
+        for mode in [0o500, 0o600] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let selected = set.reserve_for_upload(50).await;
+            std::fs::set_permissions(path, original_permissions.clone()).unwrap();
+            assert_eq!(selected.unwrap().volume_id(), 1, "permissions: {mode:o}");
+            assert_eq!(set.reserve_for_upload(50).await.unwrap().volume_id(), 0);
+        }
+    }
+
     // Catches leaked reservations or clearing other uploads' reservations when one handle is dropped.
     #[tokio::test]
     async fn allocator_drop_releases_only_its_own_reservation_across_clones() {
