@@ -1,13 +1,14 @@
 import {
   closeSync,
   existsSync,
+  fchmodSync,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
   renameSync,
-  statSync,
   writeSync,
 } from "node:fs";
 import path from "node:path";
@@ -21,11 +22,11 @@ function fail(message) {
 function verifyHostDirectory(value) {
   let stat;
   try {
-    stat = statSync(value);
+    stat = lstatSync(value);
   } catch {
     fail("directory does not exist");
   }
-  if (!stat.isDirectory()) fail("entry is not a directory");
+  if (stat.isSymbolicLink() || !stat.isDirectory()) fail("entry is not a directory");
   return value;
 }
 
@@ -60,7 +61,7 @@ export function parseMediaHostDirs(
 function mounts(hostDirs, root, readOnly) {
   return hostDirs.map((source, volume) => ({
     type: "bind",
-    source,
+    source: source.replaceAll("$", () => "$$"),
     target: `${root}/${volume}`,
     ...(readOnly ? { read_only: true } : {}),
     bind: { create_host_path: false },
@@ -88,7 +89,9 @@ export function renderStorageCompose(hostDirs) {
 export function readVolumeMarker(directory, volume) {
   let marker;
   try {
-    marker = JSON.parse(readFileSync(path.join(directory, VOLUME_MARKER), "utf8"));
+    const markerPath = path.join(directory, VOLUME_MARKER);
+    if (!lstatSync(markerPath).isFile()) throw new Error("marker is not a regular file");
+    marker = JSON.parse(readFileSync(markerPath, "utf8"));
   } catch {
     throw new Error(`media volume ${volume} has no valid identity marker`);
   }
@@ -111,14 +114,15 @@ function parseDotenvMediaHostDir(envPath) {
   fail("MEDIA_HOST_DIR is missing");
 }
 
-function writeAtomically(output, data) {
+function writeAtomically(output, data, mode = 0o600) {
   const outputDirectory = path.dirname(output);
   const temporary = path.join(
     outputDirectory,
     `.${path.basename(output)}.${process.pid}.${Date.now()}.tmp`,
   );
-  const descriptor = openSync(temporary, "wx", 0o600);
+  const descriptor = openSync(temporary, "wx", mode);
   try {
+    fchmodSync(descriptor, mode);
     writeSync(descriptor, data);
     fsyncSync(descriptor);
   } finally {
@@ -146,7 +150,7 @@ function initializeMarkers(hostDirs) {
     if (volume > 0 && readdirSync(directory).length !== 0) {
       throw new Error(`media volume ${volume} is non-empty and has no identity marker`);
     }
-    writeAtomically(markerPath, JSON.stringify({ version: 1, volume }));
+    writeAtomically(markerPath, JSON.stringify({ version: 1, volume }), 0o644);
   }
 }
 
