@@ -24,6 +24,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
+// Shared by removal preflight, manifest publication, and bounded recovery reads.
+pub(crate) const MAX_REMOVAL_MANIFEST_BYTES: usize = 1024 * 1024;
+
 pub trait ChunkSource {
     fn next_chunk(
         &mut self,
@@ -764,6 +767,9 @@ impl LocalMediaStorage {
         operation_id: Uuid,
         manifest: &[u8],
     ) -> Result<RemovalOperation, MediaError> {
+        if manifest.len() > MAX_REMOVAL_MANIFEST_BYTES {
+            return Err(MediaError::InvalidStorageKey);
+        }
         let name = operation_id.simple().to_string();
         mkdirat(&self.operations_fd, name.as_str(), directory_mode()).map_err(io::Error::from)?;
         sync_fd(&self.operations_fd)?;
@@ -939,10 +945,11 @@ impl LocalMediaStorage {
             {
                 return Err(MediaError::InvalidStorageKey);
             }
-            let mut reader = std::fs::File::from(manifest).take(65_537);
+            let mut reader =
+                std::fs::File::from(manifest).take(MAX_REMOVAL_MANIFEST_BYTES as u64 + 1);
             let mut encoded = Vec::new();
             reader.read_to_end(&mut encoded)?;
-            if encoded.len() > 65_536 {
+            if encoded.len() > MAX_REMOVAL_MANIFEST_BYTES {
                 return Err(MediaError::InvalidStorageKey);
             }
             operations.push(PersistedRemovalOperation {

@@ -1,6 +1,6 @@
 use super::{
     LocalMediaStorage, MediaError, MediaStorageSet,
-    storage::{RemovalOperation, RemovalSource},
+    storage::{MAX_REMOVAL_MANIFEST_BYTES, RemovalOperation, RemovalSource},
 };
 use crate::entities::media_asset;
 use sea_orm::{
@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
+
+const MAX_REMOVAL_MANIFEST_ENTRIES: usize = 4096;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnedMedia {
@@ -40,6 +42,11 @@ struct ManifestEntry {
 struct StagedEntry {
     source: RemovalSource,
     staged_name: String,
+}
+
+struct PreparedOperation {
+    encoded_manifest: Vec<u8>,
+    entries: Vec<StagedEntry>,
 }
 
 pub struct MultiVolumeStagedRemoval {
@@ -212,7 +219,7 @@ async fn recover_volume(
             .map_err(|_| MediaError::InvalidStorageKey)?;
         if manifest.version != 1
             || manifest.operation_id.simple().to_string() != persisted.operation.name
-            || manifest.entries.len() > 4096
+            || manifest.entries.len() > MAX_REMOVAL_MANIFEST_ENTRIES
         {
             return Err(MediaError::InvalidStorageKey);
         }
@@ -325,19 +332,24 @@ fn stage_operations(
         groups.entry(asset.storage_volume).or_default().push(asset);
     }
     let operation_id = Uuid::new_v4();
-    let mut staged = StagedOperations {
-        operations: Vec::new(),
-    };
+    let mut prepared = Vec::new();
+    // Validate every volume's serialized manifest before publishing any manifest or renaming files.
     for (volume_id, assets) in groups {
         let volume = storage
             .volume(volume_id)
             .ok_or(MediaError::UnconfiguredVolume(volume_id))?;
-        match stage_operation(volume.storage(), operation_id, reason, &assets) {
-            Ok(operation) => {
-                staged
-                    .operations
-                    .push((volume_id, volume.storage().clone(), operation))
-            }
+        prepared.push((
+            volume_id,
+            volume.storage().clone(),
+            prepare_operation(volume.storage(), operation_id, reason, &assets)?,
+        ));
+    }
+    let mut staged = StagedOperations {
+        operations: Vec::new(),
+    };
+    for (volume_id, storage, prepared) in prepared {
+        match stage_operation(&storage, operation_id, prepared) {
+            Ok(operation) => staged.operations.push((volume_id, storage, operation)),
             Err(error) => {
                 staged.restore()?;
                 return Err(error);
@@ -347,16 +359,19 @@ fn stage_operations(
     Ok(staged)
 }
 
-fn stage_operation(
+fn prepare_operation(
     storage: &LocalMediaStorage,
     operation_id: Uuid,
     reason: &str,
     assets: &[&OwnedMedia],
-) -> Result<StagedOperation, MediaError> {
+) -> Result<PreparedOperation, MediaError> {
     let mut prepared = Vec::new();
     for asset in assets {
         if let Some(source) = storage.prepare_removal(&asset.storage_key)? {
             prepared.push((asset, source));
+            if prepared.len() > MAX_REMOVAL_MANIFEST_ENTRIES {
+                return Err(MediaError::InvalidStorageKey);
+            }
         }
     }
 
@@ -376,20 +391,38 @@ fn stage_operation(
             .collect(),
     };
     let encoded = serde_json::to_vec(&manifest).map_err(std::io::Error::other)?;
-    let operation = storage.create_removal_operation(operation_id, &encoded)?;
-    let mut entries: Vec<StagedEntry> = Vec::new();
-    for ((_, source), manifest_entry) in prepared.into_iter().zip(&manifest.entries) {
-        entries.push(StagedEntry {
+    if encoded.len() > MAX_REMOVAL_MANIFEST_BYTES {
+        return Err(MediaError::InvalidStorageKey);
+    }
+    let entries = prepared
+        .into_iter()
+        .zip(&manifest.entries)
+        .map(|((_, source), manifest_entry)| StagedEntry {
             source,
             staged_name: manifest_entry.staged_name.clone(),
-        });
-        let current = entries
-            .last()
-            .expect("the current removal entry was pushed");
+        })
+        .collect();
+    Ok(PreparedOperation {
+        encoded_manifest: encoded,
+        entries,
+    })
+}
+
+fn stage_operation(
+    storage: &LocalMediaStorage,
+    operation_id: Uuid,
+    prepared: PreparedOperation,
+) -> Result<StagedOperation, MediaError> {
+    let PreparedOperation {
+        encoded_manifest,
+        entries,
+    } = prepared;
+    let operation = storage.create_removal_operation(operation_id, &encoded_manifest)?;
+    for (index, current) in entries.iter().enumerate() {
         if let Err(error) =
             storage.stage_removal_source(&operation, &current.source, &current.staged_name)
         {
-            for entry in entries.iter().rev() {
+            for entry in entries[..=index].iter().rev() {
                 storage.restore_removal_source(&operation, &entry.source, &entry.staged_name)?;
             }
             storage.close_removal_operation(&operation)?;

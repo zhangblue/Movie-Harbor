@@ -106,6 +106,226 @@ async fn volume_fixture() -> (MediaStorageSet, [TempRoot; 3]) {
     (MediaStorageSet::initialize(&paths, 0).await.unwrap(), roots)
 }
 
+async fn video_files(root: &Path, storage_volume: i32, count: usize) -> Vec<OwnedMedia> {
+    let mut assets = Vec::with_capacity(count);
+    for _ in 0..count {
+        let asset_id = Uuid::new_v4();
+        let opaque = asset_id.simple().to_string();
+        let key = format!("video/{}/{}.mp4", &opaque[..2], opaque);
+        let mut asset = registered_file(root, &key, b"episode-video").await;
+        asset.asset_id = asset_id;
+        asset.storage_volume = storage_volume;
+        assets.push(asset);
+    }
+    assets
+}
+
+// Catches writing a valid large series manifest that startup cannot read after interruption.
+#[tokio::test]
+async fn manifest_capacity_recovers_420_referenced_episode_files_after_interruption() {
+    let database = support::TestDatabase::migrated("removal_large_manifest").await;
+    let db = database.connection();
+    let (storage, roots) = volume_fixture().await;
+    let assets = video_files(roots[1].as_ref(), 1, 420).await;
+    let series_id = Uuid::new_v4();
+    series::ActiveModel {
+        id: Set(series_id),
+        name: Set("Long series".into()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let season_id = Uuid::new_v4();
+    season::ActiveModel {
+        id: Set(season_id),
+        series_id: Set(series_id),
+        number: Set(1),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    let tx = db.begin().await.unwrap();
+    for (index, asset) in assets.iter().enumerate() {
+        media_asset::ActiveModel {
+            id: Set(asset.asset_id),
+            storage_volume: Set(1),
+            storage_key: Set(asset.storage_key.clone()),
+            original_name: Set("episode.mp4".into()),
+            mime_type: Set("video/mp4".into()),
+            byte_size: Set(13),
+            purpose: Set("video".into()),
+            ..Default::default()
+        }
+        .insert(&tx)
+        .await
+        .unwrap();
+        episode::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            season_id: Set(season_id),
+            number: Set(index as i32 + 1),
+            name: Set(format!("Episode {}", index + 1)),
+            video_asset_id: Set(Some(asset.asset_id)),
+            ..Default::default()
+        }
+        .insert(&tx)
+        .await
+        .unwrap();
+    }
+    tx.commit().await.unwrap();
+    drop(
+        removal::stage(&storage, "delete-series", &assets)
+            .await
+            .unwrap(),
+    );
+    let operations = operation_directories(roots[1].as_ref()).await;
+    assert_eq!(operations.len(), 1);
+    let encoded = std::fs::read(operations[0].join("manifest.json")).unwrap();
+    assert!(
+        encoded.len() > 65_536,
+        "fixture must cross the old recovery limit"
+    );
+    assert!(
+        assets
+            .iter()
+            .all(|asset| !roots[1].as_ref().join(&asset.storage_key).exists())
+    );
+    let _ = movie_harbor_api::app::build(db.clone(), &startup_config(&roots))
+        .await
+        .unwrap();
+    for asset in &assets {
+        assert_eq!(
+            std::fs::read(roots[1].as_ref().join(&asset.storage_key)).unwrap(),
+            b"episode-video"
+        );
+    }
+    assert_eq!(episode::Entity::find().all(&db).await.unwrap().len(), 420);
+    assert_eq!(
+        media_asset::Entity::find().all(&db).await.unwrap().len(),
+        420
+    );
+    assert!(operation_directories(roots[1].as_ref()).await.is_empty());
+    removal::recover(&db, &storage).await.unwrap();
+}
+
+#[derive(Default)]
+struct CountManifestStageMoves(AtomicUsize);
+
+impl StorageHooks for CountManifestStageMoves {
+    fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
+        if matches!(event, StorageEvent::BeforeStage(_)) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+// Catches entry-count rejection only during recovery, after an unreadable operation was persisted.
+#[tokio::test]
+async fn manifest_capacity_rejects_4097_entries_before_moving_files() {
+    let root = TempRoot::new();
+    let hooks = Arc::new(CountManifestStageMoves::default());
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let assets = video_files(root.as_ref(), 0, 4097).await;
+    let result = removal::stage(&storage.into(), "delete-series", &assets).await;
+    assert!(
+        result.is_err(),
+        "an oversized entry list must be rejected during staging"
+    );
+    assert_eq!(
+        hooks.0.load(Ordering::SeqCst),
+        0,
+        "capacity checks must precede every rename"
+    );
+    assert!(
+        assets
+            .iter()
+            .all(|asset| root.as_ref().join(&asset.storage_key).is_file())
+    );
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+}
+
+// Catches unbounded encoded manifests even when their entry count remains small.
+#[tokio::test]
+async fn manifest_capacity_rejects_over_one_mib_before_moving_files() {
+    let root = TempRoot::new();
+    let hooks = Arc::new(CountManifestStageMoves::default());
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let assets = video_files(root.as_ref(), 0, 1).await;
+    let result = removal::stage(&storage.into(), &"x".repeat(1024 * 1024), &assets).await;
+    assert!(
+        result.is_err(),
+        "encoded manifests over 1 MiB must be rejected during staging"
+    );
+    assert_eq!(hooks.0.load(Ordering::SeqCst), 0);
+    assert!(root.as_ref().join(&assets[0].storage_key).is_file());
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+}
+
+// Catches touching an earlier volume before a later volume's manifest has passed capacity checks.
+#[cfg(unix)]
+#[tokio::test]
+async fn manifest_capacity_preflights_later_volumes_before_any_mutation() {
+    let (storage, roots) = volume_fixture().await;
+    let mut assets = video_files(roots[0].as_ref(), 0, 1).await;
+    assets.extend(video_files(roots[1].as_ref(), 1, 4097).await);
+    let operations = roots[0].as_ref().join(".operations");
+    // An attempt to publish the first volume's manifest would return an I/O permission error.
+    std::fs::set_permissions(&operations, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let result = removal::stage(&storage, "delete-series", &assets).await;
+    std::fs::set_permissions(&operations, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(result, Err(MediaError::InvalidStorageKey)),
+        "the later volume's capacity rejection must precede publication on the earlier volume"
+    );
+    for asset in assets {
+        assert!(
+            roots[asset.storage_volume as usize]
+                .as_ref()
+                .join(asset.storage_key)
+                .is_file()
+        );
+    }
+    for root in &roots {
+        assert!(operation_directories(root.as_ref()).await.is_empty());
+    }
+}
+
+// Catches removing the bounded recovery read when increasing the supported manifest size.
+#[tokio::test]
+async fn manifest_capacity_recovery_retains_oversized_manifest_evidence() {
+    let database = support::TestDatabase::migrated("removal_large_hostile_manifest").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let storage: MediaStorageSet = storage.into();
+    let assets = video_files(root.as_ref(), 0, 1).await;
+    drop(
+        removal::stage(&storage, "delete-series", &assets)
+            .await
+            .unwrap(),
+    );
+    let operation = operation_directories(root.as_ref()).await.remove(0);
+    let path = operation.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    manifest["reason"] = json!("x".repeat(1024 * 1024));
+    let oversized = serde_json::to_vec(&manifest).unwrap();
+    std::fs::write(&path, &oversized).unwrap();
+    assert!(matches!(
+        removal::recover(&db, &storage).await,
+        Err(MediaError::InvalidStorageKey)
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), oversized);
+    assert_eq!(
+        std::fs::read(operation.join("00000000.data")).unwrap(),
+        b"episode-video"
+    );
+}
+
 async fn series_across_volumes(
     db: &sea_orm::DatabaseConnection,
     roots: &[TempRoot; 3],
