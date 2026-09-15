@@ -362,10 +362,9 @@ TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_t
 ```rust
 match removal::finish_delete_transaction(tx, staged, owned.len(), database_result).await {
     Ok(count) => Ok(DeleteResultResponse { deleted_media_count: count }),
-    Err(FinishDeleteError::Operation(DomainError::Database))
-    | Err(FinishDeleteError::Restore)
-    | Err(FinishDeleteError::Commit) => Err(DomainError::MediaDelete),
+    Err(FinishDeleteError::Operation(DomainError::Database)) => Err(DomainError::MediaDelete),
     Err(FinishDeleteError::Operation(error)) => Err(error),
+    Err(FinishDeleteError::Restore | FinishDeleteError::Commit) => Err(DomainError::MediaDelete),
     Err(FinishDeleteError::Finalize) => Err(DomainError::MediaDeleteFinalization),
 }
 ```
@@ -529,15 +528,17 @@ export type EditorWriteError =
   | { kind: "validation"; fields: string[] }
   | { kind: "message"; message: string };
 
+export type GenreChoice = Pick<GenreResponse, "id" | "name" | "enabled">;
+
 export function mergeGenreChoices(
-  available: GenreResponse[],
-  linked: GenreSummary[],
-): GenreResponse[];
+  available: GenreChoice[],
+  linked: GenreChoice[],
+): GenreChoice[];
 
 export function classifyEditorWriteError(cause: unknown): EditorWriteError;
 ```
 
-题材合并不修改输入数组；追加项使用既有数据，不合成虚假 ID。普通错误文案与当前编辑器逐字一致。
+题材合并不修改输入数组；追加项使用既有数据，不合成虚假 ID 或 `sort_order`。普通错误文案与当前编辑器逐字一致。
 
 `ValidationFieldList.tsx` 接收 `fields` 和 `labels`，只在非空时渲染当前共同结构：
 
