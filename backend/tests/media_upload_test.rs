@@ -1050,7 +1050,7 @@ async fn multi_volume_missing_content_length_reserves_policy_limit() {
 
 // Catches dropping a nonzero-volume asset record while leaving its physical file behind.
 #[tokio::test]
-async fn multi_volume_delete_rejects_nonzero_assets_without_mutation() {
+async fn multi_volume_delete_removes_nonzero_asset_from_only_its_recorded_volume() {
     let db = database().await;
     let roots = [volume_root(0), volume_root(1)];
     let mut cfg = config(roots[0].as_ref());
@@ -1091,22 +1091,22 @@ async fn multi_volume_delete_rejects_nonzero_assets_without_mutation() {
         Some("https://harbor.test"),
     )
     .await;
-    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(response.status(), StatusCode::OK);
     assert!(
         movie::Entity::find_by_id(movie.id)
             .one(&db)
             .await
             .unwrap()
-            .is_some()
+            .is_none()
     );
     assert!(
         media_asset::Entity::find_by_id(asset.id)
             .one(&db)
             .await
             .unwrap()
-            .is_some()
+            .is_none()
     );
-    assert_eq!(std::fs::read(roots[1].as_ref().join(&key)).unwrap(), PNG);
+    assert!(!roots[1].as_ref().join(&key).exists());
     assert_eq!(
         std::fs::read(roots[0].as_ref().join(&key)).unwrap(),
         b"unrelated same-key file"
@@ -1261,6 +1261,101 @@ async fn multi_volume_replacement_removes_only_the_old_recorded_volume_file() {
             .poster_asset_id,
         Some(new.id)
     );
+}
+
+// Catches restoring into the upload volume or leaking a new file when a cross-volume replacement fails.
+#[cfg(unix)]
+#[tokio::test]
+async fn multi_volume_replacement_failures_preserve_old_reference_and_file() {
+    for failure in ["stage", "database", "commit"] {
+        let db = database().await;
+        let roots = [volume_root(0), volume_root(1)];
+        let set = MediaStorageSet::initialize(
+            &roots
+                .iter()
+                .map(|root| root.as_ref().to_owned())
+                .collect::<Vec<_>>(),
+            0,
+        )
+        .await
+        .unwrap();
+        let key = "poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png";
+        let leaf = roots[1].as_ref().join("poster/aa");
+        std::fs::create_dir_all(&leaf).unwrap();
+        std::fs::write(roots[1].as_ref().join(key), PNG).unwrap();
+        let old = media_asset::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            storage_volume: Set(1),
+            storage_key: Set(key.into()),
+            original_name: Set("old.png".into()),
+            mime_type: Set("image/png".into()),
+            byte_size: Set(PNG.len() as i64),
+            purpose: Set("poster".into()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let original = draft_movie(&db, Some(old.id)).await;
+        // Exclude volume 1 from allocation while keeping its existing child directories writable.
+        std::fs::set_permissions(roots[1].as_ref(), std::fs::Permissions::from_mode(0o500))
+            .unwrap();
+        match failure {
+            "stage" => {
+                std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o500)).unwrap()
+            }
+            "database" => {
+                db.execute_unprepared("CREATE FUNCTION reject_replace() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected replacement failure'; END; $$; CREATE TRIGGER reject_replace BEFORE DELETE ON media_asset FOR EACH ROW EXECUTE FUNCTION reject_replace();").await.unwrap();
+            }
+            _ => {
+                db.execute_unprepared("CREATE FUNCTION reject_replace() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected replacement commit failure'; END; $$; CREATE CONSTRAINT TRIGGER reject_replace AFTER DELETE ON media_asset DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_replace();").await.unwrap();
+            }
+        }
+        let (source, _) = Chunks::new([jpeg()]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            replace_attachment(
+                &db,
+                &set,
+                AttachmentTarget::MoviePoster {
+                    id: original.id,
+                    version: 1,
+                },
+                "new.jpg",
+                "image/jpeg",
+                &policy(4096),
+                source,
+            ),
+        )
+        .await
+        .expect("replacement attempted to acquire its held mutation guard");
+        std::fs::set_permissions(roots[1].as_ref(), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(result.is_err(), "{failure} fault must reject replacement");
+        assert_eq!(
+            movie::Entity::find_by_id(original.id)
+                .one(&db)
+                .await
+                .unwrap(),
+            Some(original)
+        );
+        assert_eq!(
+            media_asset::Entity::find().all(&db).await.unwrap(),
+            vec![old]
+        );
+        assert_eq!(std::fs::read(roots[1].as_ref().join(key)).unwrap(), PNG);
+        assert_eq!(
+            count_files(roots[0].as_ref()),
+            1,
+            "new file or recovery evidence leaked after {failure}"
+        );
+        assert_eq!(
+            count_files(roots[1].as_ref()),
+            2,
+            "old volume has leaked staged evidence after {failure}"
+        );
+    }
 }
 
 // Catches publication scanning other volumes when the recorded volume lacks the file.

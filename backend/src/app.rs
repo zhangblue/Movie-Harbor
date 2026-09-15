@@ -56,14 +56,7 @@ pub async fn build(
         config.allowed_video_mime_types.iter(),
     )?;
     crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
-    crate::media::removal::recover(
-        &db,
-        storage
-            .volume(0)
-            .ok_or(crate::media::MediaError::InvalidStorageConfiguration)?
-            .storage(),
-    )
-    .await?;
+    crate::media::removal::recover(&db, &storage).await?;
     Ok(router()
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))

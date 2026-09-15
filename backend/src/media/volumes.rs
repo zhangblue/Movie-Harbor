@@ -146,7 +146,7 @@ impl MediaStorageSet {
 
     /// Acquire once for an operation spanning volumes. Callers must transfer this guard
     /// to storage operations rather than attempting to acquire the same lock again.
-    pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
+    pub(crate) async fn acquire_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
         // This only emits the existing lock hook and acquires the shared mutex; it does
         // not access volume 0 files before the caller validates the deletion targets.
         self.volume(0)

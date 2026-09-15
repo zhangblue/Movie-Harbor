@@ -1,19 +1,21 @@
 use super::{
-    LocalMediaStorage, MediaError,
+    LocalMediaStorage, MediaError, MediaStorageSet,
     storage::{RemovalOperation, RemovalSource},
 };
 use crate::entities::media_asset;
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    EntityTrait, QueryFilter, Statement,
+    EntityTrait, QueryFilter, QuerySelect, Statement,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnedMedia {
     pub asset_id: Uuid,
+    pub storage_volume: i32,
     pub storage_key: String,
 }
 
@@ -28,6 +30,9 @@ struct Manifest {
 #[derive(Debug, Serialize, Deserialize)]
 struct ManifestEntry {
     asset_id: Uuid,
+    // Legacy v1 manifests belong to volume 0. New manifests always serialize this field.
+    #[serde(default)]
+    storage_volume: i32,
     storage_key: String,
     staged_name: String,
 }
@@ -37,10 +42,13 @@ struct StagedEntry {
     staged_name: String,
 }
 
-pub struct StagedRemoval {
-    storage: LocalMediaStorage,
-    staged: StagedOperation,
+pub struct MultiVolumeStagedRemoval {
+    staged: StagedOperations,
     _guard: OwnedMutexGuard<()>,
+}
+
+pub(crate) struct StagedOperations {
+    operations: Vec<(i32, LocalMediaStorage, StagedOperation)>,
 }
 
 #[derive(Debug)]
@@ -51,24 +59,44 @@ pub enum FinishDeleteError<E> {
     Finalize,
 }
 
-pub(crate) struct StagedOperation {
+struct StagedOperation {
     _operation_id: Uuid,
     operation: RemovalOperation,
     entries: Vec<StagedEntry>,
 }
 
 pub(crate) struct RemovalSession {
-    storage: LocalMediaStorage,
+    storage: MediaStorageSet,
     guard: OwnedMutexGuard<()>,
 }
 
-impl StagedRemoval {
+impl MultiVolumeStagedRemoval {
     pub async fn restore(self) -> Result<(), MediaError> {
-        self.staged.restore(&self.storage)
+        self.staged.restore()
     }
 
     pub async fn finish(self) -> Result<(), MediaError> {
-        self.staged.finish(&self.storage)
+        self.staged.finish()
+    }
+}
+
+impl StagedOperations {
+    pub(crate) fn restore(self) -> Result<(), MediaError> {
+        let mut failure = None;
+        for (_, storage, staged) in self.operations.into_iter().rev() {
+            if let Err(error) = staged.restore(&storage) {
+                // Keep restoring earlier volumes even when a later volume needs startup recovery.
+                failure.get_or_insert(error);
+            }
+        }
+        failure.map_or(Ok(()), Err)
+    }
+
+    pub(crate) fn finish(self) -> Result<(), MediaError> {
+        for (_, storage, staged) in self.operations {
+            staged.finish(&storage)?;
+        }
+        Ok(())
     }
 }
 
@@ -89,10 +117,10 @@ impl StagedOperation {
 }
 
 pub async fn stage(
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     reason: &str,
     assets: &[OwnedMedia],
-) -> Result<StagedRemoval, MediaError> {
+) -> Result<MultiVolumeStagedRemoval, MediaError> {
     acquire(storage).await?.stage(reason, assets)
 }
 
@@ -103,24 +131,17 @@ pub async fn load_owned_media<C: ConnectionTrait>(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    media_asset::Entity::find()
+    Ok(media_asset::Entity::find()
         .filter(media_asset::Column::Id.is_in(ids.iter().copied()))
         .all(db)
         .await?
         .into_iter()
-        .map(|asset| {
-            // Task 4 will replace this temporary gate with grouped volume deletion.
-            if asset.storage_volume != 0 {
-                return Err(DbErr::Custom(
-                    "multi-volume deletion is not available".into(),
-                ));
-            }
-            Ok(OwnedMedia {
-                asset_id: asset.id,
-                storage_key: asset.storage_key,
-            })
+        .map(|asset| OwnedMedia {
+            asset_id: asset.id,
+            storage_volume: asset.storage_volume,
+            storage_key: asset.storage_key,
         })
-        .collect::<Result<Vec<_>, DbErr>>()
+        .collect())
 }
 
 pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), DbErr> {
@@ -135,7 +156,7 @@ pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Re
 
 pub async fn finish_delete_transaction<E>(
     tx: DatabaseTransaction,
-    staged: StagedRemoval,
+    staged: MultiVolumeStagedRemoval,
     deleted_media_count: usize,
     database_result: Result<(), E>,
 ) -> Result<u64, FinishDeleteError<E>> {
@@ -161,11 +182,31 @@ pub async fn finish_delete_transaction<E>(
     Ok(deleted_media_count as u64)
 }
 
-pub async fn recover(
+pub async fn recover(db: &DatabaseConnection, storage: &MediaStorageSet) -> Result<(), MediaError> {
+    let _guard = storage.acquire_removal().await?;
+    let registered_volumes: Vec<i32> = media_asset::Entity::find()
+        .select_only()
+        .column(media_asset::Column::StorageVolume)
+        .distinct()
+        .into_tuple()
+        .all(db)
+        .await?;
+    for volume in registered_volumes {
+        if storage.volume(volume).is_none() {
+            return Err(MediaError::UnconfiguredVolume(volume));
+        }
+    }
+    for volume in storage.volumes() {
+        recover_volume(db, volume.storage(), volume.volume_id()).await?;
+    }
+    Ok(())
+}
+
+async fn recover_volume(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
+    volume_id: i32,
 ) -> Result<(), MediaError> {
-    let _session = acquire(storage).await?;
     for persisted in storage.persisted_removal_operations()? {
         let manifest: Manifest = serde_json::from_slice(&persisted.manifest)
             .map_err(|_| MediaError::InvalidStorageKey)?;
@@ -176,14 +217,15 @@ pub async fn recover(
             return Err(MediaError::InvalidStorageKey);
         }
         for (index, entry) in manifest.entries.iter().enumerate() {
-            if entry.staged_name != format!("{index:08}.data") {
+            if entry.storage_volume != volume_id || entry.staged_name != format!("{index:08}.data")
+            {
                 return Err(MediaError::InvalidStorageKey);
             }
             storage.validate_storage_key(&entry.storage_key)?;
             storage.validate_persisted_removal_entry(&persisted.operation, &entry.staged_name)?;
         }
         for entry in &manifest.entries {
-            if is_referenced(db, entry.asset_id, &entry.storage_key).await? {
+            if is_referenced(db, entry.asset_id, entry.storage_volume, &entry.storage_key).await? {
                 storage.restore_persisted_removal(
                     &persisted.operation,
                     &entry.storage_key,
@@ -201,6 +243,7 @@ pub async fn recover(
 async fn is_referenced(
     db: &DatabaseConnection,
     asset_id: Uuid,
+    storage_volume: i32,
     storage_key: &str,
 ) -> Result<bool, MediaError> {
     let row = db
@@ -208,13 +251,13 @@ async fn is_referenced(
             DbBackend::Postgres,
             r#"SELECT EXISTS (
                 SELECT 1 FROM media_asset a
-                WHERE a.id = $1 AND a.storage_key = $2 AND EXISTS (
+                WHERE a.id = $1 AND a.storage_volume = $2 AND a.storage_key = $3 AND EXISTS (
                     SELECT 1 FROM movie WHERE poster_asset_id = a.id OR video_asset_id = a.id
                     UNION ALL SELECT 1 FROM series WHERE poster_asset_id = a.id
                     UNION ALL SELECT 1 FROM episode WHERE video_asset_id = a.id
                 )
             ) AS referenced"#,
-            [asset_id.into(), storage_key.into()],
+            [asset_id.into(), storage_volume.into(), storage_key.into()],
         ))
         .await?
         .ok_or(MediaError::Database(sea_orm::DbErr::RecordNotFound(
@@ -224,15 +267,15 @@ async fn is_referenced(
         .map_err(MediaError::Database)
 }
 
-pub(crate) async fn acquire(storage: &LocalMediaStorage) -> Result<RemovalSession, MediaError> {
+pub(crate) async fn acquire(storage: &MediaStorageSet) -> Result<RemovalSession, MediaError> {
     Ok(RemovalSession {
         storage: storage.clone(),
-        guard: storage.lock_removal().await?,
+        guard: storage.acquire_removal().await?,
     })
 }
 
 pub(crate) fn continue_with_guard(
-    storage: &LocalMediaStorage,
+    storage: &MediaStorageSet,
     guard: OwnedMutexGuard<()>,
 ) -> RemovalSession {
     RemovalSession {
@@ -242,24 +285,14 @@ pub(crate) fn continue_with_guard(
 }
 
 impl RemovalSession {
-    pub(crate) fn storage(&self) -> &LocalMediaStorage {
-        &self.storage
-    }
-
-    // The caller must hold the shared storage-set guard for both volumes.
-    pub(crate) fn use_storage(&mut self, storage: &LocalMediaStorage) {
-        self.storage = storage.clone();
-    }
-
     pub(crate) fn stage(
         self,
         reason: &str,
         assets: &[OwnedMedia],
-    ) -> Result<StagedRemoval, MediaError> {
+    ) -> Result<MultiVolumeStagedRemoval, MediaError> {
         let Self { storage, guard } = self;
-        let staged = stage_operation(&storage, reason, assets)?;
-        Ok(StagedRemoval {
-            storage,
+        let staged = stage_operations(&storage, reason, assets)?;
+        Ok(MultiVolumeStagedRemoval {
             staged,
             _guard: guard,
         })
@@ -269,8 +302,8 @@ impl RemovalSession {
         &self,
         reason: &str,
         assets: &[OwnedMedia],
-    ) -> Result<StagedOperation, MediaError> {
-        stage_operation(&self.storage, reason, assets)
+    ) -> Result<StagedOperations, MediaError> {
+        stage_operations(&self.storage, reason, assets)
     }
 
     pub(crate) fn into_guard(self) -> OwnedMutexGuard<()> {
@@ -278,10 +311,47 @@ impl RemovalSession {
     }
 }
 
-fn stage_operation(
-    storage: &LocalMediaStorage,
+fn stage_operations(
+    storage: &MediaStorageSet,
     reason: &str,
     assets: &[OwnedMedia],
+) -> Result<StagedOperations, MediaError> {
+    let mut groups: BTreeMap<i32, Vec<&OwnedMedia>> = BTreeMap::new();
+    for asset in assets {
+        // Resolve every referenced volume before touching any file.
+        if storage.volume(asset.storage_volume).is_none() {
+            return Err(MediaError::UnconfiguredVolume(asset.storage_volume));
+        }
+        groups.entry(asset.storage_volume).or_default().push(asset);
+    }
+    let operation_id = Uuid::new_v4();
+    let mut staged = StagedOperations {
+        operations: Vec::new(),
+    };
+    for (volume_id, assets) in groups {
+        let volume = storage
+            .volume(volume_id)
+            .ok_or(MediaError::UnconfiguredVolume(volume_id))?;
+        match stage_operation(volume.storage(), operation_id, reason, &assets) {
+            Ok(operation) => {
+                staged
+                    .operations
+                    .push((volume_id, volume.storage().clone(), operation))
+            }
+            Err(error) => {
+                staged.restore()?;
+                return Err(error);
+            }
+        }
+    }
+    Ok(staged)
+}
+
+fn stage_operation(
+    storage: &LocalMediaStorage,
+    operation_id: Uuid,
+    reason: &str,
+    assets: &[&OwnedMedia],
 ) -> Result<StagedOperation, MediaError> {
     let mut prepared = Vec::new();
     for asset in assets {
@@ -290,7 +360,6 @@ fn stage_operation(
         }
     }
 
-    let operation_id = Uuid::new_v4();
     let manifest = Manifest {
         version: 1,
         operation_id,
@@ -300,6 +369,7 @@ fn stage_operation(
             .enumerate()
             .map(|(index, (asset, _))| ManifestEntry {
                 asset_id: asset.asset_id,
+                storage_volume: asset.storage_volume,
                 storage_key: asset.storage_key.clone(),
                 staged_name: format!("{index:08}.data"),
             })

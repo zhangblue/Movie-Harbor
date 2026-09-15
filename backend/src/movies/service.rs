@@ -273,7 +273,7 @@ pub async fn delete(
 ) -> Result<DeleteResultResponse, MovieError> {
     require_positive_i64(expected_version)?;
     let guard = storage
-        .lock_removal()
+        .acquire_removal()
         .await
         .map_err(|_| MovieError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -290,13 +290,14 @@ pub async fn delete(
     let owned = removal::load_owned_media(&tx, &asset_ids)
         .await
         .map_err(|_| MovieError::MediaDelete)?;
-    let removal = removal::continue_with_guard(
-        storage.volume(0).ok_or(MovieError::MediaDelete)?.storage(),
-        guard,
-    );
-    let staged = removal
-        .stage("delete-movie", &owned)
-        .map_err(|_| MovieError::MediaDelete)?;
+    let removal = removal::continue_with_guard(storage, guard);
+    let staged = match removal.stage("delete-movie", &owned) {
+        Ok(staged) => staged,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Err(MovieError::MediaDelete);
+        }
+    };
     let database_result: Result<(), MovieError> = async {
         repository::delete(&tx, id, expected_version).await?;
         removal::delete_media_assets(&tx, &asset_ids).await?;

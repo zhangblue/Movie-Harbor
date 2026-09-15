@@ -337,7 +337,7 @@ pub async fn delete_season(
     } = command;
     require_positive_i64(expected_version)?;
     let guard = storage
-        .lock_removal()
+        .acquire_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -356,13 +356,14 @@ pub async fn delete_season(
     let owned = removal::load_owned_media(&tx, &asset_ids)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let removal = removal::continue_with_guard(
-        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
-        guard,
-    );
-    let staged = removal
-        .stage("delete-season", &owned)
-        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(storage, guard);
+    let staged = match removal.stage("delete-season", &owned) {
+        Ok(staged) => staged,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Err(SeriesError::MediaDelete);
+        }
+    };
     let database_result: Result<(), SeriesError> = async {
         season::Entity::delete_by_id(season_id).exec(&tx).await?;
         repository::bump_series(&tx, &model).await?;
@@ -548,7 +549,7 @@ pub async fn delete_episode(
     } = command;
     require_positive_i64(expected_version)?;
     let guard = storage
-        .lock_removal()
+        .acquire_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -563,13 +564,14 @@ pub async fn delete_episode(
     let owned = removal::load_owned_media(&tx, &asset_ids)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let removal = removal::continue_with_guard(
-        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
-        guard,
-    );
-    let staged = removal
-        .stage("delete-episode", &owned)
-        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(storage, guard);
+    let staged = match removal.stage("delete-episode", &owned) {
+        Ok(staged) => staged,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Err(SeriesError::MediaDelete);
+        }
+    };
     let database_result: Result<(), SeriesError> = async {
         repository::delete_episode(&tx, episode_id, expected_version).await?;
         repository::bump_series(&tx, &series).await?;
@@ -588,7 +590,7 @@ pub async fn delete_series(
 ) -> Result<DeleteResultResponse, SeriesError> {
     require_positive_i64(expected_version)?;
     let guard = storage
-        .lock_removal()
+        .acquire_removal()
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
@@ -619,13 +621,14 @@ pub async fn delete_series(
     let owned = removal::load_owned_media(&tx, &asset_ids)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let removal = removal::continue_with_guard(
-        storage.volume(0).ok_or(SeriesError::MediaDelete)?.storage(),
-        guard,
-    );
-    let staged = removal
-        .stage("delete-series", &owned)
-        .map_err(|_| SeriesError::MediaDelete)?;
+    let removal = removal::continue_with_guard(storage, guard);
+    let staged = match removal.stage("delete-series", &owned) {
+        Ok(staged) => staged,
+        Err(_) => {
+            let _ = tx.rollback().await;
+            return Err(SeriesError::MediaDelete);
+        }
+    };
     let database_result: Result<(), SeriesError> = async {
         repository::delete_series(&tx, id, expected_version).await?;
         removal::delete_media_assets(&tx, &asset_ids).await?;
@@ -637,7 +640,7 @@ pub async fn delete_series(
 
 async fn finish_delete_transaction(
     tx: sea_orm::DatabaseTransaction,
-    staged: removal::StagedRemoval,
+    staged: removal::MultiVolumeStagedRemoval,
     deleted_media_count: usize,
     database_result: Result<(), SeriesError>,
 ) -> Result<DeleteResultResponse, SeriesError> {
