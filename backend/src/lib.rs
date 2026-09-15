@@ -2,6 +2,7 @@ pub mod app;
 pub mod auth;
 pub mod catalog;
 pub mod config;
+pub mod content;
 pub mod entities;
 pub mod error;
 pub mod genres;

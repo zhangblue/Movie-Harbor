@@ -1,6 +1,7 @@
 use crate::{
+    content::Patch,
     entities::{episode, genre, media_asset, season, series},
-    movies::dto::{GenreSummary, MediaSummary, Patch},
+    movies::dto::{GenreSummary, MediaSummary},
 };
 use serde::{Deserialize, Serialize};
 

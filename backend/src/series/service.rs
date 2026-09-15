@@ -1,11 +1,16 @@
 use crate::{
+    content::{
+        ContentRuleError, Patch, TargetState, apply_optional_i32, apply_target_state, apply_text,
+        ensure_transition, normalize_required, parse_target, parse_unique_uuids,
+        require_positive_i32, require_positive_i64, require_version,
+    },
     entities::{episode, media_asset, season, series},
     genres,
     media::{
         LocalMediaStorage, is_publishable_asset,
         removal::{self, OwnedMedia},
     },
-    movies::dto::{DeleteImpactResponse, DeleteResultResponse, Patch},
+    movies::dto::{DeleteImpactResponse, DeleteResultResponse},
 };
 use axum::{
     Json,
@@ -46,6 +51,15 @@ impl From<DbErr> for SeriesError {
             Self::Conflict
         } else {
             Self::Database
+        }
+    }
+}
+
+impl From<ContentRuleError> for SeriesError {
+    fn from(error: ContentRuleError) -> Self {
+        match error {
+            ContentRuleError::Invalid => Self::Invalid,
+            ContentRuleError::Conflict => Self::Conflict,
         }
     }
 }
@@ -111,13 +125,6 @@ impl IntoResponse for SeriesError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TargetState {
-    Draft,
-    Published,
-    Archived,
-}
-
 pub struct CreateSeasonCommand {
     pub series_id: Uuid,
     pub expected_series_version: i64,
@@ -166,7 +173,7 @@ pub struct DeleteEpisodeCommand {
 }
 
 pub async fn create(db: &DatabaseConnection, name: String) -> Result<SeriesResponse, SeriesError> {
-    let name = normalize_name(name)?;
+    let name = normalize_required(name)?;
     let model = series::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name),
@@ -213,10 +220,10 @@ pub async fn update(
     id: Uuid,
     input: UpdateSeriesRequest,
 ) -> Result<SeriesResponse, SeriesError> {
-    valid_version(input.version)?;
+    require_positive_i64(input.version)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
-    require_series_version(&model, input.version)?;
+    require_version(model.version, input.version)?;
     if model.status != "draft" {
         return Err(SeriesError::Conflict);
     }
@@ -224,10 +231,7 @@ pub async fn update(
     apply_text(&mut model.synopsis, input.synopsis, false)?;
     apply_optional_i32(&mut model.year, input.year, false)?;
 
-    let genre_ids = input
-        .genre_ids
-        .map(|ids| parse_ids(ids).map_err(|_| SeriesError::Invalid))
-        .transpose()?;
+    let genre_ids = input.genre_ids.map(parse_unique_uuids).transpose()?;
     let existing_genres = repository::genres(&tx, id).await?;
     let existing_ids = existing_genres
         .iter()
@@ -269,11 +273,11 @@ pub async fn create_season(
         expected_series_version: expected_version,
         number,
     } = command;
-    valid_version(expected_version)?;
-    valid_number(number)?;
+    require_positive_i64(expected_version)?;
+    require_positive_i32(number)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
-    require_series_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     season::ActiveModel {
         id: Set(Uuid::new_v4()),
         series_id: Set(series_id),
@@ -297,11 +301,11 @@ pub async fn update_season(
         expected_series_version: expected_version,
         number,
     } = command;
-    valid_version(expected_version)?;
-    valid_number(number)?;
+    require_positive_i64(expected_version)?;
+    require_positive_i32(number)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
-    require_series_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     let current = repository::season_locked(&tx, series_id, season_id).await?;
     if current.number == number {
         let result = response(&tx, model).await?;
@@ -334,13 +338,13 @@ pub async fn delete_season(
         season_id,
         expected_series_version: expected_version,
     } = command;
-    valid_version(expected_version)?;
+    require_positive_i64(expected_version)?;
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
-    require_series_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episodes = repository::episodes_locked(&tx, season_id).await?;
     if episodes.iter().any(|episode| episode.status == "published") {
@@ -374,12 +378,12 @@ pub async fn create_episode(
         season_id,
         input,
     } = command;
-    valid_version(input.version)?;
-    valid_number(input.number)?;
-    let name = normalize_name(input.name)?;
+    require_positive_i64(input.version)?;
+    require_positive_i32(input.number)?;
+    let name = normalize_required(input.name)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
-    require_series_version(&model, input.version)?;
+    require_version(model.version, input.version)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     episode::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -430,12 +434,12 @@ pub async fn update_episode(
         episode_id,
         input,
     } = command;
-    valid_version(input.version)?;
+    require_positive_i64(input.version)?;
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let mut episode = repository::episode_locked(&tx, season_id, episode_id).await?;
-    require_episode_version(&episode, input.version)?;
+    require_version(episode.version, input.version)?;
     if episode.status != "draft" {
         return Err(SeriesError::Conflict);
     }
@@ -457,8 +461,8 @@ pub async fn transition_series(
     expected_version: i64,
     target: &str,
 ) -> Result<SeriesResponse, SeriesError> {
-    valid_version(expected_version)?;
-    let target = TargetState::parse(target)?;
+    require_positive_i64(expected_version)?;
+    let target = parse_target(target)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
     if target.matches(&model.status) {
@@ -466,7 +470,7 @@ pub async fn transition_series(
         tx.commit().await?;
         return Ok(result);
     }
-    require_series_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     ensure_transition(&model.status, target)?;
     if target == TargetState::Published {
         validate_series_publish(&tx, storage, allowed_video_mime_types, &model).await?;
@@ -476,6 +480,7 @@ pub async fn transition_series(
         &mut model.published_at,
         &mut model.archived_at,
         target,
+        Utc::now().fixed_offset(),
     );
     let updated = repository::persist_series(&tx, &model, expected_version).await?;
     let result = response(&tx, updated).await?;
@@ -496,8 +501,8 @@ pub async fn transition_episode(
         expected_episode_version: expected_version,
         target,
     } = command;
-    valid_version(expected_version)?;
-    let target = TargetState::parse(target)?;
+    require_positive_i64(expected_version)?;
+    let target = parse_target(target)?;
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
@@ -507,7 +512,7 @@ pub async fn transition_episode(
         tx.commit().await?;
         return Ok(result);
     }
-    require_episode_version(&episode, expected_version)?;
+    require_version(episode.version, expected_version)?;
     ensure_transition(&episode.status, target)?;
     if target == TargetState::Published {
         validate_episode_publish(&tx, storage, allowed_video_mime_types, &episode).await?;
@@ -517,6 +522,7 @@ pub async fn transition_episode(
         &mut episode.published_at,
         &mut episode.archived_at,
         target,
+        Utc::now().fixed_offset(),
     );
     let updated_episode = repository::persist_episode(&tx, &episode, expected_version).await?;
     let updated_series = repository::bump_series(&tx, &series).await?;
@@ -536,7 +542,7 @@ pub async fn delete_episode(
         episode_id,
         expected_episode_version: expected_version,
     } = command;
-    valid_version(expected_version)?;
+    require_positive_i64(expected_version)?;
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -544,7 +550,7 @@ pub async fn delete_episode(
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episode = repository::episode_locked(&tx, season_id, episode_id).await?;
-    require_episode_version(&episode, expected_version)?;
+    require_version(episode.version, expected_version)?;
     if episode.status == "published" {
         return Err(SeriesError::Conflict);
     }
@@ -569,13 +575,13 @@ pub async fn delete_series(
     id: Uuid,
     expected_version: i64,
 ) -> Result<DeleteResultResponse, SeriesError> {
-    valid_version(expected_version)?;
+    require_positive_i64(expected_version)?;
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
-    require_series_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     if model.status == "published" {
         return Err(SeriesError::Conflict);
     }
@@ -855,162 +861,14 @@ async fn validate_episode_publish<C: ConnectionTrait>(
     }
 }
 
-fn normalize_name(name: String) -> Result<String, SeriesError> {
-    let name = name.trim();
-    if name.is_empty() {
-        Err(SeriesError::Invalid)
-    } else {
-        Ok(name.to_owned())
-    }
-}
-
-fn valid_version(version: i64) -> Result<(), SeriesError> {
-    if version <= 0 {
-        Err(SeriesError::Invalid)
-    } else {
-        Ok(())
-    }
-}
-
-fn valid_number(number: i32) -> Result<(), SeriesError> {
-    if number <= 0 {
-        Err(SeriesError::Invalid)
-    } else {
-        Ok(())
-    }
-}
-
-fn require_series_version(model: &series::Model, version: i64) -> Result<(), SeriesError> {
-    if model.version == version {
-        Ok(())
-    } else {
-        Err(SeriesError::Conflict)
-    }
-}
-
-fn require_episode_version(model: &episode::Model, version: i64) -> Result<(), SeriesError> {
-    if model.version == version {
-        Ok(())
-    } else {
-        Err(SeriesError::Conflict)
-    }
-}
-
-fn parse_ids(ids: Vec<String>) -> Result<Vec<Uuid>, ()> {
-    let ids = ids
-        .into_iter()
-        .map(|id| id.parse().map_err(|_| ()))
-        .collect::<Result<Vec<_>, _>>()?;
-    if ids.iter().copied().collect::<HashSet<_>>().len() != ids.len() {
-        return Err(());
-    }
-    Ok(ids)
-}
-
-fn apply_text(
-    current: &mut String,
-    patch: Patch<String>,
-    nonblank: bool,
-) -> Result<(), SeriesError> {
-    match patch {
-        Patch::Missing => Ok(()),
-        Patch::Null => Err(SeriesError::Invalid),
-        Patch::Value(value) => {
-            let value = value.trim();
-            if nonblank && value.is_empty() {
-                return Err(SeriesError::Invalid);
-            }
-            *current = value.to_owned();
-            Ok(())
-        }
-    }
-}
-
-fn apply_optional_i32(
-    current: &mut Option<i32>,
-    patch: Patch<i32>,
-    nonnegative: bool,
-) -> Result<(), SeriesError> {
-    match patch {
-        Patch::Missing => Ok(()),
-        Patch::Null => {
-            *current = None;
-            Ok(())
-        }
-        Patch::Value(value) if !nonnegative || value >= 0 => {
-            *current = Some(value);
-            Ok(())
-        }
-        Patch::Value(_) => Err(SeriesError::Invalid),
-    }
-}
-
 fn apply_required_number(current: &mut i32, patch: Patch<i32>) -> Result<(), SeriesError> {
     match patch {
         Patch::Missing => Ok(()),
-        Patch::Value(value) if value > 0 => {
+        Patch::Value(value) => {
+            require_positive_i32(value)?;
             *current = value;
             Ok(())
         }
-        Patch::Null | Patch::Value(_) => Err(SeriesError::Invalid),
-    }
-}
-
-fn ensure_transition(current: &str, target: TargetState) -> Result<(), SeriesError> {
-    if matches!(
-        (current, target),
-        ("draft", TargetState::Published)
-            | ("published", TargetState::Archived)
-            | ("archived", TargetState::Published)
-            | ("archived", TargetState::Draft)
-    ) {
-        Ok(())
-    } else {
-        Err(SeriesError::Conflict)
-    }
-}
-
-fn apply_target_state(
-    status: &mut String,
-    published_at: &mut Option<chrono::DateTime<chrono::FixedOffset>>,
-    archived_at: &mut Option<chrono::DateTime<chrono::FixedOffset>>,
-    target: TargetState,
-) {
-    let now = Utc::now().fixed_offset();
-    match target {
-        TargetState::Draft => {
-            *status = "draft".into();
-            *published_at = None;
-            *archived_at = None;
-        }
-        TargetState::Published => {
-            *status = "published".into();
-            if published_at.is_none() {
-                *published_at = Some(now);
-            }
-            *archived_at = None;
-        }
-        TargetState::Archived => {
-            *status = "archived".into();
-            *archived_at = Some(now);
-        }
-    }
-}
-
-impl TargetState {
-    fn parse(value: &str) -> Result<Self, SeriesError> {
-        match value {
-            "draft" => Ok(Self::Draft),
-            "published" => Ok(Self::Published),
-            "archived" => Ok(Self::Archived),
-            _ => Err(SeriesError::Invalid),
-        }
-    }
-
-    fn matches(self, current: &str) -> bool {
-        matches!(
-            (self, current),
-            (Self::Draft, "draft") | (Self::Published, "published") | (Self::Archived, "archived")
-        )
+        Patch::Null => Err(SeriesError::Invalid),
     }
 }

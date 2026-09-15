@@ -1,4 +1,9 @@
 use crate::{
+    content::{
+        ContentRuleError, TargetState, apply_optional_i32, apply_target_state, apply_text,
+        ensure_transition, normalize_required, parse_target, parse_unique_uuids,
+        require_positive_i64, require_version,
+    },
     entities::{media_asset, movie},
     genres,
     media::{
@@ -21,7 +26,7 @@ use uuid::Uuid;
 
 use super::{
     dto::{
-        DeleteImpactResponse, DeleteResultResponse, MovieListQuery, MovieResponse, Patch,
+        DeleteImpactResponse, DeleteResultResponse, MovieListQuery, MovieResponse,
         UpdateMovieRequest,
     },
     repository,
@@ -41,6 +46,15 @@ pub enum MovieError {
 impl From<DbErr> for MovieError {
     fn from(_: DbErr) -> Self {
         Self::Database
+    }
+}
+
+impl From<ContentRuleError> for MovieError {
+    fn from(error: ContentRuleError) -> Self {
+        match error {
+            ContentRuleError::Invalid => Self::Invalid,
+            ContentRuleError::Conflict => Self::Conflict,
+        }
     }
 }
 
@@ -105,15 +119,8 @@ impl IntoResponse for MovieError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TargetState {
-    Draft,
-    Published,
-    Archived,
-}
-
 pub async fn create(db: &DatabaseConnection, name: String) -> Result<MovieResponse, MovieError> {
-    let name = normalize_name(name)?;
+    let name = normalize_required(name)?;
     let model = movie::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name),
@@ -163,10 +170,10 @@ pub async fn update(
     id: Uuid,
     input: UpdateMovieRequest,
 ) -> Result<MovieResponse, MovieError> {
-    valid_version(input.version)?;
+    require_positive_i64(input.version)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
-    require_version(&model, input.version)?;
+    require_version(model.version, input.version)?;
     if model.status != "draft" {
         return Err(MovieError::Conflict);
     }
@@ -175,10 +182,7 @@ pub async fn update(
     apply_optional_i32(&mut model.year, input.year, false)?;
     apply_optional_i32(&mut model.duration_seconds, input.duration_seconds, true)?;
 
-    let genre_ids = input
-        .genre_ids
-        .map(|ids| parse_ids(ids).map_err(|_| MovieError::Invalid))
-        .transpose()?;
+    let genre_ids = input.genre_ids.map(parse_unique_uuids).transpose()?;
     let existing_genres = repository::genres(&tx, id).await?;
     let existing_ids = existing_genres
         .iter()
@@ -219,8 +223,8 @@ pub async fn transition(
     expected_version: i64,
     target: &str,
 ) -> Result<MovieResponse, MovieError> {
-    valid_version(expected_version)?;
-    let target = TargetState::parse(target)?;
+    require_positive_i64(expected_version)?;
+    let target = parse_target(target)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
     if target.matches(&model.status) {
@@ -228,30 +232,18 @@ pub async fn transition(
         tx.commit().await?;
         return Ok(result);
     }
-    require_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     ensure_transition(&model.status, target)?;
     if target == TargetState::Published {
         validate_publish(&tx, storage, allowed_video_mime_types, &model).await?;
     }
-    let now = Utc::now().fixed_offset();
-    match target {
-        TargetState::Draft => {
-            model.status = "draft".into();
-            model.published_at = None;
-            model.archived_at = None;
-        }
-        TargetState::Published => {
-            model.status = "published".into();
-            if model.published_at.is_none() {
-                model.published_at = Some(now);
-            }
-            model.archived_at = None;
-        }
-        TargetState::Archived => {
-            model.status = "archived".into();
-            model.archived_at = Some(now);
-        }
-    }
+    apply_target_state(
+        &mut model.status,
+        &mut model.published_at,
+        &mut model.archived_at,
+        target,
+        Utc::now().fixed_offset(),
+    );
     let updated = repository::persist(&tx, &model, expected_version).await?;
     let result = response(&tx, updated).await?;
     tx.commit().await?;
@@ -282,13 +274,13 @@ pub async fn delete(
     id: Uuid,
     expected_version: i64,
 ) -> Result<DeleteResultResponse, MovieError> {
-    valid_version(expected_version)?;
+    require_positive_i64(expected_version)?;
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| MovieError::MediaDelete)?;
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, id).await?;
-    require_version(&model, expected_version)?;
+    require_version(model.version, expected_version)?;
     if model.status == "published" {
         return Err(MovieError::Conflict);
     }
@@ -394,112 +386,5 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
         Ok(())
     } else {
         Err(MovieError::Validation(missing))
-    }
-}
-
-fn normalize_name(name: String) -> Result<String, MovieError> {
-    let name = name.trim();
-    if name.is_empty() {
-        Err(MovieError::Invalid)
-    } else {
-        Ok(name.to_owned())
-    }
-}
-
-fn valid_version(version: i64) -> Result<(), MovieError> {
-    if version <= 0 {
-        Err(MovieError::Invalid)
-    } else {
-        Ok(())
-    }
-}
-
-fn require_version(model: &movie::Model, version: i64) -> Result<(), MovieError> {
-    if model.version == version {
-        Ok(())
-    } else {
-        Err(MovieError::Conflict)
-    }
-}
-
-fn parse_ids(ids: Vec<String>) -> Result<Vec<Uuid>, ()> {
-    let ids = ids
-        .into_iter()
-        .map(|id| id.parse().map_err(|_| ()))
-        .collect::<Result<Vec<_>, _>>()?;
-    if ids.iter().copied().collect::<HashSet<_>>().len() != ids.len() {
-        return Err(());
-    }
-    Ok(ids)
-}
-
-fn apply_text(
-    current: &mut String,
-    patch: Patch<String>,
-    nonblank: bool,
-) -> Result<(), MovieError> {
-    match patch {
-        Patch::Missing => Ok(()),
-        Patch::Null => Err(MovieError::Invalid),
-        Patch::Value(value) => {
-            let value = value.trim();
-            if nonblank && value.is_empty() {
-                return Err(MovieError::Invalid);
-            }
-            *current = value.to_owned();
-            Ok(())
-        }
-    }
-}
-
-fn apply_optional_i32(
-    current: &mut Option<i32>,
-    patch: Patch<i32>,
-    nonnegative: bool,
-) -> Result<(), MovieError> {
-    match patch {
-        Patch::Missing => Ok(()),
-        Patch::Null => {
-            *current = None;
-            Ok(())
-        }
-        Patch::Value(value) if !nonnegative || value >= 0 => {
-            *current = Some(value);
-            Ok(())
-        }
-        Patch::Value(_) => Err(MovieError::Invalid),
-    }
-}
-
-fn ensure_transition(current: &str, target: TargetState) -> Result<(), MovieError> {
-    let allowed = matches!(
-        (current, target),
-        ("draft", TargetState::Published)
-            | ("published", TargetState::Archived)
-            | ("archived", TargetState::Published)
-            | ("archived", TargetState::Draft)
-    );
-    if allowed {
-        Ok(())
-    } else {
-        Err(MovieError::Conflict)
-    }
-}
-
-impl TargetState {
-    fn parse(value: &str) -> Result<Self, MovieError> {
-        match value {
-            "draft" => Ok(Self::Draft),
-            "published" => Ok(Self::Published),
-            "archived" => Ok(Self::Archived),
-            _ => Err(MovieError::Invalid),
-        }
-    }
-
-    fn matches(self, current: &str) -> bool {
-        matches!(
-            (self, current),
-            (Self::Draft, "draft") | (Self::Published, "published") | (Self::Archived, "archived")
-        )
     }
 }
