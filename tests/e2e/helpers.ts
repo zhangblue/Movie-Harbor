@@ -31,7 +31,7 @@ export async function restartCompose() {
 }
 export async function withPrivateMediaSentinels(check: () => Promise<void>) {
   const execute = promisify(execFile);
-  const paths = [0, 1].flatMap((volume) => [".incoming", ".quarantine"].map((area) => `/media/volumes/${volume}/${area}/e2e-private-sentinel`));
+  const paths = [0, 1].flatMap((volume) => [".incoming", ".quarantine", ".operations"].map((area) => `/media/volumes/${volume}/${area}/e2e-private-sentinel`));
   try {
     await execute("docker", [...composeArgs, "exec", "-T", "--user", "10001", "api", "sh", "-ec", 'for file do printf private > "$file"; done', "sh", ...paths]);
     await check();

@@ -18,7 +18,7 @@ test("two isolated volumes support playback, replacement, deletion and restart w
   async function expectPrivateStorage() {
     for (const [volume, directory] of mediaHostDirs.entries()) {
       expect(JSON.parse(readFileSync(join(directory, ".movie-harbor-volume.json"), "utf8"))).toEqual({ version: 1, volume });
-      for (const internal of [".incoming", ".quarantine"]) {
+      for (const internal of [".incoming", ".quarantine", ".operations"]) {
         expect(readdirSync(join(directory, internal))).toEqual([]);
       }
       expect((await request.get(`/media/v${volume}/.movie-harbor-volume.json`)).status()).toBe(404);
@@ -27,12 +27,18 @@ test("two isolated volumes support playback, replacement, deletion and restart w
     }
     await withPrivateMediaSentinels(async () => {
       for (const [volume, directory] of mediaHostDirs.entries()) {
-        for (const internal of [".incoming", ".quarantine"]) {
+        for (const internal of [".incoming", ".quarantine", ".operations"]) {
+          expect(existsSync(join(directory, internal, "e2e-private-sentinel")), `${internal} must have a real privacy sentinel`).toBe(true);
           expect(readFileSync(join(directory, internal, "e2e-private-sentinel"), "utf8")).toBe("private");
           expect((await request.get(`/media/v${volume}/${internal}/e2e-private-sentinel`)).status()).toBe(404);
         }
       }
     });
+    for (const directory of mediaHostDirs) {
+      for (const internal of [".incoming", ".quarantine", ".operations"]) {
+        expect(readdirSync(join(directory, internal))).toEqual([]);
+      }
+    }
   }
   await expectPrivateStorage();
   expect((await request.get("/media/.incoming/e2e-private-sentinel")).status()).toBe(404);
@@ -68,6 +74,7 @@ test("two isolated volumes support playback, replacement, deletion and restart w
   expect((await request.get(body.video_url)).status()).toBe(404);
   const oldVideo = originalFiles.find((file) => file.includes("/video/"))!;
   expect(existsSync(oldVideo)).toBe(false);
+  await expectPrivateStorage();
   movie = await api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: replaced.version });
   const replacement = await (await request.get(`/api/catalog/movies/${movie.id}`)).json();
   expect(replacement.video_url).toMatch(/^\/media\/v0\/video\//);
