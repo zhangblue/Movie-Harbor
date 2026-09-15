@@ -1,4 +1,4 @@
-import { ApiError, apiPath, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
+import { ApiError, apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken } from "./http";
 import type {
   ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
@@ -8,11 +8,6 @@ import type {
 type ListQuery = { status?: ContentStatus; name?: string };
 type LifecycleAction = "publish" | "archive" | "draft";
 
-function required<T>(value: T | undefined): T {
-  if (value === undefined) throw new TypeError("Expected an API response body");
-  return value;
-}
-
 export function apiErrorCode(error: ApiError): string | undefined {
   if (!error.details || typeof error.details !== "object") return undefined;
   const code = (error.details as Record<string, unknown>).code;
@@ -21,10 +16,10 @@ export function apiErrorCode(error: ApiError): string | undefined {
 
 export async function login(input: LoginRequest): Promise<LoginResponse> {
   clearCsrfToken();
-  return required(await apiRequest<LoginResponse>("/api/admin/login", { method: "POST", json: input }));
+  return requiredResponse(await apiRequest<LoginResponse>("/api/admin/login", { method: "POST", json: input }));
 }
 export async function getSession(): Promise<SessionResponse> {
-  const session = required(await apiRequest<SessionResponse>("/api/admin/session"));
+  const session = requiredResponse(await apiRequest<SessionResponse>("/api/admin/session"));
   setCsrfToken(session.csrf_token);
   return session;
 }
@@ -38,100 +33,100 @@ export async function changePassword(input: ChangePasswordRequest): Promise<void
 }
 
 export async function listGenres(): Promise<GenreResponse[]> {
-  return required(await apiRequest<GenreResponse[]>("/api/admin/genres"));
+  return requiredResponse(await apiRequest<GenreResponse[]>("/api/admin/genres"));
 }
 export async function createGenre(name: string): Promise<GenreResponse> {
-  return required(await apiRequest<GenreResponse>("/api/admin/genres", { method: "POST", json: { name } }));
+  return requiredResponse(await apiRequest<GenreResponse>("/api/admin/genres", { method: "POST", json: { name } }));
 }
 export async function renameGenre(id: string, name: string): Promise<GenreResponse> {
-  return required(await apiRequest<GenreResponse>(apiPath("admin", "genres", id), { method: "PATCH", json: { name } }));
+  return requiredResponse(await apiRequest<GenreResponse>(apiPath("admin", "genres", id), { method: "PATCH", json: { name } }));
 }
 export async function reorderGenres(items: ReorderGenre[]): Promise<GenreResponse[]> {
-  return required(await apiRequest<GenreResponse[]>("/api/admin/genres/order", { method: "PUT", json: { items } }));
+  return requiredResponse(await apiRequest<GenreResponse[]>("/api/admin/genres/order", { method: "PUT", json: { items } }));
 }
 export async function deactivateGenre(id: string): Promise<GenreResponse> {
-  return required(await apiRequest<GenreResponse>(apiPath("admin", "genres", id, "deactivate"), { method: "POST" }));
+  return requiredResponse(await apiRequest<GenreResponse>(apiPath("admin", "genres", id, "deactivate"), { method: "POST" }));
 }
 export async function deleteGenre(id: string): Promise<void> {
   await apiRequest(apiPath("admin", "genres", id), { method: "DELETE" });
 }
 
 export async function listMovies(query: ListQuery = {}): Promise<MovieResponse[]> {
-  return required(await apiRequest<MovieResponse[]>("/api/admin/movies", { query }));
+  return requiredResponse(await apiRequest<MovieResponse[]>("/api/admin/movies", { query }));
 }
 export async function createMovie(name: string): Promise<MovieResponse> {
-  return required(await apiRequest<MovieResponse>("/api/admin/movies", { method: "POST", json: { name } }));
+  return requiredResponse(await apiRequest<MovieResponse>("/api/admin/movies", { method: "POST", json: { name } }));
 }
 export async function getMovie(id: string): Promise<MovieResponse> {
-  return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id)));
+  return requiredResponse(await apiRequest<MovieResponse>(apiPath("admin", "movies", id)));
 }
 export async function updateMovie(id: string, input: UpdateMovieRequest): Promise<MovieResponse> {
-  return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id), { method: "PATCH", json: input }));
+  return requiredResponse(await apiRequest<MovieResponse>(apiPath("admin", "movies", id), { method: "PATCH", json: input }));
 }
 export async function transitionMovie(id: string, action: LifecycleAction, version: number): Promise<MovieResponse> {
-  return required(await apiRequest<MovieResponse>(apiPath("admin", "movies", id, action), { method: "POST", json: { version } }));
+  return requiredResponse(await apiRequest<MovieResponse>(apiPath("admin", "movies", id, action), { method: "POST", json: { version } }));
 }
 export async function getMovieDeleteImpact(id: string): Promise<DeleteImpactResponse> {
-  return required(await apiRequest<DeleteImpactResponse>(apiPath("admin", "movies", id, "delete-impact")));
+  return requiredResponse(await apiRequest<DeleteImpactResponse>(apiPath("admin", "movies", id, "delete-impact")));
 }
 export async function deleteMovie(id: string, version: number): Promise<DeleteResultResponse> {
-  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "movies", id), { method: "DELETE", json: { version } }));
+  return requiredResponse(await apiRequest<DeleteResultResponse>(apiPath("admin", "movies", id), { method: "DELETE", json: { version } }));
 }
 
 export async function listSeries(query: ListQuery = {}): Promise<SeriesResponse[]> {
-  return required(await apiRequest<SeriesResponse[]>("/api/admin/series", { query }));
+  return requiredResponse(await apiRequest<SeriesResponse[]>("/api/admin/series", { query }));
 }
 export async function createSeries(name: string): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>("/api/admin/series", { method: "POST", json: { name } }));
+  return requiredResponse(await apiRequest<SeriesResponse>("/api/admin/series", { method: "POST", json: { name } }));
 }
 export async function getSeries(id: string): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", id)));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", id)));
 }
 export async function updateSeries(id: string, input: UpdateSeriesRequest): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", id), { method: "PATCH", json: input }));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", id), { method: "PATCH", json: input }));
 }
 export async function transitionSeries(id: string, action: LifecycleAction, version: number): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", id, action), { method: "POST", json: { version } }));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", id, action), { method: "POST", json: { version } }));
 }
 export async function getSeriesDeleteImpact(id: string): Promise<DeleteImpactResponse> {
-  return required(await apiRequest<DeleteImpactResponse>(apiPath("admin", "series", id, "delete-impact")));
+  return requiredResponse(await apiRequest<DeleteImpactResponse>(apiPath("admin", "series", id, "delete-impact")));
 }
 export async function deleteSeries(id: string, version: number): Promise<DeleteResultResponse> {
-  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", id), { method: "DELETE", json: { version } }));
+  return requiredResponse(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", id), { method: "DELETE", json: { version } }));
 }
 
 export async function createSeason(seriesId: string, number: number, version: number): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons"), { method: "POST", json: { number, version } }));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons"), { method: "POST", json: { number, version } }));
 }
 export async function updateSeason(seriesId: string, seasonId: string, number: number, version: number): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "PATCH", json: { number, version } }));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "PATCH", json: { number, version } }));
 }
 export async function deleteSeason(seriesId: string, seasonId: string, version: number): Promise<DeleteResultResponse> {
-  return required(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "DELETE", json: { version } }));
+  return requiredResponse(await apiRequest<DeleteResultResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId), { method: "DELETE", json: { version } }));
 }
 export async function getSeasonDeleteImpact(seriesId: string, seasonId: string): Promise<ChildDeleteImpactResponse> {
-  return required(await apiRequest<ChildDeleteImpactResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "delete-impact")));
+  return requiredResponse(await apiRequest<ChildDeleteImpactResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "delete-impact")));
 }
 export async function createEpisode(seriesId: string, seasonId: string, input: { version: number; number: number; name: string }): Promise<SeriesResponse> {
-  return required(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "episodes"), { method: "POST", json: input }));
+  return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", seriesId, "seasons", seasonId, "episodes"), { method: "POST", json: input }));
 }
 function episodePath(seriesId: string, seasonId: string, episodeId: string): string {
   return apiPath("admin", "series", seriesId, "seasons", seasonId, "episodes", episodeId);
 }
 export async function getEpisode(seriesId: string, seasonId: string, episodeId: string): Promise<EpisodeEnvelope> {
-  return required(await apiRequest<EpisodeEnvelope>(episodePath(seriesId, seasonId, episodeId)));
+  return requiredResponse(await apiRequest<EpisodeEnvelope>(episodePath(seriesId, seasonId, episodeId)));
 }
 export async function updateEpisode(seriesId: string, seasonId: string, episodeId: string, input: UpdateEpisodeRequest): Promise<EpisodeEnvelope> {
-  return required(await apiRequest<EpisodeEnvelope>(episodePath(seriesId, seasonId, episodeId), { method: "PATCH", json: input }));
+  return requiredResponse(await apiRequest<EpisodeEnvelope>(episodePath(seriesId, seasonId, episodeId), { method: "PATCH", json: input }));
 }
 export async function transitionEpisode(seriesId: string, seasonId: string, episodeId: string, action: LifecycleAction, version: number): Promise<EpisodeEnvelope> {
-  return required(await apiRequest<EpisodeEnvelope>(`${episodePath(seriesId, seasonId, episodeId)}/${action}`, { method: "POST", json: { version } }));
+  return requiredResponse(await apiRequest<EpisodeEnvelope>(`${episodePath(seriesId, seasonId, episodeId)}/${action}`, { method: "POST", json: { version } }));
 }
 export async function deleteEpisode(seriesId: string, seasonId: string, episodeId: string, version: number): Promise<DeleteResultResponse> {
-  return required(await apiRequest<DeleteResultResponse>(episodePath(seriesId, seasonId, episodeId), { method: "DELETE", json: { version } }));
+  return requiredResponse(await apiRequest<DeleteResultResponse>(episodePath(seriesId, seasonId, episodeId), { method: "DELETE", json: { version } }));
 }
 export async function getEpisodeDeleteImpact(seriesId: string, seasonId: string, episodeId: string): Promise<ChildDeleteImpactResponse> {
-  return required(await apiRequest<ChildDeleteImpactResponse>(`${episodePath(seriesId, seasonId, episodeId)}/delete-impact`));
+  return requiredResponse(await apiRequest<ChildDeleteImpactResponse>(`${episodePath(seriesId, seasonId, episodeId)}/delete-impact`));
 }
 
 type MediaUploadTarget =
@@ -142,7 +137,7 @@ type MediaUploadTarget =
 export async function uploadMedia(target: MediaUploadTarget, file: File, version: number): Promise<MediaAssetResponse> {
   const form = new FormData();
   form.append("file", file);
-  return required(await apiRequest<MediaAssetResponse>(apiPath("admin", "media", target.kind, target.id, target.slot), {
+  return requiredResponse(await apiRequest<MediaAssetResponse>(apiPath("admin", "media", target.kind, target.id, target.slot), {
     method: "POST", query: { version }, body: form,
   }));
 }
