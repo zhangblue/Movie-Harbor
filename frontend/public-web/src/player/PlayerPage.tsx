@@ -2,7 +2,8 @@ import { useCallback, useEffect } from "react";
 import { getMovieDetail, getSeriesDetail, type SeriesDetail } from "@movie-harbor/api-client";
 import { Loading, NotFound, RequestError } from "../app/RequestState";
 import { usePublicRequest } from "../app/usePublicRequest";
-import { EpisodePicker, orderedPlayableEpisodes, type OrderedEpisode } from "./EpisodePicker";
+import { EpisodePicker } from "./EpisodePicker";
+import { orderedPlayableEpisodes, type OrderedEpisode } from "../series/ordering";
 import { getRecentEpisode, setRecentEpisode } from "./progressStore";
 import { VideoPlayer } from "./VideoPlayer";
 

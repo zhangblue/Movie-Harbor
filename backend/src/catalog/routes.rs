@@ -2,6 +2,7 @@ use super::{
     dto::{CatalogFilter, CatalogRequest, MovieDetail, SeriesDetail},
     query,
 };
+use crate::route_params::parse_uuid;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -10,7 +11,6 @@ use axum::{
     routing::get,
 };
 use sea_orm::{DatabaseConnection, DbErr};
-use uuid::Uuid;
 
 #[derive(Clone)]
 struct CatalogState {
@@ -61,7 +61,7 @@ async fn movie_detail(
     State(state): State<CatalogState>,
     Path(id): Path<String>,
 ) -> Result<Json<MovieDetail>, CatalogError> {
-    let id = parse_id(id)?;
+    let id = parse_uuid(id, CatalogError::NotFound)?;
     query::movie_detail(&state.db, id)
         .await?
         .map(Json)
@@ -72,13 +72,9 @@ async fn series_detail(
     State(state): State<CatalogState>,
     Path(id): Path<String>,
 ) -> Result<Json<SeriesDetail>, CatalogError> {
-    let id = parse_id(id)?;
+    let id = parse_uuid(id, CatalogError::NotFound)?;
     query::series_detail(&state.db, id)
         .await?
         .map(Json)
         .ok_or(CatalogError::NotFound)
-}
-
-fn parse_id(value: String) -> Result<Uuid, CatalogError> {
-    value.parse().map_err(|_| CatalogError::NotFound)
 }

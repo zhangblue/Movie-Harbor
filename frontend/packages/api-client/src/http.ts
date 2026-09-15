@@ -57,6 +57,11 @@ export function clearCsrfToken(): void {
   csrfToken = undefined;
 }
 
+export function requiredResponse<T>(value: T | undefined): T {
+  if (value === undefined) throw new TypeError("Expected an API response body");
+  return value;
+}
+
 export function apiPath(...segments: Array<string | number>): string {
   return `/api/${segments.map((segment) => encodeURIComponent(String(segment))).join("/")}`;
 }

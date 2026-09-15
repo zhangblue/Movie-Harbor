@@ -3,6 +3,7 @@ import { getSeriesDetail } from "@movie-harbor/api-client";
 import { Loading, RequestError } from "../app/RequestState";
 import { usePublicRequest } from "../app/usePublicRequest";
 import { DetailsLayout, durationLabel } from "./DetailsLayout";
+import { orderEpisodes, orderSeasons } from "../series/ordering";
 
 export function SeriesDetails({ id }: { id: string }) {
   const load = useCallback(() => getSeriesDetail(id), [id]);
@@ -11,9 +12,9 @@ export function SeriesDetails({ id }: { id: string }) {
   if (state.status === "loading") return <Loading />;
   if (state.status === "error") return <RequestError error={state.error} retry={retry} />;
   // The public endpoint already enforces publication visibility; never infer or synthesize missing episodes.
-  const seasons = [...state.data.seasons].sort((a, b) => a.number - b.number);
+  const seasons = orderSeasons(state.data.seasons);
   const season = seasons.find((item) => item.id === selectedSeason) ?? seasons[0];
-  const episodes = [...(season?.episodes ?? [])].sort((a, b) => a.number - b.number);
+  const episodes = orderEpisodes(season?.episodes ?? []);
   return <>
     <DetailsLayout detail={state.data}><p>{seasons.length} 季</p></DetailsLayout>
     <section className="series-episodes" aria-labelledby="episodes-title">

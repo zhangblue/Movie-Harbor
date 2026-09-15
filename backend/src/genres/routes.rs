@@ -2,7 +2,10 @@ use super::{
     dto::{CreateGenreRequest, GenreResponse, ReorderGenresRequest, UpdateGenreRequest},
     service::{self, GenreError},
 };
-use crate::auth::{self, AuthState};
+use crate::{
+    auth::{self, AuthState},
+    route_params::parse_uuid,
+};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -10,7 +13,6 @@ use axum::{
     middleware,
     routing::{get, patch, post, put},
 };
-use uuid::Uuid;
 
 pub fn router(state: AuthState) -> Router {
     Router::new()
@@ -48,7 +50,7 @@ async fn rename(
     Path(id): Path<String>,
     Json(request): Json<UpdateGenreRequest>,
 ) -> Result<Json<GenreResponse>, GenreError> {
-    let id = parse_id(id)?;
+    let id = parse_uuid(id, GenreError::Invalid)?;
     Ok(Json(
         service::rename(&state.db, id, request.name).await?.into(),
     ))
@@ -81,7 +83,7 @@ async fn deactivate(
     State(state): State<AuthState>,
     Path(id): Path<String>,
 ) -> Result<Json<GenreResponse>, GenreError> {
-    let id = parse_id(id)?;
+    let id = parse_uuid(id, GenreError::Invalid)?;
     Ok(Json(service::deactivate(&state.db, id).await?.into()))
 }
 
@@ -89,11 +91,7 @@ async fn delete_genre(
     State(state): State<AuthState>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, GenreError> {
-    let id = parse_id(id)?;
+    let id = parse_uuid(id, GenreError::Invalid)?;
     service::delete(&state.db, id).await?;
     Ok(StatusCode::NO_CONTENT)
-}
-
-fn parse_id(id: String) -> Result<Uuid, GenreError> {
-    id.parse().map_err(|_| GenreError::Invalid)
 }

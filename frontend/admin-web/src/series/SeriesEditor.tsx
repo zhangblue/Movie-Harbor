@@ -3,6 +3,7 @@ import { ApiError, apiErrorCode, createSeries, createSeason, createEpisode, dele
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
+import { classifyEditorWriteError, mergeGenreChoices } from "../content/editorSupport";
 import { PosterPicker } from "../movies/PosterPicker";
 import { SeasonCard } from "./SeasonCard";
 import { SeriesPublishErrors } from "./SeriesPublishErrors";
@@ -84,16 +85,12 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       const recovery = await recoverForbiddenWrite();
       if (!mounted.current) return;
       if (recovery.expired) onExpired(); else setError(recovery.message);
-    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_delete_failed") {
-      setError("删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。");
-    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_replace_failed") {
-      setError("替换失败，原媒体文件已保留，请检查媒体目录权限后重试。");
-    } else if (cause instanceof ApiError && apiErrorCode(cause) === "media_content_mismatch") {
-      setError("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
-    } else if (cause instanceof ApiError && cause.status === 409) { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
-    else if (cause instanceof ApiError && cause.status === 422 && cause.details && typeof cause.details === "object" && "fields" in cause.details && Array.isArray(cause.details.fields)) {
-      setInvalid(cause.details.fields.filter((f): f is string => typeof f === "string"));
-    } else setError(cause instanceof ApiError ? `操作失败：${cause.message}` : "操作失败，请检查网络后重试。");
+    } else {
+      const result = classifyEditorWriteError(cause);
+      if (result.kind === "conflict") { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
+      else if (result.kind === "validation") setInvalid(result.fields);
+      else setError(result.message);
+    }
   }
   async function run(action: () => Promise<void>): Promise<boolean> {
     if (operation.current || loading || conflict || !mounted.current) return false;
@@ -200,7 +197,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   }
   const locked = busy || loading || conflict;
   const readOnly = !series || !canAct(series, "edit");
-  const choices = [...genres, ...(series?.genres.filter((g) => !genres.some((choice) => choice.id === g.id)).map((g) => ({ ...g, sort_order: 0 })) ?? [])];
+  const choices = mergeGenreChoices(genres, series?.genres ?? []);
   const deleteName = deleting ? "display_name" in deleting.impact ? deleting.impact.display_name : deleting.impact.name : "";
   return <section>
     <div inert={!!deleting}>

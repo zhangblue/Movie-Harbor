@@ -1,23 +1,13 @@
 import { useState } from "react";
-import type { PublicEpisode, PublicSeason } from "@movie-harbor/api-client";
-
-export interface OrderedEpisode extends PublicEpisode { seasonId: string; seasonNumber: number }
-
-export function orderedPlayableEpisodes(seasons: PublicSeason[]): OrderedEpisode[] {
-  return [...seasons]
-    .sort((a, b) => a.number - b.number)
-    .flatMap((season) => [...season.episodes]
-      .sort((a, b) => a.number - b.number)
-      .filter((episode) => episode.video_url)
-      .map((episode) => ({ ...episode, seasonId: season.id, seasonNumber: season.number })));
-}
+import type { PublicSeason } from "@movie-harbor/api-client";
+import { orderedPlayableEpisodes, orderSeasons, type OrderedEpisode } from "../series/ordering";
 
 export function EpisodePicker({ seasons, current, select }: {
   seasons: PublicSeason[];
   current: OrderedEpisode;
   select: (episode: OrderedEpisode) => void;
 }) {
-  const orderedSeasons = [...seasons].sort((a, b) => a.number - b.number);
+  const orderedSeasons = orderSeasons(seasons);
   const [pickedSeason, setPickedSeason] = useState<{ episodeId: string; number: number } | null>(null);
   const seasonNumber = pickedSeason?.episodeId === current.id ? pickedSeason.number : current.seasonNumber;
   const episodes = orderedPlayableEpisodes(orderedSeasons).filter((item) => item.seasonNumber === seasonNumber);

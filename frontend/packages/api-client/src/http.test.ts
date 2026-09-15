@@ -6,6 +6,7 @@ import {
   apiRequest,
   buildApiUrl,
   clearCsrfToken,
+  requiredResponse,
   setCsrfToken,
 } from "./http";
 
@@ -17,6 +18,14 @@ afterEach(() => {
 function respond(body: string | null, init: ResponseInit = {}) {
   return new Response(body, init);
 }
+
+it("requiredResponse preserves values and rejects an absent body", () => {
+  expect(requiredResponse({ id: "movie-1" })).toEqual({ id: "movie-1" });
+  expect(() => requiredResponse(undefined)).toThrowError(
+    new TypeError("Expected an API response body"),
+  );
+  expect(requiredResponse(null)).toBeNull();
+});
 
 describe("buildApiUrl", () => {
   it("encodes query values without allowing them to change the path", () => {

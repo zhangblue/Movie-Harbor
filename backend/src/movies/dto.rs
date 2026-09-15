@@ -1,32 +1,12 @@
-use crate::entities::{genre, media_asset, movie};
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::{
+    content::Patch,
+    entities::{genre, media_asset, movie},
+};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateMovieRequest {
     pub name: String,
-}
-
-#[derive(Debug, Default)]
-pub enum Patch<T> {
-    #[default]
-    Missing,
-    Null,
-    Value(T),
-}
-
-impl<'de, T> Deserialize<'de> for Patch<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Option::<T>::deserialize(deserializer).map(|value| match value {
-            Some(value) => Self::Value(value),
-            None => Self::Null,
-        })
-    }
 }
 
 #[derive(Debug, Deserialize)]
