@@ -1311,6 +1311,132 @@ async fn multi_volume_publication_never_falls_back_to_a_same_key_in_another_volu
         &["video/mp4"]
     ));
 }
+
+// Catches management summaries bypassing the shared controlled-key and volume boundary.
+#[tokio::test]
+async fn review_admin_details_suppress_uncontrolled_media_urls() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    let mut cfg = config(roots[0].as_ref());
+    cfg.media_dirs.push(roots[1].as_ref().to_path_buf());
+    let app = app::build(db.clone(), &cfg).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    db.execute_unprepared(r#"
+INSERT INTO media_asset(id, storage_volume, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('11111111-1111-1111-1111-111111111111', 1, '../outside.png', 'poster.png', 'image/png', 1, 'poster'),
+('22222222-2222-2222-2222-222222222222', 1, 'poster/22/22222222222222222222222222222222.png', 'video.mp4', 'video/mp4', 1, 'video'),
+('33333333-3333-3333-3333-333333333333', 1, 'poster/33/../outside.png', 'poster.png', 'image/png', 1, 'poster'),
+('44444444-4444-4444-4444-444444444444', 1, 'video/44/../../outside.mp4', 'video.mp4', 'video/mp4', 1, 'video');
+INSERT INTO movie(id,name,poster_asset_id,video_asset_id) VALUES
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','Movie','11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222');
+INSERT INTO series(id,name,poster_asset_id) VALUES
+('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb','Series','33333333-3333-3333-3333-333333333333');
+INSERT INTO season(id,series_id,number) VALUES
+('cccccccc-cccc-cccc-cccc-cccccccccccc','bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',1);
+INSERT INTO episode(id,season_id,number,name,video_asset_id) VALUES
+('dddddddd-dddd-dddd-dddd-dddddddddddd','cccccccc-cccc-cccc-cccc-cccccccccccc',1,'Episode','44444444-4444-4444-4444-444444444444');
+"#).await.unwrap();
+    for valid in [false, true] {
+        if valid {
+            db.execute_unprepared("UPDATE media_asset SET storage_key = purpose || '/' || left(replace(id::text, '-', ''), 2) || '/' || replace(id::text, '-', '') || CASE purpose WHEN 'poster' THEN '.png' ELSE '.mp4' END").await.unwrap();
+        }
+        let movie = json_request(
+            &app,
+            "GET",
+            "/api/admin/movies/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            json!(null),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        )
+        .await;
+        assert_eq!(movie.status(), StatusCode::OK);
+        let movie: Value =
+            serde_json::from_slice(&movie.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let series = json_request(
+            &app,
+            "GET",
+            "/api/admin/series/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            json!(null),
+            Some(&cookie),
+            Some(&csrf),
+            None,
+        )
+        .await;
+        assert_eq!(series.status(), StatusCode::OK);
+        let series: Value =
+            serde_json::from_slice(&series.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if valid {
+            assert_eq!(
+                movie["poster"]["url"],
+                "/media/v1/poster/11/11111111111111111111111111111111.png"
+            );
+            assert_eq!(
+                movie["video"]["url"],
+                "/media/v1/video/22/22222222222222222222222222222222.mp4"
+            );
+            assert_eq!(
+                series["poster"]["url"],
+                "/media/v1/poster/33/33333333333333333333333333333333.png"
+            );
+            assert_eq!(
+                series["seasons"][0]["episodes"][0]["video"]["url"],
+                "/media/v1/video/44/44444444444444444444444444444444.mp4"
+            );
+        } else {
+            assert!(movie["poster"].is_null(), "unsafe poster summary: {movie}");
+            assert!(movie["video"].is_null());
+            assert!(series["poster"].is_null());
+            assert!(series["seasons"][0]["episodes"][0]["video"].is_null());
+        }
+    }
+    // Database constraints prohibit negative volumes; exercise the DTO boundary with a corrupt model.
+    let mut asset = media_asset::Entity::find_by_id(
+        "11111111-1111-1111-1111-111111111111"
+            .parse::<Uuid>()
+            .unwrap(),
+    )
+    .one(&db)
+    .await
+    .unwrap()
+    .unwrap();
+    asset.storage_volume = -1;
+    let movie = movie::Entity::find_by_id(
+        "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+            .parse::<Uuid>()
+            .unwrap(),
+    )
+    .one(&db)
+    .await
+    .unwrap()
+    .unwrap();
+    let response =
+        movie_harbor_api::movies::dto::MovieResponse::new(movie, vec![], Some(asset), None);
+    assert!(response.poster.is_none());
+}
+
+// Catches starting with persisted media references that cannot be resolved by the configured set.
+#[tokio::test]
+async fn review_startup_rejects_unconfigured_registered_volumes() {
+    let db = database().await;
+    let roots = [volume_root(0), volume_root(1)];
+    db.execute_unprepared("INSERT INTO media_asset(id,storage_volume,storage_key,original_name,mime_type,byte_size,purpose) VALUES ('11111111-1111-1111-1111-111111111111',1,'poster/11/11111111111111111111111111111111.png','poster.png','image/png',1,'poster')").await.unwrap();
+    let mut cfg = config(roots[0].as_ref());
+    let error = app::build(db.clone(), &cfg)
+        .await
+        .expect_err("unconfigured asset volume must reject startup");
+    assert!(error.to_string().contains("volume 1"));
+    for root in &roots {
+        assert!(!format!("{error:?}").contains(&root.as_ref().display().to_string()));
+    }
+    cfg.media_dirs.push(roots[1].as_ref().to_path_buf());
+    assert!(
+        app::build(db.clone(), &cfg).await.is_ok(),
+        "configured registered volume must start"
+    );
+    assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
+}
 fn volume_root(volume: i32) -> TempRoot {
     let root = TempRoot::new();
     std::fs::write(

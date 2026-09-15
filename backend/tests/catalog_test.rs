@@ -50,6 +50,13 @@ impl Drop for TempRoot {
 }
 
 fn config(root: &Path) -> Config {
+    let second = root.join("volume-1");
+    std::fs::create_dir_all(&second).unwrap();
+    std::fs::write(
+        second.join(".movie-harbor-volume.json"),
+        r#"{"version":1,"volume":1}"#,
+    )
+    .unwrap();
     std::fs::write(
         root.join(".movie-harbor-volume.json"),
         r#"{"version":1,"volume":0}"#,
@@ -58,7 +65,7 @@ fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
-        media_dirs: vec![root.into()],
+        media_dirs: vec![root.into(), second],
         media_disk_reserve_bytes: 1,
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),

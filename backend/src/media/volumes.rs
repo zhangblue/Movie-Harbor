@@ -317,6 +317,94 @@ mod tests {
         );
         assert!(set.reserve_for_upload(200).await.is_ok());
     }
+
+    struct ExhaustAtIncomingSync {
+        root: PathBuf,
+        errno: i32,
+    }
+
+    impl super::super::StorageHooks for ExhaustAtIncomingSync {
+        fn on_event(&self, event: &super::super::StorageEvent) -> io::Result<()> {
+            if let super::super::StorageEvent::FileSynced(name) = event
+                && name.ends_with(".part")
+            {
+                assert!(std::fs::metadata(self.root.join(name)).unwrap().len() > 0);
+                return Err(io::Error::from_raw_os_error(self.errno));
+            }
+            Ok(())
+        }
+    }
+
+    // Catches ENOSPC/EDQUOT after real file writes being reported as 500, or leaked quota/parts.
+    #[tokio::test]
+    async fn review_io_exhaustion_maps_507_and_releases_upload() {
+        use axum::response::IntoResponse;
+        use http_body_util::BodyExt;
+        use image::ImageEncoder;
+        for errno in [
+            rustix::io::Errno::NOSPC.raw_os_error(),
+            rustix::io::Errno::DQUOT.raw_os_error(),
+        ] {
+            let root = TestRoot(
+                std::env::temp_dir().join(format!("movie_harbor_full_{}", uuid::Uuid::new_v4())),
+            );
+            let storage = LocalMediaStorage::initialize_with_hooks(
+                &root.0,
+                Arc::new(ExhaustAtIncomingSync {
+                    root: root.0.clone(),
+                    errno,
+                }),
+            )
+            .await
+            .unwrap();
+            let mut set = MediaStorageSet::from(storage);
+            set.capacity = Arc::new(FixedCapacity([(0, Some(200))].into_iter().collect()));
+            let mut bytes = Vec::new();
+            image::codecs::png::PngEncoder::new(&mut bytes)
+                .write_image(&[20, 40, 60], 1, 1, image::ExtendedColorType::Rgb8)
+                .unwrap();
+            let policy = UploadPolicy::new(1024, ["video/mp4"]).unwrap();
+            let error = set
+                .store(
+                    100,
+                    uuid::Uuid::new_v4(),
+                    MediaKind::Poster,
+                    "image.png",
+                    "image/png",
+                    &policy,
+                    OneChunk(Some(bytes.into())),
+                )
+                .await
+                .err()
+                .expect("disk fault must fail upload");
+            assert_eq!(
+                std::fs::read_dir(root.0.join(".incoming")).unwrap().count(),
+                0
+            );
+            assert!(
+                set.reserve_for_upload(200).await.is_ok(),
+                "failed upload leaked its reservation"
+            );
+            let response = error.into_response();
+            assert_eq!(
+                response.status(),
+                axum::http::StatusCode::INSUFFICIENT_STORAGE
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                    .unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({"error":"media storage is unavailable or full","code":"media_storage_insufficient"})
+            );
+        }
+        assert_eq!(
+            MediaError::from(io::Error::from(io::ErrorKind::PermissionDenied))
+                .into_response()
+                .status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
     struct TestRoot(PathBuf);
 
     impl Drop for TestRoot {

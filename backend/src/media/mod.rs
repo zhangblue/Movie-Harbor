@@ -48,6 +48,7 @@ pub enum MediaError {
     TooLarge,
     InsufficientStorage,
     InvalidStorageConfiguration,
+    UnconfiguredVolume(i32),
     VolumeInitialization {
         volume_id: usize,
         reason: &'static str,
@@ -75,6 +76,9 @@ impl fmt::Display for MediaError {
             Self::TooLarge => "upload exceeds configured byte limit",
             Self::InsufficientStorage => "insufficient media storage capacity",
             Self::InvalidStorageConfiguration => "no media storage volumes configured",
+            Self::UnconfiguredVolume(volume) => {
+                return write!(formatter, "media volume {volume} is not configured");
+            }
             Self::VolumeInitialization { volume_id, reason } => {
                 return write!(
                     formatter,
@@ -109,7 +113,10 @@ impl std::error::Error for MediaError {
 
 impl From<io::Error> for MediaError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error)
+        match error.kind() {
+            io::ErrorKind::StorageFull | io::ErrorKind::QuotaExceeded => Self::InsufficientStorage,
+            _ => Self::Io(error),
+        }
     }
 }
 
@@ -168,6 +175,7 @@ impl IntoResponse for MediaError {
             Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
             Self::InvalidStorageKey
             | Self::InvalidStorageConfiguration
+            | Self::UnconfiguredVolume(_)
             | Self::VolumeInitialization { .. }
             | Self::ReplacementFailed
             | Self::ReplacementFinalizationFailed

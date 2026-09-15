@@ -74,15 +74,23 @@ pub struct MediaSummary {
     pub byte_size: i64,
 }
 
-impl From<media_asset::Model> for MediaSummary {
-    fn from(value: media_asset::Model) -> Self {
-        Self {
+impl MediaSummary {
+    pub(crate) fn for_kind(value: media_asset::Model, expected_kind: &str) -> Option<Self> {
+        if value.purpose != expected_kind {
+            return None;
+        }
+        let url = crate::catalog::dto::media_url(
+            Some(value.storage_volume),
+            Some(value.storage_key),
+            expected_kind,
+        )?;
+        Some(Self {
             id: value.id.to_string(),
-            url: format!("/media/v{}/{}", value.storage_volume, value.storage_key),
+            url,
             original_name: value.original_name,
             mime_type: value.mime_type,
             byte_size: value.byte_size,
-        }
+        })
     }
 }
 
@@ -124,8 +132,8 @@ impl MovieResponse {
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             genres: genres.into_iter().map(Into::into).collect(),
-            poster: poster.map(Into::into),
-            video: video.map(Into::into),
+            poster: poster.and_then(|asset| MediaSummary::for_kind(asset, "poster")),
+            video: video.and_then(|asset| MediaSummary::for_kind(asset, "video")),
         }
     }
 }

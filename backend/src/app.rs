@@ -1,4 +1,5 @@
 use axum::{Json, Router, routing::get};
+use sea_orm::{EntityTrait, QuerySelect};
 use serde::Serialize;
 use std::time::Duration;
 
@@ -38,6 +39,18 @@ pub async fn build(
         config.media_disk_reserve_bytes,
     )
     .await?;
+    let registered_volumes: Vec<i32> = crate::entities::media_asset::Entity::find()
+        .select_only()
+        .column(crate::entities::media_asset::Column::StorageVolume)
+        .distinct()
+        .into_tuple()
+        .all(&db)
+        .await?;
+    for volume in registered_volumes {
+        if storage.volume(volume).is_none() {
+            return Err(crate::media::MediaError::UnconfiguredVolume(volume).into());
+        }
+    }
     let policy = crate::media::UploadPolicy::new(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),

@@ -103,7 +103,7 @@ impl EpisodeResponse {
             archived_at: value.archived_at.map(|value| value.to_rfc3339()),
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
-            video: video.map(Into::into),
+            video: video.and_then(|asset| MediaSummary::for_kind(asset, "video")),
         }
     }
 }
@@ -161,7 +161,7 @@ impl SeriesResponse {
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             genres: genres.into_iter().map(Into::into).collect(),
-            poster: poster.map(Into::into),
+            poster: poster.and_then(|asset| MediaSummary::for_kind(asset, "poster")),
             seasons,
         }
     }
