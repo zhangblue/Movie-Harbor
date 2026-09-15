@@ -2,17 +2,23 @@
 
 Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与剧集媒体库。访客无需登录即可浏览、搜索和播放已发布内容；单一管理员通过独立后台维护电影、剧集、季、单集、题材、海报和视频。
 
+快速入口：[生产部署](#生产部署) · [半离线发布包](#半离线发布包) · [备份与恢复](#一致备份与恢复) · [开发与验收](#开发与验收) · [项目文档](#项目文档)
+
 ## 当前状态
 
 - 产品设计：已确认。
 - UI Demo：已确认，保存在 `demo/`。
-- 实现计划：已完成。
-- 生产代码：已实现，可通过 Docker Compose 自托管。
+- 生产应用：已实现，可通过 Docker Compose 自托管。
+- 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
+- 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
+- 发布工具：支持生成 `linux/arm64` 半离线 Docker 部署包。
 
 ## 核心设计
 
 - 内容支持电影和“剧集 → 季 → 集”两种结构。
 - 电影、剧集和单集具有草稿、已发布、已归档状态，只有草稿可以编辑。
+- 电影和剧集可不上传海报；缺失或加载失败时显示无文字的纯色占位。
+- 单集不保存独立简介，详情页按季、集序号展示名称和时长。
 - 访客无需账号；观看进度只保存在当前浏览器。
 - 管理后台采用单一管理员账号。
 - 视频不自动转码，管理员上传浏览器可直接播放的文件。
@@ -29,11 +35,23 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 
 ## 项目文档
 
+核心文档：
+
 - [产品设计规格](docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md)
-- [实现计划](docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md)
-- [半离线发布包设计](docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md)
-- [半离线发布包实现计划](docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md)
+- [主实现计划](docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md)
 - [协作约定](AGENTS.md)
+
+当前关键增量：
+
+- [媒体独占归属与发布体验](docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md)
+- [宿主机数据目录映射](docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md)
+- [半离线 Docker 发布包](docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md)
+- [本机默认配置一致性](docs/superpowers/specs/2026-09-13-default-local-config-design.md)
+- [HEVC MP4 上传与中文错误反馈](docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md)
+- [管理与公开内容列表分页](docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md)
+- [前后端公共函数提取](docs/superpowers/specs/2026-09-15-common-function-extraction-design.md)
+
+完整设计和实施记录位于 `docs/superpowers/specs/` 与 `docs/superpowers/plans/`。
 
 ## 媒体目录安全边界
 
@@ -62,6 +80,22 @@ docker compose -p movie-harbor up -d --build --wait
 
 首次启动时，API 自动执行数据库迁移。只有数据库内尚无管理员时，`ADMIN_NAME` 和 `ADMIN_INITIAL_PASSWORD` 才会创建初始账号；之后修改 `.env` 或重启容器都不会覆盖已有管理员名称和密码。首次登录并修改密码后，应从 `.env` 移除初始凭据或换成无意义的占位值，但其余必填变量仍须保留。
 
+关键环境变量：
+
+| 变量 | 示例默认值 | 说明 |
+| --- | --- | --- |
+| `APP_PORT` | `8080` | 宿主机入口端口；修改后同步调整 `PUBLIC_ORIGIN`。 |
+| `DATABASE_HOST_DIR` | `./data/postgres` | PostgreSQL 宿主机持久目录。 |
+| `MEDIA_HOST_DIR` | `./data/media` | 海报和视频宿主机持久目录。 |
+| `POSTGRES_DB` / `POSTGRES_USER` | `movie_harbor` | Compose 使用的数据库名与账号。 |
+| `POSTGRES_PASSWORD` | 无安全默认值 | 必须替换为随机数据库密码。 |
+| `ADMIN_NAME` / `ADMIN_INITIAL_PASSWORD` | `admin` / 无安全默认值 | 仅在空库首次创建管理员时使用。 |
+| `PUBLIC_ORIGIN` | `http://localhost:8080` | 必须与浏览器实际访问来源完全一致。 |
+| `COOKIE_SECURE` | `false` | 只允许 localhost 或环回 HTTP；正式部署必须设为 `true`。 |
+| `TRUST_PROXY_SECRET` | 无安全默认值 | Caddy 与 API 之间的独立代理认证秘密，至少 32 字节。 |
+| `MAX_UPLOAD_BYTES` | `53687091200` | 单文件上限，默认 50 GiB。 |
+| `VIDEO_MIME_ALLOWLIST` | `video/mp4,video/webm` | 允许进入结构化格式校验的视频 MIME。 |
+
 数据库连接必须二选一：直接运行 API 时可只设置 `DATABASE_URL`；Compose 使用 `DATABASE_HOST`、`DATABASE_PORT`、`POSTGRES_DB`、`POSTGRES_USER`、`POSTGRES_PASSWORD` 这组分项变量。为避免迁移和运行时误连不同数据库，两种方式同时出现时 API 会拒绝启动。
 
 登录限流默认只信任 API 连接的对端地址，并忽略客户端提供的 `X-Forwarded-For`。标准 Compose 不向宿主机暴露 API，由 Caddy 覆盖该请求头为实际客户端地址，并用独立的 `TRUST_PROXY_SECRET` 向 API 认证代理身份。请把示例值替换为至少 32 字节的随机秘密且不要复用其他密码。仅当 API 只能由持有该秘密且会覆盖（而非追加）该请求头的受信反向代理访问时才可开启 `TRUST_PROXY_HEADERS`；直接暴露 API 时必须保持关闭。
@@ -78,7 +112,7 @@ docker compose -p movie-harbor pull
 docker compose -p movie-harbor up -d --build --wait
 ```
 
-不要在保留数据时执行 `docker compose down --volumes`，该选项会删除命名卷。
+`docker compose down` 不会删除当前通过 bind mount 保存的数据库和媒体目录；真正的数据边界是 `DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 指向的宿主机路径。不要在未完成一致备份时删除、清空或改指这两个目录。
 
 ## 半离线发布包
 
@@ -124,18 +158,26 @@ docker compose up -d --no-build --wait
 
 ## 一致备份与恢复
 
-数据库元数据和 `media_data` 媒体卷必须作为同一个一致性备份集处理，只备份其中一项会产生丢失引用或孤立文件。稳妥的单机流程是在维护窗口停止写入，然后同时备份数据库逻辑导出和媒体卷：
+数据库元数据和 `MEDIA_HOST_DIR` 媒体目录必须作为同一个一致性备份集处理，只备份其中一项会产生丢失引用或孤立文件。稳妥的单机流程是在维护窗口停止 API 写入，同时导出数据库并归档媒体目录。下面假设 `.env` 中的 `MEDIA_HOST_DIR` 已改为宿主机绝对路径：
 
 ```bash
 docker compose -p movie-harbor stop api
 docker compose -p movie-harbor exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc' > movie-harbor-db.dump
-docker run --rm -v movie-harbor_media_data:/source:ro -v "$PWD":/backup alpine:3.22 tar -C /source -czf /backup/movie-harbor-media.tgz .
+MEDIA_BACKUP_SOURCE=/absolute/path/from-MEDIA_HOST_DIR
+docker run --rm --mount type=bind,src="$MEDIA_BACKUP_SOURCE",dst=/source,readonly --mount type=bind,src="$PWD",dst=/backup alpine:3.22 tar -C /source -czf /backup/movie-harbor-media.tgz .
 docker compose -p movie-harbor start api
 ```
 
-恢复时先停止 API，将数据库恢复到空库并把媒体归档解压回 `movie-harbor_media_data`，确认两者来自同一备份点后再启动 API。备份文件包含私有内容与密码哈希，应加密保存并定期演练恢复。若修改了 Compose 项目名，卷名中的 `movie-harbor` 也会随之改变，请先用 `docker volume ls` 核对精确名称。
+恢复时先停止 API，将数据库恢复到空库，并把媒体归档解压回 `MEDIA_HOST_DIR` 指向的目录；确认两者来自同一备份点、媒体目录属主仍为 UID/GID `10001:10001` 且权限为 `0700` 后再启动 API。备份文件包含私有内容与密码哈希，应加密保存并定期演练恢复。`DATABASE_HOST_DIR` 的 PostgreSQL 文件不能替代逻辑导出直接跨版本复制。
 
 ## 开发与验收
+
+源码开发需要 Rust stable（支持 Rust 2024 edition）、Node.js 24、npm、Docker Engine 和 Docker Compose v2。首次进入仓库先安装前端依赖并启动隔离测试数据库：
+
+```bash
+npm install
+docker compose -f docker-compose.test.yml up -d postgres
+```
 
 单元测试与构建：
 
@@ -188,6 +230,9 @@ python3 -m http.server 4174 --directory demo --bind 127.0.0.1
 
 ```text
 backend/                    Axum API、迁移与后端测试
+backend/src/admin_content/  电影与剧集统一管理列表和分页
+backend/src/content.rs      跨内容类型的字段与生命周期基础规则
+backend/src/route_params.rs 公共 UUID 路由参数解析
 frontend/public-web/        公开 React 应用
 frontend/admin-web/         管理后台 React 应用
 frontend/packages/          共享 API 客户端与 UI

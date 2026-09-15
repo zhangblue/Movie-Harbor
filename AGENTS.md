@@ -2,16 +2,46 @@
 
 ## 当前阶段
 
-项目已完成需求设计、UI Demo、主实现计划、生产应用、Docker Compose 部署和半离线发布工具。任何变更前都必须先阅读主设计与主实现计划，以及以下增量设计与对应计划：
+项目已完成需求设计、UI Demo、生产应用、Docker Compose 部署、半离线发布工具、管理与公开内容分页，以及前后端公共函数整理。任何变更前都必须先阅读主设计与主实现计划：
 
 - `docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md`
 - `docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md`
+
+然后按变更领域阅读对应的增量设计与实现计划：
+
+### 内容与界面
+
+- `docs/superpowers/specs/2026-09-12-series-episode-ux-revision-design.md`
+- `docs/superpowers/plans/2026-09-12-series-episode-ux-revision.md`
+- `docs/superpowers/specs/2026-09-14-published-series-view-collapse-design.md`
+- `docs/superpowers/plans/2026-09-14-published-series-view-collapse.md`
+- `docs/superpowers/specs/2026-09-14-season-editor-collapse-design.md`
+- `docs/superpowers/plans/2026-09-14-season-editor-collapse.md`
+- `docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md`
+- `docs/superpowers/plans/2026-09-15-admin-and-public-content-pagination.md`
+
+### 媒体、部署与发布
+
 - `docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md`
 - `docs/superpowers/plans/2026-09-12-media-ownership-and-publishing.md`
 - `docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md`
 - `docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md`
 - `docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md`
 - `docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md`
+- `docs/superpowers/specs/2026-09-13-default-local-config-design.md`
+- `docs/superpowers/plans/2026-09-13-default-local-config.md`
+- `docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md`
+- `docs/superpowers/plans/2026-09-14-hevc-mp4-upload-and-localized-error.md`
+- `docs/superpowers/specs/2026-09-14-high-profile-avcc-compatibility-design.md`
+- `docs/superpowers/plans/2026-09-14-high-profile-avcc-compatibility.md`
+
+### 工程与文档
+
+- `docs/superpowers/specs/2026-09-12-readme-guide-design.md`
+- `docs/superpowers/specs/2026-09-13-project-documentation-sync-design.md`
+- `docs/superpowers/plans/2026-09-13-project-documentation-sync.md`
+- `docs/superpowers/specs/2026-09-15-common-function-extraction-design.md`
+- `docs/superpowers/plans/2026-09-15-common-function-extraction.md`
 
 当前实现与日期较新的增量规格覆盖主规格中的旧约定，发生冲突时以当前实现与日期较新的增量规格为准。
 
@@ -34,7 +64,12 @@
 - `frontend/admin-web/`：认证、内容管理、题材配置和系统设置。
 - `frontend/packages/api-client/`：共享 API 类型与请求封装。
 - `frontend/packages/ui/`：共享主题和基础交互组件。
+- `frontend/packages/ui/src/pagination.ts`：管理后台与公开站共用的页码窗口算法。
 - `backend/`：Axum API、SeaORM entities 与后端测试。
+- `backend/src/admin_content/`：电影、剧集统一管理列表的筛选、排序和分页。
+- `backend/src/content.rs`：电影、剧集和单集共用的字段、Patch 与生命周期基础规则。
+- `backend/src/route_params.rs`：保留各领域错误语义的公共 UUID 路由参数解析。
+- `backend/src/media/removal.rs`：媒体暂存、恢复、同步删除及删除事务收尾。
 - `backend/migration/`：SeaORM 数据库迁移。
 - `tests/`：根 Node 契约测试。
 - `tests/e2e/`：Playwright 跨服务验收与安全 runner。
@@ -55,6 +90,9 @@
 - 有已发布单集的季不可修改季序号或删除。
 - 公开 API 只能返回有效发布内容；草稿和归档内容对访客表现为不存在。
 - 视频不自动转码，只接受浏览器可直接播放的文件；首版不管理外挂字幕。
+- 电影和剧集允许没有海报；公开页面使用无文字的纯色占位区域。
+- 单集不保存简介；公开剧集详情按季、集序号展示名称和时长。
+- 管理内容列表和公开内容目录固定每页 20 条，并使用数字页码；管理列表通过 `/api/admin/contents` 统一分页电影与剧集。
 - 媒体文件保存在挂载目录，数据库只保存受控文件标识和元数据。
 - 发布后的媒体 URL 是公开地址，不承诺防下载或防盗链。
 - 媒体资产在电影海报、电影视频、剧集海报和单集视频槽位之间全局独占，不能共享。
@@ -83,6 +121,7 @@
 - 文件上传必须使用 Tokio 流式写入临时文件，校验成功后原子替换，禁止把大视频完整载入内存。
 - 状态转换和删除约束必须在后端执行，不能只依赖前端隐藏按钮。
 - 保持公开站、管理后台和后端 API 边界清晰，不跨目录复制业务逻辑。
+- 新增功能前先检查现有公共边界：后端优先复用 `content.rs`、`route_params.rs` 和 `media/removal.rs`；前端优先复用 API 客户端、内容编辑辅助函数、剧集排序函数和共享页码算法。只有语义与变化原因一致的逻辑才提取，禁止建立无边界的全局 `utils`。
 - 不实现设计规格明确列出的首版非目标。
 - 不要修改或删除与当前任务无关的用户文件。
 
