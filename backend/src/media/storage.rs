@@ -464,9 +464,19 @@ impl LocalMediaStorage {
         self.root.as_ref()
     }
 
+    pub(crate) fn filesystem_device(&self) -> Result<u64, MediaError> {
+        let stat = rustix::fs::fstat(&self.root_fd).map_err(io::Error::from)?;
+        Ok(stat.st_dev as u64)
+    }
+
     pub(crate) fn available_bytes(&self) -> Result<u64, MediaError> {
         let stat = rustix::fs::fstatvfs(&self.root_fd).map_err(io::Error::from)?;
         let available = filesystem_available_bytes(&stat)?;
+        self.ensure_writable()?;
+        Ok(available)
+    }
+
+    pub(crate) fn ensure_writable(&self) -> Result<(), MediaError> {
         // Use effective credentials (including OS ACL checks), and require directory
         // search permission as well as write permission. Never reopen the host path.
         rustix::fs::accessat(
@@ -476,7 +486,7 @@ impl LocalMediaStorage {
             AtFlags::EACCESS,
         )
         .map_err(io::Error::from)?;
-        Ok(available)
+        Ok(())
     }
 
     /// Resolve a persisted key through directory capabilities and verify it names a readable

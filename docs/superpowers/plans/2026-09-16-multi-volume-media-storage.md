@@ -8,6 +8,8 @@
 
 **技术栈：** Rust 2024、Axum 0.8、SeaORM 1.1、PostgreSQL、Tokio、rustix `fstatvfs`、Docker Compose、Caddy、Node 内置测试。
 
+**最终审查修订：** 容量与预留按已验证根 fd 的文件系统容量域共享，一次分配每域只采样一次，同域候选以小编号决胜；下文原逐卷伪代码由此约定覆盖。部署工具在 `.env` 所在目录以 fsync、原子 rename、目录 fsync 保存 `.movie-harbor-storage-state.json`，区分首次登记、普通重启和末尾追加；已有卷缺标记或路径替换/删除/重排、登记丢失/损坏必须先于持久写和 Docker 启动失败。首次卷 0 可含旧文件，新卷须为空且没有标记。`media-init` 仅将卷根设为 `10001:10001`/`0711`，内部目录仍为 `0700`，媒体权限不变；以真实 Linux named volume 和不同普通 UID 验证二次启动。
+
 ---
 
 ## 文件结构

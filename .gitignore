@@ -7,6 +7,7 @@ target/
 .env.*
 !/.env.example
 compose.storage.generated.json
+.movie-harbor-storage-state.json
 frontend/public-web/dist/
 frontend/admin-web/dist/
 /data/

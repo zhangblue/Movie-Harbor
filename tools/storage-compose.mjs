@@ -13,6 +13,7 @@ import {
 import path from "node:path";
 
 const VOLUME_MARKER = ".movie-harbor-volume.json";
+const REGISTRATION_STATE = ".movie-harbor-storage-state.json";
 
 function fail(message) {
   throw new Error(`Invalid MEDIA_HOST_DIR: ${message}`);
@@ -155,20 +156,56 @@ function writeAtomically(output, data, mode = 0o600) {
   }
 }
 
-function initializeMarkers(hostDirs) {
-  for (const [volume, directory] of hostDirs.entries()) {
-    const markerPath = path.join(directory, VOLUME_MARKER);
-    try {
-      readVolumeMarker(directory, volume);
-      continue;
-    } catch (error) {
-      if (markerEntryExists(markerPath)) throw error;
-    }
+function readRegistration(statePath) {
+  if (!markerEntryExists(statePath)) return null;
+  try {
+    if (!lstatSync(statePath).isFile()) throw new Error();
+    const state = JSON.parse(readFileSync(statePath, "utf8"));
+    if (
+      !state || Object.keys(state).length !== 2 || state.version !== 1 ||
+      !Array.isArray(state.directories) || state.directories.length === 0 ||
+      state.directories.some((directory) => typeof directory !== "string" || !path.isAbsolute(directory)) ||
+      new Set(state.directories).size !== state.directories.length
+    ) throw new Error();
+    return state;
+  } catch {
+    throw new Error("media volume registration is invalid; restore the deployment registration from backup");
+  }
+}
 
-    if (volume > 0 && readdirSync(directory).length !== 0) {
-      throw new Error(`media volume ${volume} is non-empty and has no identity marker`);
+function initializeMarkers(hostDirs, statePath, outputPath) {
+  const directories = hostDirs.map((directory) => realpathSync(directory));
+  const registered = readRegistration(statePath);
+  const previous = registered?.directories ?? [];
+  if (!registered && (
+    markerEntryExists(outputPath) ||
+    hostDirs.some((directory) => markerEntryExists(path.join(directory, VOLUME_MARKER)))
+  )) {
+    throw new Error("media volume registration is missing; restore it before starting an existing deployment");
+  }
+  if (previous.length > directories.length || previous.some((directory, volume) => directory !== directories[volume])) {
+    throw new Error("registered media volume paths cannot be replaced, reordered or removed");
+  }
+
+  // Validate the complete prefix and every new directory before any persistent write.
+  for (const [volume, directory] of hostDirs.entries()) {
+    if (volume < previous.length) {
+      readVolumeMarker(directory, volume);
+    } else {
+      if (markerEntryExists(path.join(directory, VOLUME_MARKER))) {
+        throw new Error(`new media volume ${volume} already has an identity marker`);
+      }
+      if (volume > 0 && readdirSync(directory).length !== 0) {
+        throw new Error(`new media volume ${volume} must be empty`);
+      }
     }
-    writeAtomically(markerPath, JSON.stringify({ version: 1, volume }), 0o644);
+  }
+
+  if (previous.length === directories.length) return;
+  // Persist intent first: interruption while creating markers must fail closed on restart.
+  writeAtomically(statePath, `${JSON.stringify({ version: 1, directories }, null, 2)}\n`);
+  for (let volume = previous.length; volume < hostDirs.length; volume += 1) {
+    writeAtomically(path.join(hostDirs[volume], VOLUME_MARKER), JSON.stringify({ version: 1, volume }), 0o644);
   }
 }
 
@@ -196,8 +233,11 @@ function main() {
     baseDirectory: path.dirname(envPath),
     requireExisting: options.initialize,
   });
-  if (options.initialize) initializeMarkers(hostDirs);
-  writeAtomically(path.resolve(options.output), `${JSON.stringify(renderStorageCompose(hostDirs), null, 2)}\n`);
+  const outputPath = path.resolve(options.output);
+  if (options.initialize) {
+    initializeMarkers(hostDirs, path.join(path.dirname(envPath), REGISTRATION_STATE), outputPath);
+  }
+  writeAtomically(outputPath, `${JSON.stringify(renderStorageCompose(hostDirs), null, 2)}\n`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

@@ -11,7 +11,7 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 pub struct MediaStorageSet {
     volumes: Arc<Vec<MediaVolume>>,
     reserve_bytes: u64,
-    reservations: Arc<Mutex<HashMap<i32, u64>>>,
+    reservations: Arc<Mutex<HashMap<CapacityDomain, u64>>>,
     mutations: Arc<AsyncMutex<()>>,
     capacity: Arc<dyn CapacityProbe>,
 }
@@ -32,7 +32,16 @@ impl MediaVolume {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct CapacityDomain(u64);
+
 pub(crate) trait CapacityProbe: Send + Sync {
+    fn domain(&self, volume: &MediaVolume) -> Result<CapacityDomain, MediaError> {
+        // The validated root capability identifies the filesystem even when logical
+        // roots are separate directories or bind mounts of the same filesystem.
+        volume.storage.filesystem_device().map(CapacityDomain)
+    }
+
     fn available_bytes(&self, volume: &MediaVolume) -> Result<u64, MediaError>;
 }
 
@@ -170,29 +179,37 @@ impl MediaStorageSet {
             .reservations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut snapshots = HashMap::new();
         let selected = self
             .volumes
             .iter()
             .filter_map(|volume| {
-                let reserved = reservations.get(&volume.volume_id).copied().unwrap_or(0);
-                let available = self
-                    .capacity
-                    .available_bytes(volume)
-                    .ok()?
+                // Eligibility is per directory; capacity and in-flight debits belong
+                // to the shared filesystem, including uploads waiting on mutations.
+                volume.storage.ensure_writable().ok()?;
+                let domain = self.capacity.domain(volume).ok()?;
+                let reserved = reservations.get(&domain).copied().unwrap_or(0);
+                let snapshot = snapshots
+                    .entry(domain)
+                    .or_insert_with(|| self.capacity.available_bytes(volume).ok());
+                let available = (*snapshot)?
                     .checked_sub(self.reserve_bytes)?
                     .checked_sub(reserved)?;
                 let total = reserved.checked_add(required_bytes)?;
                 (available >= required_bytes).then_some((
                     available,
                     Reverse(volume.volume_id),
+                    domain,
                     total,
                 ))
             })
-            .max_by_key(|(available, id, _)| (*available, *id));
-        let (_, Reverse(volume_id), total) = selected.ok_or(MediaError::InsufficientStorage)?;
-        reservations.insert(volume_id, total);
+            .max_by_key(|(available, id, _, _)| (*available, *id));
+        let (_, Reverse(volume_id), domain, total) =
+            selected.ok_or(MediaError::InsufficientStorage)?;
+        reservations.insert(domain, total);
         Ok(UploadReservation {
             volume_id,
+            domain,
             reserved_bytes: required_bytes,
             reservations: self.reservations.clone(),
         })
@@ -210,8 +227,9 @@ fn checked_volume_id(index: usize) -> Result<i32, MediaError> {
 #[must_use = "keep the reservation alive until the upload is resolved"]
 pub struct UploadReservation {
     volume_id: i32,
+    domain: CapacityDomain,
     reserved_bytes: u64,
-    reservations: Arc<Mutex<HashMap<i32, u64>>>,
+    reservations: Arc<Mutex<HashMap<CapacityDomain, u64>>>,
 }
 
 impl UploadReservation {
@@ -226,13 +244,13 @@ impl Drop for UploadReservation {
             .reservations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(reserved) = reservations.get_mut(&self.volume_id) {
+        if let Some(reserved) = reservations.get_mut(&self.domain) {
             // Only this non-cloneable handle can release its contribution. If accounting
             // were corrupted, retain capacity conservatively instead of wrapping.
             if let Some(remaining) = reserved.checked_sub(self.reserved_bytes) {
                 *reserved = remaining;
                 if remaining == 0 {
-                    reservations.remove(&self.volume_id);
+                    reservations.remove(&self.domain);
                 }
             }
         }
@@ -416,6 +434,12 @@ mod tests {
     struct FixedCapacity(HashMap<i32, Option<u64>>);
 
     impl CapacityProbe for FixedCapacity {
+        fn domain(&self, volume: &MediaVolume) -> Result<CapacityDomain, MediaError> {
+            // These fixtures model separate filesystems without requiring physical
+            // disks; same-domain regressions retain the descriptor-based identity.
+            Ok(CapacityDomain(volume.volume_id() as u64))
+        }
+
         fn available_bytes(&self, volume: &MediaVolume) -> Result<u64, MediaError> {
             self.0[&volume.volume_id()]
                 .ok_or_else(|| io::Error::other("capacity unavailable").into())
@@ -443,6 +467,156 @@ mod tests {
         let mut set = MediaStorageSet::initialize(&paths, reserve).await.unwrap();
         set.capacity = Arc::new(FixedCapacity(capacities.iter().copied().collect()));
         (set, root)
+    }
+
+    struct SharedCapacity;
+
+    impl CapacityProbe for SharedCapacity {
+        fn available_bytes(&self, _: &MediaVolume) -> Result<u64, MediaError> {
+            Ok(100)
+        }
+    }
+
+    async fn same_domain_storage_set() -> (MediaStorageSet, TestRoot) {
+        let (mut set, root) = storage_set(&[(0, Some(100)), (1, Some(100))], 20).await;
+        // Both real directories live on the same filesystem. Only the reported
+        // free bytes are replaced; filesystem identity remains the production path.
+        set.capacity = Arc::new(SharedCapacity);
+        (set, root)
+    }
+
+    // Catches counting the same filesystem once for each logical volume during races.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn allocator_same_domain_concurrent_requests_share_capacity() {
+        let (set, _root) = same_domain_storage_set().await;
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let set = set.clone();
+            let barrier = barrier.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                set.reserve_for_upload(50).await
+            }));
+        }
+        let mut held = Vec::new();
+        let mut rejected = 0;
+        for task in tasks {
+            match task.await.unwrap() {
+                Ok(reservation) => held.push(reservation),
+                Err(MediaError::InsufficientStorage) => rejected += 1,
+                Err(error) => panic!("unexpected error: {error}"),
+            }
+        }
+        assert_eq!(
+            held.len(),
+            1,
+            "one filesystem cannot admit two 50-byte uploads"
+        );
+        assert_eq!(rejected, 7);
+        assert_eq!(held[0].volume_id(), 0);
+        drop(held);
+        assert_eq!(set.reserve_for_upload(80).await.unwrap().volume_id(), 0);
+    }
+
+    // Catches releasing a whole domain when one upload finishes, or keeping a
+    // per-volume debit that incorrectly breaks ties for the next upload.
+    #[tokio::test]
+    async fn allocator_same_domain_drop_releases_only_its_upload() {
+        let (set, _root) = same_domain_storage_set().await;
+        let first = set.reserve_for_upload(30).await.unwrap();
+        let second = set.clone().reserve_for_upload(50).await.unwrap();
+        assert_eq!(first.volume_id(), 0);
+        assert_eq!(second.volume_id(), 0);
+        drop(first);
+        assert!(matches!(
+            set.reserve_for_upload(31).await,
+            Err(MediaError::InsufficientStorage)
+        ));
+        let replacement = set.reserve_for_upload(30).await.unwrap();
+        assert_eq!(replacement.volume_id(), 0);
+        drop((second, replacement));
+        assert_eq!(set.reserve_for_upload(80).await.unwrap().volume_id(), 0);
+    }
+
+    // Catches taking separate samples for aliases of one filesystem: external
+    // writes between samples must not make the higher logical volume win a tie.
+    #[tokio::test]
+    async fn allocator_same_domain_samples_once_and_breaks_ties_by_volume_id() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        struct JitteringCapacity(Arc<AtomicU64>);
+        impl CapacityProbe for JitteringCapacity {
+            fn available_bytes(&self, _: &MediaVolume) -> Result<u64, MediaError> {
+                Ok(100 + self.0.fetch_add(1, Ordering::SeqCst))
+            }
+        }
+        let (mut set, _root) = same_domain_storage_set().await;
+        let samples = Arc::new(AtomicU64::new(0));
+        set.capacity = Arc::new(JitteringCapacity(samples.clone()));
+        let first = set.reserve_for_upload(50).await.unwrap();
+        assert_eq!(first.volume_id(), 0);
+        assert_eq!(samples.load(Ordering::SeqCst), 1);
+        drop(first);
+        let second = set.reserve_for_upload(50).await.unwrap();
+        assert_eq!(second.volume_id(), 0);
+        assert_eq!(
+            samples.load(Ordering::SeqCst),
+            2,
+            "each request needs a fresh sample"
+        );
+    }
+
+    // Catches admitting another upload through a different logical volume while
+    // the first upload has reserved space but is still waiting for the write lock.
+    #[tokio::test]
+    async fn allocator_same_domain_waiting_upload_prevents_overbooking_and_cancel_releases() {
+        use std::{
+            future::Future,
+            task::{Context, Poll, Waker},
+        };
+
+        let (set, _root) = same_domain_storage_set().await;
+        let guard = set.lock_mutations().await;
+        let policy = UploadPolicy::new(1024, ["video/mp4"]).unwrap();
+        let mut first = Box::pin(set.store(
+            50,
+            uuid::Uuid::new_v4(),
+            MediaKind::Poster,
+            "first.png",
+            "image/png",
+            &policy,
+            OneChunk(None),
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        let mut second = Box::pin(set.store(
+            50,
+            uuid::Uuid::new_v4(),
+            MediaKind::Poster,
+            "second.png",
+            "image/png",
+            &policy,
+            OneChunk(None),
+        ));
+        assert!(
+            matches!(
+                second.as_mut().poll(&mut context),
+                Poll::Ready(Err(MediaError::InsufficientStorage))
+            ),
+            "second upload must be rejected before it can wait on the shared write lock"
+        );
+        drop((first, second));
+        assert_eq!(set.reserve_for_upload(80).await.unwrap().volume_id(), 0);
+        for volume in set.volumes() {
+            assert_eq!(
+                std::fs::read_dir(volume.storage().root().join(".incoming"))
+                    .unwrap()
+                    .count(),
+                0
+            );
+        }
+        drop(guard);
     }
 
     // Catches choosing by raw space, ignoring in-flight reservations, or breaking ID tie ordering.

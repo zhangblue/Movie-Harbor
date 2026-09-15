@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -43,6 +44,151 @@ function makeDirectory(root, name) {
   mkdirSync(directory, { recursive: true });
   return directory;
 }
+
+function deployment(root, directories) {
+  const envFile = path.join(root, "deployment.env");
+  const output = path.join(root, "compose.storage.generated.json");
+  const state = path.join(root, ".movie-harbor-storage-state.json");
+  const fakeBin = makeDirectory(root, "bin");
+  const dockerLog = path.join(root, "docker-called");
+  writeFileSync(path.join(fakeBin, "docker"), "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MOVIE_HARBOR_DOCKER_LOG\"\n", { mode: 0o755 });
+  const configure = (dirs) => writeFileSync(envFile, `POSTGRES_PASSWORD=secret-not-for-state\nMEDIA_HOST_DIR=${dirs.join(";")}\n`);
+  configure(directories);
+  return {
+    state, output, dockerLog, configure,
+    run() {
+      rmSync(dockerLog, { force: true });
+      return spawnSync("sh", ["tools/start-compose.sh"], {
+        cwd: projectRoot, encoding: "utf8",
+        env: {
+          ...process.env, PATH: `${fakeBin}:${process.env.PATH}`,
+          MOVIE_HARBOR_ENV_FILE: envFile,
+          MOVIE_HARBOR_STORAGE_COMPOSE_OUTPUT: output,
+          MOVIE_HARBOR_DOCKER_LOG: dockerLog,
+        },
+      });
+    },
+  };
+}
+
+test("registered volumes reject an empty missing-disk mount point without recreating markers or calling Docker", () => {
+  for (const missingVolume of [0, 1]) {
+    const root = tempRoot();
+    try {
+      const directories = [makeDirectory(root, "zero"), makeDirectory(root, "one")];
+      const deploy = deployment(root, directories);
+      assert.equal(deploy.run().status, 0);
+      const oldOutput = readFileSync(deploy.output, "utf8");
+      renameSync(directories[missingVolume], `${directories[missingVolume]}-offline`);
+      mkdirSync(directories[missingVolume]);
+      const result = deploy.run();
+      assert.notEqual(result.status, 0, "missing disks must fail closed even when the mount point still exists");
+      assert.equal(existsSync(path.join(directories[missingVolume], ".movie-harbor-volume.json")), false);
+      assert.equal(existsSync(deploy.dockerLog), false);
+      assert.equal(readFileSync(deploy.output, "utf8"), oldOutput);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("registration rejects replacement, reorder and deletion of existing paths before touching a new volume", () => {
+  for (const change of ["replace", "replace-marked", "reorder", "delete"]) {
+    const root = tempRoot();
+    try {
+      const first = makeDirectory(root, "zero");
+      const second = makeDirectory(root, "one");
+      const fresh = makeDirectory(root, "fresh");
+      const deploy = deployment(root, [first, second]);
+      assert.equal(deploy.run().status, 0);
+      if (change === "replace-marked") writeFileSync(path.join(fresh, ".movie-harbor-volume.json"), '{"version":1,"volume":1}');
+      const configured = change.startsWith("replace") ? [first, fresh]
+        : change === "reorder" ? [second, first, fresh] : [first];
+      deploy.configure(configured);
+      const result = deploy.run();
+      assert.notEqual(result.status, 0, `${change} must be rejected`);
+      assert.equal(existsSync(deploy.dockerLog), false);
+      if (change !== "replace-marked") assert.equal(existsSync(path.join(fresh, ".movie-harbor-volume.json")), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("registration persists a non-secret path prefix and permits only empty appended volumes", () => {
+  const root = tempRoot();
+  try {
+    const first = makeDirectory(root, "zero");
+    writeFileSync(path.join(first, "legacy.mp4"), "legacy data");
+    const deploy = deployment(root, [first]);
+    assert.equal(deploy.run().status, 0);
+    assert.equal(existsSync(deploy.state), true, "registration must survive a new deployment process");
+    assert.doesNotMatch(readFileSync(deploy.state, "utf8"), /secret-not-for-state/);
+    const marker = path.join(first, ".movie-harbor-volume.json");
+    const initialMarker = statSync(marker, { bigint: true });
+    const second = makeDirectory(root, "one");
+    deploy.configure([first, second]);
+    assert.equal(deploy.run().status, 0);
+    assert.deepEqual(readVolumeMarker(second, 1), { version: 1, volume: 1 });
+    assert.equal(statSync(marker, { bigint: true }).ino, initialMarker.ino);
+    assert.equal(statSync(marker, { bigint: true }).mtimeNs, initialMarker.mtimeNs);
+    assert.equal(readFileSync(path.join(first, "legacy.mp4"), "utf8"), "legacy data");
+    const stateBeforeRestart = readFileSync(deploy.state, "utf8");
+    assert.equal(deploy.run().status, 0);
+    assert.equal(readFileSync(deploy.state, "utf8"), stateBeforeRestart);
+    const third = makeDirectory(root, "nonempty");
+    writeFileSync(path.join(third, "foreign.txt"), "keep me");
+    deploy.configure([first, second, third]);
+    assert.notEqual(deploy.run().status, 0);
+    assert.equal(existsSync(deploy.dockerLog), false);
+    assert.equal(existsSync(path.join(third, ".movie-harbor-volume.json")), false);
+    assert.equal(readFileSync(deploy.state, "utf8"), stateBeforeRestart);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("missing or damaged registration refuses to adopt existing markers", () => {
+  for (const damage of ["missing", "missing-with-offline-disk", "invalid-json", "invalid-schema", "symlink"]) {
+    const root = tempRoot();
+    try {
+      const first = makeDirectory(root, "zero");
+      const deploy = deployment(root, [first]);
+      assert.equal(deploy.run().status, 0);
+      rmSync(deploy.state, { force: true });
+      if (damage === "missing-with-offline-disk") {
+        renameSync(first, `${first}-offline`);
+        mkdirSync(first);
+        assert.notEqual(deploy.run().status, 0, "lost state and an empty mount point must not be treated as first deployment");
+        assert.equal(existsSync(deploy.dockerLog), false);
+        assert.equal(existsSync(path.join(first, ".movie-harbor-volume.json")), false);
+        continue;
+      }
+      if (damage === "invalid-json") writeFileSync(deploy.state, "{broken");
+      if (damage === "invalid-schema") writeFileSync(deploy.state, '{"version":1,"directories":[]}');
+      if (damage === "symlink") {
+        const target = path.join(root, "foreign-state");
+        writeFileSync(target, JSON.stringify({ version: 1, directories: [first] }));
+        symlinkSync(target, deploy.state);
+      }
+      const marker = path.join(first, ".movie-harbor-volume.json");
+      const before = statSync(marker, { bigint: true });
+      const result = deploy.run();
+      assert.notEqual(result.status, 0, `${damage} registration must fail closed`);
+      assert.equal(existsSync(deploy.dockerLog), false);
+      assert.equal(statSync(marker, { bigint: true }).ino, before.ino);
+      assert.equal(statSync(marker, { bigint: true }).mtimeNs, before.mtimeNs);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
+test("initial registration validates every candidate before writing any marker", () => {
+  const root = tempRoot();
+  try {
+    const first = makeDirectory(root, "zero");
+    const second = makeDirectory(root, "foreign");
+    writeFileSync(path.join(second, "foreign.txt"), "foreign media");
+    const deploy = deployment(root, [first, second]);
+    assert.notEqual(deploy.run().status, 0);
+    assert.equal(existsSync(deploy.dockerLog), false);
+    assert.equal(existsSync(path.join(first, ".movie-harbor-volume.json")), false, "a later invalid volume must not leave partial markers");
+    assert.equal(existsSync(deploy.state), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 function request(url) {
   return new Promise((resolve, reject) => {

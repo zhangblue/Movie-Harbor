@@ -1181,9 +1181,15 @@ async fn multi_volume_replacement_removes_only_the_old_recorded_volume_file() {
     )
     .await
     .unwrap();
-    let held = set.reserve_for_upload(1024 * 1024 * 1024).await.unwrap();
-    let new_volume = held.volume_id();
-    let old_volume = 1 - new_volume;
+    let new_volume = 0;
+    let old_volume = 1;
+    // These roots share a filesystem and its reservation ledger. Make only the
+    // old volume eligible instead of relying on independent per-volume debits.
+    std::fs::set_permissions(
+        roots[new_volume as usize].as_ref(),
+        std::fs::Permissions::from_mode(0o500),
+    )
+    .unwrap();
     let (source, _) = Chunks::new([PNG]);
     let old = store_new_asset(
         &db,
@@ -1197,7 +1203,11 @@ async fn multi_volume_replacement_removes_only_the_old_recorded_volume_file() {
     .await
     .unwrap();
     assert_eq!(old.storage_volume, old_volume);
-    drop(held);
+    std::fs::set_permissions(
+        roots[new_volume as usize].as_ref(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
     let same_key = roots[new_volume as usize].as_ref().join(&old.storage_key);
     std::fs::set_permissions(
         roots[old_volume as usize].as_ref(),
