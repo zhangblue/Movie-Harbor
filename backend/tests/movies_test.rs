@@ -68,7 +68,8 @@ fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
         database_url: String::new(),
-        media_dir: root.into(),
+        media_dirs: vec![root.into()],
+        media_disk_reserve_bytes: 1,
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
         trust_proxy_headers: false,

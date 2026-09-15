@@ -1,17 +1,21 @@
 use std::{
+    collections::HashSet,
     env,
     fmt::{self, Display, Formatter},
     net::SocketAddr,
     path::PathBuf,
 };
 
+const DEFAULT_MEDIA_DISK_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
 #[derive(Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub database_url: String,
-    /// Must be owned by the backend OS account and not group/world writable.
+    /// Each directory must be owned by the backend OS account and not group/world writable.
     /// Processes running as that same account are inside the storage trust boundary.
-    pub media_dir: PathBuf,
+    pub media_dirs: Vec<PathBuf>,
+    pub media_disk_reserve_bytes: u64,
     pub cookie_secure: bool,
     pub public_origin: String,
     pub trust_proxy_headers: bool,
@@ -58,7 +62,21 @@ impl Config {
                 .map_err(|_| ConfigError::Invalid("LISTEN_ADDR"))
         })?;
         let database_url = database_url(&lookup)?;
-        let media_dir = PathBuf::from(required(&lookup, "MEDIA_DIR")?);
+        let media_dirs = match lookup("MEDIA_DIRS") {
+            Some(value) => parse_media_dirs(&value)?,
+            None => vec![PathBuf::from(required(&lookup, "MEDIA_DIR")?)],
+        };
+        let media_disk_reserve_bytes = lookup("MEDIA_DISK_RESERVE_BYTES")
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|_| ConfigError::Invalid("MEDIA_DISK_RESERVE_BYTES"))
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_MEDIA_DISK_RESERVE_BYTES);
+        if media_disk_reserve_bytes == 0 {
+            return Err(ConfigError::Invalid("MEDIA_DISK_RESERVE_BYTES"));
+        }
         let cookie_secure = required(&lookup, "COOKIE_SECURE").and_then(|value| {
             value
                 .parse()
@@ -92,7 +110,8 @@ impl Config {
         let mut config = Self {
             listen_addr,
             database_url,
-            media_dir,
+            media_dirs,
+            media_disk_reserve_bytes,
             cookie_secure,
             public_origin: required(&lookup, "PUBLIC_ORIGIN")?,
             trust_proxy_headers,
@@ -123,6 +142,18 @@ impl Config {
         }
         Ok(origin)
     }
+}
+
+fn parse_media_dirs(value: &str) -> Result<Vec<PathBuf>, ConfigError> {
+    let parts: Vec<_> = value.split(';').map(str::trim).collect();
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
+        return Err(ConfigError::Invalid("MEDIA_DIRS"));
+    }
+    let paths: Vec<_> = parts.into_iter().map(PathBuf::from).collect();
+    let unique: HashSet<_> = paths.iter().collect();
+    (unique.len() == paths.len())
+        .then_some(paths)
+        .ok_or(ConfigError::Invalid("MEDIA_DIRS"))
 }
 
 fn database_url<F>(lookup: &F) -> Result<String, ConfigError>
@@ -222,7 +253,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, path::PathBuf};
 
     use super::{Config, ConfigError};
 
@@ -230,13 +261,84 @@ mod tests {
         HashMap::from([
             ("LISTEN_ADDR", "127.0.0.1:3000"),
             ("DATABASE_URL", "postgresql://localhost/movie_harbor"),
-            ("MEDIA_DIR", "/var/lib/movie-harbor/media"),
+            ("MEDIA_DIRS", "/var/lib/movie-harbor/media"),
+            ("MEDIA_DISK_RESERVE_BYTES", "1"),
             ("COOKIE_SECURE", "true"),
             ("PUBLIC_ORIGIN", "https://harbor.test"),
             ("MAX_UPLOAD_BYTES", "1048576"),
             ("VIDEO_MIME_ALLOWLIST", "video/mp4,video/webm"),
             ("ADMIN_NAME", "admin"),
         ])
+    }
+
+    fn config_with<const N: usize>(
+        values: [(&'static str, &'static str); N],
+    ) -> Result<Config, ConfigError> {
+        let mut config_values = required_values();
+        config_values.extend(values);
+        Config::from_lookup(|name| config_values.get(name).map(ToString::to_string))
+    }
+
+    // Catches silently treating empty or duplicate media-volume entries as valid storage.
+    #[test]
+    fn media_dirs_are_ordered_nonempty_and_unique() {
+        let config = config_with([
+            ("MEDIA_DIRS", "/media/volumes/0;/media/volumes/1"),
+            ("MEDIA_DISK_RESERVE_BYTES", "10737418240"),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.media_dirs,
+            vec![
+                PathBuf::from("/media/volumes/0"),
+                PathBuf::from("/media/volumes/1"),
+            ]
+        );
+        assert_eq!(config.media_disk_reserve_bytes, 10 * 1024 * 1024 * 1024);
+
+        let single = config_with([
+            ("MEDIA_DIRS", "/media/volumes/0"),
+            ("MEDIA_DISK_RESERVE_BYTES", "1"),
+        ])
+        .unwrap();
+        assert_eq!(single.media_dirs, vec![PathBuf::from("/media/volumes/0")]);
+
+        for dirs in [
+            "",
+            "/media/volumes/0;;/media/volumes/1",
+            "/media/volumes/0;/media/volumes/0",
+        ] {
+            assert!(matches!(
+                config_with([("MEDIA_DIRS", dirs), ("MEDIA_DISK_RESERVE_BYTES", "1")]),
+                Err(ConfigError::Missing("MEDIA_DIRS")) | Err(ConfigError::Invalid("MEDIA_DIRS"))
+            ));
+        }
+        for reserve in ["", "0", "not-a-number"] {
+            assert!(matches!(
+                config_with([
+                    ("MEDIA_DIRS", "/media/volumes/0"),
+                    ("MEDIA_DISK_RESERVE_BYTES", reserve)
+                ]),
+                Err(ConfigError::Missing("MEDIA_DISK_RESERVE_BYTES"))
+                    | Err(ConfigError::Invalid("MEDIA_DISK_RESERVE_BYTES"))
+            ));
+        }
+    }
+
+    // Catches breaking existing single-volume deployments before their Compose config is updated.
+    #[test]
+    fn legacy_single_media_dir_uses_the_default_disk_reserve() {
+        let mut values = required_values();
+        values.remove("MEDIA_DIRS");
+        values.remove("MEDIA_DISK_RESERVE_BYTES");
+        values.insert("MEDIA_DIR", "/var/lib/movie-harbor/media");
+
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        assert_eq!(
+            config.media_dirs,
+            vec![PathBuf::from("/var/lib/movie-harbor/media")]
+        );
+        assert_eq!(config.media_disk_reserve_bytes, 10 * 1024 * 1024 * 1024);
     }
 
     #[test]

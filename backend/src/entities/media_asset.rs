@@ -5,6 +5,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
+    pub storage_volume: i32,
     /// System-generated relative path beneath the configured media root.
     pub storage_key: String,
     pub original_name: String,

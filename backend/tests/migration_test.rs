@@ -39,6 +39,16 @@ async fn sql(db: &DatabaseTransaction, statement: &str) {
     db.execute_unprepared(statement).await.unwrap();
 }
 
+async fn sql_result(
+    db: &DatabaseTransaction,
+    statement: &str,
+) -> Result<sea_orm::ExecResult, sea_orm::DbErr> {
+    let savepoint = db.begin().await.unwrap();
+    let result = savepoint.execute_unprepared(statement).await;
+    savepoint.rollback().await.unwrap();
+    result
+}
+
 async fn rejects(db: &DatabaseTransaction, statement: &str, code: &str) {
     let savepoint = db.begin().await.unwrap();
     let error = savepoint.execute_unprepared(statement).await.unwrap_err();
@@ -96,6 +106,37 @@ async fn episode_synopsis_migration_is_reversible() {
     assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
     migration::Migrator::down(&db, Some(1)).await.unwrap();
     sql(&db, "INSERT INTO episode (id, season_id, number, name) VALUES (gen_random_uuid(), '00000000-0000-0000-0000-000000000011', 2, 'Second')").await;
+    db.rollback().await.unwrap();
+}
+
+#[tokio::test]
+async fn media_storage_volume_migration_is_reversible() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, Some(5)).await.unwrap();
+    sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000061', 'video/06/60000000000000000000000000000001.mp4', 'old.mp4', 'video/mp4', 32, 'video')").await;
+
+    migration::Migrator::up(&db, None).await.unwrap();
+    let row = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT storage_volume FROM media_asset WHERE id = '10000000-0000-0000-0000-000000000061'",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i32>("", "storage_volume").unwrap(), 0);
+    assert!(
+        sql_result(&db, "UPDATE media_asset SET storage_volume = -1")
+            .await
+            .is_err()
+    );
+
+    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    assert!(
+        sql_result(&db, "SELECT storage_volume FROM media_asset")
+            .await
+            .is_err()
+    );
     db.rollback().await.unwrap();
 }
 
@@ -164,7 +205,7 @@ async fn media_ownership_migration_enforces_exclusive_assets_and_is_reversible()
     rejects(&db, "UPDATE episode SET video_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '50000000-0000-0000-0000-000000000001'", "23505").await;
     sql(&db, "DELETE FROM movie WHERE id = '20000000-0000-0000-0000-000000000002'; UPDATE series SET poster_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '30000000-0000-0000-0000-000000000001'").await;
 
-    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    migration::Migrator::down(&db, Some(2)).await.unwrap();
     sql(&db, "SELECT * FROM file_cleanup_job LIMIT 0").await;
     sql(&db, "UPDATE episode SET video_asset_id = '10000000-0000-0000-0000-000000000003' WHERE id = '50000000-0000-0000-0000-000000000001'").await;
     db.rollback().await.unwrap();

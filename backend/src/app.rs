@@ -33,7 +33,11 @@ pub async fn build(
         limits: Default::default(),
         password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
     };
-    let storage = crate::media::LocalMediaStorage::initialize(&config.media_dir).await?;
+    let media_dir = config
+        .media_dirs
+        .first()
+        .ok_or(crate::config::ConfigError::Invalid("MEDIA_DIRS"))?;
+    let storage = crate::media::LocalMediaStorage::initialize(media_dir).await?;
     let policy = crate::media::UploadPolicy::new(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
