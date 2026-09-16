@@ -113,10 +113,29 @@ INSERT INTO episode (id, season_id, number, name, status, video_asset_id, durati
 ('40000000-0000-0000-0000-000000000004', '30000000-0000-0000-0000-000000000003', 1, 'Hidden parent episode', 'published', NULL, NULL);
 UPDATE genre SET enabled = false
 WHERE id = '00000000-0000-0000-0001-000000000004';
+UPDATE genre SET sort_order = CASE id
+    WHEN '00000000-0000-0000-0001-000000000001'::uuid THEN 30
+    WHEN '00000000-0000-0000-0001-000000000003'::uuid THEN 10
+    WHEN '00000000-0000-0000-0001-000000000004'::uuid THEN 10
+    WHEN '00000000-0000-0000-0001-000000000005'::uuid THEN 30
+    WHEN '00000000-0000-0000-0001-000000000006'::uuid THEN 10
+    WHEN '00000000-0000-0000-0001-000000000007'::uuid THEN 10
+END
+WHERE id IN (
+    '00000000-0000-0000-0001-000000000001',
+    '00000000-0000-0000-0001-000000000003',
+    '00000000-0000-0000-0001-000000000004',
+    '00000000-0000-0000-0001-000000000005',
+    '00000000-0000-0000-0001-000000000006',
+    '00000000-0000-0000-0001-000000000007'
+);
 INSERT INTO movie_genre (movie_id, genre_id) VALUES
 ('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000004'),
-('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000001');
+('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000001'),
+('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000003');
 INSERT INTO series_genre (series_id, genre_id) VALUES
+('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000007'),
+('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000005'),
 ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000006');
 "#).await.unwrap();
 }
@@ -164,7 +183,8 @@ async fn export_requires_authentication_and_returns_timestamped_json_attachment(
     );
 }
 
-// Exact payloads catch leaked IDs/status, missing states, incorrect grouping and unstable ordering.
+// Exact payloads catch leaked IDs/status, missing states, incorrect grouping, and genre ordering:
+// both content kinds need sort_order before ID, then ID to break equal sort_order ties.
 #[tokio::test]
 async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_order() {
     let (db, _root, app, cookie) = setup().await;
@@ -177,12 +197,12 @@ async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_o
         json!({
             "exported_at": payload["exported_at"],
             "movies": [
-                {"name":"Alpha","synopsis":"draft movie","year":2024,"genres":["剧情","科幻"],"poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
+                {"name":"Alpha","synopsis":"draft movie","year":2024,"genres":["动作","科幻","剧情"],"poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
                 {"name":"Alpha","synopsis":"published movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null},
                 {"name":"Zulu","synopsis":"archived movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null}
             ],
             "series": [
-                {"name":"Alpha","synopsis":"draft series","year":2023,"genres":["悬疑"],"poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
+                {"name":"Alpha","synopsis":"draft series","year":2023,"genres":["悬疑","犯罪","恐怖"],"poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
                     {"season_number":1,"episode_number":1,"name":"First","video_path":"/media/video/dd/dddddddddddddddddddddddddddddddd.webm","duration_seconds":45},
                     {"season_number":1,"episode_number":2,"name":"Second","video_path":null,"duration_seconds":null},
                     {"season_number":2,"episode_number":1,"name":"Season two","video_path":null,"duration_seconds":null}
@@ -333,7 +353,10 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     let payload = body(response).await;
     assert_eq!(payload["movies"][0]["synopsis"], "draft movie");
     assert_eq!(payload["movies"][0]["year"], 2024);
-    assert_eq!(payload["movies"][0]["genres"], json!(["剧情", "科幻"]));
+    assert_eq!(
+        payload["movies"][0]["genres"],
+        json!(["动作", "科幻", "剧情"])
+    );
     assert_eq!(
         payload["movies"][0]["video_path"],
         "/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4"
@@ -349,7 +372,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     assert_eq!(fresh["movies"][0]["year"], 2025);
     assert_eq!(
         fresh["movies"][0]["genres"],
-        json!(["剧情", "concurrent genre"])
+        json!(["动作", "concurrent genre", "剧情"])
     );
     assert_eq!(
         fresh["movies"][0]["video_path"],
