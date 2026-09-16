@@ -10,6 +10,7 @@
   "scripts": {
     "build": "npm run build --workspaces",
     "test": "npm test --workspaces",
+    "test:package": "node --test tests/offline-package.test.mjs tests/offline-package-powershell.test.mjs",
     "test:e2e": "node tests/e2e/run.mjs",
     "package:offline": "sh tools/build-offline-package.sh"
   },

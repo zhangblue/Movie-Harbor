@@ -230,6 +230,10 @@ test("shell CLI explicit linux/amd64 platform derives target, tags, and archive 
   }
   const save = calls.find(args => args[0] === "image" && args[1] === "save");
   assert.deepEqual(save.slice(4), imageTags(VERSION, "linux/amd64"));
+  const inspections = calls.filter(args => args[0] === "image" && args[1] === "inspect");
+  assert.deepEqual(inspections.map(args => args.at(-1)), imageTags(VERSION, "linux/amd64"));
+  const saveIndex = calls.indexOf(save);
+  assert.equal(inspections.every(args => calls.indexOf(args) < saveIndex), true);
 
   const amd64Bundle = archiveName(VERSION, "linux/amd64");
   const amd64Destination = join(f.repo, "dist/offline", amd64Bundle);
@@ -281,12 +285,24 @@ test("shell CLI rejects an unavailable Compose plugin before building", async t 
 
 test("shell CLI rejects unavailable Buildx before building", async t => {
   const f = await fixture(t, "buildx-down");
-  const result = f.run();
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Buildx unavailable/);
   const calls = await f.calls();
   assert.deepEqual(calls.at(-1), ["buildx", "version"]);
   assert.equal(calls.some(args => args[0] === "buildx" && args[1] === "build"), false);
+  await assertClean(f);
+});
+
+test("shell CLI does not export images when a runtime image build fails", async t => {
+  const f = await fixture(t, "build-fails");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Build failed/i);
+
+  const calls = await f.calls();
+  assert.equal(calls.some(args => args[0] === "buildx" && args[1] === "build"), true);
+  assert.equal(calls.some(args => args[0] === "image" && args[1] === "save"), false);
   await assertClean(f);
 });
 
@@ -310,7 +326,7 @@ test("shell CLI rejects an AMD64 image archive containing an extra tag", async t
 
 for (const [mode, error] of [
   ["docker-down", /Docker/i],
-  ["windows-daemon", /Linux containers/i], ["build-fails", /Build failed/i],
+  ["windows-daemon", /Linux containers/i],
   ["inspect-fails", /inspect|Image missing/i], ["wrong-image", /linux\/arm64/i],
   ["save-fails", /Save/i], ["extra-tag", /RepoTags|tags/i], ["missing-tag", /RepoTags|tags/i],
   ["duplicate-tag", /RepoTags|tags/i], ["bad-manifest", /JSON|manifest/i],
