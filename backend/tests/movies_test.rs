@@ -133,6 +133,27 @@ async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+async fn assert_internal_server_error(response: Response, leaked_storage_key: &str) {
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let raw = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&raw).unwrap(),
+        json!({
+            "error": "internal server error"
+        })
+    );
+    assert!(!raw.contains(leaked_storage_key));
+}
+
 async fn credentials(app: &Router) -> (String, String) {
     let response = request(
         app,
@@ -622,6 +643,70 @@ async fn movie_admin_detail_includes_a_controlled_video_local_path() {
         payload["video"]["local_path"],
         "/media/video/ab/ab000000000000000000000000000001.mp4"
     );
+}
+
+#[tokio::test]
+async fn movie_admin_detail_rejects_a_malformed_video_storage_key_without_leaking_it() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Malformed path movie").await;
+    let movie_id = created["id"].as_str().unwrap();
+    let leaked_storage_key = "video/ab/../outside.mp4";
+    sql(
+        &db,
+        &format!(
+            "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('ab000000-0000-0000-0000-000000000011', '{leaked_storage_key}', 'outside.mp4', 'video/mp4', 1, 'video'); UPDATE movie SET video_asset_id='ab000000-0000-0000-0000-000000000011' WHERE id='{movie_id}'"
+        ),
+    )
+    .await;
+
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/admin/movies/{movie_id}"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_internal_server_error(response, leaked_storage_key).await;
+}
+
+#[tokio::test]
+async fn movie_admin_detail_rejects_a_video_asset_with_the_wrong_purpose_without_leaking_it() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Wrong purpose movie").await;
+    let movie_id = created["id"].as_str().unwrap();
+    let leaked_storage_key = "poster/ab/ab000000000000000000000000000011.png";
+    sql(
+        &db,
+        &format!(
+            "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('ab000000-0000-0000-0000-000000000012', '{leaked_storage_key}', 'poster.png', 'image/png', 1, 'poster'); UPDATE movie SET video_asset_id='ab000000-0000-0000-0000-000000000012' WHERE id='{movie_id}'"
+        ),
+    )
+    .await;
+
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/admin/movies/{movie_id}"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_internal_server_error(response, leaked_storage_key).await;
 }
 
 // Catches partial metadata/genre commits, inactive association, or replacing omitted associations.
