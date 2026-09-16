@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -69,6 +70,42 @@ test("packaged start.sh generates the same multi-volume mounts before fixed Comp
     generated.services.api.volumes[0].source,
   );
   assert.equal(generated.services.caddy.volumes.every(value => value.read_only === true), true);
+});
+
+test("ARM64 packaged start.sh initializes and starts the default single volume", async t => {
+  const root = await mkdtemp(join(tmpdir(), "offline-start-arm64-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = join(root, "bundle");
+  const bin = join(root, "bin");
+  const volume = join(bundle, "data", "media");
+  await Promise.all([mkdir(bin, { recursive: true }), mkdir(volume, { recursive: true })]);
+  await mkdir(join(volume, "poster"));
+  await writeFile(join(bundle, "compose.yml"), "{}\n");
+  await writeFile(join(bundle, ".env"), "MEDIA_HOST_DIR=./data/media\n");
+  await writeFile(join(bundle, "start.sh"), renderStartScript(VERSION, "linux/arm64"));
+  await chmod(join(bundle, "start.sh"), 0o755);
+  const log = join(root, "docker.log");
+  await writeFile(join(bin, "docker"), `#!/usr/bin/env node\n${DOCKER_DOUBLE}`);
+  await chmod(join(bin, "docker"), 0o755);
+
+  const result = spawnSync("sh", [join(bundle, "start.sh")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      DOCKER_TEST_LOG: log,
+      DOCKER_TEST_MODE: "success",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.deepEqual(JSON.parse(await readFile(join(volume, ".movie-harbor-volume.json"), "utf8")), {
+    version: 1, volume: 0,
+  });
+  const generated = JSON.parse(await readFile(join(bundle, "compose.storage.generated.json"), "utf8"));
+  assert.equal(generated.services.api.environment.MEDIA_DIRS, "/media/volumes/0");
+  assert.equal(generated.services.api.volumes[0].target, "/media/volumes/0");
+  assert.equal(generated.services.caddy.volumes[0].target, "/srv/media/volumes/0");
 });
 
 test("renders a PowerShell loader that verifies the exact package before importing images", () => {
@@ -197,6 +234,30 @@ function asWindowsPath(value) {
   return value.replaceAll("\\", "/");
 }
 
+function missingWindowsDrivePath() {
+  for (let code = "Z".charCodeAt(0); code >= "D".charCodeAt(0); code -= 1) {
+    const drive = `${String.fromCharCode(code)}:\\`;
+    if (!existsSync(drive)) return `${String.fromCharCode(code)}:/movie-harbor-missing`;
+  }
+  throw new Error("Windows behavior test requires one unused drive letter");
+}
+
+function runStartPowerShell(bundle, root, env) {
+  return spawnSync(POWERSHELL, [
+    "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", join(bundle, "start.ps1"),
+  ], { cwd: root, env, encoding: "utf8" });
+}
+
+async function writeWindowsMediaEnv(bundle, mediaValue) {
+  await writeFile(join(bundle, ".env"), [
+    "# must not be evaluated as PowerShell",
+    "ATTACK=$(Set-Content should-not-exist.txt attacked)",
+    `MEDIA_HOST_DIR=\"${mediaValue}\"`,
+    "MEDIA_HOST_DIR=Z:/ignored-duplicate",
+  ].join("\r\n"));
+}
+
 async function startPowerShellFixture(t, mode = "success") {
   const root = await mkdtemp(join(tmpdir(), "offline-start-powershell-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -211,17 +272,14 @@ async function startPowerShellFixture(t, mode = "success") {
   const configuredVolume1 = mode === "missing-directory" ? join(root, "missing") : volume1;
   if (mode === "nonempty-new-volume") await writeFile(join(volume1, "unexpected.txt"), "occupied");
   let mediaValue = `${asWindowsPath(volume0)};${asWindowsPath(configuredVolume1)}`;
+  if (mode === "single-volume") mediaValue = asWindowsPath(volume0);
+  if (mode === "missing-drive") mediaValue = missingWindowsDrivePath();
   if (mode === "duplicate") mediaValue = `${asWindowsPath(volume0)};${asWindowsPath(volume0)}`;
   if (mode === "relative") mediaValue = "relative/media";
   if (mode === "unc") mediaValue = "//server/share";
   if (mode === "wildcard") mediaValue = `${asWindowsPath(volume0)}/*`;
   if (mode === "empty-entry") mediaValue = `${asWindowsPath(volume0)};;${asWindowsPath(volume1)}`;
-  await writeFile(join(bundle, ".env"), [
-    "# must not be evaluated as PowerShell",
-    "ATTACK=$(Set-Content should-not-exist.txt attacked)",
-    `MEDIA_HOST_DIR=\"${mediaValue}\"`,
-    "MEDIA_HOST_DIR=Z:/ignored-duplicate",
-  ].join("\r\n"));
+  await writeWindowsMediaEnv(bundle, mediaValue);
   await writeFile(join(bin, "docker-double.cjs"), DOCKER_DOUBLE);
   await writeFile(join(bin, "docker.cmd"), '@echo off\r\nnode "%~dp0docker-double.cjs" %*\r\n');
   await chmod(join(bin, "docker.cmd"), 0o755);
@@ -234,22 +292,16 @@ async function startPowerShellFixture(t, mode = "success") {
     await writeFile(join(volume1, ".movie-harbor-volume.json"), JSON.stringify({ version: 1, volume: 9 }));
   }
   const log = join(root, "docker.log");
-  const result = spawnSync(POWERSHELL, [
-    "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
-    "-File", join(bundle, "start.ps1"),
-  ], {
-    cwd: root,
-    env: {
-      ...process.env,
-      PATH: `${bin}${delimiter}${process.env.PATH}`,
-      DOCKER_TEST_LOG: log,
-      DOCKER_TEST_MODE: mode,
-    },
-    encoding: "utf8",
-  });
+  const env = {
+    ...process.env,
+    PATH: `${bin}${delimiter}${process.env.PATH}`,
+    DOCKER_TEST_LOG: log,
+    DOCKER_TEST_MODE: mode,
+  };
+  const result = runStartPowerShell(bundle, root, env);
   const calls = (await readFile(log, "utf8").catch(() => ""))
     .trim().split("\n").filter(Boolean).map(JSON.parse);
-  return { bundle, calls, result, root, volume0, volume1 };
+  return { bundle, calls, env, result, root, volume0, volume1 };
 }
 
 test("PowerShell deployment generates multi-volume storage and starts fixed Compose files", {
@@ -287,6 +339,7 @@ test("PowerShell deployment generates multi-volume storage and starts fixed Comp
 for (const [mode, error] of [
   ["windows-daemon", /Linux containers/i],
   ["missing-directory", /does not exist/i],
+  ["missing-drive", /drive does not exist/i],
   ["duplicate", /duplicate/i],
   ["relative", /absolute Windows drive paths/i],
   ["unc", /UNC network paths/i],
@@ -305,6 +358,62 @@ for (const [mode, error] of [
     if (mode !== "startup-failure") {
       assert.equal(fixture.calls.some(args => args.includes("up")), false);
     }
+  });
+}
+
+test("PowerShell deployment accepts a normal registered restart", {
+  skip: POWERSHELL ? false : "requires Windows PowerShell 5.1+",
+}, async t => {
+  const fixture = await startPowerShellFixture(t);
+  assert.equal(fixture.result.status, 0, fixture.result.stderr || fixture.result.stdout);
+  const restarted = runStartPowerShell(fixture.bundle, fixture.root, fixture.env);
+  assert.equal(restarted.status, 0, restarted.stderr || restarted.stdout);
+});
+
+test("PowerShell deployment permits only an empty volume appended at the end", {
+  skip: POWERSHELL ? false : "requires Windows PowerShell 5.1+",
+}, async t => {
+  const fixture = await startPowerShellFixture(t, "single-volume");
+  assert.equal(fixture.result.status, 0, fixture.result.stderr || fixture.result.stdout);
+  await writeWindowsMediaEnv(
+    fixture.bundle,
+    `${asWindowsPath(fixture.volume0)};${asWindowsPath(fixture.volume1)}`,
+  );
+  const appended = runStartPowerShell(fixture.bundle, fixture.root, {
+    ...fixture.env, DOCKER_TEST_MODE: "success",
+  });
+  assert.equal(appended.status, 0, appended.stderr || appended.stdout);
+  assert.deepEqual(JSON.parse(await readFile(join(fixture.volume1, ".movie-harbor-volume.json"), "utf8")), {
+    version: 1, volume: 1,
+  });
+});
+
+for (const [name, configure, error] of [
+  ["reordered volumes", async fixture => writeWindowsMediaEnv(
+    fixture.bundle,
+    `${asWindowsPath(fixture.volume1)};${asWindowsPath(fixture.volume0)}`,
+  ), /replaced or reordered/i],
+  ["removed volume", async fixture => writeWindowsMediaEnv(
+    fixture.bundle,
+    asWindowsPath(fixture.volume0),
+  ), /cannot be removed/i],
+  ["missing registration", async fixture => rm(
+    join(fixture.bundle, ".movie-harbor-storage-state.json"),
+  ), /registration is missing/i],
+  ["damaged registration", async fixture => writeFile(
+    join(fixture.bundle, ".movie-harbor-storage-state.json"),
+    "{damaged",
+  ), /registration is invalid/i],
+]) {
+  test(`PowerShell deployment fails closed for ${name}`, {
+    skip: POWERSHELL ? false : "requires Windows PowerShell 5.1+",
+  }, async t => {
+    const fixture = await startPowerShellFixture(t);
+    assert.equal(fixture.result.status, 0, fixture.result.stderr || fixture.result.stdout);
+    await configure(fixture);
+    const rerun = runStartPowerShell(fixture.bundle, fixture.root, fixture.env);
+    assert.notEqual(rerun.status, 0);
+    assert.match(rerun.stderr, error);
   });
 }
 

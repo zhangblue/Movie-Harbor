@@ -26,13 +26,12 @@ const BUNDLE_ENTRIES = [
   "movie-harbor/", "movie-harbor/.env.example", "movie-harbor/Caddyfile",
   "movie-harbor/README.md", "movie-harbor/SHA256SUMS",
   "movie-harbor/compose.yml", "movie-harbor/images.tar",
-  "movie-harbor/load-images.sh",
+  "movie-harbor/load-images.sh", "movie-harbor/start.sh",
 ];
 const AMD64_BUNDLE_ENTRIES = [
   ...BUNDLE_ENTRIES,
   "movie-harbor/load-images.ps1",
   "movie-harbor/start.ps1",
-  "movie-harbor/start.sh",
 ].sort();
 
 // Only Docker is replaced: its save boundary still emits a real tar archive.
@@ -196,6 +195,7 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   const checksums = (await readFile(join(bundle, "SHA256SUMS"), "utf8")).trim().split("\n");
   assert.deepEqual(checksums.map(line => line.slice(66)).sort(), [
     ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
+    "start.sh",
   ]);
   for (const line of checksums) {
     const content = await readFile(join(bundle, line.slice(66)));
@@ -207,6 +207,10 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   });
   assert.equal(checksumVerification.status, 0, checksumVerification.stderr);
   assert.ok((await stat(join(bundle, "load-images.sh"))).mode & 0o111);
+  assert.ok((await stat(join(bundle, "start.sh"))).mode & 0o111);
+  const bundleReadme = await readFile(join(bundle, "README.md"), "utf8");
+  assert.match(bundleReadme, /\.\/start\.sh/);
+  assert.doesNotMatch(bundleReadme, /docker compose up -d --no-build --wait/);
   await assertClean(f, [BUNDLE_NAME]);
 });
 
@@ -707,6 +711,14 @@ test("renders AMD64 bundle guidance through the verified Windows deployment entr
   assert.match(readme, /\.\\start\.ps1/);
   assert.match(readme, /MEDIA_HOST_DIR/);
   assert.match(readme, /D:\/MovieHarbor\/media;E:\/MovieHarbor\/media/);
+  assert.doesNotMatch(readme, /docker compose up -d --no-build --wait/);
+});
+
+test("renders ARM64 bundle guidance through the safe storage deployment entrypoint", () => {
+  const readme = renderBundleReadme(VERSION, "linux/arm64");
+
+  assert.match(readme, /\.\/start\.sh/);
+  assert.match(readme, /MEDIA_HOST_DIR/);
   assert.doesNotMatch(readme, /docker compose up -d --no-build --wait/);
 });
 

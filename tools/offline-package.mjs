@@ -15,6 +15,7 @@ const PLATFORMS = new Map([
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const BASE_DELIVERY_FILES = [
   ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
+  "start.sh",
 ];
 const USAGE = "Usage: ./tools/build-offline-package.sh [--platform <linux/arm64|linux/amd64>] [version]\nDefault platform: linux/arm64. Default version: Git short revision (12 characters). Output: dist/offline/";
 
@@ -131,11 +132,11 @@ async function main(args) {
     await writeFile(join(bundle, "compose.yml"), renderCompose(version, options.platform));
     await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version, options.platform));
     await chmod(join(bundle, "load-images.sh"), 0o755);
+    await writeFile(join(bundle, "start.sh"), renderStartScript(version, options.platform));
+    await chmod(join(bundle, "start.sh"), 0o755);
     if (options.platform === "linux/amd64") {
       await writeFile(join(bundle, "load-images.ps1"), renderLoadPowerShell(version, options.platform));
       await writeFile(join(bundle, "start.ps1"), renderStartPowerShell(version, options.platform));
-      await writeFile(join(bundle, "start.sh"), renderStartScript(version, options.platform));
-      await chmod(join(bundle, "start.sh"), 0o755);
     }
     await writeFile(join(bundle, "README.md"), renderBundleReadme(version, options.platform));
     await mkdir(outputDirectory, { recursive: true });
@@ -227,7 +228,7 @@ export function archiveName(version, platform = DEFAULT_PLATFORM) {
 function deliveryFilesForPlatform(platform) {
   platformInfo(platform);
   return platform === "linux/amd64"
-    ? [...BASE_DELIVERY_FILES, "load-images.ps1", "start.ps1", "start.sh"]
+    ? [...BASE_DELIVERY_FILES, "load-images.ps1", "start.ps1"]
     : [...BASE_DELIVERY_FILES];
 }
 
@@ -746,9 +747,6 @@ try {
 export function renderStartScript(version, platform = "linux/amd64") {
   validateVersion(version);
   platformInfo(platform);
-  if (platform !== "linux/amd64") {
-    throw new Error("Packaged multi-volume startup is only supported for linux/amd64 packages");
-  }
   return String.raw`#!/bin/sh
 set -eu
 
@@ -892,13 +890,13 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
         "```",
       ]
     : [
-        `需要 Docker Engine、Docker Compose v2 和 \`${imagePlatform}\`。解压后执行：`,
+        `需要 Node.js、Docker Engine、Docker Compose v2 和 \`${imagePlatform}\`。解压后执行：`,
         "",
         "```sh",
         "./load-images.sh",
         "cp .env.example .env",
-        "# 按下方配置说明编辑 .env 后再启动。",
-        "docker compose up -d --no-build --wait",
+        "# 按下方配置说明编辑 .env；MEDIA_HOST_DIR 至少包含一个现存目录。",
+        "./start.sh",
         "```",
       ];
   return [
