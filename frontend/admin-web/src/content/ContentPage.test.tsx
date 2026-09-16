@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { clearCsrfToken } from "@movie-harbor/api-client";
@@ -9,13 +9,14 @@ import {
   adminContentPage,
   deferred,
   json,
+  jsonDownload,
   movie,
   server,
   session,
 } from "../test/server";
 import styles from "../styles.css?raw";
 
-afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); clearCsrfToken(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 function numberedItems(first: number, count: number) {
   return Array.from({ length: count }, (_, index) => {
@@ -23,6 +24,106 @@ function numberedItems(first: number, count: number) {
     return adminContentItem({ id: `movie-${number}`, name: `内容 ${number}` });
   });
 }
+
+function stubDownloadBrowser() {
+  const createObjectURL = vi.fn(() => "blob:content-export");
+  const revokeObjectURL = vi.fn();
+  class DownloadUrl extends URL {
+    static createObjectURL = createObjectURL;
+    static revokeObjectURL = revokeObjectURL;
+  }
+  vi.stubGlobal("URL", DownloadUrl);
+  const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+  return { createObjectURL, revokeObjectURL, click };
+}
+
+// Catches exporting through a separate control, an untrusted response filename, or retaining object URLs.
+it("downloads the content export once from the adjacent title action using the response filename", async () => {
+  const browser = stubDownloadBrowser();
+  const requests = server((request) => request.url === "/api/admin/contents/export"
+    ? jsonDownload({ movies: [] })
+    : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+
+  const exportButton = screen.getByRole("button", { name: "导出 JSON" });
+  const actions = exportButton.parentElement!;
+  expect(actions).toHaveClass("admin-title-actions");
+  expect(within(actions).getAllByRole("button").map((button) => button.textContent)).toEqual(["导出 JSON", "＋ 新建内容"]);
+  await user.click(exportButton);
+
+  expect(browser.createObjectURL).toHaveBeenCalledOnce();
+  expect(browser.click).toHaveBeenCalledOnce();
+  expect(browser.click.mock.instances[0]).toMatchObject({
+    href: "blob:content-export",
+    download: "movie-harbor-content-export-20260916-120000.json",
+  });
+  expect(browser.revokeObjectURL).toHaveBeenCalledWith("blob:content-export");
+  expect(requests.filter((request) => request.url === "/api/admin/contents/export")).toHaveLength(1);
+});
+
+it("disables a pending export without changing the current list page", async () => {
+  stubDownloadBrowser();
+  const pending = deferred<Response>();
+  const requests = server((request) => {
+    if (request.url === "/api/admin/contents?kind=all&page=1") return json(adminContentPage(numberedItems(1, 20), 21, 1));
+    if (request.url === "/api/admin/contents?kind=all&page=2") return json(adminContentPage(numberedItems(21, 1), 21, 2));
+    if (request.url === "/api/admin/contents/export") return pending.promise;
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("内容 1");
+  await user.click(screen.getByRole("button", { name: "第 2 页" }));
+  await screen.findByText("内容 21");
+  const exportButton = screen.getByRole("button", { name: "导出 JSON" });
+  await act(async () => {
+    fireEvent.click(exportButton);
+    fireEvent.click(exportButton);
+  });
+  expect(exportButton).toBeDisabled();
+  expect(requests.filter((request) => request.url === "/api/admin/contents/export")).toHaveLength(1);
+  expect(screen.getByText("内容 21")).toBeInTheDocument();
+  expect(screen.getByText("共 21 条 · 第 2/2 页")).toBeInTheDocument();
+  await act(async () => { pending.resolve(jsonDownload({ movies: [] })); });
+  await screen.findByRole("button", { name: "导出 JSON" });
+  expect(requests.filter((request) => request.url.startsWith("/api/admin/contents?"))).toHaveLength(2);
+});
+
+it("does not create a download or write export state after unmounting during a pending export", async () => {
+  const browser = stubDownloadBrowser();
+  const pending = deferred<Response>();
+  server((request) => request.url === "/api/admin/contents/export" ? pending.promise : undefined);
+  const user = userEvent.setup();
+  const view = render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+  view.unmount();
+  await act(async () => { pending.resolve(jsonDownload({ movies: [] })); });
+  expect(browser.createObjectURL).not.toHaveBeenCalled();
+  expect(browser.revokeObjectURL).not.toHaveBeenCalled();
+});
+
+it("expires the session for an unauthorized export and otherwise shows an export-only failure", async () => {
+  let status = 401;
+  const browser = stubDownloadBrowser();
+  server((request) => request.url === "/api/admin/contents/export"
+    ? json({ error: status === 401 ? "authentication failed" : "export unavailable" }, status)
+    : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+  await screen.findByRole("heading", { name: "管理员登录" });
+  expect(browser.createObjectURL).not.toHaveBeenCalled();
+
+  status = 500;
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("button", { name: "导出 JSON" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("内容导出失败，请重试");
+  expect(browser.createObjectURL).not.toHaveBeenCalled();
+});
 
 // Catches a regression to the two legacy list endpoints or client-only filtering.
 it("loads the unified list and submits compact name and dropdown filters to the API", async () => {

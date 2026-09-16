@@ -5,6 +5,14 @@ export const session = { name: "港口管理员", csrf_token: "session-csrf" };
 export function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
+export function jsonDownload(body: unknown, filename = "movie-harbor-content-export-20260916-120000.json") {
+  return new Response(JSON.stringify(body), {
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    },
+  });
+}
 export function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });

@@ -7,6 +7,11 @@ export interface ApiRequestInit extends Omit<RequestInit, "body"> {
   query?: Query;
 }
 
+export interface ApiDownload {
+  blob: Blob;
+  filename: string;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
@@ -102,6 +107,30 @@ export async function apiRequest<T = unknown>(
   path: string,
   init: ApiRequestInit = {},
 ): Promise<T | undefined> {
+  const response = await performApiFetch(path, init);
+  if (response.status === 204 || response.status === 205) return undefined;
+  return parseApiResponse<T>(response);
+}
+
+export async function apiDownload(
+  path: string,
+  init: ApiRequestInit = {},
+): Promise<ApiDownload> {
+  const response = await performApiFetch(path, init);
+  if (!isJsonContentType(response.headers.get("content-type"))) {
+    throw new ApiResponseParseError(response.status, new TypeError("Expected a JSON download response"));
+  }
+
+  let blob: Blob;
+  try {
+    blob = await response.blob();
+  } catch (error) {
+    throw new ApiNetworkError(error);
+  }
+  return { blob, filename: downloadFilename(response.headers.get("content-disposition")) };
+}
+
+async function performApiFetch(path: string, init: ApiRequestInit): Promise<Response> {
   const { query, json, body, ...requestInit } = init;
   if (json !== undefined && body !== undefined) {
     throw new TypeError("Use either json or body, not both");
@@ -130,31 +159,63 @@ export async function apiRequest<T = unknown>(
     throw new ApiNetworkError(error);
   }
 
-  if (response.status === 204 || response.status === 205) return undefined;
+  if (!response.ok) throw await responseError(response);
+  return response;
+}
+
+async function parseApiResponse<T>(response: Response): Promise<T | undefined> {
   let text: string;
   try {
     text = await response.text();
   } catch (error) {
     throw new ApiNetworkError(error);
   }
-  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
-  const expectsJson = contentType.includes("application/json") || contentType.includes("+json");
+  const expectsJson = isJsonContentType(response.headers.get("content-type"));
   let parsed: unknown = text;
   if (text && expectsJson) {
     try {
       parsed = JSON.parse(text) as unknown;
     } catch (error) {
-      if (response.ok) throw new ApiResponseParseError(response.status, error);
+      throw new ApiResponseParseError(response.status, error);
+    }
+  } else if (!text) {
+    parsed = undefined;
+  }
+  return parsed as T | undefined;
+}
+
+async function responseError(response: Response): Promise<ApiError> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch (error) {
+    throw new ApiNetworkError(error);
+  }
+  const expectsJson = isJsonContentType(response.headers.get("content-type"));
+  let parsed: unknown = text;
+  if (text && expectsJson) {
+    try {
+      parsed = JSON.parse(text) as unknown;
+    } catch {
       parsed = undefined;
     }
   } else if (!text) {
     parsed = undefined;
   }
+  return new ApiError(response.status, response.statusText, errorMessage(parsed, text, response.statusText), parsed);
+}
 
-  if (!response.ok) {
-    throw new ApiError(response.status, response.statusText, errorMessage(parsed, text, response.statusText), parsed);
-  }
-  return parsed as T | undefined;
+function isJsonContentType(contentType: string | null): boolean {
+  const normalized = contentType?.toLowerCase() ?? "";
+  return normalized.includes("application/json") || normalized.includes("+json");
+}
+
+function downloadFilename(contentDisposition: string | null): string {
+  const match = contentDisposition?.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;\s]*))/i);
+  const filename = match?.[1] ?? match?.[2];
+  return filename && /^movie-harbor-content-export-\d{8}-\d{6}\.json$/.test(filename)
+    ? filename
+    : "movie-harbor-content-export.json";
 }
 
 function isUnsafeAdminRequest(url: string, method: string): boolean {

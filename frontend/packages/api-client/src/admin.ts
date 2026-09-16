@@ -1,4 +1,4 @@
-import { ApiError, apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken } from "./http";
+import { ApiError, apiDownload, apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload } from "./http";
 import type {
   AdminContentListQuery, AdminContentPage, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
@@ -38,6 +38,9 @@ export async function listGenres(): Promise<GenreResponse[]> {
 export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
   const params = { kind: query.kind, status: query.status, name: query.name, page: query.page };
   return requiredResponse(await apiRequest<AdminContentPage>("/api/admin/contents", { query: params }));
+}
+export function downloadAdminContentExport(): Promise<ApiDownload> {
+  return apiDownload("/api/admin/contents/export");
 }
 export async function createGenre(name: string): Promise<GenreResponse> {
   return requiredResponse(await apiRequest<GenreResponse>("/api/admin/genres", { method: "POST", json: { name } }));

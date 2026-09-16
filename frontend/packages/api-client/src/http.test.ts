@@ -3,6 +3,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   ApiNetworkError,
+  ApiResponseParseError,
+  apiDownload,
   apiRequest,
   buildApiUrl,
   clearCsrfToken,
@@ -201,5 +203,76 @@ describe("apiRequest", () => {
       name: "ApiNetworkError",
       aborted: false,
     });
+  });
+});
+
+describe("apiDownload", () => {
+  it("downloads the JSON export through the same-origin authenticated API boundary", async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      respond('{"movies":[]}', {
+        headers: {
+          "content-type": "application/json; charset=utf-8",
+          "content-disposition": 'attachment; filename="movie-harbor-content-export-20260916-120000.json"',
+        },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await apiDownload("/api/admin/contents/export");
+
+    expect(result.filename).toBe("movie-harbor-content-export-20260916-120000.json");
+    expect(await result.blob.text()).toContain('"movies"');
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/admin/contents/export");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ credentials: "same-origin" });
+  });
+
+  it("preserves API error semantics and maps network failures", async () => {
+    const responses = [
+      respond('{"error":"authentication failed"}', { status: 401, headers: { "content-type": "application/json" } }),
+      respond('{"error":"export unavailable"}', { status: 500, headers: { "content-type": "application/json" } }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+
+    await expect(apiDownload("/api/admin/contents/export")).rejects.toMatchObject({
+      name: "ApiError", status: 401, message: "authentication failed",
+    });
+    await expect(apiDownload("/api/admin/contents/export")).rejects.toMatchObject({
+      name: "ApiError", status: 500, message: "export unavailable",
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("offline")));
+    await expect(apiDownload("/api/admin/contents/export")).rejects.toBeInstanceOf(ApiNetworkError);
+  });
+
+  it("uses a fixed safe filename and rejects non-JSON success responses", async () => {
+    const responses = [
+      respond('{"movies":[]}', {
+        headers: {
+          "content-type": "application/json",
+          "content-disposition": "attachment; filename=../../untrusted.json",
+        },
+      }),
+      respond("not JSON", { headers: { "content-type": "text/plain" } }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async () => responses.shift()!));
+
+    await expect(apiDownload("/api/admin/contents/export")).resolves.toMatchObject({
+      filename: "movie-harbor-content-export.json",
+    });
+    await expect(apiDownload("/api/admin/contents/export")).rejects.toBeInstanceOf(ApiResponseParseError);
+  });
+
+  it("maps a response blob stream failure to ApiNetworkError", async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.error(new TypeError("connection reset"));
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(stream, {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })));
+
+    await expect(apiDownload("/api/admin/contents/export")).rejects.toBeInstanceOf(ApiNetworkError);
   });
 });

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ApiError, listAdminContent, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
+import { ApiError, downloadAdminContentExport, listAdminContent, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -21,9 +21,12 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   const [loading, setLoading] = useState(true);
   const [mutating, setMutating] = useState(false);
   const [error, setError] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exporting, setExporting] = useState(false);
   const [conflict, setConflict] = useState(false);
   const mounted = useMounted();
   const operation = useRef(false);
+  const exportOperation = useRef(false);
 
   useEffect(() => {
     let ignore = false;
@@ -78,12 +81,40 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     }
   }
 
+  async function exportContent() {
+    if (exportOperation.current) return;
+    exportOperation.current = true;
+    setExporting(true);
+    setExportError("");
+    try {
+      const { blob, filename } = await downloadAdminContentExport();
+      if (!mounted.current) return;
+      const url = URL.createObjectURL(blob);
+      try {
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = filename;
+        anchor.click();
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    } catch (cause) {
+      if (!mounted.current) return;
+      if (cause instanceof ApiError && cause.status === 401) onExpired();
+      else setExportError("内容导出失败，请重试");
+    } finally {
+      exportOperation.current = false;
+      if (mounted.current) setExporting(false);
+    }
+  }
+
   const rows = data?.items ?? [];
   return <section>
-    <div className="admin-title-row"><div><p className="eyebrow">CONTENT</p><h1>内容管理</h1></div><Button variant="primary" onClick={() => onOpen(null, "create")} disabled={mutating}>＋ 新建内容</Button></div>
+    <div className="admin-title-row"><div><p className="eyebrow">CONTENT</p><h1>内容管理</h1></div><div className="admin-title-actions"><Button onClick={() => { void exportContent(); }} disabled={exporting}>导出 JSON</Button><Button variant="primary" onClick={() => onOpen(null, "create")} disabled={mutating}>＋ 新建内容</Button></div></div>
     <ContentFilters initialValue={state.filters} onQuery={(filters) => {
       setState((value) => ({ ...value, filters, page: 1 }));
     }} disabled={mutating} />
+    {exportError && <p className="error-message" role="alert">{exportError}</p>}
     {error && <div className="request-error"><p role="alert">{error}</p><Button onClick={() => setState((value) => ({ ...value, revision: value.revision + 1 }))} disabled={loading || mutating}>重新加载</Button></div>}
     {loading && <p role="status">正在加载内容…</p>}
     {data && <>
