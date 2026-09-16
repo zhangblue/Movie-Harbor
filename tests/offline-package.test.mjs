@@ -8,8 +8,11 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  archiveName,
   imageTags,
-  normalizePlatform,
+  normalizeImagePlatform,
+  parseArguments,
+  platformInfo,
   renderBundleReadme,
   renderCompose,
   renderLoadScript,
@@ -37,7 +40,7 @@ fs.appendFileSync(process.env.DOCKER_TEST_LOG, JSON.stringify(args) + '\\n');
 function fail(message) { console.error(message); process.exit(1); }
 if (args[0] === 'info') {
   if (mode === 'docker-down') fail('Docker daemon unavailable');
-  console.log(mode === 'wrong-host' ? 'linux/x86_64' : 'linux/aarch64');
+  console.log(mode === 'windows-daemon' ? 'windows' : 'linux');
 } else if (args[0] === 'compose' && args[1] === 'version') {
   if (mode === 'compose-down') fail('Compose unavailable');
   console.log(mode === 'compose-new-major' ? '5.1.2' : '2.39.1');
@@ -46,7 +49,7 @@ if (args[0] === 'info') {
   if (mode === 'build-fails') fail('Build failed');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (mode === 'inspect-fails') fail('Image missing');
-  console.log(mode === 'wrong-image' ? 'linux/amd64' : 'linux/arm64');
+  console.log(mode === 'wrong-image' || mode === 'amd64' ? 'linux/amd64' : 'linux/arm64');
 } else if (args[0] === 'image' && args[1] === 'save') {
   if (args[2] !== '--output') fail('Expected explicit output');
   const output = args[3];
@@ -67,7 +70,9 @@ if (args[0] === 'info') {
     try {
       const manifest = tags.map(tag => ({ Config: 'config.json', RepoTags: [tag], Layers: ['layer.tar'] }));
       fs.writeFileSync(path.join(temp, 'manifest.json'), mode === 'bad-manifest' ? '{' : JSON.stringify(manifest));
-      fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ os: 'linux', architecture: 'arm64' }));
+      fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({
+        os: 'linux', architecture: mode === 'amd64' ? 'amd64' : 'arm64',
+      }));
       fs.writeFileSync(path.join(temp, 'layer.tar'), 'fixture runtime layer');
       const result = spawnSync('tar', ['-cf', output, '-C', temp, 'manifest.json', 'config.json', 'layer.tar']);
       if (result.status !== 0) fail('Fixture tar failed');
@@ -140,6 +145,7 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   const calls = await f.calls();
+  assert.deepEqual(calls[0], ["info", "--format", "{{.OSType}}"]);
   const save = calls.find(args => args[0] === "image" && args[1] === "save");
   assert.ok(save, "CLI must export the runtime images");
   const savedTags = save.slice(4);
@@ -183,6 +189,25 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+test("shell CLI explicit linux/amd64 platform derives target, tags, and archive name", async t => {
+  const f = await fixture(t, "amd64");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.equal(result.status, 0, result.stderr);
+
+  const calls = await f.calls();
+  const builds = calls.filter(args => args[0] === "build");
+  assert.equal(builds.length, 3);
+  for (const args of builds) {
+    assert.equal(args[args.indexOf("--platform") + 1], "linux/amd64");
+  }
+  const save = calls.find(args => args[0] === "image" && args[1] === "save");
+  assert.deepEqual(save.slice(4), imageTags(VERSION, "linux/amd64"));
+
+  const amd64Bundle = archiveName(VERSION, "linux/amd64");
+  assert.equal((await stat(join(f.repo, "dist/offline", amd64Bundle))).isFile(), true);
+  await assertClean(f, [amd64Bundle]);
+});
+
 for (const [args, error] of [
   [["../secret"], /invalid version/i], [["bad version"], /invalid version/i],
   [["one", "two"], /usage|argument/i], [["--output-dir", "elsewhere"], /usage|argument/i],
@@ -216,7 +241,7 @@ test("shell CLI rejects an unavailable Compose plugin before building", async t 
 
 for (const [mode, error] of [
   ["docker-down", /Docker/i],
-  ["wrong-host", /only supports linux\/arm64/i], ["build-fails", /Build failed/i],
+  ["windows-daemon", /Linux containers/i], ["build-fails", /Build failed/i],
   ["inspect-fails", /inspect|Image missing/i], ["wrong-image", /linux\/arm64/i],
   ["save-fails", /Save/i], ["extra-tag", /RepoTags|tags/i], ["missing-tag", /RepoTags|tags/i],
   ["duplicate-tag", /RepoTags|tags/i], ["bad-manifest", /JSON|manifest/i],
@@ -308,19 +333,61 @@ test("validates the release version against a strict tag-safe whitelist", () => 
   assert.throws(() => validateVersion(""), /invalid version/);
 });
 
-test("normalizes only the supported Linux ARM64 Docker platform", () => {
-  assert.equal(normalizePlatform("linux", "aarch64"), "linux/arm64");
-  assert.equal(normalizePlatform("linux", "arm64"), "linux/arm64");
-  assert.throws(() => normalizePlatform("linux", "x86_64"), /only supports linux\/arm64/);
-  assert.throws(() => normalizePlatform("darwin", "arm64"), /only supports linux\/arm64/);
+test("parses the target platform and optional version in their strict argument positions", () => {
+  assert.deepEqual(parseArguments([]), { platform: "linux/arm64", version: undefined });
+  assert.deepEqual(parseArguments(["v2"]), { platform: "linux/arm64", version: "v2" });
+  assert.deepEqual(parseArguments(["--platform", "linux/arm64"]), {
+    platform: "linux/arm64", version: undefined,
+  });
+  assert.deepEqual(parseArguments(["--platform", "linux/amd64", "v2"]), {
+    platform: "linux/amd64", version: "v2",
+  });
 });
 
-test("uses the three exact self-hosted image tags", () => {
+for (const args of [
+  ["--platform"],
+  ["--platform", "linux/amd64", "v1", "extra"],
+  ["v1", "--platform", "linux/amd64"],
+  ["--platform", "linux/amd64", "--platform", "linux/arm64"],
+]) {
+  test(`rejects invalid platform argument placement ${JSON.stringify(args)}`, () => {
+    assert.throws(() => parseArguments(args), /Usage/);
+  });
+}
+
+test("rejects target platform values outside the exact allowlist", () => {
+  assert.throws(() => parseArguments(["--platform", "windows/amd64"]), /unsupported platform/i);
+  assert.throws(() => platformInfo("linux/x86_64"), /unsupported platform/i);
+});
+
+test("normalizes supported image platform metadata without conflating architectures", () => {
+  assert.equal(normalizeImagePlatform("linux", "aarch64"), "linux/arm64");
+  assert.equal(normalizeImagePlatform("linux", "arm64"), "linux/arm64");
+  assert.equal(normalizeImagePlatform("linux", "x86_64"), "linux/amd64");
+  assert.equal(normalizeImagePlatform("linux", "amd64"), "linux/amd64");
+  assert.notEqual(normalizeImagePlatform("linux", "arm64"), "linux/amd64");
+  assert.throws(() => normalizeImagePlatform("darwin", "arm64"), /unsupported image platform/i);
+});
+
+test("uses the three exact self-hosted image tags for each target platform", () => {
   assert.deepEqual(imageTags(VERSION), [
     "movie-harbor-api:test-v1-linux-arm64",
     "movie-harbor-public-web:test-v1-linux-arm64",
     "movie-harbor-admin-web:test-v1-linux-arm64",
   ]);
+  assert.deepEqual(imageTags(VERSION, "linux/amd64"), [
+    "movie-harbor-api:test-v1-linux-amd64",
+    "movie-harbor-public-web:test-v1-linux-amd64",
+    "movie-harbor-admin-web:test-v1-linux-amd64",
+  ]);
+});
+
+test("derives the archive name from the validated platform slug", () => {
+  assert.equal(archiveName(VERSION, "linux/arm64"), BUNDLE_NAME);
+  assert.equal(
+    archiveName(VERSION, "linux/amd64"),
+    "movie-harbor-offline-linux-amd64-test-v1.tar.gz",
+  );
 });
 
 function assertDeploymentMounts(compose) {

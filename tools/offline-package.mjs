@@ -7,12 +7,16 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
-const SUPPORTED_PLATFORM = "linux/arm64";
+const DEFAULT_PLATFORM = "linux/arm64";
+const PLATFORMS = new Map([
+  ["linux/arm64", Object.freeze({ os: "linux", architecture: "arm64", slug: "linux-arm64" })],
+  ["linux/amd64", Object.freeze({ os: "linux", architecture: "amd64", slug: "linux-amd64" })],
+]);
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DELIVERY_FILES = [
   ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
 ];
-const USAGE = "Usage: ./tools/build-offline-package.sh [version]\nDefault version: Git short revision (12 characters). Output: dist/offline/";
+const USAGE = "Usage: ./tools/build-offline-package.sh [--platform <linux/arm64|linux/amd64>] [version]\nDefault platform: linux/arm64. Default version: Git short revision (12 characters). Output: dist/offline/";
 
 function run(command, args, { cwd = REPO_ROOT, signal, capture = true } = {}) {
   signal?.throwIfAborted();
@@ -71,7 +75,7 @@ async function main(args) {
     console.log(USAGE);
     return;
   }
-  if (args.length > 1 || args[0]?.startsWith("-")) throw new Error(USAGE);
+  const options = parseArguments(args);
 
   const controller = new AbortController();
   const { signal } = controller;
@@ -83,10 +87,10 @@ async function main(args) {
   let staging;
   let archiveDirectory;
   try {
-    const version = validateVersion(args[0] ?? await run("git", ["rev-parse", "--short=12", "HEAD"], { signal }));
-    const tags = imageTags(version);
+    const version = validateVersion(options.version ?? await run("git", ["rev-parse", "--short=12", "HEAD"], { signal }));
+    const tags = imageTags(version, options.platform);
     const outputDirectory = join(REPO_ROOT, "dist/offline");
-    const destination = join(outputDirectory, `movie-harbor-offline-linux-arm64-${version}.tar.gz`);
+    const destination = join(outputDirectory, archiveName(version, options.platform));
     try {
       await lstat(destination);
       throw new Error(`Output already exists: ${destination}`);
@@ -94,27 +98,35 @@ async function main(args) {
       if (error.code !== "ENOENT") throw error;
     }
 
-    const platform = await run("docker", ["info", "--format", "{{.OSType}}/{{.Architecture}}"], { signal });
+    const daemonOs = await run("docker", ["info", "--format", "{{.OSType}}"], { signal });
+    if (daemonOs !== "linux") {
+      throw new Error(`Docker daemon must run Linux containers, found ${daemonOs || "unknown"}`);
+    }
     await run("docker", ["compose", "version", "--short"], { signal });
-    normalizePlatform(...platform.split("/"));
 
     const dockerfiles = ["backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile"];
     for (const [index, file] of dockerfiles.entries()) {
-      await run("docker", ["build", "--platform", SUPPORTED_PLATFORM, "--file", file, "--tag", tags[index], "."], { signal, capture: false });
+      await run("docker", ["build", "--platform", options.platform, "--file", file, "--tag", tags[index], "."], { signal, capture: false });
     }
     for (const tag of tags) {
       const imagePlatform = await run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", tag], { signal });
-      if (imagePlatform !== SUPPORTED_PLATFORM) throw new Error(`Expected ${tag} to use ${SUPPORTED_PLATFORM}, found ${imagePlatform}`);
+      const components = imagePlatform.split("/");
+      const normalized = components.length === 2
+        ? normalizeImagePlatform(components[0], components[1])
+        : imagePlatform;
+      if (normalized !== options.platform) {
+        throw new Error(`Expected ${tag} to use ${options.platform}, found ${imagePlatform}`);
+      }
     }
 
     staging = await mkdtemp(join(tmpdir(), "movie-harbor-offline-"));
     const bundle = join(staging, "movie-harbor");
     await mkdir(bundle);
     for (const file of ["Caddyfile", ".env.example"]) await copyFile(join(REPO_ROOT, file), join(bundle, file));
-    await writeFile(join(bundle, "compose.yml"), renderCompose(version));
-    await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version));
+    await writeFile(join(bundle, "compose.yml"), renderCompose(version, options.platform));
+    await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version, options.platform));
     await chmod(join(bundle, "load-images.sh"), 0o755);
-    await writeFile(join(bundle, "README.md"), renderBundleReadme(version));
+    await writeFile(join(bundle, "README.md"), renderBundleReadme(version, options.platform));
     await mkdir(outputDirectory, { recursive: true });
     await run("docker", ["image", "save", "--output", join(bundle, "images.tar"), ...tags], { signal, capture: false });
     await validateStaging(bundle, DELIVERY_FILES);
@@ -161,20 +173,44 @@ export function validateVersion(value) {
   return value;
 }
 
-export function normalizePlatform(os, architecture) {
-  if (os !== "linux" || !["aarch64", "arm64"].includes(architecture)) {
-    throw new Error(`only supports ${SUPPORTED_PLATFORM}`);
-  }
-  return SUPPORTED_PLATFORM;
+export function platformInfo(value) {
+  const info = PLATFORMS.get(value);
+  if (!info) throw new Error(`unsupported platform: ${value}`);
+  return info;
 }
 
-export function imageTags(version) {
+export function parseArguments(args) {
+  if (args[0] === "--platform") {
+    if (args.length < 2 || args.length > 3 || args[2]?.startsWith("-")) {
+      throw new Error(USAGE);
+    }
+    platformInfo(args[1]);
+    return { platform: args[1], version: args[2] };
+  }
+  if (args.length > 1 || args[0]?.startsWith("-")) throw new Error(USAGE);
+  return { platform: DEFAULT_PLATFORM, version: args[0] };
+}
+
+export function normalizeImagePlatform(os, architecture) {
+  if (os === "linux" && ["aarch64", "arm64"].includes(architecture)) return "linux/arm64";
+  if (os === "linux" && ["x86_64", "amd64"].includes(architecture)) return "linux/amd64";
+  throw new Error(`unsupported image platform: ${os}/${architecture}`);
+}
+
+export function imageTags(version, platform = DEFAULT_PLATFORM) {
   const safeVersion = validateVersion(version);
+  const { slug } = platformInfo(platform);
   return [
-    `movie-harbor-api:${safeVersion}-linux-arm64`,
-    `movie-harbor-public-web:${safeVersion}-linux-arm64`,
-    `movie-harbor-admin-web:${safeVersion}-linux-arm64`,
+    `movie-harbor-api:${safeVersion}-${slug}`,
+    `movie-harbor-public-web:${safeVersion}-${slug}`,
+    `movie-harbor-admin-web:${safeVersion}-${slug}`,
   ];
+}
+
+export function archiveName(version, platform = DEFAULT_PLATFORM) {
+  const safeVersion = validateVersion(version);
+  const { slug } = platformInfo(platform);
+  return `movie-harbor-offline-${slug}-${safeVersion}.tar.gz`;
 }
 
 function bind(source, target, options = {}) {
@@ -197,8 +233,8 @@ function healthcheck(test, retries, startPeriod) {
   };
 }
 
-export function renderCompose(version) {
-  const [apiImage, publicWebImage, adminWebImage] = imageTags(version);
+export function renderCompose(version, platform = DEFAULT_PLATFORM) {
+  const [apiImage, publicWebImage, adminWebImage] = imageTags(version, platform);
   const mediaSource = "${MEDIA_HOST_DIR:-./data/media}";
 
   return `${JSON.stringify({
@@ -298,8 +334,10 @@ export function renderCompose(version) {
   }, null, 2)}\n`;
 }
 
-export function renderLoadScript(version) {
-  const tags = imageTags(version);
+export function renderLoadScript(version, platform = DEFAULT_PLATFORM) {
+  const tags = imageTags(version, platform);
+  const { os, architecture } = platformInfo(platform);
+  const imagePlatform = `${os}/${architecture}`;
   const quotedTags = tags.map((tag) => `  '${tag}'`).join(" \\\n");
 
   return `#!/bin/sh
@@ -313,20 +351,22 @@ for image in \\
 ${quotedTags}
 do
   platform="$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")"
-  if [ "$platform" != "${SUPPORTED_PLATFORM}" ]; then
-    echo "expected $image to use ${SUPPORTED_PLATFORM}, found $platform" >&2
+  if [ "$platform" != "${imagePlatform}" ]; then
+    echo "expected $image to use ${imagePlatform}, found $platform" >&2
     exit 1
   fi
 done
 `;
 }
 
-export function renderBundleReadme(version) {
-  const tags = imageTags(version);
+export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
+  const tags = imageTags(version, platform);
+  const { os, architecture } = platformInfo(platform);
+  const imagePlatform = `${os}/${architecture}`;
   return [
     "# Movie Harbor 半离线部署包",
     "",
-    `此包为版本 \`${version}\`，只支持 \`${SUPPORTED_PLATFORM}\` 目标服务器。`,
+    `此包为版本 \`${version}\`，只支持 \`${imagePlatform}\` 目标服务器。`,
     "",
     "## 联网要求",
     "",
@@ -344,7 +384,7 @@ export function renderBundleReadme(version) {
     "",
     "## 部署",
     "",
-    `需要 Docker Engine、Docker Compose v2 和 \`${SUPPORTED_PLATFORM}\`。解压后执行：`,
+    `需要 Docker Engine、Docker Compose v2 和 \`${imagePlatform}\`。解压后执行：`,
     "",
     "```sh",
     "./load-images.sh",
