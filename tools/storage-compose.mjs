@@ -1,6 +1,8 @@
 import {
   closeSync,
+  constants,
   fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -96,13 +98,17 @@ export function renderStorageCompose(hostDirs) {
 }
 
 export function readVolumeMarker(directory, volume) {
-  let marker;
+  let marker, descriptor;
   try {
     const markerPath = path.join(directory, VOLUME_MARKER);
-    if (!lstatSync(markerPath).isFile()) throw new Error("marker is not a regular file");
-    marker = JSON.parse(readFileSync(markerPath, "utf8"));
+    descriptor = openSync(markerPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 4096) throw new Error("marker is not an exclusive regular file");
+    marker = JSON.parse(readFileSync(descriptor, "utf8"));
   } catch {
     throw new Error(`media volume ${volume} has no valid identity marker`);
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
   }
   if (
     !marker ||
@@ -125,7 +131,7 @@ function markerEntryExists(markerPath) {
   }
 }
 
-function parseDotenvMediaHostDir(envPath) {
+export function parseDotenvMediaHostDir(envPath) {
   const lines = readFileSync(envPath, "utf8").split(/\r?\n/);
   for (const line of lines) {
     if (line.startsWith("MEDIA_HOST_DIR=")) return line.slice("MEDIA_HOST_DIR=".length);
@@ -133,7 +139,7 @@ function parseDotenvMediaHostDir(envPath) {
   fail("MEDIA_HOST_DIR is missing");
 }
 
-function writeAtomically(output, data, mode = 0o600) {
+export function writeAtomically(output, data, mode = 0o600) {
   const outputDirectory = path.dirname(output);
   const temporary = path.join(
     outputDirectory,
@@ -161,6 +167,9 @@ function readRegistration(statePath) {
   try {
     if (!lstatSync(statePath).isFile()) throw new Error();
     const state = JSON.parse(readFileSync(statePath, "utf8"));
+    if (state?.upgrade?.kind === "legacy-volume-zero") {
+      throw new Error("pending-upgrade");
+    }
     if (
       !state || Object.keys(state).length !== 2 || state.version !== 1 ||
       !Array.isArray(state.directories) || state.directories.length === 0 ||
@@ -168,7 +177,10 @@ function readRegistration(statePath) {
       new Set(state.directories).size !== state.directories.length
     ) throw new Error();
     return state;
-  } catch {
+  } catch (error) {
+    if (error.message === "pending-upgrade") {
+      throw new Error("media storage upgrade is pending; rerun tools/upgrade-media-storage.sh --confirm-existing-volume-zero");
+    }
     throw new Error("media volume registration is invalid; restore the deployment registration from backup");
   }
 }

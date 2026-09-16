@@ -614,3 +614,51 @@ git commit -m "test: verify multi-volume media deployment"
 - [ ] **步骤 8：请求代码审查**
 
 使用 superpowers:requesting-code-review，逐项核对 `2026-09-16-multi-volume-media-storage-design.md`，重点审查路径逃逸、共享变更锁、跨卷回滚、启动恢复和既有卷 0 兼容性。发现问题后使用 superpowers:receiving-code-review 验证并修复，再重新运行步骤 6。
+
+### 任务 7：旧单卷部署的一次性特权升级入口
+
+**追加决定：** 旧版媒体根为 UID/GID `10001:10001`、权限 `0700`，普通部署用户首次升级时无法写入卷标记。增加需要显式确认、可安全重试的专用入口，完成后继续使用普通启动入口；不把普通重启改为自动修复，不放宽缺盘保护。
+
+**文件：**
+
+- 创建：`tools/upgrade-media-storage.sh`
+- 创建：`tools/upgrade-media-storage.mjs`
+- 创建：`tests/upgrade-media-storage.test.mjs`
+- 修改：`tools/storage-compose.mjs`
+- 修改或扩展：真实 Linux 存储权限集成测试
+- 修改：`README.md`、`AGENTS.md`
+- 修改：`docs/superpowers/specs/2026-09-16-multi-volume-media-storage-design.md`
+
+- [x] **步骤 1：用真实旧版权限复现 RED**
+
+在隔离 Linux 容器中准备已有媒体和 `.incoming`、`.quarantine`、`.operations` 的旧卷，属主 `10001:10001`、根与私有目录权限 `0700`、无卷标记。以不同的普通部署 UID 运行现有启动入口，确认因无法访问旧根内的标记而失败；记录媒体 inode、内容、属主和权限，用于升级后对照。不得使用生产数据目录。
+
+- [x] **步骤 2：编写专用入口与 pending 的失败测试**
+
+覆盖显式确认缺失、多目录、已正常登记、损坏登记、路径或根身份不匹配、根/marker 符号链接与特殊文件、错误 marker、缺盘空挂载点、路径含空格和 `$`。验证 `.env` 只被解析，不被执行；所有拒绝分支不得调用最终 Compose 启动。
+
+覆盖 pending 已写但 marker 未创建、marker 已创建但正常登记未提交时的重试。普通 `start-compose.sh` 遇到 pending 必须失败且不改 marker、登记或生成配置。首次无可信登记的既有 marker 不能仅因再次运行升级入口而被接纳。
+
+- [x] **步骤 3：实现可持久恢复的专用状态机**
+
+入口要求 `--confirm-existing-volume-zero`，支持 `MOVIE_HARBOR_ENV_FILE`，恰好一个原媒体目录。先持久保存严格 pending 格式 `{version, directories, upgrade}`，其中 `upgrade` 保存升级类型、随机操作标识、原根设备/inode 字符串及 `markerAllowed` 布尔值；同步登记文件与所在目录后再运行固定 `alpine:3.22` root 容器。
+
+初始 `markerAllowed: false`。容器验证根与 marker 后，通过受控协议报告 marker 内容或缺失；确认缺失且校验通过时，先持久保存 `markerAllowed: true` 再允许发布。重试只有在可信许可存在时才能接纳精确匹配的既有 marker。错误内容不得覆盖，根身份变化不得恢复。最终校验完成后原子转为正常 `{version, directories}`，成功提示运行 `./tools/start-compose.sh`，自身不启动服务。
+
+- [x] **步骤 4：实现受限权限更新并确认 GREEN**
+
+Docker 参数使用 argv，禁止拼接可执行路径文本。无跟随校验根与 marker，拒绝特殊文件及陌生链接；根中至少存在一个真实旧版结构目录（`.incoming`、`.quarantine`、`.operations`、`video` 或 `poster`），不能把 marker 或升级临时物算作旧卷证据。marker 缺失时原子创建 `{"version":1,"volume":0}`；已有 marker 必须校验，不覆盖错误版本或卷号。
+
+只把根设为 `10001:10001`、`0711`，marker 设为 `0644`。用真实 Linux 和不同 UID 验证升级后原媒体 inode、内容、属主和权限不变，私有目录保持 `0700` 且内容不变，普通 UID 可以运行普通入口。检查临时文件发布后的中断窗口，不得留下无法安全重试的升级状态。
+
+- [x] **步骤 5：同步运维文档**
+
+README 提供旧服务停止与一致备份前置条件、保留原单路径、显式升级命令、自定义环境文件用法、成功后的普通启动命令，以及 pending 中断重试和拒绝分支。修正旧媒体根 `0700` 的当前部署说明，明确根 `0711`、marker `0644` 与私有目录 `0700` 的边界。设计与 AGENTS 同步专用升级状态机和安全约束。
+
+- [x] **步骤 6：运行完整验证并审查**
+
+运行任务 6 步骤 6 的完整 Rust、前端、Node/Docker、E2E、格式、Clippy、构建和 diff 检查，并显式启用真实 Docker 权限集成测试，不能把跳过的权限用例计为通过。逐项记录旧版 RED、升级 GREEN、pending 重试和拒绝场景；发现问题后修复并重跑受影响检查。
+
+- [x] **步骤 7：提交并报告**
+
+提交专用入口、测试及四份文档，不包含无关改动。在 `.superpowers/sdd/2026-09-16-multi-volume-media-storage/task-7-report.md` 记录逐项 RED/GREEN、实际命令与输出、自审结果和剩余疑虑。

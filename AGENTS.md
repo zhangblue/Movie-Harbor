@@ -78,6 +78,7 @@
 - `tests/e2e/`：Playwright 跨服务验收与安全 runner。
 - `tools/`：半离线发布包构建入口与核心工具。
 - `tools/storage-compose.mjs` 与 `tools/start-compose.sh`：源码部署的媒体卷标记初始化、Compose 存储覆盖文件生成及启动。
+- `tools/upgrade-media-storage.sh` 与 `tools/upgrade-media-storage.mjs`：旧单卷的一次性特权登记与 pending 升级重试；不启动应用服务。
 - `dist/offline/`：工具运行后构建生成且被 Git 忽略的半离线归档输出。
 - `demo/`：审核通过的静态 UI Demo，不参与生产构建。
 - `docs/superpowers/specs/`：已确认的产品与增量设计。
@@ -112,6 +113,9 @@
 - `MEDIA_HOST_DIR` 默认 `./data/media`，支持分号分隔的有序目录数组；多卷使用绝对路径，禁止空项、重复、替换、删除或重排已有项，只允许在末尾追加。
 - 各卷映射 API 的 `/media/volumes/<编号>` 与 Caddy 只读的 `/srv/media/volumes/<编号>`，API 的 `MEDIA_DIRS` 由生成配置写入；每卷必须有匹配的 `.movie-harbor-volume.json` 标记。
 - 部署目录（`.env` 所在目录）内的 `.movie-harbor-storage-state.json` 保存卷路径登记，须与全部数据共同备份；普通重启不得重建已有卷标记，登记缺失/损坏和原路径替换/重排/删除须在写标记或启动 Docker 前失败。
+- 旧单卷权限升级必须先停止旧服务并完成一致备份，再显式运行 `./tools/upgrade-media-storage.sh --confirm-existing-volume-zero`；只接纳一个原路径，已有正常登记拒绝再次升级。普通启动遇到 pending 必须失败关闭，只能由专用入口核对原根身份后继续。
+- 专用升级先持久保存 pending，再校验卷根和 marker；只有确认原 marker 缺失并持久记录发布许可后才可创建新 marker。拒绝根/marker 符号链接或特殊文件、错误标记、同路径替换及缺少真实旧版目录结构的空挂载点，不得通过普通重启自动认领。
+- 媒体根统一使用 UID/GID `10001:10001`、权限 `0711`，非秘密卷标记为 `0644`；`.incoming`、`.quarantine`、`.operations` 保持 `0700`，不得递归 chmod/chown 或改变原媒体文件。
 - `MEDIA_DISK_RESERVE_BYTES` 必须为正整数，默认每卷 10 GiB。缺盘、卷标记错误或数据库引用未配置卷时拒绝启动，不自动创建空卷冒充原盘。
 - 数据库与全部媒体卷（含标记与恢复清单）必须作为同一一致性备份集；从既有命名卷部署切换到 bind mount 不会自动迁移数据。既有单目录升级为卷 0，不移动原文件。
 
