@@ -28,6 +28,10 @@ const BUNDLE_ENTRIES = [
   "movie-harbor/compose.yml", "movie-harbor/images.tar",
   "movie-harbor/load-images.sh",
 ];
+const AMD64_BUNDLE_ENTRIES = [
+  ...BUNDLE_ENTRIES,
+  "movie-harbor/load-images.ps1",
+].sort();
 
 // Only Docker is replaced: its save boundary still emits a real tar archive.
 const DOCKER_DOUBLE = `#!/usr/bin/env node
@@ -222,7 +226,15 @@ test("shell CLI explicit linux/amd64 platform derives target, tags, and archive 
   assert.deepEqual(save.slice(4), imageTags(VERSION, "linux/amd64"));
 
   const amd64Bundle = archiveName(VERSION, "linux/amd64");
-  assert.equal((await stat(join(f.repo, "dist/offline", amd64Bundle))).isFile(), true);
+  const amd64Destination = join(f.repo, "dist/offline", amd64Bundle);
+  assert.equal((await stat(amd64Destination)).isFile(), true);
+  assert.deepEqual(tar(["-tzf", amd64Destination]).trim().split("\n").sort(), AMD64_BUNDLE_ENTRIES);
+  const checksums = tar(["-xOf", amd64Destination, "movie-harbor/SHA256SUMS"])
+    .trim().split("\n");
+  assert.deepEqual(checksums.map(line => line.slice(66)).sort(), [
+    ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar",
+    "load-images.ps1", "load-images.sh",
+  ]);
   await assertClean(f, [amd64Bundle]);
 });
 

@@ -13,7 +13,7 @@ const PLATFORMS = new Map([
   ["linux/amd64", Object.freeze({ os: "linux", architecture: "amd64", slug: "linux-amd64" })],
 ]);
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const DELIVERY_FILES = [
+const BASE_DELIVERY_FILES = [
   ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
 ];
 const USAGE = "Usage: ./tools/build-offline-package.sh [--platform <linux/arm64|linux/amd64>] [version]\nDefault platform: linux/arm64. Default version: Git short revision (12 characters). Output: dist/offline/";
@@ -89,6 +89,7 @@ async function main(args) {
   try {
     const version = validateVersion(options.version ?? await run("git", ["rev-parse", "--short=12", "HEAD"], { signal }));
     const tags = imageTags(version, options.platform);
+    const deliveryFiles = deliveryFilesForPlatform(options.platform);
     const outputDirectory = join(REPO_ROOT, "dist/offline");
     const destination = join(outputDirectory, archiveName(version, options.platform));
     try {
@@ -130,10 +131,13 @@ async function main(args) {
     await writeFile(join(bundle, "compose.yml"), renderCompose(version, options.platform));
     await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version, options.platform));
     await chmod(join(bundle, "load-images.sh"), 0o755);
+    if (options.platform === "linux/amd64") {
+      await writeFile(join(bundle, "load-images.ps1"), renderLoadPowerShell(version, options.platform));
+    }
     await writeFile(join(bundle, "README.md"), renderBundleReadme(version, options.platform));
     await mkdir(outputDirectory, { recursive: true });
     await run("docker", ["image", "save", "--output", join(bundle, "images.tar"), ...tags], { signal, capture: false });
-    await validateStaging(bundle, DELIVERY_FILES);
+    await validateStaging(bundle, deliveryFiles);
 
     const manifest = JSON.parse(await run("tar", ["-xOf", join(bundle, "images.tar"), "manifest.json"], { signal }));
     if (!Array.isArray(manifest) || manifest.some(image => !Array.isArray(image?.RepoTags))) {
@@ -141,16 +145,16 @@ async function main(args) {
     }
     requireExactEntries(manifest.flatMap(image => image.RepoTags), tags, "images.tar RepoTags");
     const checksums = [];
-    for (const file of DELIVERY_FILES) checksums.push(`${await sha256(join(bundle, file), signal)}  ${file}`);
+    for (const file of deliveryFiles) checksums.push(`${await sha256(join(bundle, file), signal)}  ${file}`);
     await writeFile(join(bundle, "SHA256SUMS"), `${checksums.join("\n")}\n`);
-    await validateStaging(bundle, [...DELIVERY_FILES, "SHA256SUMS"]);
+    await validateStaging(bundle, [...deliveryFiles, "SHA256SUMS"]);
 
     // Keep the completed archive on the destination filesystem for atomic publication.
     archiveDirectory = await mkdtemp(join(outputDirectory, ".package-"));
     const archive = join(archiveDirectory, "bundle.tar.gz");
     await run("tar", ["-czf", archive, "-C", staging, "movie-harbor"], { signal, capture: false });
     const entries = (await run("tar", ["-tzf", archive], { signal })).split("\n");
-    requireExactEntries(entries, ["movie-harbor/", ...DELIVERY_FILES.map(file => `movie-harbor/${file}`), "movie-harbor/SHA256SUMS"], "archive entries");
+    requireExactEntries(entries, ["movie-harbor/", ...deliveryFiles.map(file => `movie-harbor/${file}`), "movie-harbor/SHA256SUMS"], "archive entries");
     signal.throwIfAborted();
     // link atomically creates the final name and fails with EEXIST, including races.
     await link(archive, destination);
@@ -215,6 +219,13 @@ export function archiveName(version, platform = DEFAULT_PLATFORM) {
   const safeVersion = validateVersion(version);
   const { slug } = platformInfo(platform);
   return `movie-harbor-offline-${slug}-${safeVersion}.tar.gz`;
+}
+
+function deliveryFilesForPlatform(platform) {
+  platformInfo(platform);
+  return platform === "linux/amd64"
+    ? [...BASE_DELIVERY_FILES, "load-images.ps1"]
+    : [...BASE_DELIVERY_FILES];
 }
 
 function bind(source, target, options = {}) {
@@ -360,6 +371,86 @@ do
     exit 1
   fi
 done
+`;
+}
+
+export function renderLoadPowerShell(version, platform = "linux/amd64") {
+  platformInfo(platform);
+  if (platform !== "linux/amd64") {
+    throw new Error("PowerShell image loading is only supported for linux/amd64 packages");
+  }
+  const files = deliveryFilesForPlatform(platform);
+  const tags = imageTags(version, platform);
+  const expectedFiles = files.map(file => `    '${file}'`).join(",\n");
+  const expectedImages = tags.map(tag => `    '${tag}'`).join(",\n");
+
+  return `$ErrorActionPreference = 'Stop'
+
+try {
+    $packageRoot = $PSScriptRoot
+    $manifestPath = Join-Path -Path $packageRoot -ChildPath 'SHA256SUMS'
+    $expectedFiles = @(
+${expectedFiles}
+    )
+    $expected = [System.Collections.Generic.Dictionary[string,bool]]::new([System.StringComparer]::Ordinal)
+    foreach ($name in $expectedFiles) {
+        $expected.Add($name, $true)
+    }
+
+    $entries = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
+    $seen = [System.Collections.Generic.Dictionary[string,bool]]::new([System.StringComparer]::Ordinal)
+    foreach ($line in @(Get-Content -LiteralPath $manifestPath)) {
+        $match = [regex]::Match($line, '^(?i:[0-9a-f]{64})  (?<name>[^/\\\\]+)$')
+        if (-not $match.Success) {
+            throw 'invalid SHA256SUMS entry'
+        }
+        $name = $match.Groups['name'].Value
+        if (-not $expected.ContainsKey($name)) {
+            throw "unexpected checksum entry: $name"
+        }
+        if ($seen.ContainsKey($name)) {
+            throw "duplicate checksum entry: $name"
+        }
+        $seen.Add($name, $true)
+        $entries.Add($name, $match.Groups['hash'].Value.ToLowerInvariant())
+    }
+    if ($entries.Count -ne $expectedFiles.Count) {
+        throw 'SHA256SUMS does not exactly cover the package allowlist'
+    }
+
+    foreach ($name in $expectedFiles) {
+        if (-not $entries.ContainsKey($name)) {
+            throw "missing checksum entry: $name"
+        }
+        $path = Join-Path -Path $packageRoot -ChildPath $name
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "missing package file: $name"
+        }
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actual -ne $entries[$name]) {
+            throw "checksum mismatch: $name"
+        }
+    }
+
+    $imagesPath = Join-Path -Path $packageRoot -ChildPath 'images.tar'
+    docker image load --input $imagesPath
+    if ($LASTEXITCODE -ne 0) {
+        throw 'docker image load failed'
+    }
+
+    $images = @(
+${expectedImages}
+    )
+    foreach ($image in $images) {
+        $imagePlatform = docker image inspect --format '{{.Os}}/{{.Architecture}}' $image
+        if ($LASTEXITCODE -ne 0 -or $imagePlatform.Trim() -ne 'linux/amd64') {
+            throw "expected $image to use linux/amd64"
+        }
+    }
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
 `;
 }
 
