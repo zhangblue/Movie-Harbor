@@ -21,6 +21,7 @@
 - `docs/superpowers/plans/2026-09-15-admin-and-public-content-pagination.md`
 - `docs/superpowers/specs/2026-09-16-admin-media-path-and-json-export-design.md`
 - `docs/superpowers/plans/2026-09-16-admin-media-path-and-json-export.md`
+- `docs/superpowers/plans/2026-09-16-export-year-and-genres.md`
 
 ### 媒体、部署与发布
 
@@ -97,7 +98,7 @@
 - 单集不保存简介；公开剧集详情按季、集序号展示名称和时长。
 - 管理内容列表和公开内容目录固定每页 20 条，并使用数字页码；管理列表通过 `/api/admin/contents` 统一分页电影与剧集。
 - 管理媒体 `local_path` 只表示由受控存储键派生的容器内路径，不允许客户端提交或修改，也不得进入公共 API。
-- 内容 JSON 导出覆盖全部状态，不受筛选、搜索或分页影响；必须由后端读取一致快照，不得改为前端分页聚合或逐条请求详情。
+- 内容 JSON 导出覆盖全部状态，不受筛选、搜索或分页影响；必须由后端读取一致快照，不得改为前端分页聚合或逐条请求详情。`year` 只在电影、剧集层级导出；`genres` 只含按 `sort_order`、ID 稳定排序的题材名称；不得给单集复制父级年份或题材。
 - 媒体文件保存在挂载目录，数据库只保存受控文件标识和元数据。
 - 发布后的媒体 URL 是公开地址，不承诺防下载或防盗链。
 - 媒体资产在电影海报、电影视频、剧集海报和单集视频槽位之间全局独占，不能共享。

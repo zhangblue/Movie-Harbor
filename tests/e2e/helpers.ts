@@ -45,6 +45,7 @@ export function video() {
 }
 
 export type MediaSummary = { url: string; local_path: string };
+export type Genre = { id: string; name: string; sort_order: number; enabled: boolean };
 export type Movie = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; video: MediaSummary | null };
 export type Episode = { id: string; version: number; number: number; name: string; status: string; video: MediaSummary | null };
 export type Series = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; seasons: Array<{ id: string; number: number; episodes: Episode[] }> };
@@ -82,11 +83,12 @@ export class AdminApi {
 }
 
 export async function createMovieDraftWithMedia(api: AdminApi, name: string, options: {
-  synopsis: string; durationSeconds: number; includePoster?: boolean;
+  synopsis: string; durationSeconds: number; includePoster?: boolean; year?: number | null; genreIds?: string[];
 }) {
   let movie = await api.write<Movie>("post", "/api/admin/movies", { name });
   movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
-    version: movie.version, name, synopsis: options.synopsis, year: 2026, duration_seconds: options.durationSeconds, genre_ids: [],
+    version: movie.version, name, synopsis: options.synopsis, year: options.year === undefined ? 2026 : options.year,
+    duration_seconds: options.durationSeconds, genre_ids: options.genreIds ?? [],
   });
   let version = movie.version;
   if (options.includePoster !== false) {
@@ -111,9 +113,12 @@ export async function createPublishableMovieWithoutPoster(api: AdminApi, name: s
 
 export async function createSeriesDraftWithMedia(api: AdminApi, name: string, options: {
   synopsis: string; seasonNumber: number; episodeNumber: number; episodeName: string; durationSeconds: number;
+  year?: number | null; genreIds?: string[];
 }) {
   let series = await api.write<Series>("post", "/api/admin/series", { name });
-  series = await api.write<Series>("patch", `/api/admin/series/${series.id}`, { version: series.version, synopsis: options.synopsis });
+  series = await api.write<Series>("patch", `/api/admin/series/${series.id}`, {
+    version: series.version, synopsis: options.synopsis, year: options.year ?? null, genre_ids: options.genreIds ?? [],
+  });
   const uploaded = await api.upload<{ version: number }>(`/api/admin/media/series/${series.id}/poster?version=${series.version}`, poster);
   series = await api.write<Series>("post", `/api/admin/series/${series.id}/seasons`, { version: uploaded.version, number: options.seasonNumber });
   const season = series.seasons.find((item) => item.number === options.seasonNumber)!;
