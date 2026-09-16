@@ -44,8 +44,10 @@ export function video() {
   return { name: "sample.mp4", mimeType: "video/mp4", buffer: readFileSync(resolve(generated, "sample.mp4")) };
 }
 
-export type Movie = { id: string; version: number; name: string; status: string; video: null | { url: string } };
-export type Series = { id: string; version: number; name: string; status: string; seasons: Array<{ id: string; number: number; episodes: Array<{ id: string; version: number; name: string; status: string; video: null | { url: string } }> }> };
+export type MediaSummary = { url: string; local_path: string };
+export type Movie = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; video: MediaSummary | null };
+export type Episode = { id: string; version: number; number: number; name: string; status: string; video: MediaSummary | null };
+export type Series = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; seasons: Array<{ id: string; number: number; episodes: Episode[] }> };
 
 export class AdminApi {
   constructor(readonly request: APIRequestContext, readonly csrf: string) {}
@@ -79,31 +81,50 @@ export class AdminApi {
   }
 }
 
-export async function createPublishableMovie(api: AdminApi, name: string) {
+export async function createMovieDraftWithMedia(api: AdminApi, name: string, options: {
+  synopsis: string; durationSeconds: number; includePoster?: boolean;
+}) {
   let movie = await api.write<Movie>("post", "/api/admin/movies", { name });
   movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
-    version: movie.version, name, synopsis: `${name} searchable synopsis`, year: 2026, duration_seconds: 1, genre_ids: [],
+    version: movie.version, name, synopsis: options.synopsis, year: 2026, duration_seconds: options.durationSeconds, genre_ids: [],
   });
-  const uploadedPoster = await api.upload<{ version: number }>(`/api/admin/media/movies/${movie.id}/poster?version=${movie.version}`, poster);
-  const uploadedVideo = await api.upload<{ version: number }>(`/api/admin/media/movies/${movie.id}/video?version=${uploadedPoster.version}`, video());
-  return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: uploadedVideo.version });
+  let version = movie.version;
+  if (options.includePoster !== false) {
+    const uploaded = await api.upload<{ version: number }>(`/api/admin/media/movies/${movie.id}/poster?version=${version}`, poster);
+    version = uploaded.version;
+  }
+  await api.upload(`/api/admin/media/movies/${movie.id}/video?version=${version}`, video());
+  return api.get<Movie>(`/api/admin/movies/${movie.id}`);
+}
+
+export async function createPublishableMovie(api: AdminApi, name: string) {
+  const movie = await createMovieDraftWithMedia(api, name, { synopsis: `${name} searchable synopsis`, durationSeconds: 1 });
+  return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: movie.version });
 }
 
 export async function createPublishableMovieWithoutPoster(api: AdminApi, name: string) {
-  let movie = await api.write<Movie>("post", "/api/admin/movies", { name });
-  movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
-    version: movie.version,
-    name,
-    synopsis: `${name} pagination fixture`,
-    year: 2026,
-    duration_seconds: 1,
-    genre_ids: [],
+  const movie = await createMovieDraftWithMedia(api, name, {
+    synopsis: `${name} pagination fixture`, durationSeconds: 1, includePoster: false,
   });
-  const uploaded = await api.upload<{ version: number }>(
-    `/api/admin/media/movies/${movie.id}/video?version=${movie.version}`,
-    video(),
-  );
-  return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: uploaded.version });
+  return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: movie.version });
+}
+
+export async function createSeriesDraftWithMedia(api: AdminApi, name: string, options: {
+  synopsis: string; seasonNumber: number; episodeNumber: number; episodeName: string; durationSeconds: number;
+}) {
+  let series = await api.write<Series>("post", "/api/admin/series", { name });
+  series = await api.write<Series>("patch", `/api/admin/series/${series.id}`, { version: series.version, synopsis: options.synopsis });
+  const uploaded = await api.upload<{ version: number }>(`/api/admin/media/series/${series.id}/poster?version=${series.version}`, poster);
+  series = await api.write<Series>("post", `/api/admin/series/${series.id}/seasons`, { version: uploaded.version, number: options.seasonNumber });
+  const season = series.seasons.find((item) => item.number === options.seasonNumber)!;
+  const episodesPath = `/api/admin/series/${series.id}/seasons/${season.id}/episodes`;
+  series = await api.write<Series>("post", episodesPath, { version: series.version, number: options.episodeNumber, name: options.episodeName });
+  const episode = series.seasons.find((item) => item.id === season.id)!.episodes[0];
+  const updated = await api.write<{ episode: Episode }>("patch", `${episodesPath}/${episode.id}`, {
+    version: episode.version, duration_seconds: options.durationSeconds,
+  });
+  await api.upload(`/api/admin/media/episodes/${episode.id}/video?version=${updated.episode.version}`, video());
+  return api.get<Series>(`/api/admin/series/${series.id}`);
 }
 
 export function saveState(state: Record<string, unknown>) { writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 }); }

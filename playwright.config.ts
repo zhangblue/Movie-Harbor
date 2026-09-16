@@ -12,7 +12,8 @@ export default defineConfig({
   projects: [
     { name: "public", testMatch: /public\.spec\.ts/ },
     { name: "series", testMatch: /series\.spec\.ts/, dependencies: ["public"] },
-    { name: "playback", testMatch: /playback\.spec\.ts/, dependencies: ["series"] },
+    { name: "export", testMatch: /export\.spec\.ts/, dependencies: ["series"] },
+    { name: "playback", testMatch: /playback\.spec\.ts/, dependencies: ["export"] },
     { name: "pagination", testMatch: /pagination\.spec\.ts/, dependencies: ["playback"] },
     { name: "admin", testMatch: /admin\.spec\.ts/, dependencies: ["pagination"] },
     { name: "persistence", testMatch: /persistence\.spec\.ts/ },

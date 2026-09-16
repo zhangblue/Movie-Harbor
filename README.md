@@ -11,6 +11,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 生产应用：已实现，可通过 Docker Compose 自托管。
 - 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
 - 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
+- 管理导出：详情展示视频容器内路径，支持一次下载全部内容的只读 JSON。
 - 发布工具：支持生成 `linux/arm64` 半离线 Docker 部署包。
 
 ## 核心设计
@@ -50,8 +51,17 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [HEVC MP4 上传与中文错误反馈](docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md)
 - [管理与公开内容列表分页](docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md)
 - [前后端公共函数提取](docs/superpowers/specs/2026-09-15-common-function-extraction-design.md)
+- [管理媒体路径显示与内容 JSON 导出](docs/superpowers/specs/2026-09-16-admin-media-path-and-json-export-design.md)
 
 完整设计和实施记录位于 `docs/superpowers/specs/` 与 `docs/superpowers/plans/`。
+
+## 管理媒体路径与内容导出
+
+电影详情和剧集的单集视频区域显示已上传视频的只读“本地存储路径”，例如 `/media/video/ab/<uuid>.mp4`。这是容器内完整路径，不是 `MEDIA_HOST_DIR` 对应的宿主机绝对路径；未上传的视频不会显示路径，路径也不能用于修改媒体。
+
+在管理后台“内容管理”标题旁点击“导出 JSON”，可下载 `movie-harbor-content-export-YYYYMMDD-HHmmss.json`，文件名时间使用服务端 UTC。导出包含全部草稿、已发布和已归档电影与剧集，不受当前筛选、搜索或分页影响；JSON 中不包含状态、数据库 ID 或媒体 ID。
+
+电影导出名称、简介、海报路径、视频路径和秒数；剧集导出名称、简介、海报路径及扁平单集数组，每集包含季编号、集编号、名称、视频路径和秒数。海报路径和视频路径均为容器内路径；缺失的媒体或时长显式为 `null`。导出是只读元数据快照，不能导入，也不包含媒体文件，不能代替数据库与媒体目录的一致备份。
 
 ## 媒体目录安全边界
 
@@ -231,6 +241,7 @@ python3 -m http.server 4174 --directory demo --bind 127.0.0.1
 ```text
 backend/                    Axum API、迁移与后端测试
 backend/src/admin_content/  电影与剧集统一管理列表和分页
+backend/src/admin_export/   全量内容只读快照与 JSON 导出
 backend/src/content.rs      跨内容类型的字段与生命周期基础规则
 backend/src/route_params.rs 公共 UUID 路由参数解析
 frontend/public-web/        公开 React 应用
