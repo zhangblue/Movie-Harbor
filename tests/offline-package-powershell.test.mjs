@@ -6,15 +6,70 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-import { imageTags, renderLoadPowerShell } from "../tools/offline-package.mjs";
+import {
+  imageTags,
+  renderLoadPowerShell,
+  renderStartPowerShell,
+  renderStartScript,
+} from "../tools/offline-package.mjs";
 
 const VERSION = "test-v1";
 const PLATFORM = "linux/amd64";
 const DELIVERY_FILES = [
   ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar",
-  "load-images.sh", "load-images.ps1",
+  "load-images.sh", "load-images.ps1", "start.sh", "start.ps1",
 ];
 const POWERSHELL = process.platform === "win32" ? "powershell.exe" : undefined;
+
+test("packaged start.sh generates the same multi-volume mounts before fixed Compose startup", async t => {
+  const root = await mkdtemp(join(tmpdir(), "offline-start-shell-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = join(root, "bundle with spaces");
+  const bin = join(root, "bin");
+  const volume0 = join(root, "media $ zero");
+  const volume1 = join(root, "media one");
+  await Promise.all([mkdir(bundle), mkdir(bin), mkdir(volume0), mkdir(volume1)]);
+  await mkdir(join(volume0, "poster"));
+  await writeFile(join(bundle, "compose.yml"), "{}\n");
+  await writeFile(join(bundle, ".env"), `MEDIA_HOST_DIR=${volume0};${volume1}\n`);
+  await writeFile(join(bundle, "start.sh"), renderStartScript(VERSION, PLATFORM));
+  await chmod(join(bundle, "start.sh"), 0o755);
+  const log = join(root, "docker.log");
+  await writeFile(join(bin, "docker"), `#!/usr/bin/env node\n${DOCKER_DOUBLE}`);
+  await chmod(join(bin, "docker"), 0o755);
+
+  const result = spawnSync("sh", [join(bundle, "start.sh")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      DOCKER_TEST_LOG: log,
+      DOCKER_TEST_MODE: "success",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const calls = (await readFile(log, "utf8")).trim().split("\n").map(JSON.parse);
+  assert.deepEqual(calls, [
+    ["info", "--format", "{{.OSType}}/{{.Architecture}}"],
+    ["compose", "version", "--short"],
+    ["compose", "--env-file", ".env", "-f", "compose.yml", "-f", "compose.storage.generated.json", "up", "-d", "--no-build", "--wait"],
+  ]);
+  const generated = JSON.parse(await readFile(join(bundle, "compose.storage.generated.json"), "utf8"));
+  assert.equal(generated.services.api.environment.MEDIA_DIRS, "/media/volumes/0;/media/volumes/1");
+  assert.deepEqual(generated.services.api.volumes.map(value => value.target), [
+    "/media/volumes/0", "/media/volumes/1",
+  ]);
+  assert.deepEqual(generated.services.caddy.volumes.map(value => value.target), [
+    "/srv/media/volumes/0", "/srv/media/volumes/1",
+  ]);
+  assert.equal(
+    generated.services.api.volumes[0].source.includes("$$"),
+    true,
+    generated.services.api.volumes[0].source,
+  );
+  assert.equal(generated.services.caddy.volumes.every(value => value.read_only === true), true);
+});
 
 test("renders a PowerShell loader that verifies the exact package before importing images", () => {
   const script = renderLoadPowerShell(VERSION, PLATFORM);
@@ -52,6 +107,48 @@ test("only the AMD64 package exposes the PowerShell image loader", () => {
   assert.throws(() => renderLoadPowerShell(VERSION, "windows/amd64"), /unsupported platform/i);
 });
 
+test("renders a PowerShell deployment entrypoint with strict storage and Docker boundaries", () => {
+  const script = renderStartPowerShell(VERSION, PLATFORM);
+
+  assert.match(script, /\$PSScriptRoot/);
+  assert.match(script, /OSVersion\.Platform[^\n]*Win32NT/);
+  assert.match(script, /Get-Content -LiteralPath/);
+  assert.match(script, /MEDIA_HOST_DIR/);
+  assert.match(script, /rawValue\.Split\(\[char\]';'\)/);
+  assert.match(script, /ContainsWildcardCharacters/);
+  assert.match(script, /cannot use UNC network paths/);
+  assert.match(script, /absolute Windows drive paths/);
+  assert.match(script, /Get-PSDrive[^\n]*-PSProvider FileSystem/);
+  assert.match(script, /StringComparer\]::OrdinalIgnoreCase/);
+  assert.match(script, /new media volume \$volume must be empty/);
+  assert.match(script, /\.movie-harbor-volume\.json/);
+  assert.match(script, /\.movie-harbor-storage-state\.json/);
+  assert.match(script, /compose\.storage\.generated\.json/);
+  assert.match(script, /ConvertFrom-Json/);
+  assert.match(script, /ConvertTo-Json -Depth 12/);
+  assert.match(script, /System\.Text\.UTF8Encoding\]\:\:new\(\$false\)/);
+  assert.match(script, /Move-Item -LiteralPath/);
+  assert.match(script, /docker info --format '\{\{\.OSType\}\}\/\{\{\.Architecture\}\}'/);
+  assert.match(script, /docker compose version --short/);
+  assert.match(
+    script,
+    /docker compose --env-file \.env -f compose\.yml -f compose\.storage\.generated\.json up -d --no-build --wait/,
+  );
+  assert.match(script, /MEDIA_DIRS/);
+  assert.match(script, /\/media\/volumes\/\$volume/);
+  assert.match(script, /\/srv\/media\/volumes\/\$volume/);
+  assert.match(script, /create_host_path["']?\s*[=:]\s*\$false/);
+  assert.match(script, /read_only["']?\s*[=:]\s*\$true/);
+  assert.doesNotMatch(script, /Invoke-WebRequest|Invoke-RestMethod|Invoke-Expression|\biex\b/i);
+  assert.doesNotMatch(script, /Start-Process[^\n]*-Verb\s+RunAs|Set-ExecutionPolicy|switch[^\n]*container/i);
+  assert.doesNotMatch(script, /docker (?:pull|build)|curl|wget/i);
+});
+
+test("PowerShell deployment entrypoint only targets the AMD64 package", () => {
+  assert.throws(() => renderStartPowerShell(VERSION, "linux/arm64"), /only supported.*linux\/amd64/i);
+  assert.throws(() => renderStartPowerShell(VERSION, "windows/amd64"), /unsupported platform/i);
+});
+
 async function checksumLines(directory) {
   const lines = [];
   for (const name of DELIVERY_FILES) {
@@ -64,9 +161,21 @@ async function checksumLines(directory) {
 const DOCKER_DOUBLE = String.raw`const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(process.env.DOCKER_TEST_LOG, JSON.stringify(args) + '\n');
+if (args[0] === 'info') {
+  console.log(process.env.DOCKER_TEST_MODE === 'windows-daemon' ? 'windows/amd64' : 'linux/amd64');
+  process.exit(0);
+}
+if (args[0] === 'compose' && args[1] === 'version') {
+  console.log('2.39.1');
+  process.exit(0);
+}
+if (args[0] === 'compose' && args.includes('up')) {
+  process.exit(process.env.DOCKER_TEST_MODE === 'startup-failure' ? 1 : 0);
+}
 if (args[0] === 'image' && args[1] === 'load') {
   process.exit(0);
 }
+
 if (args[0] === 'image' && args[1] === 'inspect') {
   const image = args.at(-1);
   if (process.env.DOCKER_TEST_MODE === 'missing-image' && image.includes('public-web')) {
@@ -83,6 +192,121 @@ if (args[0] === 'image' && args[1] === 'inspect') {
 console.error('unexpected docker command: ' + args.join(' '));
 process.exit(1);
 `;
+
+function asWindowsPath(value) {
+  return value.replaceAll("\\", "/");
+}
+
+async function startPowerShellFixture(t, mode = "success") {
+  const root = await mkdtemp(join(tmpdir(), "offline-start-powershell-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bundle = join(root, "bundle with spaces");
+  const bin = join(root, "bin");
+  const volume0 = join(root, "media $ zero");
+  const volume1 = join(root, "media one");
+  await Promise.all([mkdir(bundle), mkdir(bin), mkdir(volume0), mkdir(volume1)]);
+  await mkdir(join(volume0, "poster"));
+  await writeFile(join(bundle, "compose.yml"), "{}\n");
+  await writeFile(join(bundle, "start.ps1"), renderStartPowerShell(VERSION, PLATFORM));
+  const configuredVolume1 = mode === "missing-directory" ? join(root, "missing") : volume1;
+  if (mode === "nonempty-new-volume") await writeFile(join(volume1, "unexpected.txt"), "occupied");
+  let mediaValue = `${asWindowsPath(volume0)};${asWindowsPath(configuredVolume1)}`;
+  if (mode === "duplicate") mediaValue = `${asWindowsPath(volume0)};${asWindowsPath(volume0)}`;
+  if (mode === "relative") mediaValue = "relative/media";
+  if (mode === "unc") mediaValue = "//server/share";
+  if (mode === "wildcard") mediaValue = `${asWindowsPath(volume0)}/*`;
+  if (mode === "empty-entry") mediaValue = `${asWindowsPath(volume0)};;${asWindowsPath(volume1)}`;
+  await writeFile(join(bundle, ".env"), [
+    "# must not be evaluated as PowerShell",
+    "ATTACK=$(Set-Content should-not-exist.txt attacked)",
+    `MEDIA_HOST_DIR=\"${mediaValue}\"`,
+    "MEDIA_HOST_DIR=Z:/ignored-duplicate",
+  ].join("\r\n"));
+  await writeFile(join(bin, "docker-double.cjs"), DOCKER_DOUBLE);
+  await writeFile(join(bin, "docker.cmd"), '@echo off\r\nnode "%~dp0docker-double.cjs" %*\r\n');
+  await chmod(join(bin, "docker.cmd"), 0o755);
+  if (mode === "marker-mismatch") {
+    const directories = [asWindowsPath(volume0), asWindowsPath(volume1)];
+    await writeFile(join(bundle, ".movie-harbor-storage-state.json"), JSON.stringify({
+      version: 1, directories,
+    }));
+    await writeFile(join(volume0, ".movie-harbor-volume.json"), JSON.stringify({ version: 1, volume: 0 }));
+    await writeFile(join(volume1, ".movie-harbor-volume.json"), JSON.stringify({ version: 1, volume: 9 }));
+  }
+  const log = join(root, "docker.log");
+  const result = spawnSync(POWERSHELL, [
+    "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+    "-File", join(bundle, "start.ps1"),
+  ], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      DOCKER_TEST_LOG: log,
+      DOCKER_TEST_MODE: mode,
+    },
+    encoding: "utf8",
+  });
+  const calls = (await readFile(log, "utf8").catch(() => ""))
+    .trim().split("\n").filter(Boolean).map(JSON.parse);
+  return { bundle, calls, result, root, volume0, volume1 };
+}
+
+test("PowerShell deployment generates multi-volume storage and starts fixed Compose files", {
+  skip: POWERSHELL ? false : "requires Windows PowerShell 5.1+",
+}, async t => {
+  const fixture = await startPowerShellFixture(t);
+  assert.equal(fixture.result.status, 0, fixture.result.stderr || fixture.result.stdout);
+  assert.deepEqual(fixture.calls, [
+    ["info", "--format", "{{.OSType}}/{{.Architecture}}"],
+    ["compose", "version", "--short"],
+    ["compose", "--env-file", ".env", "-f", "compose.yml", "-f", "compose.storage.generated.json", "up", "-d", "--no-build", "--wait"],
+  ]);
+  const outputBytes = await readFile(join(fixture.bundle, "compose.storage.generated.json"));
+  assert.notDeepEqual([...outputBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  const generated = JSON.parse(outputBytes.toString("utf8"));
+  assert.equal(generated.services.api.environment.MEDIA_DIRS, "/media/volumes/0;/media/volumes/1");
+  assert.deepEqual(generated.services.api.volumes.map(value => value.target), [
+    "/media/volumes/0", "/media/volumes/1",
+  ]);
+  assert.deepEqual(generated.services.caddy.volumes.map(value => value.target), [
+    "/srv/media/volumes/0", "/srv/media/volumes/1",
+  ]);
+  assert.equal(generated.services.api.volumes[0].source.includes("$$"), true);
+  assert.equal(generated.services.caddy.volumes.every(value => value.read_only === true), true);
+  assert.equal(generated.services.api.volumes.every(value => value.bind.create_host_path === false), true);
+  assert.deepEqual(JSON.parse(await readFile(join(fixture.volume0, ".movie-harbor-volume.json"), "utf8")), {
+    version: 1, volume: 0,
+  });
+  assert.deepEqual(JSON.parse(await readFile(join(fixture.volume1, ".movie-harbor-volume.json"), "utf8")), {
+    version: 1, volume: 1,
+  });
+  await assert.rejects(readFile(join(fixture.root, "should-not-exist.txt")), /ENOENT/);
+});
+
+for (const [mode, error] of [
+  ["windows-daemon", /Linux containers/i],
+  ["missing-directory", /does not exist/i],
+  ["duplicate", /duplicate/i],
+  ["relative", /absolute Windows drive paths/i],
+  ["unc", /UNC network paths/i],
+  ["wildcard", /wildcard/i],
+  ["empty-entry", /empty directory entry/i],
+  ["nonempty-new-volume", /must be empty/i],
+  ["marker-mismatch", /identity marker does not match/i],
+  ["startup-failure", /startup failed/i],
+]) {
+  test(`PowerShell deployment fails safely for ${mode}`, {
+    skip: POWERSHELL ? false : "requires Windows PowerShell 5.1+",
+  }, async t => {
+    const fixture = await startPowerShellFixture(t, mode);
+    assert.notEqual(fixture.result.status, 0);
+    assert.match(fixture.result.stderr, error);
+    if (mode !== "startup-failure") {
+      assert.equal(fixture.calls.some(args => args.includes("up")), false);
+    }
+  });
+}
 
 async function powershellFixture(t, mode) {
   const root = await mkdtemp(join(tmpdir(), "offline-powershell-test-"));

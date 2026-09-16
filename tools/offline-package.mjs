@@ -133,6 +133,9 @@ async function main(args) {
     await chmod(join(bundle, "load-images.sh"), 0o755);
     if (options.platform === "linux/amd64") {
       await writeFile(join(bundle, "load-images.ps1"), renderLoadPowerShell(version, options.platform));
+      await writeFile(join(bundle, "start.ps1"), renderStartPowerShell(version, options.platform));
+      await writeFile(join(bundle, "start.sh"), renderStartScript(version, options.platform));
+      await chmod(join(bundle, "start.sh"), 0o755);
     }
     await writeFile(join(bundle, "README.md"), renderBundleReadme(version, options.platform));
     await mkdir(outputDirectory, { recursive: true });
@@ -224,17 +227,17 @@ export function archiveName(version, platform = DEFAULT_PLATFORM) {
 function deliveryFilesForPlatform(platform) {
   platformInfo(platform);
   return platform === "linux/amd64"
-    ? [...BASE_DELIVERY_FILES, "load-images.ps1"]
+    ? [...BASE_DELIVERY_FILES, "load-images.ps1", "start.ps1", "start.sh"]
     : [...BASE_DELIVERY_FILES];
 }
 
-function bind(source, target, options = {}) {
+function bind(source, target, { create_host_path = true, ...options } = {}) {
   return {
     type: "bind",
     source,
     target,
     ...options,
-    bind: { create_host_path: true },
+    bind: { create_host_path },
   };
 }
 
@@ -273,8 +276,8 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
       "media-init": {
         image: "alpine:3.22",
         restart: "no",
-        command: ["sh", "-c", "chown 10001:10001 /media && chmod 0700 /media"],
-        volumes: [bind(mediaSource, "/media")],
+        command: ["sh", "-c", "for directory in /media/volumes/*; do chown 10001:10001 \"$$directory\" && chmod 0711 \"$$directory\"; done"],
+        volumes: [bind(mediaSource, "/media/volumes/0", { create_host_path: false })],
       },
       api: {
         image: apiImage,
@@ -291,7 +294,8 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
           POSTGRES_DB: "${POSTGRES_DB:?set POSTGRES_DB}",
           POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER}",
           POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}",
-          MEDIA_DIR: "/media",
+          MEDIA_DIRS: "/media/volumes/0",
+          MEDIA_DISK_RESERVE_BYTES: "${MEDIA_DISK_RESERVE_BYTES:-10737418240}",
           COOKIE_SECURE: "${COOKIE_SECURE:-false}",
           PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
           TRUST_PROXY_HEADERS: "true",
@@ -301,7 +305,7 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
           ADMIN_NAME: "${ADMIN_NAME:-}",
           ADMIN_INITIAL_PASSWORD: "${ADMIN_INITIAL_PASSWORD:-}",
         },
-        volumes: [bind(mediaSource, "/media")],
+        volumes: [bind(mediaSource, "/media/volumes/0", { create_host_path: false })],
         healthcheck: healthcheck(
           ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/api/health"],
           20,
@@ -338,7 +342,7 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
         ports: ["${APP_PORT:-8080}:80"],
         volumes: [
           "./Caddyfile:/etc/caddy/Caddyfile:ro",
-          bind(mediaSource, "/srv/media", { read_only: true }),
+          bind(mediaSource, "/srv/media/volumes/0", { read_only: true, create_host_path: false }),
         ],
         healthcheck: healthcheck(
           ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1/api/health"],
@@ -454,10 +458,449 @@ ${expectedImages}
 `;
 }
 
+export function renderStartPowerShell(version, platform = "linux/amd64") {
+  validateVersion(version);
+  platformInfo(platform);
+  if (platform !== "linux/amd64") {
+    throw new Error("PowerShell deployment is only supported for linux/amd64 packages");
+  }
+
+  return String.raw`$ErrorActionPreference = 'Stop'
+
+function Test-ExactProperties($Value, [string[]]$ExpectedNames) {
+    $remaining = [System.Collections.Generic.HashSet[string]]::new(
+        $ExpectedNames,
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($property in @($Value.PSObject.Properties)) {
+        if (-not $remaining.Remove($property.Name)) {
+            return $false
+        }
+    }
+    return $remaining.Count -eq 0
+}
+
+function Write-Utf8NoBomAtomic([string]$Path, [string]$Content) {
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $temporary = Join-Path -Path $parent -ChildPath ('.{0}.{1}.{2}.tmp' -f $leaf, $PID, [Guid]::NewGuid().ToString('N'))
+    try {
+        $utf8 = [System.Text.UTF8Encoding]::new($false)
+        [System.IO.File]::WriteAllText($temporary, $Content, $utf8)
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    } finally {
+        if (Test-Path -LiteralPath $temporary) {
+            Remove-Item -LiteralPath $temporary -Force
+        }
+    }
+}
+
+function Get-MediaHostDirectories([string]$EnvPath) {
+    $rawValue = $null
+    foreach ($line in [System.IO.File]::ReadAllLines($EnvPath)) {
+        $match = [regex]::Match($line, '^\s*MEDIA_HOST_DIR\s*=(?<value>.*)$')
+        if ($match.Success) {
+            $rawValue = $match.Groups['value'].Value.Trim()
+            break
+        }
+    }
+    if ($null -eq $rawValue) {
+        throw 'MEDIA_HOST_DIR is missing from .env'
+    }
+    if ($rawValue.StartsWith('"') -or $rawValue.EndsWith('"')) {
+        if ($rawValue.Length -lt 2 -or -not ($rawValue.StartsWith('"') -and $rawValue.EndsWith('"'))) {
+            throw 'MEDIA_HOST_DIR has unmatched double quotes'
+        }
+        $rawValue = $rawValue.Substring(1, $rawValue.Length - 2)
+    }
+    if ($rawValue.Contains('"')) {
+        throw 'MEDIA_HOST_DIR only accepts an unquoted value or one pair of double quotes'
+    }
+
+    $entries = @($rawValue.Split([char]';') | ForEach-Object { $_.Trim() })
+    if ($entries.Count -eq 0 -or @($entries | Where-Object { $_ -eq '' }).Count -ne 0) {
+        throw 'MEDIA_HOST_DIR contains an empty directory entry'
+    }
+
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $directories = New-Object System.Collections.ArrayList
+    foreach ($entry in $entries) {
+        if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($entry)) {
+            throw 'MEDIA_HOST_DIR cannot contain wildcard characters'
+        }
+        if ($entry.StartsWith('\\') -or $entry.StartsWith('//')) {
+            throw 'MEDIA_HOST_DIR cannot use UNC network paths'
+        }
+        if ($entry -notmatch '^[A-Za-z]:[\\/]') {
+            throw 'MEDIA_HOST_DIR entries must be absolute Windows drive paths'
+        }
+        $driveName = $entry.Substring(0, 1)
+        if ($null -eq (Get-PSDrive -Name $driveName -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+            throw "MEDIA_HOST_DIR drive does not exist: $driveName"
+        }
+        $fullPath = [System.IO.Path]::GetFullPath($entry)
+        $root = [System.IO.Path]::GetPathRoot($fullPath)
+        while ($fullPath.Length -gt $root.Length -and ($fullPath.EndsWith('\') -or $fullPath.EndsWith('/'))) {
+            $fullPath = $fullPath.Substring(0, $fullPath.Length - 1)
+        }
+        if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+            throw 'MEDIA_HOST_DIR directory does not exist'
+        }
+        $item = Get-Item -LiteralPath $fullPath -Force
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'MEDIA_HOST_DIR directory cannot be a reparse point'
+        }
+        $normalized = ([System.IO.Path]::GetFullPath($item.FullName)).Replace('\', '/')
+        if (-not $seen.Add($normalized)) {
+            throw 'MEDIA_HOST_DIR contains a duplicate directory'
+        }
+
+        $probe = Join-Path -Path $item.FullName -ChildPath ('.movie-harbor-write-probe-{0}' -f [Guid]::NewGuid().ToString('N'))
+        try {
+            $stream = [System.IO.File]::Open($probe, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            $stream.Dispose()
+        } finally {
+            if (Test-Path -LiteralPath $probe) {
+                Remove-Item -LiteralPath $probe -Force
+            }
+        }
+        [void]$directories.Add($normalized)
+    }
+    return @($directories)
+}
+
+function Read-VolumeMarker([string]$Directory, [int]$Volume) {
+    $markerPath = Join-Path -Path $Directory -ChildPath '.movie-harbor-volume.json'
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        throw "media volume $Volume has no valid identity marker"
+    }
+    $item = Get-Item -LiteralPath $markerPath -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $item.Length -gt 4096) {
+        throw "media volume $Volume has no valid identity marker"
+    }
+    try {
+        $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
+    } catch {
+        throw "media volume $Volume has no valid identity marker"
+    }
+    if (-not (Test-ExactProperties $marker @('version', 'volume')) -or $marker.version -ne 1 -or $marker.volume -ne $Volume) {
+        throw "media volume $Volume identity marker does not match"
+    }
+}
+
+function Initialize-MediaVolumes([string[]]$Directories, [string]$StatePath, [string]$OutputPath) {
+    $registered = $null
+    if (Test-Path -LiteralPath $StatePath) {
+        if (-not (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
+            throw 'media volume registration is invalid; restore it from backup'
+        }
+        try {
+            $stateItem = Get-Item -LiteralPath $StatePath -Force
+            if (($stateItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0 -or $stateItem.Length -gt 1048576) {
+                throw 'invalid state entry'
+            }
+            $registered = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json
+        } catch {
+            throw 'media volume registration is invalid; restore it from backup'
+        }
+        if (-not (Test-ExactProperties $registered @('version', 'directories')) -or
+            $registered.version -ne 1 -or $null -eq $registered.directories -or @($registered.directories).Count -eq 0) {
+            throw 'media volume registration is invalid; restore it from backup'
+        }
+    } else {
+        if (Test-Path -LiteralPath $OutputPath) {
+            throw 'media volume registration is missing; restore it before starting'
+        }
+        for ($volume = 0; $volume -lt $Directories.Count; $volume += 1) {
+            $markerPath = Join-Path -Path $Directories[$volume] -ChildPath '.movie-harbor-volume.json'
+            if (Test-Path -LiteralPath $markerPath) {
+                throw 'media volume registration is missing; restore it before starting'
+            }
+        }
+    }
+
+    $previous = if ($null -eq $registered) { @() } else { @($registered.directories) }
+    if ($previous.Count -gt $Directories.Count) {
+        throw 'registered media volume paths cannot be removed'
+    }
+    for ($volume = 0; $volume -lt $previous.Count; $volume += 1) {
+        if (-not [string]::Equals([string]$previous[$volume], $Directories[$volume], [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'registered media volume paths cannot be replaced or reordered'
+        }
+    }
+
+    for ($volume = 0; $volume -lt $Directories.Count; $volume += 1) {
+        $markerPath = Join-Path -Path $Directories[$volume] -ChildPath '.movie-harbor-volume.json'
+        if ($volume -lt $previous.Count) {
+            Read-VolumeMarker $Directories[$volume] $volume
+        } else {
+            if (Test-Path -LiteralPath $markerPath) {
+                throw "new media volume $volume already has an identity marker"
+            }
+            if ($volume -gt 0 -and @(Get-ChildItem -LiteralPath $Directories[$volume] -Force).Count -ne 0) {
+                throw "new media volume $volume must be empty"
+            }
+        }
+    }
+
+    if ($previous.Count -eq $Directories.Count) {
+        return
+    }
+    $state = [ordered]@{ version = 1; directories = @($Directories) }
+    $stateJson = ($state | ConvertTo-Json -Depth 12) + [Environment]::NewLine
+    Write-Utf8NoBomAtomic $StatePath $stateJson
+    for ($volume = $previous.Count; $volume -lt $Directories.Count; $volume += 1) {
+        $markerPath = Join-Path -Path $Directories[$volume] -ChildPath '.movie-harbor-volume.json'
+        $marker = [ordered]@{ version = 1; volume = $volume }
+        Write-Utf8NoBomAtomic $markerPath (($marker | ConvertTo-Json -Depth 12 -Compress) + [Environment]::NewLine)
+    }
+}
+
+function New-StorageCompose([string[]]$Directories) {
+    $initMounts = New-Object System.Collections.ArrayList
+    $apiMounts = New-Object System.Collections.ArrayList
+    $caddyMounts = New-Object System.Collections.ArrayList
+    $mediaDirectories = New-Object System.Collections.ArrayList
+    for ($volume = 0; $volume -lt $Directories.Count; $volume += 1) {
+        $source = $Directories[$volume].Replace('$', '$$')
+        [void]$initMounts.Add([ordered]@{
+            type = 'bind'; source = $source; target = "/media/volumes/$volume"
+            bind = [ordered]@{ create_host_path = $false }
+        })
+        [void]$apiMounts.Add([ordered]@{
+            type = 'bind'; source = $source; target = "/media/volumes/$volume"
+            bind = [ordered]@{ create_host_path = $false }
+        })
+        [void]$caddyMounts.Add([ordered]@{
+            type = 'bind'; source = $source; target = "/srv/media/volumes/$volume"; read_only = $true
+            bind = [ordered]@{ create_host_path = $false }
+        })
+        [void]$mediaDirectories.Add("/media/volumes/$volume")
+    }
+    return [ordered]@{
+        services = [ordered]@{
+            'media-init' = [ordered]@{ volumes = @($initMounts) }
+            api = [ordered]@{
+                environment = [ordered]@{ MEDIA_DIRS = (@($mediaDirectories) -join ';') }
+                volumes = @($apiMounts)
+            }
+            caddy = [ordered]@{ volumes = @($caddyMounts) }
+        }
+    }
+}
+
+try {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'Windows is required'
+    }
+    if (-not [Environment]::Is64BitOperatingSystem) {
+        throw 'Windows 64-bit is required'
+    }
+    $packageRoot = $PSScriptRoot
+    $envPath = Join-Path -Path $packageRoot -ChildPath '.env'
+    $composePath = Join-Path -Path $packageRoot -ChildPath 'compose.yml'
+    $outputPath = Join-Path -Path $packageRoot -ChildPath 'compose.storage.generated.json'
+    $statePath = Join-Path -Path $packageRoot -ChildPath '.movie-harbor-storage-state.json'
+    if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
+        throw '.env is missing'
+    }
+    if (-not (Test-Path -LiteralPath $composePath -PathType Leaf)) {
+        throw 'compose.yml is missing'
+    }
+
+    $dockerPlatform = (docker info --format '{{.OSType}}/{{.Architecture}}' | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Desktop is unavailable'
+    }
+    $dockerParts = @($dockerPlatform.Split([char]'/'))
+    if ($dockerParts.Count -ne 2 -or $dockerParts[0] -ne 'linux') {
+        throw "Docker Desktop must run Linux containers, found $dockerPlatform"
+    }
+    docker compose version --short | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker Compose v2 is unavailable'
+    }
+
+    $directories = @(Get-MediaHostDirectories $envPath)
+    Initialize-MediaVolumes $directories $statePath $outputPath
+    $storageCompose = New-StorageCompose $directories
+    $storageJson = ($storageCompose | ConvertTo-Json -Depth 12) + [Environment]::NewLine
+    Write-Utf8NoBomAtomic $outputPath $storageJson
+
+    Push-Location $packageRoot
+    try {
+        docker compose --env-file .env -f compose.yml -f compose.storage.generated.json up -d --no-build --wait
+        if ($LASTEXITCODE -ne 0) {
+            throw 'docker compose startup failed'
+        }
+    } finally {
+        Pop-Location
+    }
+} catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+}
+`;
+}
+
+export function renderStartScript(version, platform = "linux/amd64") {
+  validateVersion(version);
+  platformInfo(platform);
+  if (platform !== "linux/amd64") {
+    throw new Error("Packaged multi-volume startup is only supported for linux/amd64 packages");
+  }
+  return String.raw`#!/bin/sh
+set -eu
+
+package_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$package_root"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo 'Node.js is required to run start.sh; Windows deployments should use start.ps1' >&2
+  exit 1
+fi
+
+daemon_platform=$(docker info --format '{{.OSType}}/{{.Architecture}}')
+case "$daemon_platform" in
+  linux/*) ;;
+  *)
+  echo "Docker must run Linux containers, found $daemon_platform" >&2
+  exit 1
+  ;;
+esac
+docker compose version --short >/dev/null
+
+node --input-type=module <<'MOVIE_HARBOR_STORAGE_GENERATOR'
+import {
+  closeSync, constants, fchmodSync, fstatSync, fsyncSync, lstatSync, openSync,
+  readFileSync, readdirSync, realpathSync, renameSync, writeSync,
+} from "node:fs";
+import path from "node:path";
+
+const markerName = ".movie-harbor-volume.json";
+const statePath = path.resolve(".movie-harbor-storage-state.json");
+const outputPath = path.resolve("compose.storage.generated.json");
+const envPath = path.resolve(".env");
+function fail(message) { throw new Error(message); }
+function exists(value) {
+  try { lstatSync(value); return true; }
+  catch (error) { if (error?.code === "ENOENT") return false; throw error; }
+}
+function atomicWrite(target, content, mode = 0o600) {
+  const temporary = path.join(path.dirname(target), "." + path.basename(target) + "." + process.pid + "." + Date.now() + ".tmp");
+  const descriptor = openSync(temporary, "wx", mode);
+  try { fchmodSync(descriptor, mode); writeSync(descriptor, content); fsyncSync(descriptor); }
+  finally { closeSync(descriptor); }
+  renameSync(temporary, target);
+  const parent = openSync(path.dirname(target), "r");
+  try { fsyncSync(parent); } finally { closeSync(parent); }
+}
+function exactObject(value, names) {
+  return value && !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...names].sort());
+}
+function readMarker(directory, volume) {
+  let descriptor;
+  try {
+    descriptor = openSync(path.join(directory, markerName), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(descriptor);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 4096) fail("media volume " + volume + " has no valid identity marker");
+    const marker = JSON.parse(readFileSync(descriptor, "utf8"));
+    if (!exactObject(marker, ["version", "volume"]) || marker.version !== 1 || marker.volume !== volume) {
+      fail("media volume " + volume + " identity marker does not match");
+    }
+  } catch (error) {
+    if (/identity marker/.test(error.message)) throw error;
+    fail("media volume " + volume + " has no valid identity marker");
+  } finally { if (descriptor !== undefined) closeSync(descriptor); }
+}
+const line = readFileSync(envPath, "utf8").split(/\r?\n/).find(value => value.startsWith("MEDIA_HOST_DIR="));
+if (!line) fail("MEDIA_HOST_DIR is missing from .env");
+const value = line.slice("MEDIA_HOST_DIR=".length);
+const entries = value.split(";").map(entry => entry.trim());
+if (!entries.length || entries.some(entry => !entry)) fail("MEDIA_HOST_DIR contains an empty directory entry");
+const directories = entries.map((entry, index) => {
+  if (!path.isAbsolute(entry) && (entries.length !== 1 || index !== 0)) fail("multi-volume paths must be absolute");
+  const resolved = path.isAbsolute(entry) ? entry : path.resolve(path.dirname(envPath), entry);
+  const stat = lstatSync(resolved);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) fail("MEDIA_HOST_DIR entry is not a directory");
+  return realpathSync(resolved);
+});
+if (new Set(directories).size !== directories.length) fail("MEDIA_HOST_DIR contains a duplicate directory");
+
+let state = null;
+if (exists(statePath)) {
+  const stat = lstatSync(statePath);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail("media volume registration is invalid");
+  state = JSON.parse(readFileSync(statePath, "utf8"));
+  if (!exactObject(state, ["version", "directories"]) || state.version !== 1 ||
+      !Array.isArray(state.directories) || state.directories.length === 0) fail("media volume registration is invalid");
+} else if (exists(outputPath) || directories.some(directory => exists(path.join(directory, markerName)))) {
+  fail("media volume registration is missing; restore it before starting");
+}
+const previous = state?.directories ?? [];
+if (previous.length > directories.length || previous.some((directory, volume) => directory !== directories[volume])) {
+  fail("registered media volume paths cannot be replaced, reordered or removed");
+}
+for (const [volume, directory] of directories.entries()) {
+  const markerPath = path.join(directory, markerName);
+  if (volume < previous.length) readMarker(directory, volume);
+  else {
+    if (exists(markerPath)) fail("new media volume " + volume + " already has an identity marker");
+    if (volume > 0 && readdirSync(directory).length !== 0) fail("new media volume " + volume + " must be empty");
+  }
+}
+if (previous.length !== directories.length) {
+  atomicWrite(statePath, JSON.stringify({ version: 1, directories }, null, 2) + "\n");
+  for (let volume = previous.length; volume < directories.length; volume += 1) {
+    atomicWrite(path.join(directories[volume], markerName), JSON.stringify({ version: 1, volume }) + "\n", 0o644);
+  }
+}
+const mounts = (root, readOnly) => directories.map((source, volume) => ({
+  type: "bind", source: source.replaceAll("$", () => "$$"), target: root + "/" + volume,
+  ...(readOnly ? { read_only: true } : {}), bind: { create_host_path: false },
+}));
+const generated = { services: {
+  "media-init": { volumes: mounts("/media/volumes", false) },
+  api: {
+    environment: { MEDIA_DIRS: directories.map((_, volume) => "/media/volumes/" + volume).join(";") },
+    volumes: mounts("/media/volumes", false),
+  },
+  caddy: { volumes: mounts("/srv/media/volumes", true) },
+} };
+atomicWrite(outputPath, JSON.stringify(generated, null, 2) + "\n");
+MOVIE_HARBOR_STORAGE_GENERATOR
+
+docker compose --env-file .env -f compose.yml -f compose.storage.generated.json up -d --no-build --wait
+`;
+}
+
 export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
   const tags = imageTags(version, platform);
   const { os, architecture } = platformInfo(platform);
   const imagePlatform = `${os}/${architecture}`;
+  const deployment = platform === "linux/amd64"
+    ? [
+        "需要 Windows 11 64 位、Docker Desktop WSL2 后端、Linux containers 和 Docker Compose v2。解压后在 Windows PowerShell 5.1 或更高版本中执行：",
+        "",
+        "```powershell",
+        ".\\load-images.ps1",
+        "Copy-Item .env.example .env",
+        "# 编辑 .env，并用正斜杠配置至少一个现存媒体目录，例如：",
+        "# MEDIA_HOST_DIR=D:/MovieHarbor/media;E:/MovieHarbor/media",
+        ".\\start.ps1",
+        "```",
+      ]
+    : [
+        `需要 Docker Engine、Docker Compose v2 和 \`${imagePlatform}\`。解压后执行：`,
+        "",
+        "```sh",
+        "./load-images.sh",
+        "cp .env.example .env",
+        "# 按下方配置说明编辑 .env 后再启动。",
+        "docker compose up -d --no-build --wait",
+        "```",
+      ];
   return [
     "# Movie Harbor 半离线部署包",
     "",
@@ -479,14 +922,7 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
     "",
     "## 部署",
     "",
-    `需要 Docker Engine、Docker Compose v2 和 \`${imagePlatform}\`。解压后执行：`,
-    "",
-    "```sh",
-    "./load-images.sh",
-    "cp .env.example .env",
-    "# 按下方配置说明编辑 .env 后再启动。",
-    "docker compose up -d --no-build --wait",
-    "```",
+    ...deployment,
     "",
     "## 首次配置与访问",
     "",

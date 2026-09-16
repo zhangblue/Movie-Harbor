@@ -31,6 +31,8 @@ const BUNDLE_ENTRIES = [
 const AMD64_BUNDLE_ENTRIES = [
   ...BUNDLE_ENTRIES,
   "movie-harbor/load-images.ps1",
+  "movie-harbor/start.ps1",
+  "movie-harbor/start.sh",
 ].sort();
 
 // Only Docker is replaced: its save boundary still emits a real tar archive.
@@ -233,8 +235,12 @@ test("shell CLI explicit linux/amd64 platform derives target, tags, and archive 
     .trim().split("\n");
   assert.deepEqual(checksums.map(line => line.slice(66)).sort(), [
     ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar",
-    "load-images.ps1", "load-images.sh",
+    "load-images.ps1", "load-images.sh", "start.ps1", "start.sh",
   ]);
+  const startPowerShell = tar(["-xOf", amd64Destination, "movie-harbor/start.ps1"]);
+  assert.match(startPowerShell, /compose\.storage\.generated\.json/);
+  const startShell = tar(["-xOf", amd64Destination, "movie-harbor/start.sh"]);
+  assert.match(startShell, /compose\.storage\.generated\.json/);
   await assertClean(f, [amd64Bundle]);
 });
 
@@ -509,6 +515,28 @@ test("renders the same local configuration fallbacks in the offline Compose", ()
   );
 });
 
+test("renders a multi-volume-ready base Compose for generated storage overrides", () => {
+  const compose = JSON.parse(renderCompose(VERSION, "linux/amd64"));
+
+  assert.equal(compose.services.api.environment.MEDIA_DIRS, "/media/volumes/0");
+  assert.equal(
+    compose.services.api.environment.MEDIA_DISK_RESERVE_BYTES,
+    "${MEDIA_DISK_RESERVE_BYTES:-10737418240}",
+  );
+  assert.equal(Object.hasOwn(compose.services.api.environment, "MEDIA_DIR"), false);
+  assert.deepEqual(compose.services["media-init"].volumes[0], {
+    type: "bind",
+    source: "${MEDIA_HOST_DIR:-./data/media}",
+    target: "/media/volumes/0",
+    bind: { create_host_path: false },
+  });
+  assert.match(compose.services["media-init"].command[2], /chmod 0711/);
+  assert.match(compose.services["media-init"].command[2], /"\$\$directory"/);
+  assert.equal(compose.services.api.volumes[0].target, "/media/volumes/0");
+  assert.equal(compose.services.caddy.volumes[1].target, "/srv/media/volumes/0");
+  assert.equal(compose.services.caddy.volumes[1].read_only, true);
+});
+
 test("renders an image-only Compose deployment with the production topology", () => {
   const compose = JSON.parse(renderCompose(VERSION));
 
@@ -557,12 +585,12 @@ test("renders an image-only Compose deployment with the production topology", ()
   assert.deepEqual(compose.services["media-init"], {
     image: "alpine:3.22",
     restart: "no",
-    command: ["sh", "-c", "chown 10001:10001 /media && chmod 0700 /media"],
+    command: ["sh", "-c", "for directory in /media/volumes/*; do chown 10001:10001 \"$$directory\" && chmod 0711 \"$$directory\"; done"],
     volumes: [{
       type: "bind",
       source: "${MEDIA_HOST_DIR:-./data/media}",
-      target: "/media",
-      bind: { create_host_path: true },
+      target: "/media/volumes/0",
+      bind: { create_host_path: false },
     }],
   });
   assert.deepEqual(compose.services.api, {
@@ -580,7 +608,8 @@ test("renders an image-only Compose deployment with the production topology", ()
       POSTGRES_DB: "${POSTGRES_DB:?set POSTGRES_DB}",
       POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER}",
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}",
-      MEDIA_DIR: "/media",
+      MEDIA_DIRS: "/media/volumes/0",
+      MEDIA_DISK_RESERVE_BYTES: "${MEDIA_DISK_RESERVE_BYTES:-10737418240}",
       COOKIE_SECURE: "${COOKIE_SECURE:-false}",
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
       TRUST_PROXY_HEADERS: "true",
@@ -593,8 +622,8 @@ test("renders an image-only Compose deployment with the production topology", ()
     volumes: [{
       type: "bind",
       source: "${MEDIA_HOST_DIR:-./data/media}",
-      target: "/media",
-      bind: { create_host_path: true },
+      target: "/media/volumes/0",
+      bind: { create_host_path: false },
     }],
     healthcheck: {
       test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/api/health"],
@@ -619,9 +648,9 @@ test("renders an image-only Compose deployment with the production topology", ()
       {
         type: "bind",
         source: "${MEDIA_HOST_DIR:-./data/media}",
-        target: "/srv/media",
+        target: "/srv/media/volumes/0",
         read_only: true,
-        bind: { create_host_path: true },
+        bind: { create_host_path: false },
       },
     ],
     healthcheck: {
@@ -669,6 +698,16 @@ test("renders deployment guidance that keeps official images online", () => {
   assert.match(readme, /caddy:2\.10-alpine/);
   assert.match(readme, /linux\/arm64/);
   assert.match(readme, /test-v1/);
+});
+
+test("renders AMD64 bundle guidance through the verified Windows deployment entrypoints", () => {
+  const readme = renderBundleReadme(VERSION, "linux/amd64");
+
+  assert.match(readme, /\.\\load-images\.ps1/);
+  assert.match(readme, /\.\\start\.ps1/);
+  assert.match(readme, /MEDIA_HOST_DIR/);
+  assert.match(readme, /D:\/MovieHarbor\/media;E:\/MovieHarbor\/media/);
+  assert.doesNotMatch(readme, /docker compose up -d --no-build --wait/);
 });
 
 test("bundle guidance explains HTTPS termination and matching origin and cookie settings", () => {
