@@ -11,6 +11,8 @@ pub struct ContentExport {
 pub struct ExportMovie {
     pub name: String,
     pub synopsis: String,
+    pub year: Option<i32>,
+    pub genres: Vec<String>,
     pub poster_path: Option<String>,
     pub video_path: Option<String>,
     pub duration_seconds: Option<i32>,
@@ -20,6 +22,8 @@ pub struct ExportMovie {
 pub struct ExportSeries {
     pub name: String,
     pub synopsis: String,
+    pub year: Option<i32>,
+    pub genres: Vec<String>,
     pub poster_path: Option<String>,
     pub episodes: Vec<ExportEpisode>,
 }

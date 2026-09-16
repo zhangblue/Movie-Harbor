@@ -94,14 +94,14 @@ INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, p
 ('a0000000-0000-0000-0000-000000000002', 'video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4', 'movie.mp4', 'video/mp4', 1, 'video'),
 ('a0000000-0000-0000-0000-000000000003', 'poster/cc/cccccccccccccccccccccccccccccccc.jpg', 'series.jpg', 'image/jpeg', 1, 'poster'),
 ('a0000000-0000-0000-0000-000000000004', 'video/dd/dddddddddddddddddddddddddddddddd.webm', 'episode.webm', 'video/webm', 1, 'video');
-INSERT INTO movie (id, name, synopsis, status, poster_asset_id, video_asset_id, duration_seconds) VALUES
-('10000000-0000-0000-0000-000000000003', 'Zulu', 'archived movie', 'archived', NULL, NULL, NULL),
-('10000000-0000-0000-0000-000000000002', 'Alpha', 'published movie', 'published', NULL, NULL, NULL),
-('10000000-0000-0000-0000-000000000001', 'Alpha', 'draft movie', 'draft', 'a0000000-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000002', 123);
-INSERT INTO series (id, name, synopsis, status, poster_asset_id) VALUES
-('20000000-0000-0000-0000-000000000003', 'Zulu', 'archived series', 'archived', NULL),
-('20000000-0000-0000-0000-000000000002', 'Alpha', 'published series', 'published', NULL),
-('20000000-0000-0000-0000-000000000001', 'Alpha', 'draft series', 'draft', 'a0000000-0000-0000-0000-000000000003');
+INSERT INTO movie (id, name, synopsis, year, status, poster_asset_id, video_asset_id, duration_seconds) VALUES
+('10000000-0000-0000-0000-000000000003', 'Zulu', 'archived movie', NULL, 'archived', NULL, NULL, NULL),
+('10000000-0000-0000-0000-000000000002', 'Alpha', 'published movie', NULL, 'published', NULL, NULL, NULL),
+('10000000-0000-0000-0000-000000000001', 'Alpha', 'draft movie', 2024, 'draft', 'a0000000-0000-0000-0000-000000000001', 'a0000000-0000-0000-0000-000000000002', 123);
+INSERT INTO series (id, name, synopsis, year, status, poster_asset_id) VALUES
+('20000000-0000-0000-0000-000000000003', 'Zulu', 'archived series', NULL, 'archived', NULL),
+('20000000-0000-0000-0000-000000000002', 'Alpha', 'published series', NULL, 'published', NULL),
+('20000000-0000-0000-0000-000000000001', 'Alpha', 'draft series', 2023, 'draft', 'a0000000-0000-0000-0000-000000000003');
 INSERT INTO season (id, series_id, number) VALUES
 ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 2),
 ('30000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000001', 1),
@@ -111,6 +111,13 @@ INSERT INTO episode (id, season_id, number, name, status, video_asset_id, durati
 ('40000000-0000-0000-0000-000000000002', '30000000-0000-0000-0000-000000000002', 2, 'Second', 'published', NULL, NULL),
 ('40000000-0000-0000-0000-000000000003', '30000000-0000-0000-0000-000000000002', 1, 'First', 'draft', 'a0000000-0000-0000-0000-000000000004', 45),
 ('40000000-0000-0000-0000-000000000004', '30000000-0000-0000-0000-000000000003', 1, 'Hidden parent episode', 'published', NULL, NULL);
+UPDATE genre SET enabled = false
+WHERE id = '00000000-0000-0000-0001-000000000004';
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000004'),
+('10000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000001');
+INSERT INTO series_genre (series_id, genre_id) VALUES
+('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0001-000000000006');
 "#).await.unwrap();
 }
 
@@ -170,18 +177,18 @@ async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_o
         json!({
             "exported_at": payload["exported_at"],
             "movies": [
-                {"name":"Alpha","synopsis":"draft movie","poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
-                {"name":"Alpha","synopsis":"published movie","poster_path":null,"video_path":null,"duration_seconds":null},
-                {"name":"Zulu","synopsis":"archived movie","poster_path":null,"video_path":null,"duration_seconds":null}
+                {"name":"Alpha","synopsis":"draft movie","year":2024,"genres":["剧情","科幻"],"poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
+                {"name":"Alpha","synopsis":"published movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null},
+                {"name":"Zulu","synopsis":"archived movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null}
             ],
             "series": [
-                {"name":"Alpha","synopsis":"draft series","poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
+                {"name":"Alpha","synopsis":"draft series","year":2023,"genres":["悬疑"],"poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
                     {"season_number":1,"episode_number":1,"name":"First","video_path":"/media/video/dd/dddddddddddddddddddddddddddddddd.webm","duration_seconds":45},
                     {"season_number":1,"episode_number":2,"name":"Second","video_path":null,"duration_seconds":null},
                     {"season_number":2,"episode_number":1,"name":"Season two","video_path":null,"duration_seconds":null}
                 ]},
-                {"name":"Alpha","synopsis":"published series","poster_path":null,"episodes":[]},
-                {"name":"Zulu","synopsis":"archived series","poster_path":null,"episodes":[
+                {"name":"Alpha","synopsis":"published series","year":null,"genres":[],"poster_path":null,"episodes":[]},
+                {"name":"Zulu","synopsis":"archived series","year":null,"genres":[],"poster_path":null,"episodes":[
                     {"season_number":1,"episode_number":1,"name":"Hidden parent episode","video_path":null,"duration_seconds":null}
                 ]}
             ]
@@ -261,10 +268,10 @@ async fn export_fails_closed_for_invalid_paths_in_every_media_slot() {
     );
 }
 
-async fn wait_for_locked_media_query(db: &DatabaseConnection) -> bool {
+async fn wait_for_locked_query(db: &DatabaseConnection, relation: &str) -> bool {
     for _ in 0..300 {
         let row = db
-            .query_one(Statement::from_string(
+            .query_one(Statement::from_sql_and_values(
                 DatabaseBackend::Postgres,
                 r#"
 SELECT EXISTS (
@@ -272,9 +279,10 @@ SELECT EXISTS (
     JOIN pg_locks lock ON lock.pid = activity.pid
     WHERE activity.wait_event_type = 'Lock'
       AND lock.locktype = 'relation' AND NOT lock.granted
-      AND lock.relation = to_regclass('media_asset')::oid
+      AND lock.relation = to_regclass($1)::oid
 ) AS blocked
 "#,
+                [relation.into()],
             ))
             .await
             .unwrap()
@@ -287,30 +295,32 @@ SELECT EXISTS (
     false
 }
 
-// Read committed would combine old parent metadata with newly committed media paths.
+// Read committed would combine old parent metadata with newly committed genres and media paths.
 #[tokio::test]
-async fn export_content_and_media_share_one_snapshot() {
+async fn export_content_genres_and_media_share_one_snapshot() {
     let (db, _root, app, cookie) = setup().await;
     seed(&db).await;
     let blocker = db.begin().await.unwrap();
     blocker
-        .execute_unprepared("LOCK TABLE media_asset IN ACCESS EXCLUSIVE MODE")
+        .execute_unprepared("LOCK TABLE movie_genre IN ACCESS EXCLUSIVE MODE")
         .await
         .unwrap();
     let read_app = app.clone();
     let read_cookie = cookie.clone();
     let export_task =
         tokio::spawn(async move { request(&read_app, EXPORT_URI, Some(&read_cookie)).await });
-    if !wait_for_locked_media_query(&db).await {
+    if !wait_for_locked_query(&db, "movie_genre").await {
         blocker.rollback().await.unwrap();
         export_task.abort();
         let _ = export_task.await;
-        panic!("export did not wait for the locked media table");
+        panic!("export did not wait for the locked movie_genre table");
     }
     blocker.execute_unprepared(r#"
 UPDATE movie SET synopsis = 'concurrent movie' WHERE id = '10000000-0000-0000-0000-000000000001';
+UPDATE movie SET year = 2025 WHERE id = '10000000-0000-0000-0000-000000000001';
 UPDATE series SET synopsis = 'concurrent series' WHERE id = '20000000-0000-0000-0000-000000000001';
 UPDATE episode SET name = 'concurrent episode' WHERE id = '40000000-0000-0000-0000-000000000003';
+UPDATE genre SET name = 'concurrent genre' WHERE id = '00000000-0000-0000-0001-000000000004';
 UPDATE media_asset SET storage_key = 'video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4' WHERE id = 'a0000000-0000-0000-0000-000000000002';
 UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.webm' WHERE id = 'a0000000-0000-0000-0000-000000000004';
 "#).await.unwrap();
@@ -322,6 +332,8 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     assert_eq!(response.status(), StatusCode::OK);
     let payload = body(response).await;
     assert_eq!(payload["movies"][0]["synopsis"], "draft movie");
+    assert_eq!(payload["movies"][0]["year"], 2024);
+    assert_eq!(payload["movies"][0]["genres"], json!(["剧情", "科幻"]));
     assert_eq!(
         payload["movies"][0]["video_path"],
         "/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4"
@@ -334,6 +346,11 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     );
     let fresh = body(request(&app, EXPORT_URI, Some(&cookie)).await).await;
     assert_eq!(fresh["movies"][0]["synopsis"], "concurrent movie");
+    assert_eq!(fresh["movies"][0]["year"], 2025);
+    assert_eq!(
+        fresh["movies"][0]["genres"],
+        json!(["剧情", "concurrent genre"])
+    );
     assert_eq!(
         fresh["movies"][0]["video_path"],
         "/media/video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4"

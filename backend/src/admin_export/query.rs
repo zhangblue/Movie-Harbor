@@ -9,8 +9,10 @@ use uuid::Uuid;
 
 #[derive(FromQueryResult)]
 struct MovieRow {
+    id: Uuid,
     name: String,
     synopsis: String,
+    year: Option<i32>,
     poster_asset_id: Option<Uuid>,
     video_asset_id: Option<Uuid>,
     duration_seconds: Option<i32>,
@@ -21,6 +23,7 @@ struct SeriesRow {
     id: Uuid,
     name: String,
     synopsis: String,
+    year: Option<i32>,
     poster_asset_id: Option<Uuid>,
 }
 
@@ -40,6 +43,12 @@ struct MediaRow {
     storage_key: String,
 }
 
+#[derive(FromQueryResult)]
+struct GenreRow {
+    content_id: Uuid,
+    name: String,
+}
+
 pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<ContentExport, DbErr> {
     let tx = db
         .begin_with_config(
@@ -49,11 +58,19 @@ pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<Cont
         .await?;
     let movies = MovieRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
-        "SELECT movie.name, movie.synopsis, movie.poster_asset_id, movie.video_asset_id, movie.duration_seconds FROM movie ORDER BY movie.name ASC, movie.id ASC",
+        "SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.poster_asset_id, movie.video_asset_id, movie.duration_seconds FROM movie ORDER BY movie.name ASC, movie.id ASC",
     )).all(&tx).await?;
     let series = SeriesRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
-        "SELECT series.id, series.name, series.synopsis, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
+        "SELECT series.id, series.name, series.synopsis, series.year, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
+    )).all(&tx).await?;
+    let movie_genres = GenreRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT movie_genre.movie_id AS content_id, genre.name FROM movie_genre JOIN genre ON genre.id = movie_genre.genre_id ORDER BY movie_genre.movie_id ASC, genre.sort_order ASC, genre.id ASC",
+    )).all(&tx).await?;
+    let series_genres = GenreRow::find_by_statement(Statement::from_string(
+        DatabaseBackend::Postgres,
+        "SELECT series_genre.series_id AS content_id, genre.name FROM series_genre JOIN genre ON genre.id = series_genre.genre_id ORDER BY series_genre.series_id ASC, genre.sort_order ASC, genre.id ASC",
     )).all(&tx).await?;
     let episodes = EpisodeRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
@@ -80,12 +97,15 @@ WHERE media_asset.id IN (
         })
         .collect::<Result<HashMap<_, _>, DbErr>>()?;
 
+    let mut movie_genres = group_genres(movie_genres);
     let movies = movies
         .into_iter()
         .map(|row| {
             Ok(ExportMovie {
                 name: row.name,
                 synopsis: row.synopsis,
+                year: row.year,
+                genres: movie_genres.remove(&row.id).unwrap_or_default(),
                 poster_path: media_path(&media, row.poster_asset_id, "poster")?,
                 video_path: media_path(&media, row.video_asset_id, "video")?,
                 duration_seconds: row.duration_seconds,
@@ -106,12 +126,15 @@ WHERE media_asset.id IN (
                 duration_seconds: row.duration_seconds,
             });
     }
+    let mut series_genres = group_genres(series_genres);
     let series = series
         .into_iter()
         .map(|row| {
             Ok(ExportSeries {
                 name: row.name,
                 synopsis: row.synopsis,
+                year: row.year,
+                genres: series_genres.remove(&row.id).unwrap_or_default(),
                 poster_path: media_path(&media, row.poster_asset_id, "poster")?,
                 episodes: by_series.remove(&row.id).unwrap_or_default(),
             })
@@ -123,6 +146,14 @@ WHERE media_asset.id IN (
         movies,
         series,
     })
+}
+
+fn group_genres(rows: Vec<GenreRow>) -> HashMap<Uuid, Vec<String>> {
+    let mut grouped: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.content_id).or_default().push(row.name);
+    }
+    grouped
 }
 
 fn media_path(
