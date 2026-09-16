@@ -27,6 +27,8 @@ const BUNDLE_ENTRIES = [
   "movie-harbor/README.md", "movie-harbor/SHA256SUMS",
   "movie-harbor/compose.yml", "movie-harbor/images.tar",
   "movie-harbor/load-images.sh", "movie-harbor/start.sh",
+  "movie-harbor/storage-compose.mjs", "movie-harbor/upgrade-media-storage.mjs",
+  "movie-harbor/upgrade-media-storage.sh",
 ];
 const AMD64_BUNDLE_ENTRIES = [
   ...BUNDLE_ENTRIES,
@@ -114,6 +116,7 @@ async function fixture(t, mode = "success") {
   await Promise.all([mkdir(repo), mkdir(temporary), mkdir(bin)]);
   for (const file of [
     "tools/offline-package.mjs", "tools/build-offline-package.sh", "Caddyfile", ".env.example",
+    "tools/storage-compose.mjs", "tools/upgrade-media-storage.mjs", "tools/upgrade-media-storage.sh",
     "backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
   ]) {
     await mkdir(dirname(join(repo, file)), { recursive: true });
@@ -201,7 +204,7 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   const checksums = (await readFile(join(bundle, "SHA256SUMS"), "utf8")).trim().split("\n");
   assert.deepEqual(checksums.map(line => line.slice(66)).sort(), [
     ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
-    "start.sh",
+    "start.sh", "storage-compose.mjs", "upgrade-media-storage.mjs", "upgrade-media-storage.sh",
   ]);
   for (const line of checksums) {
     const content = await readFile(join(bundle, line.slice(66)));
@@ -214,8 +217,16 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   assert.equal(checksumVerification.status, 0, checksumVerification.stderr);
   assert.ok((await stat(join(bundle, "load-images.sh"))).mode & 0o111);
   assert.ok((await stat(join(bundle, "start.sh"))).mode & 0o111);
+  assert.ok((await stat(join(bundle, "upgrade-media-storage.sh"))).mode & 0o111);
+  assert.match(await readFile(join(bundle, "upgrade-media-storage.mjs"), "utf8"), /\.\/storage-compose\.mjs/);
+  const rejectedUpgrade = spawnSync("sh", [join(bundle, "upgrade-media-storage.sh")], {
+    cwd: f.root, encoding: "utf8",
+  });
+  assert.notEqual(rejectedUpgrade.status, 0);
+  assert.match(rejectedUpgrade.stderr, /explicit confirmation required/i);
   const bundleReadme = await readFile(join(bundle, "README.md"), "utf8");
   assert.match(bundleReadme, /\.\/start\.sh/);
+  assert.match(bundleReadme, /\.\/upgrade-media-storage\.sh --confirm-existing-volume-zero/);
   assert.doesNotMatch(bundleReadme, /docker compose up -d --no-build --wait/);
   await assertClean(f, [BUNDLE_NAME]);
 });
@@ -249,7 +260,8 @@ test("shell CLI explicit linux/amd64 platform derives target, tags, and archive 
     .trim().split("\n");
   assert.deepEqual(checksums.map(line => line.slice(66)).sort(), [
     ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar",
-    "load-images.ps1", "load-images.sh", "start.ps1", "start.sh",
+    "load-images.ps1", "load-images.sh", "start.ps1", "start.sh", "storage-compose.mjs",
+    "upgrade-media-storage.mjs", "upgrade-media-storage.sh",
   ]);
   const startPowerShell = tar(["-xOf", amd64Destination, "movie-harbor/start.ps1"]);
   assert.match(startPowerShell, /compose\.storage\.generated\.json/);
@@ -598,6 +610,7 @@ test("repository deployment docs distinguish dual-platform packages from pending
   assert.match(readme, /COOKIE_SECURE=true/);
   assert.match(readme, /局域网.*HTTPS|HTTPS.*局域网/);
   assert.match(readme, /失败.*重试|重试.*失败/);
+  assert.match(readme, /旧.*Linux.*单卷.*\.\/upgrade-media-storage\.sh --confirm-existing-volume-zero/s);
 
   assert.match(agents, /linux\/arm64.*linux\/amd64|linux\/amd64.*linux\/arm64/s);
   assert.match(agents, /两个单平台包/);
@@ -614,6 +627,8 @@ test("repository deployment docs distinguish dual-platform packages from pending
   assert.match(verification, /错误镜像架构/);
   assert.match(verification, /错误卷标记/);
   assert.match(verification, /证据文件/);
+  assert.match(verification, /普通容器重建/);
+  assert.match(verification, /持久清单中断恢复[^\n]*PENDING|PENDING[^\n]*持久清单中断恢复/);
 });
 
 test("renders an image-only Compose deployment with the production topology", () => {
@@ -785,7 +800,9 @@ test("renders AMD64 bundle guidance through the verified Windows deployment entr
   assert.match(readme, /\.\\load-images\.ps1/);
   assert.match(readme, /\.\\start\.ps1/);
   assert.match(readme, /MEDIA_HOST_DIR/);
+  assert.match(readme, /DATABASE_HOST_DIR=D:\/MovieHarbor\/postgres/);
   assert.match(readme, /D:\/MovieHarbor\/media;E:\/MovieHarbor\/media/);
+  assert.match(readme, /相对默认值.*Windows.*绝对盘符路径|Windows.*绝对盘符路径.*相对默认值/);
   assert.doesNotMatch(readme, /docker compose up -d --no-build --wait/);
 });
 

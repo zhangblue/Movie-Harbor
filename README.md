@@ -204,6 +204,15 @@ cp .env.example .env
 
 `load-images.sh` 先用 `sha256sum` 校验包内文件，再导入并验证三个 `linux/arm64` 镜像。`start.sh` 使用与 Windows 入口一致的卷登记、只允许末尾追加和存储覆盖生成规则，再以固定 Compose 文件启动；不要绕过它直接运行单个 Compose 文件。
 
+如果是旧版 Linux 单卷半离线部署，原媒体根可能已被设为 `10001:10001`、`0700`，普通宿主用户不能直接用 `start.sh` 完成首次登记。先停止旧服务，对数据库、整个原媒体目录和原 `.env` 做一致备份；在新包目录保留原 `.env`，确保 `MEDIA_HOST_DIR` 仍只有原目录且原盘在线，然后执行：
+
+```bash
+./upgrade-media-storage.sh --confirm-existing-volume-zero
+./start.sh
+```
+
+包内 `upgrade-media-storage.sh`、`upgrade-media-storage.mjs` 与 `storage-compose.mjs` 是专用的一次性升级入口；它只登记原卷 0 并修正卷根与标记权限，不递归修改或迁移媒体，也不会启动应用。升级中断时保留 pending 和原数据，核对原盘后重跑同一条升级命令。新部署、已经正常登记的部署以及 Windows PowerShell 部署不得运行该 shell 入口。Linux AMD64 主机使用 AMD64 包时遵循同一流程。
+
 ### Windows 11 AMD64 部署
 
 目标电脑必须是 Windows 11 64 位，CPU 为 Intel/AMD x86-64（用户目标机 Intel i7-8700K 满足架构要求），并安装 Docker Desktop。Docker Desktop 必须启用 WSL2 后端、切换到 Linux containers 模式且提供 Docker Compose v2；本包不支持 Windows containers、Windows on ARM 或 32 位 Windows。还需在 Docker Desktop 中允许 Linux VM 访问数据库和每个媒体盘目录。
@@ -222,7 +231,7 @@ Copy-Item .env.example .env
 .\start.ps1
 ```
 
-`load-images.ps1` 会先验证 `SHA256SUMS` 精确覆盖的全部包内文件，校验失败时不会导入镜像；随后导入并确认三个自研镜像均为 `linux/amd64`。`start.ps1` 会拒绝 Windows containers、缺失盘符或目录、无写权限、卷身份不符和不安全路径，再生成 `compose.storage.generated.json` 并等待服务健康。首次部署前必须手动创建配置中的目录；脚本不会把缺失盘符静默替换成其他位置。
+`load-images.ps1` 会先验证 `SHA256SUMS` 精确覆盖的全部包内文件，校验失败时不会导入镜像；随后导入并确认三个自研镜像均为 `linux/amd64`。`start.ps1` 只按文本读取 `.env` 中首次出现的 `DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR`，不会执行其中内容。它先要求数据库目录是现存、可写、非 UNC、非通配符或重解析点的本地绝对盘符路径，再校验媒体目录；数据库目录无效时不会创建媒体登记、卷标记或生成覆盖文件。随后它会拒绝 Windows containers、缺失盘符或目录、无写权限、卷身份不符和不安全路径，再生成 `compose.storage.generated.json` 并等待服务健康。首次部署前必须手动创建配置中的数据库和媒体目录，并把 `.env.example` 的相对数据库默认值改为上方展示的绝对盘符路径；脚本不会把缺失盘符静默替换成其他位置。
 
 `MEDIA_HOST_DIR` 是有序卷数组。部署后只允许在末尾追加一个已挂载、现存且为空的新目录；不得删除、替换或重排已有路径，也不要删除 `.movie-harbor-storage-state.json` 或各卷的 `.movie-harbor-volume.json`。系统不支持运行中热插拔；扩容前应停止写入并对数据库、登记文件和全部媒体卷做一致备份。
 

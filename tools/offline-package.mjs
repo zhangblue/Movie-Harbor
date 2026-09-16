@@ -15,7 +15,7 @@ const PLATFORMS = new Map([
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const BASE_DELIVERY_FILES = [
   ".env.example", "Caddyfile", "README.md", "compose.yml", "images.tar", "load-images.sh",
-  "start.sh",
+  "start.sh", "storage-compose.mjs", "upgrade-media-storage.mjs", "upgrade-media-storage.sh",
 ];
 const USAGE = "Usage: ./tools/build-offline-package.sh [--platform <linux/arm64|linux/amd64>] [version]\nDefault platform: linux/arm64. Default version: Git short revision (12 characters). Output: dist/offline/";
 
@@ -129,6 +129,10 @@ async function main(args) {
     const bundle = join(staging, "movie-harbor");
     await mkdir(bundle);
     for (const file of ["Caddyfile", ".env.example"]) await copyFile(join(REPO_ROOT, file), join(bundle, file));
+    for (const file of ["storage-compose.mjs", "upgrade-media-storage.mjs", "upgrade-media-storage.sh"]) {
+      await copyFile(join(REPO_ROOT, "tools", file), join(bundle, file));
+    }
+    await chmod(join(bundle, "upgrade-media-storage.sh"), 0o755);
     await writeFile(join(bundle, "compose.yml"), renderCompose(version, options.platform));
     await writeFile(join(bundle, "load-images.sh"), renderLoadScript(version, options.platform));
     await chmod(join(bundle, "load-images.sh"), 0o755);
@@ -496,28 +500,74 @@ function Write-Utf8NoBomAtomic([string]$Path, [string]$Content) {
     }
 }
 
-function Get-MediaHostDirectories([string]$EnvPath) {
+function Get-FirstDotenvValue([string]$EnvPath, [string]$Name) {
     $rawValue = $null
+    $escapedName = [regex]::Escape($Name)
     foreach ($line in [System.IO.File]::ReadAllLines($EnvPath)) {
-        $match = [regex]::Match($line, '^\s*MEDIA_HOST_DIR\s*=(?<value>.*)$')
+        $match = [regex]::Match($line, ('^\s*{0}\s*=(?<value>.*)$' -f $escapedName))
         if ($match.Success) {
             $rawValue = $match.Groups['value'].Value.Trim()
             break
         }
     }
     if ($null -eq $rawValue) {
-        throw 'MEDIA_HOST_DIR is missing from .env'
+        throw "$Name is missing from .env"
     }
     if ($rawValue.StartsWith('"') -or $rawValue.EndsWith('"')) {
         if ($rawValue.Length -lt 2 -or -not ($rawValue.StartsWith('"') -and $rawValue.EndsWith('"'))) {
-            throw 'MEDIA_HOST_DIR has unmatched double quotes'
+            throw "$Name has unmatched double quotes"
         }
         $rawValue = $rawValue.Substring(1, $rawValue.Length - 2)
     }
     if ($rawValue.Contains('"')) {
-        throw 'MEDIA_HOST_DIR only accepts an unquoted value or one pair of double quotes'
+        throw "$Name only accepts an unquoted value or one pair of double quotes"
     }
+    return $rawValue
+}
 
+function Get-DatabaseHostDirectory([string]$EnvPath) {
+    $entry = Get-FirstDotenvValue $EnvPath 'DATABASE_HOST_DIR'
+    if ([System.Management.Automation.WildcardPattern]::ContainsWildcardCharacters($entry)) {
+        throw 'database directory cannot contain wildcard characters'
+    }
+    if ($entry.StartsWith('\\') -or $entry.StartsWith('//')) {
+        throw 'database directory cannot use UNC network paths'
+    }
+    if ($entry -notmatch '^[A-Za-z]:[\\/]') {
+        throw 'database directory must be an absolute Windows drive path'
+    }
+    $driveName = $entry.Substring(0, 1)
+    if ($null -eq (Get-PSDrive -Name $driveName -PSProvider FileSystem -ErrorAction SilentlyContinue)) {
+        throw "database drive does not exist: $driveName"
+    }
+    $fullPath = [System.IO.Path]::GetFullPath($entry)
+    $root = [System.IO.Path]::GetPathRoot($fullPath)
+    while ($fullPath.Length -gt $root.Length -and ($fullPath.EndsWith('\') -or $fullPath.EndsWith('/'))) {
+        $fullPath = $fullPath.Substring(0, $fullPath.Length - 1)
+    }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) {
+        throw 'database directory does not exist'
+    }
+    $item = Get-Item -LiteralPath $fullPath -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'database directory cannot be a reparse point'
+    }
+    $probe = Join-Path -Path $item.FullName -ChildPath ('.movie-harbor-database-write-probe-{0}' -f [Guid]::NewGuid().ToString('N'))
+    try {
+        $stream = [System.IO.File]::Open($probe, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        $stream.Dispose()
+    } catch {
+        throw 'database directory is not writable'
+    } finally {
+        if (Test-Path -LiteralPath $probe) {
+            Remove-Item -LiteralPath $probe -Force
+        }
+    }
+    return ([System.IO.Path]::GetFullPath($item.FullName)).Replace('\', '/')
+}
+
+function Get-MediaHostDirectories([string]$EnvPath) {
+    $rawValue = Get-FirstDotenvValue $EnvPath 'MEDIA_HOST_DIR'
     $entries = @($rawValue.Split([char]';') | ForEach-Object { $_.Trim() })
     if ($entries.Count -eq 0 -or @($entries | Where-Object { $_ -eq '' }).Count -ne 0) {
         throw 'MEDIA_HOST_DIR contains an empty directory entry'
@@ -709,6 +759,8 @@ try {
         throw 'compose.yml is missing'
     }
 
+    $databaseDirectory = Get-DatabaseHostDirectory $envPath
+
     $dockerPlatform = (docker info --format '{{.OSType}}/{{.Architecture}}' | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw 'Docker Desktop is unavailable'
@@ -884,7 +936,8 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
         "```powershell",
         ".\\load-images.ps1",
         "Copy-Item .env.example .env",
-        "# 编辑 .env，并用正斜杠配置至少一个现存媒体目录，例如：",
+        "# 编辑 .env；Windows 必须把相对默认值改为正斜杠绝对盘符路径，例如：",
+        "# DATABASE_HOST_DIR=D:/MovieHarbor/postgres",
         "# MEDIA_HOST_DIR=D:/MovieHarbor/media;E:/MovieHarbor/media",
         ".\\start.ps1",
         "```",
@@ -899,6 +952,25 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
         "./start.sh",
         "```",
       ];
+  const legacyLinuxUpgrade = [
+    "## 旧 Linux 单卷升级",
+    "",
+    ...(platform === "linux/amd64"
+      ? ["本节只适用于在 Linux AMD64 主机上部署此包；Windows PowerShell 部署不得运行 shell 升级入口。", ""]
+      : []),
+    "旧版 Linux 单卷的媒体根可能由 `10001:10001` 持有且权限为 `0700`，普通启动无法安全登记。先停止旧服务，并对数据库、原媒体目录和原 `.env` 做一致备份；保留原 `.env`，确保 `MEDIA_HOST_DIR` 仍只有原目录且原盘在线。然后在解压目录执行：",
+    "",
+    "```sh",
+    "./upgrade-media-storage.sh --confirm-existing-volume-zero",
+    "./start.sh",
+    "```",
+    "",
+    "升级入口使用包内 `upgrade-media-storage.mjs` 与 `storage-compose.mjs`，只登记原卷 0 并修正卷根和标记权限，不递归修改或迁移媒体，也不会启动应用。升级中断时保留 pending 和原数据，核对原盘后重跑同一条升级命令；不要删除登记或标记来绕过校验。新部署和已经正常登记的部署不要运行此入口。",
+    "",
+  ];
+  const dataDirectoryGuidance = platform === "linux/amd64"
+    ? "Windows 的 `start.ps1` 要求 `DATABASE_HOST_DIR` 是现存、可写的本地绝对盘符目录，并在写任何媒体登记前校验；`.env.example` 的相对默认值必须改为 Windows 绝对盘符路径。`MEDIA_HOST_DIR` 中的每项也必须预先存在。Linux AMD64 使用 `start.sh` 时仍可使用交付目录下的单卷相对默认值。升级前请同时备份数据库、登记文件和全部媒体卷。"
+    : "`DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 默认使用交付目录下的 `./data/`；升级前请同时备份数据库、登记文件和全部媒体卷。";
   return [
     "# Movie Harbor 半离线部署包",
     "",
@@ -922,6 +994,7 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
     "",
     ...deployment,
     "",
+    ...legacyLinuxUpgrade,
     "## 首次配置与访问",
     "",
     "包内 Caddy 仅提供 HTTP，默认本机入口为 `http://localhost:8080`，宿主端口可用 `APP_PORT` 修改。修改 `APP_PORT` 时，即使仍通过 localhost 访问，也必须同步将 `PUBLIC_ORIGIN` 改为包含该端口的实际来源，例如 `http://localhost:9090`。此 HTTP 默认仅适用于 localhost 或环回地址的本机访问。",
@@ -932,7 +1005,7 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
     "",
     "每台部署都必须把 `TRUST_PROXY_SECRET` 替换为独立的、至少 32 字节的高强度随机秘密，不要复用数据库或管理员密码，也不要跨部署复用。Compose 会把同一秘密传给 Caddy 和 API，用于认证受信代理；API 应仅由受信代理访问。",
     "",
-    "`DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 默认使用交付目录下的 `./data/`；升级前请同时备份数据库和媒体目录。停止服务使用 `docker compose down`，保留数据时不要添加 `--volumes`。",
+    `${dataDirectoryGuidance} 停止服务使用 \`docker compose down\`，保留数据时不要添加 \`--volumes\`。`,
     "",
   ].join("\n");
 }

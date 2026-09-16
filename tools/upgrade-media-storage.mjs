@@ -6,6 +6,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
+import { fileURLToPath } from "node:url";
 import { parseDotenvMediaHostDir, parseMediaHostDirs, readVolumeMarker, writeAtomically } from "./storage-compose.mjs";
 
 const STATE = ".movie-harbor-storage-state.json";
@@ -207,7 +208,14 @@ async function main(args) {
   if (readState(statePath).upgrade.id !== pending.upgrade.id) throw new Error("upgrade registration changed while running");
   readVolumeMarker(directory, 0);
   writeAtomically(statePath, `${JSON.stringify({ version: 1, directories: [directory] }, null, 2)}\n`);
-  process.stdout.write("媒体卷 0 升级完成。请运行 ./tools/start-compose.sh 启动应用。\n");
+  const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
+  let startCommand = "./tools/start-compose.sh";
+  try {
+    if (lstatSync(path.join(scriptDirectory, "start.sh")).isFile()) startCommand = "./start.sh";
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  process.stdout.write(`媒体卷 0 升级完成。请运行 ${startCommand} 启动应用。\n`);
 }
 
 main(process.argv.slice(2)).catch((error) => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });

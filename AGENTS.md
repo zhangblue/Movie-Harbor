@@ -130,6 +130,8 @@
 - 包不包含源码、真实 `.env`、凭据、数据库或媒体数据。
 - 输出固定在被 Git 忽略的 `dist/offline/`，构建工具拒绝覆盖同名产物。
 - ARM64 与 AMD64 包的启动入口都必须执行多卷登记、身份校验和只允许末尾追加规则；Windows 使用 `start.ps1`，Linux 使用 `start.sh`。
+- 两个平台的包均包含经过校验的 `upgrade-media-storage.sh`、`upgrade-media-storage.mjs` 与 `storage-compose.mjs`，用于旧 Linux 单卷的显式特权升级；Windows PowerShell 部署不得运行该 shell 入口。
+- Windows `start.ps1` 必须在写入任何媒体登记、卷标记或覆盖配置前，按文本读取首个 `DATABASE_HOST_DIR`，并拒绝非本地绝对盘符、UNC、通配符、缺失、不可写或重解析点目录。
 - 正式 AMD64 交付必须具有原生 AMD64 Linux 构建机或 CI runner 的成功构建、归档 allowlist、SHA-256 和三个镜像平台检查证据；Apple Silicon 模拟构建不能替代这些证据。
 - 声称 Windows 支持已完整验收前，必须具有 Windows 11 64 位 Intel 实机、Docker Desktop WSL2/Linux containers、双物理硬盘业务流程和失败路径的可复核证据。证据缺失时必须明确标为 `BLOCKED` 或 `PENDING`，不得用本机契约测试推断通过。
 
