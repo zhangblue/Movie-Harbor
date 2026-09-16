@@ -400,7 +400,7 @@ ${expectedFiles}
     $entries = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::Ordinal)
     $seen = [System.Collections.Generic.Dictionary[string,bool]]::new([System.StringComparer]::Ordinal)
     foreach ($line in @(Get-Content -LiteralPath $manifestPath)) {
-        $match = [regex]::Match($line, '^(?i:[0-9a-f]{64})  (?<name>[^/\\\\]+)$')
+        $match = [regex]::Match($line, '^(?<hash>(?i:[0-9a-f]{64}))  (?<name>[^/\\\\]+)$')
         if (-not $match.Success) {
             throw 'invalid SHA256SUMS entry'
         }

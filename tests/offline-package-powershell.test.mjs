@@ -24,7 +24,13 @@ test("renders a PowerShell loader that verifies the exact package before importi
   assert.match(script, /\$PSScriptRoot/);
   assert.match(script, /Get-Content -LiteralPath/);
   assert.match(script, /Get-FileHash -LiteralPath/);
-  assert.match(script, /\^\(\?i:\[0-9a-f\]\{64\}\) {2}\(\?\<name\>/);
+  assert.match(script, /\^\(\?\<hash\>\(\?i:\[0-9a-f\]\{64\}\)\) {2}\(\?\<name\>/);
+  const hashGroup = script.match(/\(\?<([A-Za-z][A-Za-z0-9]*)>\(\?i:\[0-9a-f\]\{64\}\)\)/);
+  assert.ok(hashGroup, "the checksum regex must capture the hash in a named group");
+  assert.ok(
+    script.includes(`$match.Groups['${hashGroup[1]}'].Value.ToLowerInvariant()`),
+    "the checksum parser must read the same named group defined by its regex",
+  );
   assert.ok(
     script.includes("(?<name>[^/\\\\]+)$"),
     "the manifest grammar must reject both path separator forms",
