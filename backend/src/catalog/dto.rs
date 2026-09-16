@@ -2,7 +2,7 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::media::path::controlled_media_path;
+use crate::media::path::controlled_media_url;
 
 pub const DEFAULT_PAGE_SIZE: u64 = 20;
 pub const MAX_PAGE_SIZE: u64 = 100;
@@ -161,7 +161,7 @@ pub struct PublicEpisode {
 }
 
 pub(crate) fn media_url(storage_key: Option<String>, expected_kind: &str) -> Option<String> {
-    storage_key.and_then(|key| controlled_media_path(&key, expected_kind))
+    storage_key.and_then(|key| controlled_media_url(&key, expected_kind))
 }
 
 pub(crate) fn published_at_string(value: DateTime<FixedOffset>) -> String {

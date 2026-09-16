@@ -1,3 +1,7 @@
+pub(crate) fn controlled_media_url(storage_key: &str, expected_kind: &str) -> Option<String> {
+    controlled_storage_key(storage_key, expected_kind).then(|| format!("/media/{storage_key}"))
+}
+
 pub(crate) fn controlled_media_path(storage_key: &str, expected_kind: &str) -> Option<String> {
     controlled_storage_key(storage_key, expected_kind).then(|| format!("/media/{storage_key}"))
 }
@@ -33,4 +37,22 @@ fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {
         && lowercase_hex(stem, 32)
         && stem.starts_with(shard)
         && extension_allowed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{controlled_media_path, controlled_media_url};
+
+    #[test]
+    fn builds_public_urls_and_container_paths_through_separate_boundaries() {
+        let storage_key = "video/ab/ab000000000000000000000000000001.mp4";
+        assert_eq!(
+            controlled_media_url(storage_key, "video"),
+            Some("/media/video/ab/ab000000000000000000000000000001.mp4".into())
+        );
+        assert_eq!(
+            controlled_media_path(storage_key, "video"),
+            Some("/media/video/ab/ab000000000000000000000000000001.mp4".into())
+        );
+    }
 }

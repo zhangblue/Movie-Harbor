@@ -1,7 +1,7 @@
 use crate::{
     content::Patch,
     entities::{genre, media_asset, movie},
-    media::path::controlled_media_path,
+    media::path::{controlled_media_path, controlled_media_url},
 };
 use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
@@ -82,11 +82,13 @@ impl MediaSummary {
         if value.purpose != expected_kind {
             return Err(DbErr::Custom("invalid media asset purpose".into()));
         }
+        let url = controlled_media_url(&value.storage_key, expected_kind)
+            .ok_or_else(|| DbErr::Custom("invalid media asset storage key".into()))?;
         let local_path = controlled_media_path(&value.storage_key, expected_kind)
             .ok_or_else(|| DbErr::Custom("invalid media asset storage key".into()))?;
         Ok(Self {
             id: value.id.to_string(),
-            url: local_path.clone(),
+            url,
             local_path,
             original_name: value.original_name,
             mime_type: value.mime_type,
