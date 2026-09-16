@@ -54,8 +54,14 @@ if (args[0] === 'info') {
   if (mode === 'buildx-down') fail('Buildx unavailable');
   console.log('github.com/docker/buildx v0.28.0');
 } else if (args[0] === 'buildx' && args[1] === 'build') {
-  if (!fs.existsSync(args[args.indexOf('--file') + 1])) fail('Dockerfile unavailable in build context');
-  if (mode === 'build-fails') fail('Build failed');
+  const dockerfile = args[args.indexOf('--file') + 1];
+  if (!fs.existsSync(dockerfile)) fail('Dockerfile unavailable in build context');
+  const failedDockerfile = {
+    'build-fails-api': 'backend/Dockerfile',
+    'build-fails-public-web': 'frontend/public-web/Dockerfile',
+    'build-fails-admin-web': 'frontend/admin-web/Dockerfile',
+  }[mode];
+  if (mode === 'build-fails' || dockerfile === failedDockerfile) fail('Build failed');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (mode === 'inspect-fails') fail('Image missing');
   const tag = args.at(-1);
@@ -294,17 +300,23 @@ test("shell CLI rejects unavailable Buildx before building", async t => {
   await assertClean(f);
 });
 
-test("shell CLI does not export images when a runtime image build fails", async t => {
-  const f = await fixture(t, "build-fails");
-  const result = f.run(["--platform", "linux/amd64", VERSION]);
-  assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /Build failed/i);
+for (const [component, expectedBuildCount] of [
+  ["api", 1], ["public-web", 2], ["admin-web", 3],
+]) {
+  test(`shell CLI does not export images when the ${component} image build fails`, async t => {
+    const f = await fixture(t, `build-fails-${component}`);
+    const result = f.run(["--platform", "linux/amd64", VERSION]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Build failed/i);
 
-  const calls = await f.calls();
-  assert.equal(calls.some(args => args[0] === "buildx" && args[1] === "build"), true);
-  assert.equal(calls.some(args => args[0] === "image" && args[1] === "save"), false);
-  await assertClean(f);
-});
+    const calls = await f.calls();
+    const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
+    assert.equal(builds.length, expectedBuildCount);
+    assert.equal(calls.some(args => args[0] === "image" && args[1] === "inspect"), false);
+    assert.equal(calls.some(args => args[0] === "image" && args[1] === "save"), false);
+    await assertClean(f);
+  });
+}
 
 test("shell CLI rejects one wrong AMD64 image before exporting any archive", async t => {
   const f = await fixture(t, "amd64-wrong-image");
