@@ -569,6 +569,53 @@ test("renders a multi-volume-ready base Compose for generated storage overrides"
   assert.equal(compose.services.caddy.volumes[1].read_only, true);
 });
 
+test("repository deployment docs distinguish dual-platform packages from pending external acceptance", async () => {
+  const [readme, agents, verification] = await Promise.all([
+    readFile(join(REPO_ROOT, "README.md"), "utf8"),
+    readFile(join(REPO_ROOT, "AGENTS.md"), "utf8"),
+    readFile(join(REPO_ROOT, "docs/verification/windows11-amd64-package.md"), "utf8"),
+  ]);
+
+  for (const command of [
+    "./tools/build-offline-package.sh --platform linux/arm64",
+    "./tools/build-offline-package.sh --platform linux/amd64",
+    ".\\load-images.ps1",
+    "Copy-Item .env.example .env",
+    ".\\start.ps1",
+    "./start.sh",
+  ]) {
+    assert.match(readme, new RegExp(command.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+  assert.match(readme, /Windows 11 64 位/);
+  assert.match(readme, /WSL2/);
+  assert.match(readme, /Linux containers/);
+  assert.match(readme, /D:\/MovieHarbor\/media;E:\/MovieHarbor\/media/);
+  assert.match(readme, /只允许.*末尾追加|只能在末尾追加/);
+  assert.match(readme, /postgres:17-alpine/);
+  assert.match(readme, /caddy:2\.10-alpine/);
+  assert.match(readme, /alpine:3\.22/);
+  assert.match(readme, /\/admin\//);
+  assert.match(readme, /COOKIE_SECURE=true/);
+  assert.match(readme, /局域网.*HTTPS|HTTPS.*局域网/);
+  assert.match(readme, /失败.*重试|重试.*失败/);
+
+  assert.match(agents, /linux\/arm64.*linux\/amd64|linux\/amd64.*linux\/arm64/s);
+  assert.match(agents, /两个单平台包/);
+  assert.match(agents, /原生 AMD64.*证据/);
+  assert.match(agents, /Windows 11.*实机.*证据/);
+
+  assert.match(verification, /正式构建状态：\s*\*\*BLOCKED/);
+  assert.match(verification, /Windows 实机状态：\s*\*\*PENDING/);
+  assert.match(verification, /Intel i7-8700K/);
+  assert.match(verification, /Windows 版本/);
+  assert.match(verification, /Docker.*Linux containers/);
+  assert.match(verification, /卷 0.*卷 1|卷 1.*卷 0/s);
+  assert.match(verification, /校验文件篡改/);
+  assert.match(verification, /错误镜像架构/);
+  assert.match(verification, /错误卷标记/);
+  assert.match(verification, /证据文件/);
+});
+
 test("renders an image-only Compose deployment with the production topology", () => {
   const compose = JSON.parse(renderCompose(VERSION));
 

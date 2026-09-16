@@ -36,6 +36,8 @@
 - `docs/superpowers/plans/2026-09-14-high-profile-avcc-compatibility.md`
 - `docs/superpowers/specs/2026-09-16-multi-volume-media-storage-design.md`
 - `docs/superpowers/plans/2026-09-16-multi-volume-media-storage.md`
+- `docs/superpowers/specs/2026-09-16-windows11-amd64-offline-package-design.md`
+- `docs/superpowers/plans/2026-09-16-windows11-amd64-offline-package.md`
 
 ### 工程与文档
 
@@ -121,11 +123,15 @@
 
 ## 半离线发布边界
 
-- 首版只支持 `linux/arm64`。
+- 发布工具支持分别生成 `linux/arm64` 与 `linux/amd64` 两个单平台包；一个归档不会混装两种架构，也不生成多架构清单。
+- `linux/amd64` 包面向 Windows 11 64 位 Intel/AMD + Docker Desktop WSL2 后端的 Linux containers，不支持原生 Windows containers、Windows on ARM 或 32 位 Windows。
 - 归档只内置 API、公开站、管理后台三个自研运行镜像。
 - 目标机仍须从 Docker Hub 获取固定版本 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`。
 - 包不包含源码、真实 `.env`、凭据、数据库或媒体数据。
 - 输出固定在被 Git 忽略的 `dist/offline/`，构建工具拒绝覆盖同名产物。
+- ARM64 与 AMD64 包的启动入口都必须执行多卷登记、身份校验和只允许末尾追加规则；Windows 使用 `start.ps1`，Linux 使用 `start.sh`。
+- 正式 AMD64 交付必须具有原生 AMD64 Linux 构建机或 CI runner 的成功构建、归档 allowlist、SHA-256 和三个镜像平台检查证据；Apple Silicon 模拟构建不能替代这些证据。
+- 声称 Windows 支持已完整验收前，必须具有 Windows 11 64 位 Intel 实机、Docker Desktop WSL2/Linux containers、双物理硬盘业务流程和失败路径的可复核证据。证据缺失时必须明确标为 `BLOCKED` 或 `PENDING`，不得用本机契约测试推断通过。
 
 ## 开发工作流
 

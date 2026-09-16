@@ -11,7 +11,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 生产应用：已实现，可通过 Docker Compose 自托管。
 - 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
 - 媒体能力：支持多存储卷、同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
-- 发布工具：支持生成 `linux/arm64` 半离线 Docker 部署包。
+- 发布工具：支持分别生成 `linux/arm64` 与 `linux/amd64` 两个单平台半离线 Docker 部署包；AMD64 包面向 Windows 11 64 位 Intel/AMD + Docker Desktop Linux containers。
 
 ## 核心设计
 
@@ -51,6 +51,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [管理与公开内容列表分页](docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md)
 - [前后端公共函数提取](docs/superpowers/specs/2026-09-15-common-function-extraction-design.md)
 - [多存储卷媒体设计](docs/superpowers/specs/2026-09-16-multi-volume-media-storage-design.md)与[实现计划](docs/superpowers/plans/2026-09-16-multi-volume-media-storage.md)
+- [Windows 11 AMD64 半离线包设计](docs/superpowers/specs/2026-09-16-windows11-amd64-offline-package-design.md)、[实现计划](docs/superpowers/plans/2026-09-16-windows11-amd64-offline-package.md)与[验收记录](docs/verification/windows11-amd64-package.md)
 
 完整设计和实施记录位于 `docs/superpowers/specs/` 与 `docs/superpowers/plans/`。
 
@@ -166,37 +167,72 @@ MOVIE_HARBOR_ENV_FILE=/absolute/path/to/deployment.env ./tools/start-compose.sh
 
 ## 半离线发布包
 
-当前分支的多卷存储初始化尚未同步到包内发布入口；这项适配会在后续发布任务中完成。以下保留既有 ARM64 打包器的使用说明，当前多卷版本请使用上文源码部署入口。
-
-构建机与目标机首版都必须使用 `linux/arm64` Docker 平台，并安装 Docker Engine 与 Docker Compose v2。构建机还需要 Node.js、Git 和 tar，并能下载构建依赖。在仓库根目录执行：
+构建工具生成两个彼此独立的单平台包，不会把 ARM64 与 AMD64 镜像放进同一个归档。构建机需要 Docker、Buildx、Docker Compose v2、Node.js、Git 和 tar，并能下载构建依赖；正式 AMD64 交付应在原生 AMD64 Linux 构建机或 CI runner 上生成并保留平台检查证据。在仓库根目录执行：
 
 ```bash
-./tools/build-offline-package.sh [版本]
-# 或使用等价的 npm 入口：
-npm run package:offline -- [版本]
+./tools/build-offline-package.sh --platform linux/arm64 [版本]
+./tools/build-offline-package.sh --platform linux/amd64 [版本]
+
+# 等价的 npm 入口：
+npm run package:offline -- --platform linux/arm64 [版本]
+npm run package:offline -- --platform linux/amd64 [版本]
 ```
 
-`[版本]` 是可选参数，使用时替换为实际版本字符串并去掉方括号；省略时使用当前 Git 提交的 12 位短 SHA。产物固定写入 `dist/offline/movie-harbor-offline-linux-arm64-<版本>.tar.gz`，同名产物已存在时构建会拒绝覆盖。
+`[版本]` 是可选参数，使用时替换为实际版本字符串并去掉方括号；省略时使用当前 Git 提交的 12 位短 SHA。不传 `--platform` 时为兼容旧调用，默认仍构建 `linux/arm64`。产物分别写入：
+
+```text
+dist/offline/movie-harbor-offline-linux-arm64-<版本>.tar.gz
+dist/offline/movie-harbor-offline-linux-amd64-<版本>.tar.gz
+```
+
+同平台同版本产物已存在时构建会拒绝覆盖。Apple Silicon 可以尝试模拟构建 AMD64，但模拟结果不能代替原生 AMD64 构建证据。
 
 包中只内置 API、公开站、管理后台这 3 个自研镜像。目标机仍必须能访问 Docker Hub 获取 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`，因此不支持完全断网部署。包内 Compose 使用固定版本的本地自研镜像且不包含源码构建上下文，启动时不会拉取或构建自研镜像。
 
-将发布包复制到目标机后，解压到部署目录并执行：
+### ARM64 Linux 部署
+
+ARM64 目标机需要 Node.js、Docker Engine、Docker Compose v2，并以 Linux containers 运行。复制归档后执行：
 
 ```bash
 tar -xzf movie-harbor-offline-linux-arm64-<版本>.tar.gz
 cd movie-harbor
 ./load-images.sh
 cp .env.example .env
-# 编辑 .env：替换密码与代理秘密并核对数据目录；localhost 默认可直接使用，服务器地址或 HTTPS 入口必须显式调整 PUBLIC_ORIGIN、COOKIE_SECURE 和 APP_PORT。
-docker compose --env-file .env config
-docker compose up -d --no-build --wait
+# 编辑 .env：替换密码与代理秘密，核对数据库目录和全部媒体目录。
+./start.sh
 ```
 
-`load-images.sh` 先用 `sha256sum` 校验包内文件，再导入镜像并验证 `linux/arm64` 平台；目标机需要提供该命令。校验用于检查文件完整性，分发时还应通过可信渠道核对外层归档的 SHA-256。公开站、管理后台及 HTTPS、初始管理员和代理秘密要求与上述生产部署说明一致。
+`load-images.sh` 先用 `sha256sum` 校验包内文件，再导入并验证三个 `linux/arm64` 镜像。`start.sh` 使用与 Windows 入口一致的卷登记、只允许末尾追加和存储覆盖生成规则，再以固定 Compose 文件启动；不要绕过它直接运行单个 Compose 文件。
 
-`DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`。媒体卷映射规则见上文；源码部署支持生成多卷覆盖配置。当前半离线打包器仍沿用单卷发布入口，尚未包含新的存储初始化工具，不能直接套用本次源码多卷启动步骤；多卷部署请先使用源码入口。默认数据目录为 `./data/postgres` 和 `./data/media`，建议使用固定绝对路径以便升级复用。
+### Windows 11 AMD64 部署
 
-升级前停止写入，并将数据库和媒体目录作为同一个一致性备份集保存；新包导入后，复用原有数据目录、部署项目名和经过核对的环境配置，再执行启动命令。包不包含真实 `.env`、密码、数据库、媒体数据、源码或开发依赖；备份与秘密须由部署者单独保管。停止本部署使用 `docker compose down`，不要删除仍需保留的数据目录。
+目标电脑必须是 Windows 11 64 位，CPU 为 Intel/AMD x86-64（用户目标机 Intel i7-8700K 满足架构要求），并安装 Docker Desktop。Docker Desktop 必须启用 WSL2 后端、切换到 Linux containers 模式且提供 Docker Compose v2；本包不支持 Windows containers、Windows on ARM 或 32 位 Windows。还需在 Docker Desktop 中允许 Linux VM 访问数据库和每个媒体盘目录。
+
+把 `movie-harbor-offline-linux-amd64-<版本>.tar.gz` 复制到目标电脑，在 Windows PowerShell 5.1 或更高版本中执行：
+
+```powershell
+tar -xzf movie-harbor-offline-linux-amd64-<版本>.tar.gz
+Set-Location movie-harbor
+.\load-images.ps1
+Copy-Item .env.example .env
+# 编辑 .env：替换全部密码和 TRUST_PROXY_SECRET，并设置现存的数据目录。
+# Windows 绝对盘符路径统一使用正斜杠；多个媒体卷以分号分隔：
+# DATABASE_HOST_DIR=D:/MovieHarbor/postgres
+# MEDIA_HOST_DIR=D:/MovieHarbor/media;E:/MovieHarbor/media
+.\start.ps1
+```
+
+`load-images.ps1` 会先验证 `SHA256SUMS` 精确覆盖的全部包内文件，校验失败时不会导入镜像；随后导入并确认三个自研镜像均为 `linux/amd64`。`start.ps1` 会拒绝 Windows containers、缺失盘符或目录、无写权限、卷身份不符和不安全路径，再生成 `compose.storage.generated.json` 并等待服务健康。首次部署前必须手动创建配置中的目录；脚本不会把缺失盘符静默替换成其他位置。
+
+`MEDIA_HOST_DIR` 是有序卷数组。部署后只允许在末尾追加一个已挂载、现存且为空的新目录；不得删除、替换或重排已有路径，也不要删除 `.movie-harbor-storage-state.json` 或各卷的 `.movie-harbor-volume.json`。系统不支持运行中热插拔；扩容前应停止写入并对数据库、登记文件和全部媒体卷做一致备份。
+
+### 访问、安全与失败恢复
+
+默认 `PUBLIC_ORIGIN=http://localhost:8080` 与 `COOKIE_SECURE=false` 只适用于目标机本机访问。管理后台位于 `/admin/`。通过其他电脑、局域网 IP、域名或公网访问时，不要直接使用明文 HTTP：应配置实际的 `https://` 来源、设置 `COOKIE_SECURE=true`，并通过域名证书或上游 TLS 终止层把 HTTPS 请求转发到包内 Caddy。
+
+如果校验或镜像导入失败，保留原归档，重新从可信渠道复制并重新执行对应的 `load-images` 脚本；不要跳过校验。如果 `start.sh` 或 `start.ps1` 失败，不要删除数据库、媒体文件、卷标记、登记文件或生成配置来强行重试。先根据错误恢复原硬盘、Docker Linux containers、目录权限或原 `.env` 卷顺序，再执行同一个启动入口重试。升级失败时继续使用同一部署目录、`.env` 和卷顺序；必要时从同一备份点恢复数据库、`.movie-harbor-storage-state.json` 与全部媒体卷。
+
+校验清单只能证明包内文件传输后未损坏；仍应通过可信渠道核对外层归档 SHA-256。包不包含真实 `.env`、密码、数据库、媒体数据、源码或开发依赖。升级前停止写入并进行一致备份，新包导入后复用原数据目录、部署目录、`.env`、卷顺序和项目状态。停止部署可在包目录用基础 Compose 与生成覆盖文件执行 `docker compose --env-file .env -f compose.yml -f compose.storage.generated.json down`；不要添加 `--volumes`，也不要删除仍需保留的数据目录。
 
 ## 上传格式与容量
 
