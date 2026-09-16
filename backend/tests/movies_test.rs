@@ -95,6 +95,10 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+async fn sql(db: &DatabaseConnection, statement: &str) {
+    db.execute_unprepared(statement).await.unwrap();
+}
+
 async fn request(
     app: &Router,
     method: &str,
@@ -580,6 +584,43 @@ async fn movie_admin_routes_are_authenticated_and_create_list_detail_drafts() {
         .await
         .status(),
         StatusCode::UNAUTHORIZED
+    );
+}
+
+// Catches exposing a raw storage key or omitting the validated container-visible media path.
+#[tokio::test]
+async fn movie_admin_detail_includes_a_controlled_video_local_path() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_movie(&app, &cookie, &csrf, "Path movie").await;
+    let movie_id = created["id"].as_str().unwrap();
+    sql(
+        &db,
+        &format!(
+            "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('ab000000-0000-0000-0000-000000000001', 'video/ab/ab000000000000000000000000000001.mp4', 'path.mp4', 'video/mp4', 1, 'video'); UPDATE movie SET video_asset_id='ab000000-0000-0000-0000-000000000001' WHERE id='{movie_id}'"
+        ),
+    )
+    .await;
+
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/admin/movies/{movie_id}"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body(response).await;
+    assert_eq!(
+        payload["video"]["local_path"],
+        "/media/video/ab/ab000000000000000000000000000001.mp4"
     );
 }
 

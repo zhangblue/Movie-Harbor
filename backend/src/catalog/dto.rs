@@ -2,6 +2,8 @@ use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::media::path::controlled_media_path;
+
 pub const DEFAULT_PAGE_SIZE: u64 = 20;
 pub const MAX_PAGE_SIZE: u64 = 100;
 
@@ -159,42 +161,7 @@ pub struct PublicEpisode {
 }
 
 pub(crate) fn media_url(storage_key: Option<String>, expected_kind: &str) -> Option<String> {
-    storage_key
-        .filter(|key| controlled_storage_key(key, expected_kind))
-        .map(|key| format!("/media/{key}"))
-}
-
-fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {
-    if key.contains(['\\', '\0']) {
-        return false;
-    }
-    let mut parts = key.split('/');
-    let (Some(kind), Some(shard), Some(file), None) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return false;
-    };
-    if kind != expected_kind || !matches!(kind, "poster" | "video") {
-        return false;
-    }
-    let Some((stem, extension)) = file.rsplit_once('.') else {
-        return false;
-    };
-    let lowercase_hex = |value: &str, length: usize| {
-        value.len() == length
-            && value
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    };
-    let extension_allowed = match kind {
-        "poster" => matches!(extension, "jpg" | "png" | "webp"),
-        "video" => matches!(extension, "mp4" | "webm" | "ogv"),
-        _ => false,
-    };
-    lowercase_hex(shard, 2)
-        && lowercase_hex(stem, 32)
-        && stem.starts_with(shard)
-        && extension_allowed
+    storage_key.and_then(|key| controlled_media_path(&key, expected_kind))
 }
 
 pub(crate) fn published_at_string(value: DateTime<FixedOffset>) -> String {

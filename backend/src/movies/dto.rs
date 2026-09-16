@@ -1,7 +1,9 @@
 use crate::{
     content::Patch,
     entities::{genre, media_asset, movie},
+    media::path::controlled_media_path,
 };
+use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -69,20 +71,27 @@ impl From<genre::Model> for GenreSummary {
 pub struct MediaSummary {
     pub id: String,
     pub url: String,
+    pub local_path: String,
     pub original_name: String,
     pub mime_type: String,
     pub byte_size: i64,
 }
 
-impl From<media_asset::Model> for MediaSummary {
-    fn from(value: media_asset::Model) -> Self {
-        Self {
+impl MediaSummary {
+    pub fn try_from_asset(value: media_asset::Model, expected_kind: &str) -> Result<Self, DbErr> {
+        if value.purpose != expected_kind {
+            return Err(DbErr::Custom("invalid media asset purpose".into()));
+        }
+        let local_path = controlled_media_path(&value.storage_key, expected_kind)
+            .ok_or_else(|| DbErr::Custom("invalid media asset storage key".into()))?;
+        Ok(Self {
             id: value.id.to_string(),
-            url: format!("/media/{}", value.storage_key),
+            url: local_path.clone(),
+            local_path,
             original_name: value.original_name,
             mime_type: value.mime_type,
             byte_size: value.byte_size,
-        }
+        })
     }
 }
 
@@ -110,8 +119,8 @@ impl MovieResponse {
         genres: Vec<genre::Model>,
         poster: Option<media_asset::Model>,
         video: Option<media_asset::Model>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DbErr> {
+        Ok(Self {
             id: value.id.to_string(),
             name: value.name,
             synopsis: value.synopsis,
@@ -124,8 +133,12 @@ impl MovieResponse {
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             genres: genres.into_iter().map(Into::into).collect(),
-            poster: poster.map(Into::into),
-            video: video.map(Into::into),
-        }
+            poster: poster
+                .map(|asset| MediaSummary::try_from_asset(asset, "poster"))
+                .transpose()?,
+            video: video
+                .map(|asset| MediaSummary::try_from_asset(asset, "video"))
+                .transpose()?,
+        })
     }
 }

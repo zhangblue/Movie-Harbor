@@ -15,7 +15,7 @@ export function movie(overrides: Partial<MovieResponse> = {}): MovieResponse {
     id: "movie-1", name: "潮汐尽头", synopsis: "海上故事", year: 2026, duration_seconds: 7200,
     status: "draft", version: 3, published_at: null, archived_at: null,
     created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z", genres: [],
-    poster: { id: "poster-1", url: "/media/poster.webp", original_name: "poster.webp", mime_type: "image/webp", byte_size: 1200 },
+    poster: { id: "poster-1", url: "/media/poster.webp", local_path: "/media/poster.webp", original_name: "poster.webp", mime_type: "image/webp", byte_size: 1200 },
     video: null, ...overrides,
   };
 }

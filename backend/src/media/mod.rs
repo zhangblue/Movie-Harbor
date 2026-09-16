@@ -1,3 +1,4 @@
+pub(crate) mod path;
 pub mod removal;
 pub mod routes;
 pub mod storage;

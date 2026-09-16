@@ -318,7 +318,7 @@ async fn response<C: sea_orm::ConnectionTrait>(
     let genres = repository::genres(db, model.id).await?;
     let poster = repository::asset(db, model.poster_asset_id).await?;
     let video = repository::asset(db, model.video_asset_id).await?;
-    Ok(MovieResponse::new(model, genres, poster, video))
+    Ok(MovieResponse::new(model, genres, poster, video)?)
 }
 
 async fn validate_publish<C: sea_orm::ConnectionTrait>(

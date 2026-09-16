@@ -53,7 +53,7 @@ export interface ReorderGenre { id: string; sort_order: number }
 export interface ReorderGenresRequest { items: ReorderGenre[] }
 export interface GenreSummary { id: string; name: string; enabled: boolean }
 export interface MediaSummary {
-  id: string; url: string; original_name: string; mime_type: string; byte_size: number;
+  id: string; url: string; local_path: string; original_name: string; mime_type: string; byte_size: number;
 }
 export interface MovieResponse {
   id: string; name: string; synopsis: string; year: number | null; duration_seconds: number | null;

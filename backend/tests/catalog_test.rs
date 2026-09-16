@@ -144,6 +144,7 @@ fn assert_public_payload(payload: &Value) {
         "original_name",
         "mime_type",
         "byte_size",
+        "local_path",
         "status",
         "version",
         "archived_at",

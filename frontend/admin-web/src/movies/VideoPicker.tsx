@@ -5,7 +5,7 @@ export function VideoPicker({ current, file, onSelect, readOnly, disabled }: {
   current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean;
 }) {
   return <div className="movie-field-wide">
-    {current ? <p><a href={current.url} target="_blank" rel="noreferrer">已保存视频：{current.original_name}</a></p> : <p>尚未上传视频</p>}
+    {current ? <><p><a href={current.url} target="_blank" rel="noreferrer">已保存视频：{current.original_name}</a></p><p className="media-local-path"><span>本地存储路径：</span><code>{current.local_path}</code></p></> : <p>尚未上传视频</p>}
     {!readOnly && <><Field label="视频文件" helpText="仅支持浏览器可直接播放的视频，不自动转码。"><input type="file" accept="video/mp4,video/webm" disabled={disabled} onChange={(event) => {
       const selected = event.currentTarget.files?.[0];
       if (selected) onSelect(selected);

@@ -89,6 +89,10 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+async fn sql(db: &DatabaseConnection, statement: &str) {
+    db.execute_unprepared(statement).await.unwrap();
+}
+
 async fn request(
     app: &Router,
     method: &str,
@@ -476,6 +480,62 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
     .await;
     assert_eq!(listed.status(), StatusCode::OK);
     assert_eq!(body(listed).await, json!([hierarchy]));
+}
+
+// Catches a missing managed-media path on nested episode responses.
+#[tokio::test]
+async fn series_admin_detail_includes_a_controlled_episode_video_local_path() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "Path series").await;
+    let series_id = created["id"].as_str().unwrap();
+    let with_season = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = with_season["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy = body(
+        add_episode(
+            &app,
+            &cookie,
+            &csrf,
+            (series_id, season_id),
+            2,
+            1,
+            "Path episode",
+        )
+        .await,
+    )
+    .await;
+    let episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap();
+    sql(
+        &db,
+        &format!(
+            "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('cd000000-0000-0000-0000-000000000002', 'video/cd/cd000000000000000000000000000002.mp4', 'path.mp4', 'video/mp4', 1, 'video'); UPDATE episode SET video_asset_id='cd000000-0000-0000-0000-000000000002' WHERE id='{episode_id}'"
+        ),
+    )
+    .await;
+
+    let response = request(
+        &app,
+        "GET",
+        &format!("/api/admin/series/{series_id}"),
+        json!(null),
+        Some(&cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body(response).await;
+    let episode = &payload["seasons"][0]["episodes"][0];
+    assert_eq!(
+        episode["video"]["local_path"],
+        "/media/video/cd/cd000000000000000000000000000002.mp4"
+    );
 }
 
 // Catches partial metadata/genre commits and accidental removal/addition of inactive genres.

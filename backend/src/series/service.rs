@@ -742,11 +742,16 @@ async fn response<C: ConnectionTrait>(
         let mut episode_responses = Vec::new();
         for episode in repository::episodes(db, season.id).await? {
             let video = repository::asset(db, episode.video_asset_id).await?;
-            episode_responses.push(EpisodeResponse::new(episode, video));
+            episode_responses.push(EpisodeResponse::new(episode, video)?);
         }
         season_responses.push(SeasonResponse::new(season, episode_responses));
     }
-    Ok(SeriesResponse::new(model, genres, poster, season_responses))
+    Ok(SeriesResponse::new(
+        model,
+        genres,
+        poster,
+        season_responses,
+    )?)
 }
 
 async fn episode_envelope<C: ConnectionTrait>(
@@ -757,7 +762,7 @@ async fn episode_envelope<C: ConnectionTrait>(
     let video = repository::asset(db, episode.video_asset_id).await?;
     Ok(EpisodeEnvelope {
         series_version,
-        episode: EpisodeResponse::new(episode, video),
+        episode: EpisodeResponse::new(episode, video)?,
     })
 }
 

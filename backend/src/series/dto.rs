@@ -3,6 +3,7 @@ use crate::{
     entities::{episode, genre, media_asset, season, series},
     movies::dto::{GenreSummary, MediaSummary},
 };
+use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
@@ -90,8 +91,8 @@ pub struct EpisodeResponse {
 }
 
 impl EpisodeResponse {
-    pub fn new(value: episode::Model, video: Option<media_asset::Model>) -> Self {
-        Self {
+    pub fn new(value: episode::Model, video: Option<media_asset::Model>) -> Result<Self, DbErr> {
+        Ok(Self {
             id: value.id.to_string(),
             season_id: value.season_id.to_string(),
             number: value.number,
@@ -103,8 +104,10 @@ impl EpisodeResponse {
             archived_at: value.archived_at.map(|value| value.to_rfc3339()),
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
-            video: video.map(Into::into),
-        }
+            video: video
+                .map(|asset| MediaSummary::try_from_asset(asset, "video"))
+                .transpose()?,
+        })
     }
 }
 
@@ -148,8 +151,8 @@ impl SeriesResponse {
         genres: Vec<genre::Model>,
         poster: Option<media_asset::Model>,
         seasons: Vec<SeasonResponse>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, DbErr> {
+        Ok(Self {
             id: value.id.to_string(),
             name: value.name,
             synopsis: value.synopsis,
@@ -161,9 +164,11 @@ impl SeriesResponse {
             created_at: value.created_at.to_rfc3339(),
             updated_at: value.updated_at.to_rfc3339(),
             genres: genres.into_iter().map(Into::into).collect(),
-            poster: poster.map(Into::into),
+            poster: poster
+                .map(|asset| MediaSummary::try_from_asset(asset, "poster"))
+                .transpose()?,
             seasons,
-        }
+        })
     }
 }
 

@@ -34,7 +34,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
     if (url.startsWith("/api/admin/media/")) {
       const slot = url.includes("/poster?") ? "poster" : "video";
       const file = r.body.get("file") as File;
-      current = { ...current, version: current.version + 1, [slot]: { id: `new-${slot}`, url: `/media/new-${slot}`, original_name: file.name, mime_type: file.type, byte_size: file.size } };
+      current = { ...current, version: current.version + 1, [slot]: { id: `new-${slot}`, url: `/media/new-${slot}`, local_path: `/media/new-${slot}`, original_name: file.name, mime_type: file.type, byte_size: file.size } };
       return json({ ...current[slot], version: current.version });
     }
     if (r.method === "POST") {
@@ -66,6 +66,17 @@ it("loads bounded draft fields and retains existing inactive genres", async () =
   expect(getComputedStyle(screen.getByLabelText("年份").parentElement!).width).toBe("145px");
   expect(screen.getByRole("option", { name: /旧题材/ })).toBeDisabled();
   expect(screen.getByRole("option", { name: /旧题材/ })).toHaveProperty("selected", true);
+});
+
+it("shows the persisted video path without inventing one for an upload", async () => {
+  fixture(movie({ video: {
+    id: "video-1", url: "/media/video/ab/ab000000000000000000000000000001.mp4",
+    local_path: "/media/video/ab/ab000000000000000000000000000001.mp4",
+    original_name: "feature.mp4", mime_type: "video/mp4", byte_size: 12,
+  } }));
+  editor();
+  expect(await screen.findByText("/media/video/ab/ab000000000000000000000000000001.mp4")).toBeInTheDocument();
+  expect(screen.getByText("本地存储路径：")).toBeInTheDocument();
 });
 
 // Catches missing poster click wiring, cancellation clearing preview, and early/leaked object URLs.
@@ -280,7 +291,7 @@ it("coordinates a committed deletion finalization failure as deleted and warns o
 
 it("reloads committed replacement state and warns when finalization fails", async () => {
   let committed = false;
-  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
   fixture(movie(), (r) => {
     if (r.url.includes("/media/") && r.method === "POST") {
       committed = true;
@@ -298,7 +309,7 @@ it("reloads committed replacement state and warns when finalization fails", asyn
 
 it("clears only the committed poster when video upload has not started", async () => {
   let committed = false;
-  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
   const requests = fixture(movie(), (r) => {
     if (r.url.includes("/poster?") && r.method === "POST") {
       committed = true;

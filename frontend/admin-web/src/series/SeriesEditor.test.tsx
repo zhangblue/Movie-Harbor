@@ -34,7 +34,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     if (url.endsWith("/delete-impact") && url.includes("/seasons/")) { const season = current.seasons.find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: `第 ${season.number} 季`, version: current.version, season_count: 1, episode_count: season.episodes.length, media_count: season.episodes.filter((ep) => ep.video).length }); }
     if (url.startsWith("/api/admin/media/")) {
       const file = r.body.get("file") as File;
-      const media = { id: "asset", url: "/media/new", original_name: file.name, mime_type: file.type, byte_size: file.size };
+      const media = { id: "asset", url: "/media/new", local_path: "/media/new", original_name: file.name, mime_type: file.type, byte_size: file.size };
       current = { ...current, version: current.version + 1 };
       if (url.includes("/series/")) { current.poster = media; return json({ ...media, version: current.version }); }
       const id = url.split("/")[5]; const ep = current.seasons.flatMap((s) => s.episodes).find((e) => e.id === id)!;
@@ -67,6 +67,30 @@ beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL",
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
+
+it("shows each persisted episode video path and no path for an episode without a video", async () => {
+  fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [
+    episode({ id: "e1", video: {
+      id: "video-1", url: "/media/video/ab/ab000000000000000000000000000001.mp4",
+      local_path: "/media/video/ab/ab000000000000000000000000000001.mp4",
+      original_name: "first.mp4", mime_type: "video/mp4", byte_size: 1,
+    } }),
+    episode({ id: "e2", name: "无视频", video: null }),
+    episode({ id: "e3", name: "第二集", video: {
+      id: "video-2", url: "/media/video/cd/cd000000000000000000000000000002.mp4",
+      local_path: "/media/video/cd/cd000000000000000000000000000002.mp4",
+      original_name: "second.mp4", mime_type: "video/mp4", byte_size: 2,
+    } }),
+  ] }] }));
+  const user = userEvent.setup();
+  editor();
+  await expandFirst(user);
+  expect(screen.getByText("/media/video/ab/ab000000000000000000000000000001.mp4")).toBeInTheDocument();
+  expect(screen.getByText("/media/video/cd/cd000000000000000000000000000002.mp4")).toBeInTheDocument();
+  const noVideoEpisode = screen.getByRole("form", { name: "第 1 集 · 无视频" });
+  expect(within(noVideoEpisode).getByText("尚未上传视频")).toBeInTheDocument();
+  expect(within(noVideoEpisode).queryByText("本地存储路径：")).not.toBeInTheDocument();
+});
 
 it("defaults existing seasons to independent accessible collapses without losing input", async () => {
   fixture(detail({ seasons: [
@@ -231,7 +255,7 @@ it("refreshes a committed child deletion and warns instead of offering a retry",
 
 it("reloads a committed series-poster replacement and shows the finalization warning", async () => {
   let committed = false;
-  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
   fixture(detail(), (r) => {
     if (r.url.includes("/media/series/") && r.method === "POST") {
       committed = true;
@@ -249,7 +273,7 @@ it("reloads a committed series-poster replacement and shows the finalization war
 
 it("reloads a committed episode-video replacement and clears its pending file", async () => {
   let committed = false;
-  const savedVideo = { id: "new-video", url: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
+  const savedVideo = { id: "new-video", url: "/media/new-video", local_path: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
   const authoritative = detail({ version: 5, seasons: [{ id: "s1", number: 1, episodes: [episode({ version: 4, video: savedVideo })] }] });
   fixture(detail(), (r) => {
     if (r.url.includes("/api/admin/media/episodes/") && r.method === "POST") {
@@ -269,7 +293,7 @@ it("reloads a committed episode-video replacement and clears its pending file", 
 
 it("a series-poster finalization clears only that target and retains a pending episode video", async () => {
   let committed = false;
-  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
+  const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
   const requests = fixture(detail(), (r) => {
     if (r.url.includes("/api/admin/media/series/") && r.method === "POST") {
       committed = true;
@@ -289,7 +313,7 @@ it("a series-poster finalization clears only that target and retains a pending e
 
 it("an episode finalization clears only its video and retains a pending series poster", async () => {
   let committed = false;
-  const savedVideo = { id: "new-video", url: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
+  const savedVideo = { id: "new-video", url: "/media/new-video", local_path: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
   const authoritative = detail({ version: 5, seasons: [{ id: "s1", number: 1, episodes: [episode({ version: 4, video: savedVideo })] }] });
   fixture(detail(), (r) => {
     if (r.url.includes("/api/admin/media/episodes/") && r.method === "POST") {

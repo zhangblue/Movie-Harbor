@@ -73,6 +73,7 @@ p { color: var(--mh-color-text-muted); }
 .movie-field-medium { width: 290px; max-width: 100%; }
 .movie-field-short { width: 145px; max-width: 100%; }
 .movie-field-wide { width: 500px; max-width: 100%; }
+.media-local-path { overflow-wrap: anywhere; }
 .movie-inline-fields { display: flex; gap: 12px; max-width: 100%; }
 .movie-form textarea { resize: vertical; }
 .movie-form-actions { width: 500px; max-width: 100%; display: flex; justify-content: flex-end; gap: 9px; flex-wrap: wrap; }
