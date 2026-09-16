@@ -103,10 +103,14 @@ async function main(args) {
       throw new Error(`Docker daemon must run Linux containers, found ${daemonOs || "unknown"}`);
     }
     await run("docker", ["compose", "version", "--short"], { signal });
+    await run("docker", ["buildx", "version"], { signal });
 
     const dockerfiles = ["backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile"];
     for (const [index, file] of dockerfiles.entries()) {
-      await run("docker", ["build", "--platform", options.platform, "--file", file, "--tag", tags[index], "."], { signal, capture: false });
+      await run("docker", [
+        "buildx", "build", "--platform", options.platform, "--load",
+        "--file", file, "--tag", tags[index], ".",
+      ], { signal, capture: false });
     }
     for (const tag of tags) {
       const imagePlatform = await run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", tag], { signal });

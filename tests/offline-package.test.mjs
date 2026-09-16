@@ -36,6 +36,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const mode = process.env.DOCKER_TEST_MODE;
+const amd64 = mode.startsWith('amd64');
 fs.appendFileSync(process.env.DOCKER_TEST_LOG, JSON.stringify(args) + '\\n');
 function fail(message) { console.error(message); process.exit(1); }
 if (args[0] === 'info') {
@@ -44,12 +45,17 @@ if (args[0] === 'info') {
 } else if (args[0] === 'compose' && args[1] === 'version') {
   if (mode === 'compose-down') fail('Compose unavailable');
   console.log(mode === 'compose-new-major' ? '5.1.2' : '2.39.1');
-} else if (args[0] === 'build') {
+} else if (args[0] === 'buildx' && args[1] === 'version') {
+  if (mode === 'buildx-down') fail('Buildx unavailable');
+  console.log('github.com/docker/buildx v0.28.0');
+} else if (args[0] === 'buildx' && args[1] === 'build') {
   if (!fs.existsSync(args[args.indexOf('--file') + 1])) fail('Dockerfile unavailable in build context');
   if (mode === 'build-fails') fail('Build failed');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (mode === 'inspect-fails') fail('Image missing');
-  console.log(mode === 'wrong-image' || mode === 'amd64' ? 'linux/amd64' : 'linux/arm64');
+  const tag = args.at(-1);
+  if (mode === 'amd64-wrong-image' && tag.includes('public-web')) console.log('linux/arm64');
+  else console.log(mode === 'wrong-image' || amd64 ? 'linux/x86_64' : 'linux/arm64');
 } else if (args[0] === 'image' && args[1] === 'save') {
   if (args[2] !== '--output') fail('Expected explicit output');
   const output = args[3];
@@ -63,7 +69,7 @@ if (args[0] === 'info') {
     console.error('SAVE_WAITING');
     setInterval(() => {}, 1000);
   } else {
-    if (mode === 'extra-tag') tags.push('postgres:17-alpine');
+    if (mode === 'extra-tag' || mode === 'amd64-extra-tag') tags.push('postgres:17-alpine');
     if (mode === 'missing-tag') tags.pop();
     if (mode === 'duplicate-tag') tags.push(tags[0]);
     const temp = fs.mkdtempSync(path.join(process.env.TMPDIR, 'docker-save-'));
@@ -71,7 +77,7 @@ if (args[0] === 'info') {
       const manifest = tags.map(tag => ({ Config: 'config.json', RepoTags: [tag], Layers: ['layer.tar'] }));
       fs.writeFileSync(path.join(temp, 'manifest.json'), mode === 'bad-manifest' ? '{' : JSON.stringify(manifest));
       fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({
-        os: 'linux', architecture: mode === 'amd64' ? 'amd64' : 'arm64',
+        os: 'linux', architecture: amd64 ? 'amd64' : 'arm64',
       }));
       fs.writeFileSync(path.join(temp, 'layer.tar'), 'fixture runtime layer');
       const result = spawnSync('tar', ['-cf', output, '-C', temp, 'manifest.json', 'config.json', 'layer.tar']);
@@ -145,7 +151,11 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
   const calls = await f.calls();
-  assert.deepEqual(calls[0], ["info", "--format", "{{.OSType}}"]);
+  assert.deepEqual(calls.slice(0, 3), [
+    ["info", "--format", "{{.OSType}}"],
+    ["compose", "version", "--short"],
+    ["buildx", "version"],
+  ]);
   const save = calls.find(args => args[0] === "image" && args[1] === "save");
   assert.ok(save, "CLI must export the runtime images");
   const savedTags = save.slice(4);
@@ -154,16 +164,21 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
     "movie-harbor-public-web:test-v1-linux-arm64",
     "movie-harbor-admin-web:test-v1-linux-arm64",
   ]);
-  const builds = calls.filter(args => args[0] === "build");
+  const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
   assert.equal(builds.length, 3);
   assert.deepEqual(builds.map(args => args[args.indexOf("--file") + 1]), [
     "backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
   ]);
   assert.deepEqual(builds.map(args => args[args.indexOf("--tag") + 1]), savedTags);
   for (const args of builds) {
+    assert.deepEqual(args.slice(0, 4), ["buildx", "build", "--platform", "linux/arm64"]);
     assert.equal(args[args.indexOf("--platform") + 1], "linux/arm64");
+    assert.ok(args.includes("--load"));
     assert.equal(args.at(-1), ".");
   }
+  const inspections = calls.filter(args => args[0] === "image" && args[1] === "inspect");
+  assert.deepEqual(inspections.map(args => args.at(-1)), savedTags);
+  assert.ok(calls.lastIndexOf(inspections.at(-1)) < calls.indexOf(save));
   const archiveEntries = tar(["-tzf", f.destination]).trim().split("\n").sort();
   assert.deepEqual(archiveEntries, BUNDLE_ENTRIES);
   const unpacked = join(f.root, "unpacked");
@@ -195,10 +210,13 @@ test("shell CLI explicit linux/amd64 platform derives target, tags, and archive 
   assert.equal(result.status, 0, result.stderr);
 
   const calls = await f.calls();
-  const builds = calls.filter(args => args[0] === "build");
+  const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
   assert.equal(builds.length, 3);
   for (const args of builds) {
+    assert.deepEqual(args.slice(0, 4), ["buildx", "build", "--platform", "linux/amd64"]);
     assert.equal(args[args.indexOf("--platform") + 1], "linux/amd64");
+    assert.ok(args.includes("--load"));
+    assert.equal(args.at(-1), ".");
   }
   const save = calls.find(args => args[0] === "image" && args[1] === "save");
   assert.deepEqual(save.slice(4), imageTags(VERSION, "linux/amd64"));
@@ -235,7 +253,36 @@ test("shell CLI rejects an unavailable Compose plugin before building", async t 
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Compose unavailable/);
-  assert.equal((await f.calls()).some(args => args[0] === "build"), false);
+  assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
+  await assertClean(f);
+});
+
+test("shell CLI rejects unavailable Buildx before building", async t => {
+  const f = await fixture(t, "buildx-down");
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Buildx unavailable/);
+  const calls = await f.calls();
+  assert.deepEqual(calls.at(-1), ["buildx", "version"]);
+  assert.equal(calls.some(args => args[0] === "buildx" && args[1] === "build"), false);
+  await assertClean(f);
+});
+
+test("shell CLI rejects one wrong AMD64 image before exporting any archive", async t => {
+  const f = await fixture(t, "amd64-wrong-image");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /expected .*public-web.*linux\/amd64.*linux\/arm64/i);
+  const calls = await f.calls();
+  assert.equal(calls.some(args => args[0] === "image" && args[1] === "save"), false);
+  await assertClean(f);
+});
+
+test("shell CLI rejects an AMD64 image archive containing an extra tag", async t => {
+  const f = await fixture(t, "amd64-extra-tag");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /RepoTags|tags/i);
   await assertClean(f);
 });
 
@@ -265,8 +312,23 @@ test("shell CLI refuses an existing artifact before building and preserves its b
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /exists/i);
   assert.equal(await readFile(f.destination, "utf8"), "previous release");
-  assert.equal((await f.calls()).some(args => args[0] === "build"), false);
+  assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
   await assertClean(f, [BUNDLE_NAME]);
+});
+
+test("shell CLI refuses an existing AMD64 artifact without disturbing the ARM64 namespace", async t => {
+  const f = await fixture(t, "amd64");
+  const amd64Bundle = archiveName(VERSION, "linux/amd64");
+  const amd64Destination = join(f.repo, "dist/offline", amd64Bundle);
+  await mkdir(dirname(amd64Destination), { recursive: true });
+  await writeFile(amd64Destination, "previous amd64 release");
+
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /exists/i);
+  assert.equal(await readFile(amd64Destination, "utf8"), "previous amd64 release");
+  assert.deepEqual(await f.calls(), []);
+  await assertClean(f, [amd64Bundle]);
 });
 
 test("shell CLI cannot overwrite an artifact that appears during packaging", async t => {
