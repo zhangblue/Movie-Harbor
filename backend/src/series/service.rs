@@ -218,6 +218,7 @@ pub async fn update(
     input: UpdateSeriesRequest,
 ) -> Result<SeriesResponse, SeriesError> {
     require_positive_i64(input.version)?;
+    // 剧集自身字段仅草稿可编辑；子级写操作另行锁定父级并递增其版本。
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
     require_version(model.version, input.version)?;
@@ -272,6 +273,7 @@ pub async fn create_season(
     } = command;
     require_positive_i64(expected_version)?;
     require_positive_i32(number)?;
+    // 此处不编辑剧集自身字段，只以父版本串行化下级创建，因此已发布剧集仍可新增草稿季。
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, expected_version)?;
@@ -309,6 +311,7 @@ pub async fn update_season(
         tx.commit().await?;
         return Ok(result);
     }
+    // 季内已有已发布单集时，季号不可改动，防止改变已公开单集的层级位置。
     if repository::episodes_locked(&tx, season_id)
         .await?
         .iter()
@@ -336,6 +339,7 @@ pub async fn delete_season(
         expected_series_version: expected_version,
     } = command;
     require_positive_i64(expected_version)?;
+    // 依次锁定父剧集、季和全部单集；先暂存关联视频，数据库失败时可恢复文件。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -344,6 +348,7 @@ pub async fn delete_season(
     require_version(model.version, expected_version)?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episodes = repository::episodes_locked(&tx, season_id).await?;
+    // 季内已有已发布单集时不可删除，避免级联删除已公开内容。
     if episodes.iter().any(|episode| episode.status == "published") {
         return Err(SeriesError::Conflict);
     }
@@ -378,6 +383,7 @@ pub async fn create_episode(
     require_positive_i64(input.version)?;
     require_positive_i32(input.number)?;
     let name = normalize_required(input.name)?;
+    // 新单集按 series -> season 加锁并递增父版本，使返回的剧集快照不会漏掉并发新增。
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, input.version)?;
@@ -432,6 +438,7 @@ pub async fn update_episode(
         input,
     } = command;
     require_positive_i64(input.version)?;
+    // 先按全局顺序锁住祖先和单集；单集版本校验成功后，同时递增父剧集版本。
     let tx = db.begin().await?;
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
@@ -462,6 +469,7 @@ pub async fn transition_series(
     let target = parse_target(target)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
+    // 重复目标状态直接成功；实际转换交给公共状态机维护 published_at 与 archived_at。
     if target.matches(&model.status) {
         let result = response(&tx, model).await?;
         tx.commit().await?;
@@ -504,6 +512,7 @@ pub async fn transition_episode(
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let mut episode = repository::episode_locked(&tx, season_id, episode_id).await?;
+    // 单集状态独立于父剧集；重复目标状态直接成功，公开查询则同时要求父剧集和单集都已发布。
     if target.matches(&episode.status) {
         let result = episode_envelope(&tx, series.version, episode).await?;
         tx.commit().await?;
@@ -540,6 +549,7 @@ pub async fn delete_episode(
         expected_episode_version: expected_version,
     } = command;
     require_positive_i64(expected_version)?;
+    // 先按层级锁定目标，再暂存独占视频；数据库提交失败时删除流程会恢复已暂存的文件。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -573,6 +583,7 @@ pub async fn delete_series(
     expected_version: i64,
 ) -> Result<DeleteResultResponse, SeriesError> {
     require_positive_i64(expected_version)?;
+    // 整剧删除先锁定剧集及全部下级，再暂存海报和视频；提交失败时删除流程会恢复这些文件。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -583,8 +594,8 @@ pub async fn delete_series(
         return Err(SeriesError::Conflict);
     }
 
-    // All hierarchy writers lock series -> season -> episode. Lock children in UUID order before
-    // cascading so deletes use that same global order and cannot race a child state transition.
+    // 所有层级写操作统一按 series -> season -> episode 加锁，删除和状态转换共享顺序以避免死锁。
+    // 级联前按 UUID 顺序锁定同层子项，避免删除与单集状态转换交错。
     let seasons = season::Entity::find()
         .filter(season::Column::SeriesId.eq(id))
         .order_by_asc(season::Column::Id)
@@ -620,6 +631,7 @@ async fn finish_delete_transaction(
     deleted_media_count: usize,
     database_result: Result<(), SeriesError>,
 ) -> Result<DeleteResultResponse, SeriesError> {
+    // 数据库提交前只暂存文件；事务失败可恢复，提交成功后才执行不可逆的物理删除。
     match removal::finish_delete_transaction(tx, staged, deleted_media_count, database_result).await
     {
         Ok(count) => Ok(DeleteResultResponse {
@@ -776,6 +788,7 @@ async fn validate_series_publish<C: ConnectionTrait>(
     if model.name.trim().is_empty() {
         missing.push("name");
     }
+    // 发布剧集要求至少一集已发布且拥有受控、可访问的受支持视频；剧集海报允许为空。
     let mut publishable_episode = false;
     for season in repository::seasons(db, model.id).await? {
         for episode in repository::episodes(db, season.id).await? {
@@ -812,6 +825,7 @@ async fn validate_episode_publish<C: ConnectionTrait>(
     if model.name.trim().is_empty() {
         missing.push("name");
     }
+    // 单集发布独立校验名称与受控、可访问的受支持视频；父级状态不在此处随之转换。
     let video = repository::asset(db, model.video_asset_id).await?;
     if !is_publishable_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
         missing.push("video");

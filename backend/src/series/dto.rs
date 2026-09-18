@@ -51,7 +51,7 @@ pub struct UpdateSeasonRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateEpisodeRequest {
-    /// The containing series version; creation has no episode version yet.
+    /// 所属剧集的版本；新建时尚无单集版本。
     pub version: i64,
     pub number: i32,
     pub name: String,

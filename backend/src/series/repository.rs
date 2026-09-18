@@ -16,6 +16,7 @@ pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<series::Model,
 }
 
 pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<series::Model, SeriesError> {
+    // 层级写入先锁定 series，随后才锁定 season 和 episode，以统一全局加锁顺序。
     series::Entity::find_by_id(id)
         .lock_exclusive()
         .one(tx)
@@ -28,6 +29,7 @@ pub async fn persist_series(
     value: &series::Model,
     expected_version: i64,
 ) -> Result<series::Model, SeriesError> {
+    // 将 expected_version 写入 WHERE 条件并在成功后递增，避免陈旧请求覆盖同一剧集或子级变更后的版本。
     let result = series::Entity::update_many()
         .col_expr(series::Column::Name, Expr::value(value.name.clone()))
         .col_expr(
@@ -97,6 +99,7 @@ pub async fn season_locked(
     series_id: Uuid,
     season_id: Uuid,
 ) -> Result<season::Model, SeriesError> {
+    // 在已锁定父剧集后再锁定所属季，保证 series -> season 的层级顺序。
     season::Entity::find()
         .filter(season::Column::Id.eq(season_id))
         .filter(season::Column::SeriesId.eq(series_id))
@@ -122,6 +125,7 @@ pub async fn episodes_locked(
     tx: &DatabaseTransaction,
     season_id: Uuid,
 ) -> Result<Vec<episode::Model>, SeriesError> {
+    // 级联操作按 UUID 顺序锁定同季单集，使多个子项的锁定次序保持一致。
     Ok(episode::Entity::find()
         .filter(episode::Column::SeasonId.eq(season_id))
         .order_by_asc(episode::Column::Id)
@@ -135,6 +139,7 @@ pub async fn episode_locked(
     season_id: Uuid,
     episode_id: Uuid,
 ) -> Result<episode::Model, SeriesError> {
+    // 单集操作在持有 series、season 锁后才取得该行锁，完成 series -> season -> episode 顺序。
     episode::Entity::find()
         .filter(episode::Column::Id.eq(episode_id))
         .filter(episode::Column::SeasonId.eq(season_id))
@@ -149,6 +154,7 @@ pub async fn persist_episode(
     value: &episode::Model,
     expected_version: i64,
 ) -> Result<episode::Model, SeriesError> {
+    // 以单集 expected_version 拒绝陈旧写入；上层服务会在同一事务中同步递增父剧集版本。
     let result = episode::Entity::update_many()
         .col_expr(episode::Column::Number, Expr::value(value.number))
         .col_expr(episode::Column::Name, Expr::value(value.name.clone()))

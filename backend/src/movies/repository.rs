@@ -16,6 +16,7 @@ pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<movie::Model, 
 }
 
 pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<movie::Model, MovieError> {
+    // 行锁将同一电影的命令串行化；persist 仍以 version 作为写入条件，防止陈旧读取盲目覆盖新数据。
     movie::Entity::find_by_id(id)
         .lock_exclusive()
         .one(tx)
@@ -28,6 +29,7 @@ pub async fn persist(
     value: &movie::Model,
     expected_version: i64,
 ) -> Result<movie::Model, MovieError> {
+    // 即使调用方已持有行锁，也用 expected_version 保护更新；成功写入才递增版本。
     let result = movie::Entity::update_many()
         .col_expr(movie::Column::Name, Expr::value(value.name.clone()))
         .col_expr(movie::Column::Synopsis, Expr::value(value.synopsis.clone()))

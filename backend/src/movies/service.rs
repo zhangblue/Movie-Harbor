@@ -168,6 +168,7 @@ pub async fn update(
     input: UpdateMovieRequest,
 ) -> Result<MovieResponse, MovieError> {
     require_positive_i64(input.version)?;
+    // 草稿更新在同一事务内锁定并校验版本、校验题材、替换关联，再递增版本，避免出现部分更新。
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
     require_version(model.version, input.version)?;
@@ -224,6 +225,7 @@ pub async fn transition(
     let target = parse_target(target)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
+    // 已处于目标状态时直接返回，令重复请求幂等；真正转换才校验版本并更新状态时间戳。
     if target.matches(&model.status) {
         let result = response(&tx, model).await?;
         tx.commit().await?;
@@ -272,6 +274,7 @@ pub async fn delete(
     expected_version: i64,
 ) -> Result<DeleteResultResponse, MovieError> {
     require_positive_i64(expected_version)?;
+    // 数据库提交前只暂存文件；事务失败可恢复，提交成功后才执行不可逆的物理删除。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| MovieError::MediaDelete)?;
@@ -331,6 +334,7 @@ async fn validate_publish<C: sea_orm::ConnectionTrait>(
     if model.name.trim().is_empty() {
         missing.push("name");
     }
+    // 发布只要求受控存储中存在且可访问的受支持视频；电影海报在当前实现中允许为空。
     let video = repository::asset(db, model.video_asset_id).await?;
     if !is_publishable_asset(storage, video.as_ref(), "video", allowed_video_mime_types) {
         missing.push("video");
