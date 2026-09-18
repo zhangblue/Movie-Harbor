@@ -16,7 +16,7 @@ pub use storage::{ChunkSource, LocalMediaStorage, StorageEvent, StorageHooks, St
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
 
-/// 在发布边界同时检查已登记资产的用途、声明类型和受控键对应的可访问普通文件，不打开特殊文件。
+/// 在发布边界同时检查已登记资产的用途、声明类型和受控键对应的可访问普通文件，拒绝符号链接和非普通文件。
 pub fn is_publishable_asset<S: AsRef<str>>(
     storage: &LocalMediaStorage,
     asset: Option<&crate::entities::media_asset::Model>,

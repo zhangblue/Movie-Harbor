@@ -89,6 +89,8 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     Ok(asset)
 }
 
+// 仅处理修改时间距今已达到年龄门槛的上传残留：临时文件可直接清理，已登记资产只清除恢复标记。
+// 未登记的正式文件须通过标记验证所有权后才能清理；无效或无法证明归属的标记保留。
 pub async fn recover_stale_uploads(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
