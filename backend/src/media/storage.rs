@@ -67,14 +67,14 @@ pub trait StorageHooks: Send + Sync {
         Ok(())
     }
 
-    /// Deterministic durability fault seam, sampled before the atomic claim.
-    /// Production hooks leave this disabled.
+    /// 在原子移入隔离区前采样，用于确定性注入删除后的持久化故障。
+    /// 生产环境的钩子保持禁用。
     fn fail_next_post_unlink_sync(&self) -> bool {
         false
     }
 
-    /// Deterministic durability fault seam, sampled before the atomic move.
-    /// Production hooks leave this disabled.
+    /// 在原子移动前采样，用于确定性注入暂存后的持久化故障。
+    /// 生产环境的钩子保持禁用。
     fn fail_next_post_stage_sync(&self) -> bool {
         false
     }
@@ -90,6 +90,7 @@ pub struct LocalMediaStorage {
     incoming_fd: Arc<OwnedFd>,
     quarantine_fd: Arc<OwnedFd>,
     operations_fd: Arc<OwnedFd>,
+    // 同一存储实例及其克隆共用变更锁；上传、替换、删除及恢复协调持锁，避免归属判断相互交错。
     mutations: Arc<AsyncMutex<()>>,
     hooks: Arc<dyn StorageHooks>,
 }
@@ -132,6 +133,7 @@ pub struct StoredFile {
 
 impl StoredFile {
     pub(crate) fn take_mutation_guard(&mut self) -> Result<OwnedMutexGuard<()>, MediaError> {
+        // 替换流程接走已有锁守卫，连续保护新文件登记与旧文件暂存，无需释放后重新抢锁。
         self.cleanup
             .as_mut()
             .and_then(|cleanup| cleanup._mutation_guard.take())
@@ -154,12 +156,14 @@ impl StoredFile {
     }
 
     pub(crate) fn begin_database_write(&mut self) {
+        // 数据库写入开始后，取消或连接错误可能使结果未知；Drop 必须保留正式文件及恢复标记。
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.destructive = false;
         }
     }
 
     pub(crate) fn database_failure_is_known(&mut self) {
+        // 只有调用方已确认数据库失败，才重新允许 Drop 删除本次未登记的正式文件。
         if let Some(cleanup) = &mut self.cleanup {
             cleanup.destructive = true;
         }
@@ -176,6 +180,7 @@ impl StoredFile {
 
     pub(crate) fn mark_registered(&mut self) -> Result<(), MediaError> {
         if let Some(mut cleanup) = self.cleanup.take() {
+            // 登记成功后先解除正式文件的清理责任；即使移除标记失败，也不能删除数据库已引用的文件。
             cleanup.formal = None;
             cleanup.remove_marker()?;
         }
@@ -251,6 +256,7 @@ impl PendingCleanup {
         storage_key: String,
         marker: &PendingMarker,
     ) {
+        // 原子移动后清理目标从临时名切换为正式文件，并保留校验时的身份，防止误删同名替代文件。
         self.temp_name = None;
         self.formal = Some(FormalCleanup {
             directory,
@@ -276,6 +282,7 @@ impl PendingCleanup {
 
 impl Drop for PendingCleanup {
     fn drop(&mut self) {
+        // 析构只能尽力收尾，不能向调用方返回错误或改写数据库结果；正式文件清理还取决于结果是否明确。
         if let Some(name) = self.temp_name.take() {
             let _ = remove_if_present(&self.incoming, &name);
             let _ = sync_fd(&self.incoming);
@@ -300,8 +307,8 @@ impl Drop for PendingCleanup {
         } else {
             true
         };
-        // A marker is deliberately retained when unlink fails so startup
-        // recovery can retry instead of silently leaking the formal file.
+        // 正式文件删除或同步失败时刻意保留标记，交给启动恢复重试，避免静默遗留文件。
+        // 数据库结果未知时也保留标记，待恢复流程查询数据库后再决定是否删除。
         if formal_removed {
             let _ = self.remove_marker();
         }
@@ -359,7 +366,9 @@ impl LocalMediaStorage {
         tokio::fs::create_dir_all(root.as_ref()).await?;
         let canonical = tokio::fs::canonicalize(root.as_ref()).await?;
         let root_fd = open_directory(&CWD, canonical.as_os_str())?;
+        // 根目录须由后端账号拥有且不允许组或其他用户写入，防止外部写入者替换受控目录项。
         verify_exclusive_directory(&root_fd, false)?;
+        // 子目录通过不跟随符号链接的目录描述符打开；新建时使用 0700 并同步根目录项。
         let incoming_fd = match open_directory(&root_fd, OsStr::new(".incoming")) {
             Ok(fd) => fd,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -378,6 +387,7 @@ impl LocalMediaStorage {
             }
             Err(error) => return Err(error.into()),
         };
+        // 隔离区与操作清单目录还要求既有权限严格为 0700，保护临时占有的文件及恢复依据。
         verify_exclusive_directory(&quarantine_fd, true)?;
         let operations_fd = match open_directory(&root_fd, OsStr::new(".operations")) {
             Ok(fd) => fd,
@@ -389,6 +399,7 @@ impl LocalMediaStorage {
             Err(error) => return Err(error.into()),
         };
         verify_exclusive_directory(&operations_fd, true)?;
+        // 实例对外提供服务前，先恢复隔离区中身份可证明且原位置空缺的文件；此阶段不查询数据库。
         recover_quarantine_claims(&root_fd, &quarantine_fd)?;
         sync_fd(&root_fd)?;
         hooks.on_event(&StorageEvent::DirectorySynced(String::new()))?;
@@ -407,8 +418,8 @@ impl LocalMediaStorage {
         self.root.as_ref()
     }
 
-    /// Resolve a persisted key through directory capabilities and verify it names a readable
-    /// regular file. This deliberately does not follow symlinks or trust a joined path.
+    /// 通过目录描述符逐级解析持久化存储键，并验证目标是可读的普通文件。
+    /// 此过程不跟随符号链接，也不信任直接拼接的路径。
     pub fn is_accessible_regular_file(&self, storage_key: &str) -> Result<bool, MediaError> {
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
@@ -445,6 +456,7 @@ impl LocalMediaStorage {
         mut source: S,
     ) -> Result<StoredFile, MediaError> {
         let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
+        // 锁随清理责任移入 StoredFile，覆盖流式写入、正式落盘及调用方随后的数据库登记。
         let mutation_guard = self.mutations.clone().lock_owned().await;
         let temp_name = format!("{}.part", Uuid::new_v4().simple());
         let mut cleanup = PendingCleanup::new(
@@ -477,6 +489,7 @@ impl LocalMediaStorage {
         let shard = &simple[..2];
         let file_name = format!("{}.{}", simple, spec.format.extension);
         let key = format!("{kind}/{shard}/{file_name}");
+        // 先准备按用途和资源 ID 前两位分层的目标目录，新建目录项由辅助函数同步后再使用。
         let kind_fd = self.open_or_create_child(&self.root_fd, kind, "")?;
         let shard_fd = Arc::new(self.open_or_create_child(&kind_fd, shard, kind)?);
 
@@ -491,6 +504,7 @@ impl LocalMediaStorage {
         let mut file = tokio::fs::File::from_std(std_file);
         let mut byte_size = 0_u64;
         let mut digest = Sha256::new();
+        // 分块累计大小和摘要，溢出或超限立即退出；数据逐块写入，避免把大视频完整留在内存。
         while let Some(chunk) = source.next_chunk().await? {
             byte_size = byte_size
                 .checked_add(chunk.len() as u64)
@@ -502,6 +516,7 @@ impl LocalMediaStorage {
             file.write_all(&chunk).await?;
             file.flush().await?;
         }
+        // flush 完成缓冲写入，sync_all 才建立文件数据的持久化边界；之后仍须校验真实内容才能提升。
         file.sync_all().await?;
         self.hooks
             .on_event(&StorageEvent::FileSynced(format!(".incoming/{temp_name}")))?;
@@ -515,7 +530,7 @@ impl LocalMediaStorage {
         }
         let checksum_sha256 = format!("{:x}", digest.finalize());
 
-        // A durable marker makes a successfully promoted but unregistered file recoverable.
+        // 在提升前持久化标记，使已经移动到正式目录、但尚未登记到数据库的文件可由启动恢复判定。
         let marker_name = format!("{}.pending", spec.resource_id.simple());
         let marker = PendingMarker {
             version: 1,
@@ -530,9 +545,8 @@ impl LocalMediaStorage {
         self.hooks
             .on_event(&StorageEvent::BeforePromote(key.clone()))?;
 
-        // Hooks model a hostile concurrent directory substitution. Revalidating the
-        // name-to-capability binding catches it, while all mutations remain relative
-        // to the already-open directory descriptors.
+        // 钩子可模拟并发替换目录的攻击；提升前重检名称与已打开目录的身份绑定，发现替换即拒绝。
+        // 后续修改仍相对已打开的目录描述符执行，配合 O_NOFOLLOW 避免重新解析被替换的路径。
         if !same_named_directory(&self.root_fd, kind, &kind_fd)?
             || !same_named_directory(&kind_fd, shard, &shard_fd)?
         {
@@ -547,6 +561,7 @@ impl LocalMediaStorage {
         )
         .map_err(io::Error::from)?;
         cleanup.promoted(shard_fd.clone(), file_name.clone(), key.clone(), &marker);
+        // 移动后再次核对类型、设备、inode 和大小，确认正式名称仍指向刚才验证的文件。
         let promoted_stat = statat(&shard_fd, file_name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
             .map_err(io::Error::from)?;
         if rustix::fs::FileType::from_raw_mode(promoted_stat.st_mode)
@@ -559,6 +574,7 @@ impl LocalMediaStorage {
         }
         drop(file);
         self.hooks.on_event(&StorageEvent::Promoted(key.clone()))?;
+        // 重命名成功不等于目录项已持久化；同步目标和来源目录，持久化正式名称及临时名称的消失。
         self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
         self.sync_directory(&self.incoming_fd, ".incoming".into())?;
 
@@ -584,6 +600,7 @@ impl LocalMediaStorage {
     }
 
     fn write_marker(&self, name: &str, marker: &PendingMarker) -> Result<(), MediaError> {
+        // 先写入并同步独占临时文件，再以不可覆盖的重命名发布标记，避免恢复读取半份 JSON。
         let temporary_name = format!("{}.part", Uuid::new_v4().simple());
         let result = (|| {
             let marker_fd = openat(
@@ -648,6 +665,7 @@ impl LocalMediaStorage {
     }
 
     pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
+        // 删除和操作清单恢复由调用方持有同一把锁，贯穿暂存、数据库决策以及恢复或最终清理。
         self.hooks.on_event(&StorageEvent::BeforeRemovalLock)?;
         Ok(self.mutations.clone().lock_owned().await)
     }
@@ -656,6 +674,7 @@ impl LocalMediaStorage {
         &self,
         storage_key: &str,
     ) -> Result<Option<RemovalSource>, MediaError> {
+        // 缺失文件按幂等删除处理；存在时只接受受控普通文件，保存目录描述符和身份供暂存前重检。
         let (kind, shard, file_name) = parse_storage_key(storage_key)?;
         let kind_fd = match open_directory(&self.root_fd, OsStr::new(kind)) {
             Ok(fd) => fd,
@@ -695,6 +714,7 @@ impl LocalMediaStorage {
         operation_id: Uuid,
         manifest: &[u8],
     ) -> Result<RemovalOperation, MediaError> {
+        // 操作目录先持久化，再同步清单内容并原子发布 manifest.json；调用方拿到结果后才开始暂存。
         let name = operation_id.simple().to_string();
         mkdirat(&self.operations_fd, name.as_str(), directory_mode()).map_err(io::Error::from)?;
         sync_fd(&self.operations_fd)?;
@@ -732,6 +752,7 @@ impl LocalMediaStorage {
         let fail_post_stage_sync = self.hooks.fail_next_post_stage_sync();
         self.hooks
             .on_event(&StorageEvent::BeforeStage(source.storage_key.clone()))?;
+        // 预检与暂存之间可能有同名替换；移动前确认仍是预检时的普通文件，并禁止覆盖已有暂存名。
         let before = statat(
             &source.leaf,
             source.file_name.as_str(),
@@ -757,6 +778,7 @@ impl LocalMediaStorage {
         if fail_post_stage_sync {
             return Err(io::Error::other("injected post-stage sync failure").into());
         }
+        // 两侧目录都同步后才报告暂存完成；移动已发生但同步失败时，由操作清单支持后续恢复。
         sync_fd(&source.leaf)?;
         sync_fd(&operation.directory)?;
         Ok(())
@@ -768,6 +790,7 @@ impl LocalMediaStorage {
         source: &RemovalSource,
         staged_name: &str,
     ) -> Result<(), MediaError> {
+        // 恢复不覆盖原位置新出现的文件；暂存名已不存在时允许幂等返回，其余错误交给调用方处理。
         match renameat_with(
             &operation.directory,
             staged_name,
@@ -790,6 +813,7 @@ impl LocalMediaStorage {
         operation: &RemovalOperation,
         staged_name: &str,
     ) -> Result<(), MediaError> {
+        // 调用方确认数据库已提交或已无引用后，才删除清单中的暂存普通文件并同步目录项。
         let opened = match openat(
             &operation.directory,
             staged_name,
@@ -813,6 +837,7 @@ impl LocalMediaStorage {
         &self,
         operation: &RemovalOperation,
     ) -> Result<(), MediaError> {
+        // 只在目录中不再有暂存数据或未知条目时删除清单，避免丢失仍需恢复文件的唯一操作依据。
         let directory =
             rustix::fs::Dir::read_from(&operation.directory).map_err(io::Error::from)?;
         for entry in directory {
@@ -839,6 +864,7 @@ impl LocalMediaStorage {
     pub(crate) fn persisted_removal_operations(
         &self,
     ) -> Result<Vec<PersistedRemovalOperation>, MediaError> {
+        // 只枚举受控操作目录；已发布清单交给 removal::recover 按数据库引用决定恢复还是完成删除。
         let directory = rustix::fs::Dir::read_from(&self.operations_fd).map_err(io::Error::from)?;
         let mut operations = Vec::new();
         for entry in directory {
@@ -859,6 +885,7 @@ impl LocalMediaStorage {
             ) {
                 Ok(manifest) => manifest,
                 Err(rustix::io::Errno::NOENT) => {
+                    // 尚未发布清单的目录仅允许为空或含 manifest.part，不能据此删除其他残留数据。
                     self.clean_unpublished_removal_operation(&name, &operation_directory)?;
                     continue;
                 }
@@ -870,6 +897,7 @@ impl LocalMediaStorage {
             {
                 return Err(MediaError::InvalidStorageKey);
             }
+            // 多读一个字节识别超限清单；损坏或超限时拒绝恢复，不扩大到无清单文件的清理。
             let mut reader = std::fs::File::from(manifest).take(65_537);
             let mut encoded = Vec::new();
             reader.read_to_end(&mut encoded)?;
@@ -958,6 +986,7 @@ impl LocalMediaStorage {
         storage_key: &str,
         staged_name: &str,
     ) -> Result<(), MediaError> {
+        // 数据库仍引用该文件时恢复公开位置；若暂存副本已不在，必须确认正式位置已有普通文件。
         let staged_exists = self.validate_persisted_removal_entry(operation, staged_name)?;
         let (kind, shard, file) = parse_storage_key(storage_key)?;
         let kind_fd = open_directory(&self.root_fd, OsStr::new(kind))
@@ -1002,6 +1031,7 @@ impl LocalMediaStorage {
         &self,
         marker: &PendingMarker,
     ) -> Result<bool, MediaError> {
+        // 调用方已确认没有数据库登记；拿锁后重读标记，避免使用等待期间已被替换或移除的恢复依据。
         let _mutation_guard = self.mutations.lock().await;
         let (_, _, file) = parse_storage_key(&marker.storage_key)?;
         let marker_name = format!(
@@ -1052,6 +1082,7 @@ impl LocalMediaStorage {
     }
 
     pub(crate) fn incoming_entries(&self) -> Result<Vec<IncomingEntry>, MediaError> {
+        // 启动上传恢复只看到受控名称的普通文件，由上层按年龄和数据库登记状态处理，不扫描正式目录。
         let directory = rustix::fs::Dir::read_from(&self.incoming_fd).map_err(io::Error::from)?;
         let mut entries = Vec::new();
         for entry in directory {
@@ -1076,6 +1107,7 @@ impl LocalMediaStorage {
     }
 
     pub(crate) fn read_pending_marker(&self, name: &str) -> Result<PendingMarker, MediaError> {
+        // 名称、长度、版本、摘要格式和资源 ID 必须共同匹配，任何不可信标记都不能成为删除授权。
         if !is_pending_name(name) {
             return Err(MediaError::InvalidStorageKey);
         }
@@ -1127,6 +1159,7 @@ impl LocalMediaStorage {
 }
 
 fn open_directory<F: AsFd>(parent: &F, name: &OsStr) -> io::Result<OwnedFd> {
+    // 受控子目录逐级相对已打开的父目录解析；要求目录类型并拒绝符号链接，避免跳出受控层级。
     openat(
         parent,
         name,
@@ -1154,6 +1187,8 @@ fn verify_exclusive_directory(directory: &OwnedFd, require_private_mode: bool) -
 }
 
 fn recover_quarantine_claims(root: &OwnedFd, quarantine: &OwnedFd) -> Result<(), MediaError> {
+    // 只处理有合法 claim 的隔离副本；设备、inode、大小和内容摘要均匹配且原位置空缺才恢复。
+    // 无关、损坏或身份不符的条目原地保留，不能把启动恢复变成对隔离区的无差别清理。
     let entries = rustix::fs::Dir::read_from(quarantine).map_err(io::Error::from)?;
     for entry in entries {
         let entry = entry.map_err(io::Error::from)?;
@@ -1245,6 +1280,7 @@ fn read_quarantine_claim(
 }
 
 fn valid_claim_base(base: &str) -> bool {
+    // 操作目录和 claim 基名限定为系统生成的 UUID 简写，不接管其他名称的文件或目录。
     base.len() == 32
         && base
             .bytes()
@@ -1252,6 +1288,7 @@ fn valid_claim_base(base: &str) -> bool {
 }
 
 fn is_staged_removal_name(name: &str) -> bool {
+    // 清单中的暂存名只允许八位十进制序号加 .data，拒绝路径分量和未知命名格式。
     name.len() == 13
         && name.ends_with(".data")
         && name[..8].bytes().all(|byte| byte.is_ascii_digit())
@@ -1267,6 +1304,7 @@ fn same_named_directory<F: AsFd>(
     name: &str,
     opened: &OwnedFd,
 ) -> Result<bool, MediaError> {
+    // 不跟随同名符号链接，比较名称当前指向对象与已持有描述符的设备和 inode，识别目录替换。
     let named = statat(parent, name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
     let held = rustix::fs::fstat(opened).map_err(io::Error::from)?;
     Ok(named.st_dev == held.st_dev && named.st_ino == held.st_ino)
@@ -1326,6 +1364,7 @@ fn remove_owned_from_leaf<F: AsFd>(
         }
         Err(error) => return Err(io::Error::from(error).into()),
     };
+    // 始终对已打开文件做身份和内容校验，不能仅凭相同存储键认定当前文件属于这次清理。
     let original_stat = rustix::fs::fstat(&original_fd).map_err(io::Error::from)?;
     let mut original_file = std::fs::File::from(original_fd);
     let matches_owner = rustix::fs::FileType::from_raw_mode(original_stat.st_mode)
@@ -1342,9 +1381,8 @@ fn remove_owned_from_leaf<F: AsFd>(
         return Err(MediaError::InvalidStorageKey);
     }
 
-    // All expensive verification is complete before this injection boundary. The
-    // subsequent claim, constant-time identity check, unlink, and fsync are one
-    // synchronous critical section protected by LocalMediaStorage::mutations.
+    // 耗时的内容校验在故障注入边界前完成；之后的隔离占有、固定字段身份重检、删除和同步
+    // 在 mutations 锁保护的同步临界区内执行。随机隔离名配合不可覆盖的重命名避免同名冲突。
     let quarantine_base = Uuid::new_v4().simple().to_string();
     let quarantine_name = format!("{quarantine_base}.data");
     let claim_name = format!("{quarantine_base}.claim");
@@ -1389,6 +1427,7 @@ fn remove_owned_from_leaf<F: AsFd>(
         && claimed_stat.st_ino == original_stat.st_ino
         && claimed_stat.st_size == original_stat.st_size;
     if !claimed_is_original {
+        // 重命名可能捕获校验后被换入的文件；身份不符时尝试放回，绝不能按旧文件的授权将其删除。
         let restored = renameat_with(
             quarantine,
             quarantine_name.as_str(),
@@ -1399,14 +1438,14 @@ fn remove_owned_from_leaf<F: AsFd>(
         sync_fd(quarantine)?;
         sync_fd(leaf)?;
         if restored.is_err() {
-            // The unrelated entry remains in the private quarantine rather than
-            // being destroyed when its original name was concurrently occupied.
+            // 原位置被并发占用而无法恢复时，把无关条目保留在私有隔离区，不能将其销毁。
             return Err(MediaError::InvalidStorageKey);
         }
         remove_if_present(quarantine, &claim_name)?;
         sync_fd(quarantine)?;
         return Err(MediaError::InvalidStorageKey);
     }
+    // 删除并同步两侧目录后才移除 claim；删除或这两次同步失败时保留恢复依据，供下次安全判定。
     unlinkat(quarantine, quarantine_name.as_str(), AtFlags::empty()).map_err(io::Error::from)?;
     if fail_post_unlink_sync {
         return Err(io::Error::other("injected post-unlink directory fsync failure").into());
@@ -1440,6 +1479,7 @@ fn write_quarantine_claim(
     name: &str,
     claim: &QuarantineClaim,
 ) -> Result<(), MediaError> {
+    // claim 必须先持久化再移动媒体文件；临时写入、文件同步、原子发布和目录同步缺一不可。
     let temporary_name = format!("{}.part", Uuid::new_v4().simple());
     let result = (|| {
         let fd = openat(
@@ -1475,6 +1515,7 @@ fn clear_completed_quarantine_claims(
     quarantine: &OwnedFd,
     storage_key: &str,
 ) -> Result<(), MediaError> {
+    // 只清除同一存储键且隔离数据已不存在的有效 claim；未知记录和仍有数据的记录继续保留。
     let entries = rustix::fs::Dir::read_from(quarantine).map_err(io::Error::from)?;
     for entry in entries {
         let entry = entry.map_err(io::Error::from)?;
@@ -1503,6 +1544,7 @@ fn clear_completed_quarantine_claims(
 }
 
 fn valid_sha256(checksum: &str) -> bool {
+    // 摘要只接受完整的小写十六进制，非法格式不能参与恢复时的所有权证明。
     checksum.len() == 64
         && checksum
             .bytes()
@@ -1522,6 +1564,7 @@ fn is_pending_name(name: &str) -> bool {
 }
 
 fn is_uuid_suffix(name: &str, suffix: &str) -> bool {
+    // 仅接收系统生成的 32 位小写十六进制名及指定后缀，不把任意临时目录条目纳入清理。
     let Some(stem) = name.strip_suffix(suffix) else {
         return false;
     };
@@ -1532,6 +1575,7 @@ fn is_uuid_suffix(name: &str, suffix: &str) -> bool {
 }
 
 fn parse_storage_key(key: &str) -> Result<(&str, &str, &str), MediaError> {
+    // 失败关闭：只接受解析为三个普通路径分量的键，拒绝绝对路径、父目录穿越、反斜杠和空字符。
     if key.contains(['\\', '\0']) {
         return Err(MediaError::InvalidStorageKey);
     }
@@ -1552,6 +1596,7 @@ fn parse_storage_key(key: &str) -> Result<(&str, &str, &str), MediaError> {
 }
 
 fn validate_storage_key_parts(kind: &str, shard: &str, file: &str) -> Result<(), MediaError> {
+    // 用途、分片前缀、资源 ID 与扩展名必须相互匹配，不能把任意根目录内文件当作媒体处理。
     if !matches!(kind, "poster" | "video") {
         return Err(MediaError::InvalidStorageKey);
     }
