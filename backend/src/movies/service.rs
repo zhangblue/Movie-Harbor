@@ -224,6 +224,7 @@ pub async fn transition(
     let target = parse_target(target)?;
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
+    // 重复目标在调用状态变更前短路，避免重试刷新归档时间。
     if target.matches(&model.status) {
         let result = response(&tx, model).await?;
         tx.commit().await?;

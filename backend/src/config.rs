@@ -9,8 +9,8 @@ use std::{
 pub struct Config {
     pub listen_addr: SocketAddr,
     pub database_url: String,
-    /// Must be owned by the backend OS account and not group/world writable.
-    /// Processes running as that same account are inside the storage trust boundary.
+    /// 必须由后端操作系统账户所有，且不得允许组或其他用户写入。
+    /// 以同一账户运行的进程属于存储信任边界。
     pub media_dir: PathBuf,
     pub cookie_secure: bool,
     pub public_origin: String,
@@ -107,7 +107,7 @@ impl Config {
         Ok(config)
     }
 
-    /// Validate at both environment parsing and application startup boundaries.
+    /// 在环境解析和应用启动两个边界均校验。
     pub fn validated_origin(&self) -> Result<url::Url, ConfigError> {
         let origin =
             parse_origin(&self.public_origin).ok_or(ConfigError::Invalid("PUBLIC_ORIGIN"))?;

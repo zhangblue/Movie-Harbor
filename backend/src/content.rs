@@ -142,7 +142,7 @@ pub fn apply_target_state(
     target: TargetState,
     now: DateTime<FixedOffset>,
 ) {
-    // 幂等地应用目标状态与时间戳，避免重试改写首次发布日期。
+    // 此函数只保留首次发布时间；归档时间会在每次进入归档时刷新。
     match target {
         TargetState::Draft => {
             *status = "draft".into();

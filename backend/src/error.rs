@@ -1,1 +1,1 @@
-//! Shared API error mapping is introduced with the first domain route.
+//! 首个领域路由引入时再提供共享 API 错误映射。
