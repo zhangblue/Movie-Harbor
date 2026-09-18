@@ -93,6 +93,7 @@ pub async fn stage(
     reason: &str,
     assets: &[OwnedMedia],
 ) -> Result<StagedRemoval, MediaError> {
+    // 返回值持有全局媒体变更锁，直到恢复或完成删除，避免删除与上传、替换交错。
     acquire(storage).await?.stage(reason, assets)
 }
 
@@ -131,6 +132,7 @@ pub async fn finish_delete_transaction<E>(
     deleted_media_count: usize,
     database_result: Result<(), E>,
 ) -> Result<u64, FinishDeleteError<E>> {
+    // 事务回滚或提交失败时恢复可见文件；只有提交成功后才同步清理隔离副本，并单独报告 finalize 失败。
     if let Err(error) = database_result {
         let _ = tx.rollback().await;
         staged
@@ -157,6 +159,7 @@ pub async fn recover(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
 ) -> Result<(), MediaError> {
+    // 启动恢复只检查持久清单明确登记的中断操作，不扫描或清理普通孤儿文件。
     let _session = acquire(storage).await?;
     for persisted in storage.persisted_removal_operations()? {
         let manifest: Manifest = serde_json::from_slice(&persisted.manifest)
@@ -175,6 +178,7 @@ pub async fn recover(
             storage.validate_persisted_removal_entry(&persisted.operation, &entry.staged_name)?;
         }
         for entry in &manifest.entries {
+            // 数据库仍引用该资产则恢复原位置；引用已切换或删除后才完成隔离副本的物理清理。
             if is_referenced(db, entry.asset_id, &entry.storage_key).await? {
                 storage.restore_persisted_removal(
                     &persisted.operation,
@@ -273,6 +277,7 @@ fn stage_operation(
         }
     }
 
+    // 全部目标预检通过后先持久化删除清单，再原子暂存文件，使崩溃恢复能够收敛已登记的状态。
     let operation_id = Uuid::new_v4();
     let manifest = Manifest {
         version: 1,
@@ -302,6 +307,7 @@ fn stage_operation(
         if let Err(error) =
             storage.stage_removal_source(&operation, &current.source, &current.staged_name)
         {
+            // 任一文件暂存失败即按相反顺序恢复已移动文件，并移除本次操作清单。
             for entry in entries.iter().rev() {
                 storage.restore_removal_source(&operation, &entry.source, &entry.staged_name)?;
             }

@@ -57,6 +57,7 @@ pub fn router(
     storage: LocalMediaStorage,
     policy: UploadPolicy,
 ) -> Result<Router, MediaError> {
+    // Axum 在此路由最多接收策略文件上限加 64 KiB Multipart 开销；流式存储仍按策略上限校验文件本身。
     let body_limit = usize::try_from(policy.max_bytes())
         .ok()
         .and_then(|limit| limit.checked_add(MULTIPART_OVERHEAD_BYTES))
@@ -152,6 +153,7 @@ async fn upload(
     target: AttachmentTarget,
     mut multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
+    // 仅接收一个名为 file 的字段；文件名限制为 255 字节，声明 MIME 由上传策略进一步校验。
     let field = multipart
         .next_field()
         .await
@@ -180,6 +182,7 @@ async fn upload(
         field,
     )
     .await?;
+    // 已暂存的首个文件必须没有同请求的额外字段，避免默默忽略未被处理的 Multipart 内容。
     if multipart
         .next_field()
         .await
@@ -199,6 +202,7 @@ async fn upload(
 }
 
 fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> MediaError {
+    // 仅将提取器的请求体上限错误映射为稳定的 TooLarge，其余格式错误保留为 Multipart。
     if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
         MediaError::TooLarge
     } else {

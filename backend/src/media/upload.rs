@@ -71,6 +71,7 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     let mut stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
+    // 先持久化恢复标记再进入数据库写阶段，使“文件已提升但引用尚未提交”的中断可在启动时收敛。
     stored.begin_database_write();
     let asset = match insert_asset(db, id, kind, original_name, &stored).await {
         Ok(asset) => asset,
@@ -81,6 +82,7 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
             return Err(error);
         }
     };
+    // 数据库记录提交后才移除恢复标记并注册文件，避免崩溃窗口遗留无法判定的已提升文件。
     stored.notify_database_committed()?;
     tokio::task::yield_now().await;
     stored.mark_registered()?;
@@ -170,6 +172,7 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     }
     let id = Uuid::new_v4();
     let kind = target.kind();
+    // 替换也先按流式上传策略完整写入新文件；旧引用在后续事务成功前保持不变。
     let stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
@@ -188,6 +191,7 @@ pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
 ) -> Result<CommittedAttachment, MediaError> {
+    // 新文件携带的全局媒体变更锁覆盖数据库切换、旧文件暂存和提交后注册，避免并发操作打破槽位独占。
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
@@ -225,6 +229,7 @@ pub(crate) async fn commit_attachment(
         restore_result.map_err(|_| MediaError::ReplacementFailed)?;
         return Err(MediaError::ReplacementFailed);
     }
+    // 先确认新资产数据库提交并注册，再不可逆地清理旧资产隔离副本；两类 finalize 失败保持不同错误语义。
     pending
         .stored
         .notify_database_committed()
@@ -252,6 +257,7 @@ async fn replace_before_commit(
     removal: &RemovalSession,
     staged: &mut Option<StagedOperation>,
 ) -> Result<CommittedAttachment, MediaError> {
+    // 新资产登记、归属槽位切换和旧资产记录删除共用一个事务，避免媒体资产被多个槽位同时引用。
     let asset = insert_asset(
         tx,
         pending.id,
@@ -306,6 +312,7 @@ async fn switch_reference(
     removal: &RemovalSession,
     staged: &mut Option<StagedOperation>,
 ) -> Result<SwitchOutcome, MediaError> {
+    // 每个槽位先锁定其归属对象并重检版本；单集路径额外锁定祖先以维持层级写入顺序。
     match target {
         AttachmentTarget::MoviePoster { id, .. } | AttachmentTarget::MovieVideo { id, .. } => {
             let model = movie::Entity::find_by_id(id)
@@ -405,8 +412,8 @@ async fn switch_reference(
             })
         }
         AttachmentTarget::EpisodeVideo { id, version } => {
-            // Discover immutable ancestry, then acquire every content lock in the global order
-            // series -> season -> episode. Re-check each edge after locking.
+            // 先读取不可变祖先，再按全局顺序锁住全部内容记录：series -> season -> episode。
+            // 加锁后重新核对每条父子关系，避免并发移动或删除使先前读取的层级失效。
             let episode_hint = episode::Entity::find_by_id(id)
                 .one(tx)
                 .await?
@@ -495,6 +502,7 @@ async fn stage_old_asset(
         .one(tx)
         .await?
         .ok_or(MediaError::TargetNotFound)?;
+    // 数据库引用切换前先将旧文件隔离；事务未提交时可恢复，提交后才允许同步删除。
     *staged = Some(
         removal
             .stage_retaining(
@@ -516,6 +524,7 @@ async fn delete_old_asset(
     let Some(old_id) = old_id else {
         return Ok(());
     };
+    // 旧文件已隔离且新引用已写入同一事务后，才删除旧资产记录以保持全局槽位独占。
     let deleted = media_asset::Entity::delete_by_id(old_id).exec(tx).await?;
     if deleted.rows_affected != 1 {
         return Err(MediaError::ReplacementFailed);

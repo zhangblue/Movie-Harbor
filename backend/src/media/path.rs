@@ -7,9 +7,11 @@ pub(crate) fn controlled_media_path(storage_key: &str, expected_kind: &str) -> O
 }
 
 fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {
+    // 受控键同时校验用途目录和系统文件名，公开 URL 与容器路径都不能接受任意相对路径。
     if key.contains(['\\', '\0']) {
         return false;
     }
+    // 仅接受“用途/两位分片/32 位文件名.受限扩展名”这一系统生成的三段结构。
     let mut parts = key.split('/');
     let (Some(kind), Some(shard), Some(file), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())
