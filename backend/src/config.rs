@@ -82,6 +82,7 @@ impl Config {
                 .map_err(|_| ConfigError::Invalid("TRUST_PROXY_HEADERS"))
         })?;
         let trusted_proxy_secret = lookup("TRUST_PROXY_SECRET").filter(|value| !value.is_empty());
+        // 信任转发头时必须绑定足够长的共享密钥，避免外部请求伪造代理身份。
         if trust_proxy_headers
             && trusted_proxy_secret
                 .as_ref()
@@ -119,6 +120,7 @@ impl Config {
             _ => false,
         };
         if !self.cookie_secure && !loopback {
+            // 非回环部署必须使用安全 Cookie，防止会话标识经 HTTP 暴露。
             return Err(ConfigError::Invalid("COOKIE_SECURE"));
         }
         Ok(origin)
@@ -129,6 +131,7 @@ fn database_url<F>(lookup: &F) -> Result<String, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
 {
+    // 完整连接 URL 与拆分配置互斥，避免部署环境覆盖后连接到意外的数据库。
     if let Some(value) = lookup("DATABASE_URL").filter(|value| !value.trim().is_empty()) {
         if [
             "DATABASE_HOST",
@@ -168,6 +171,7 @@ where
         .map_err(|_| ConfigError::Invalid("DATABASE_HOST"))?;
     url.set_port(Some(port))
         .map_err(|_| ConfigError::Invalid("DATABASE_PORT"))?;
+    // 先转义原始百分号，使 URL setter 的凭据编码不会误解已有转义序列。
     url.set_username(&username.replace('%', "%25"))
         .map_err(|_| ConfigError::Invalid("POSTGRES_USER"))?;
     url.set_password(Some(&password.replace('%', "%25")))
@@ -179,6 +183,7 @@ where
 
 fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
     const BROWSER_VIDEO_TYPES: [&str; 2] = ["video/mp4", "video/webm"];
+    // 只接受浏览器可直接播放的格式，避免上传后公开站无法播放媒体。
     let mut result = Vec::new();
     for item in value.split(',').map(str::trim) {
         if item.is_empty()
@@ -195,8 +200,9 @@ fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
     Ok(result)
 }
 
-/// Parse an HTTP origin, rejecting URL components that do not belong to an origin.
+/// 解析 HTTP Origin，拒绝不属于 Origin 的 URL 组成部分。
 pub(crate) fn parse_origin(value: &str) -> Option<url::Url> {
+    // 公开来源只能是纯 HTTP Origin，避免凭据或路径混入同源与 Cookie 判断。
     if value.contains('\\') || value.chars().any(char::is_whitespace) {
         return None;
     }
@@ -270,7 +276,7 @@ mod tests {
         ));
     }
 
-    // Catches enabling a non-browser media type or silently accepting an empty allowlist.
+    // 防止启用浏览器不支持的媒体类型，或静默接受空白名单。
     #[test]
     fn video_mime_allowlist_accepts_only_supported_unique_types() {
         let mut values = required_values();
@@ -296,7 +302,7 @@ mod tests {
         ));
     }
 
-    // Catches a value that cannot be represented in the persisted byte_size column.
+    // 防止允许无法写入持久化 byte_size 列的值。
     #[test]
     fn maximum_upload_size_must_fit_the_database_integer() {
         let mut values = required_values();
@@ -318,7 +324,7 @@ mod tests {
         assert!(Config::from_lookup(|name| values.get(name).map(ToString::to_string)).is_ok());
     }
 
-    // Catches Compose corrupting strong database passwords that contain URL delimiters.
+    // 防止 Compose 破坏含 URL 分隔符的高强度数据库密码。
     #[test]
     fn database_components_are_encoded_into_a_connection_url() {
         let mut values = required_values();
@@ -339,7 +345,7 @@ mod tests {
         assert_eq!(url.path(), "/movie_harbor");
     }
 
-    // Catches startup allowing insecure session cookies outside a loopback deployment.
+    // 防止启动时允许在非回环部署中使用不安全的会话 Cookie。
     #[test]
     fn insecure_cookies_are_rejected_for_non_loopback_public_origins() {
         for origin in [
@@ -363,7 +369,7 @@ mod tests {
         }
     }
 
-    // Catches disabling the deliberate local HTTP development exception.
+    // 防止意外移除本地 HTTP 开发环境的明确例外。
     #[test]
     fn loopback_development_can_disable_secure_cookies() {
         for origin in [
@@ -383,7 +389,7 @@ mod tests {
         }
     }
 
-    // Catches deriving trusted deployment origins from requests or accepting non-origin URL values.
+    // 防止从请求推导受信任部署来源，或接受非 Origin 的 URL 值。
     #[test]
     fn startup_requires_an_http_origin_without_credentials_path_query_or_fragment() {
         let mut values = required_values();

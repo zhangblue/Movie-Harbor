@@ -25,6 +25,7 @@ where
     where
         D: Deserializer<'de>,
     {
+        // Patch 保留“未提交、显式清空、设置新值”三种状态，避免部分更新误删已有字段。
         Option::<T>::deserialize(deserializer).map(|value| match value {
             Some(value) => Self::Value(value),
             None => Self::Null,
@@ -68,6 +69,7 @@ pub fn parse_unique_uuids(values: Vec<String>) -> Result<Vec<Uuid>, ContentRuleE
         .map(|value| value.parse().map_err(|_| ContentRuleError::Invalid))
         .collect::<Result<Vec<_>, _>>()?;
     if values.iter().copied().collect::<HashSet<_>>().len() != values.len() {
+        // 关联表原子替换前拒绝重复 ID，避免校验通过后产生重复关系。
         return Err(ContentRuleError::Invalid);
     }
     Ok(values)
@@ -121,6 +123,7 @@ pub fn parse_target(value: &str) -> Result<TargetState, ContentRuleError> {
 }
 
 pub fn ensure_transition(current: &str, target: TargetState) -> Result<(), ContentRuleError> {
+    // 生命周期转换由后端统一维护，避免客户端绕过发布和归档约束。
     matches!(
         (current, target),
         ("draft", TargetState::Published)
@@ -139,6 +142,7 @@ pub fn apply_target_state(
     target: TargetState,
     now: DateTime<FixedOffset>,
 ) {
+    // 幂等地应用目标状态与时间戳，避免重试改写首次发布日期。
     match target {
         TargetState::Draft => {
             *status = "draft".into();

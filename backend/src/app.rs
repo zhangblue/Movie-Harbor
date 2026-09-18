@@ -21,6 +21,7 @@ pub async fn build(
 ) -> Result<Router, Box<dyn std::error::Error>> {
     let public_origin = config.validated_origin()?;
     crate::auth::initialize(&db, config).await?;
+    // 各受保护路由共享同一数据库连接与认证状态，避免会话策略因路由而分裂。
     let state = crate::auth::AuthState {
         db: db.clone(),
         cookie_secure: config.cookie_secure,
@@ -40,6 +41,7 @@ pub async fn build(
     )?;
     crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
     crate::media::removal::recover(&db, &storage).await?;
+    // 所有媒体路由复用同一受控存储实例，确保文件恢复、上传和删除遵循同一所有权边界。
     Ok(router()
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))
