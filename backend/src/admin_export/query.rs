@@ -50,6 +50,7 @@ struct GenreRow {
 }
 
 pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<ContentExport, DbErr> {
+    // 父内容、题材、单集和媒体必须在同一只读快照中读取，导出不能混入并发修改的关联数据。
     let tx = db
         .begin_with_config(
             Some(IsolationLevel::RepeatableRead),
@@ -64,6 +65,7 @@ pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<Cont
         DatabaseBackend::Postgres,
         "SELECT series.id, series.name, series.synopsis, series.year, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
     )).all(&tx).await?;
+    // 批量读取全部父级题材并按系统顺序归组，既避免 N+1，也保留已停用的历史关联。
     let movie_genres = GenreRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
         "SELECT movie_genre.movie_id AS content_id, genre.name FROM movie_genre JOIN genre ON genre.id = movie_genre.genre_id ORDER BY movie_genre.movie_id ASC, genre.sort_order ASC, genre.id ASC",
@@ -76,6 +78,7 @@ pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<Cont
         DatabaseBackend::Postgres,
         "SELECT season.series_id, season.number AS season_number, episode.number AS episode_number, episode.name, episode.video_asset_id, episode.duration_seconds FROM episode JOIN season ON season.id = episode.season_id ORDER BY series_id ASC, season.number ASC, episode.number ASC, episode.id ASC",
     )).all(&tx).await?;
+    // 只有受控存储键才能写入导出路径；无效记录在响应前失败关闭，避免泄露或伪造容器路径。
     let media = tx
         .query_all(Statement::from_string(
             DatabaseBackend::Postgres,

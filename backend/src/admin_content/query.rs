@@ -6,6 +6,7 @@ use sea_orm::{
 };
 use uuid::Uuid;
 
+// 电影和剧集先投影为同一结构，随后才能按统一筛选条件统计总数。
 const ADMIN_CONTENT_COUNT_SQL: &str = r#"
 WITH candidates AS (
     SELECT movie.id, 'movie'::text AS kind, movie.name, movie.status,
@@ -66,12 +67,14 @@ pub async fn list(
     db: &DatabaseConnection,
     filter: AdminContentFilter,
 ) -> Result<AdminContentPage, DbErr> {
+    // 总数与当前页必须来自同一 RepeatableRead 快照，避免并发发布导致页码和条目不一致。
     let transaction = db
         .begin_with_config(
             Some(IsolationLevel::RepeatableRead),
             Some(AccessMode::ReadOnly),
         )
         .await?;
+    // 所有筛选值都作为绑定参数传入，名称中的通配符不会改变 SQL 的筛选结构。
     let total_row = transaction
         .query_one(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,
@@ -86,6 +89,7 @@ pub async fn list(
         .ok_or_else(|| DbErr::Custom("admin content count returned no row".into()))?;
     let total = u64::try_from(total_row.try_get::<i64>("", "total")?)
         .map_err(|_| DbErr::Custom("admin content count was negative".into()))?;
+    // 用创建时间、内容类型和 ID 的稳定顺序分页，避免相同时间的记录在翻页时重排。
     let rows = transaction
         .query_all(Statement::from_sql_and_values(
             DatabaseBackend::Postgres,

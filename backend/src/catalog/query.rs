@@ -10,6 +10,7 @@ use sea_orm::{
 use std::collections::HashMap;
 use uuid::Uuid;
 
+// 公开目录仅统计同时具备发布状态和发布时间的有效父内容。
 const CATALOG_COUNT_SQL: &str = r#"
 SELECT count(*)::bigint AS total
 FROM (
@@ -62,7 +63,7 @@ FROM (
 ) candidates
 "#;
 
-/// Kept visible for integration-level EXPLAIN verification against the exact production query.
+/// 保持对集成级 EXPLAIN 验证可见，并确保验证使用的正是生产查询。
 pub const CATALOG_ITEMS_SQL: &str = r#"
 WITH candidates AS (
     SELECT * FROM (
@@ -98,7 +99,7 @@ LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
 ORDER BY page.published_at DESC, page.kind, page.id
 "#;
 
-/// Search variant of the production query, exposed for integration-level EXPLAIN verification.
+/// 供集成级 EXPLAIN 验证使用的生产查询搜索变体。
 pub const CATALOG_SEARCH_ITEMS_SQL: &str = r#"
 WITH candidates AS (
     SELECT * FROM (
@@ -180,6 +181,7 @@ WHERE series.id = $1
   AND series.published_at IS NOT NULL
 "#;
 
+// 单集公开可见时，剧集父级和单集自身都必须处于有效发布状态。
 const SERIES_EPISODES_SQL: &str = r#"
 SELECT season.id AS season_id, season.number AS season_number,
        episode.id, episode.number, episode.name, episode.duration_seconds,
@@ -256,6 +258,7 @@ impl GenreRow {
 }
 
 pub async fn list(db: &DatabaseConnection, filter: CatalogFilter) -> Result<CatalogPage, DbErr> {
+    // 计数、目录条目与题材必须共享快照，避免页面内的总数、卡片和标签彼此不一致。
     let transaction = db
         .begin_with_config(
             Some(IsolationLevel::RepeatableRead),
@@ -342,6 +345,7 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
 }
 
 pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<MovieDetail>, DbErr> {
+    // 详情主体、媒体 URL 与题材需在同一快照中读取，防止并发归档后返回半旧数据。
     let transaction = db
         .begin_with_config(
             Some(IsolationLevel::RepeatableRead),
@@ -378,6 +382,7 @@ pub async fn series_detail(
     db: &DatabaseConnection,
     id: Uuid,
 ) -> Result<Option<SeriesDetail>, DbErr> {
+    // 剧集详情、题材和可见单集必须共享快照，保证季集树与父级可见性一致。
     let transaction = db
         .begin_with_config(
             Some(IsolationLevel::RepeatableRead),
@@ -469,6 +474,7 @@ async fn genres_for(
     if references.is_empty() {
         return Ok(HashMap::new());
     }
+    // 将当前页或详情中的父级一次传入查询，避免逐张卡片读取题材造成 N+1。
     let mut placeholders = Vec::with_capacity(references.len());
     let mut values = Vec::with_capacity(references.len() * 2);
     for (index, (kind, id)) in references.iter().enumerate() {

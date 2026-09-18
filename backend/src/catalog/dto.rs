@@ -10,8 +10,8 @@ pub const MAX_PAGE_SIZE: u64 = 100;
 #[derive(Debug, Default, Deserialize)]
 pub struct CatalogRequest {
     pub kind: Option<String>,
-    /// Trimmed substring search. Case folding follows PostgreSQL `lower` under the database
-    /// collation; LIKE metacharacters are escaped so all user input is treated literally.
+    /// 去除首尾空白后的子串搜索。大小写折叠遵循数据库排序规则下 PostgreSQL 的 `lower`；
+    /// LIKE 元字符会被转义，因此所有用户输入都按普通文本匹配。
     pub q: Option<String>,
     pub page: Option<u64>,
     pub size: Option<u64>,
@@ -83,6 +83,7 @@ impl TryFrom<CatalogRequest> for CatalogFilter {
 }
 
 fn escape_like(value: &str) -> String {
+    // 对 `%`、`_` 和转义符本身进行转义，使管理员输入始终按普通文本匹配。
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         if matches!(character, '!' | '%' | '_') {

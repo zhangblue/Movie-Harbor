@@ -24,6 +24,7 @@ pub enum GenreError {
 
 impl From<DbErr> for GenreError {
     fn from(error: DbErr) -> Self {
+        // 创建或改名触发的数据库唯一约束统一映射为可恢复的题材冲突。
         if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
             Self::Conflict
         } else {
@@ -99,6 +100,7 @@ pub async fn deactivate(db: &DatabaseConnection, id: Uuid) -> Result<genre::Mode
     if !model.enabled {
         return Ok(model);
     }
+    // 停用只阻止后续关联选择，已有电影和剧集仍保留这项历史题材。
     let mut active: genre::ActiveModel = model.into();
     active.enabled = Set(false);
     active.updated_at = Set(Utc::now().fixed_offset());
@@ -127,6 +129,7 @@ pub async fn reorder(
         return Err(GenreError::Invalid);
     }
 
+    // 重排请求必须覆盖全部现有题材，避免遗漏或重复位置留下不可判定的系统顺序。
     let tx = db.begin().await?;
     tx.execute_unprepared("LOCK TABLE genre IN EXCLUSIVE MODE")
         .await?;
@@ -160,6 +163,7 @@ pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<(), GenreError>
         .one(&tx)
         .await?
         .ok_or(GenreError::NotFound)?;
+    // 删除前检查两种父内容的关联；仍被引用的题材只能停用，不能破坏历史数据。
     let movie_reference = movie_genre::Entity::find()
         .filter(movie_genre::Column::GenreId.eq(id))
         .one(&tx)
@@ -178,15 +182,16 @@ pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<(), GenreError>
     Ok(())
 }
 
-/// Lock and validate genre IDs inside the transaction that will insert the associations.
+/// 在将要写入关联表的事务内锁定并校验题材 ID。
 ///
-/// The caller must keep `tx` open through its join-table inserts and commit. The shared row locks
-/// conflict with deactivation's `UPDATE`, ordering the association and deactivation atomically.
+/// 调用方必须让 `tx` 持续到关联表插入和提交完成。共享行锁会与停用操作的 `UPDATE`
+/// 冲突，从而原子地确定关联与停用的先后顺序。
 pub async fn ensure_associable(tx: &DatabaseTransaction, ids: &[Uuid]) -> Result<(), GenreError> {
     let distinct = ids.iter().copied().collect::<HashSet<_>>();
     if distinct.len() != ids.len() {
         return Err(GenreError::Invalid);
     }
+    // 锁住题材行直到关联写入完成，避免“检查为启用”后立刻被并发停用。
     let found = genre::Entity::find()
         .filter(genre::Column::Id.is_in(distinct))
         .lock_shared()
