@@ -142,7 +142,7 @@ pub fn apply_target_state(
     target: TargetState,
     now: DateTime<FixedOffset>,
 ) {
-    // 此函数只保留首次发布时间；归档时间会在每次进入归档时刷新。
+    // 本函数仅负责实际状态与时间戳写入；幂等短路由调用方进入前完成，首次发布时间只在缺失时写入。
     match target {
         TargetState::Draft => {
             *status = "draft".into();
