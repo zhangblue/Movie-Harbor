@@ -86,6 +86,7 @@ pub(crate) fn validate_metadata(
     declared_mime: &str,
     policy: &UploadPolicy,
 ) -> Result<ExpectedFormat, MediaError> {
+    // 元数据层只约束文件名、扩展名和声明 MIME；三者匹配后仍须校验实际字节内容。
     if original_name.is_empty()
         || original_name.contains(['/', '\\', '\0'])
         || !matches!(
@@ -143,6 +144,7 @@ pub(crate) fn validate_content(
         return Err(MediaError::Empty);
     }
     file.seek(SeekFrom::Start(0))?;
+    // 结构解析以 false/None 拒绝无效输入，统一映射为内容不匹配；图片还须通过受限解码复核。
     let matches = match format.mime_type {
         "image/jpeg" => validate_jpeg(file, byte_size) && decode_image(file, ImageFormat::Jpeg),
         "image/png" => validate_png(file, byte_size) && decode_image(file, ImageFormat::Png),
@@ -154,6 +156,7 @@ pub(crate) fn validate_content(
     matches.then_some(()).ok_or(MediaError::ContentMismatch)
 }
 
+// 尺寸、递归深度和图片分配上限分别约束恶意输入带来的内存与解析开销。
 const MAX_DIMENSION: u32 = 16_384;
 const MAX_PARSE_DEPTH: usize = 8;
 const MAX_IMAGE_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
@@ -181,6 +184,7 @@ fn read_exact<R: Read>(reader: &mut R, bytes: &mut [u8]) -> bool {
 }
 
 fn validate_png(file: &mut File, byte_size: u64) -> bool {
+    // 先核对 PNG 签名，再逐 chunk 检查长度、CRC 和必要结构；像素流由后续解码器复核。
     let mut signature = [0; 8];
     if byte_size < 45 || !read_exact(file, &mut signature) || signature != *b"\x89PNG\r\n\x1a\n" {
         return false;
@@ -194,6 +198,7 @@ fn validate_png(file: &mut File, byte_size: u64) -> bool {
             return false;
         }
         let length = u64::from(u32::from_be_bytes(header[..4].try_into().unwrap()));
+        // chunk 除数据外还占 12 字节（长度、类型、CRC），整个区间必须落在文件内。
         if position
             .checked_add(12)
             .and_then(|value| value.checked_add(length))
@@ -202,6 +207,7 @@ fn validate_png(file: &mut File, byte_size: u64) -> bool {
             return false;
         }
         let kind: [u8; 4] = header[4..].try_into().unwrap();
+        // CRC 覆盖类型与数据；分块读取仅保留 IHDR 所需前缀，避免按声明长度分配。
         let mut crc = png_crc_update(0xffff_ffff, &kind);
         let mut first = [0_u8; 13];
         let mut remaining = length;
@@ -223,6 +229,7 @@ fn validate_png(file: &mut File, byte_size: u64) -> bool {
             return false;
         }
         position += 12 + length;
+        // IHDR 必须唯一且位于首个 chunk；IEND 必须在 IDAT 出现后以空数据结束整个文件。
         match &kind {
             b"IHDR" => {
                 if saw_header || position != 33 || length != 13 {
@@ -258,6 +265,7 @@ fn png_crc_update(mut crc: u32, bytes: &[u8]) -> u32 {
 }
 
 fn validate_jpeg(file: &mut File, byte_size: u64) -> bool {
+    // 从 SOI 逐段寻找帧头和扫描段；EOI 只有在两者均出现且恰好位于文件末尾时才接受。
     let mut soi = [0; 2];
     if byte_size < 12 || !read_exact(file, &mut soi) || soi != [0xff, 0xd8] {
         return false;
@@ -287,6 +295,7 @@ fn validate_jpeg(file: &mut File, byte_size: u64) -> bool {
         if length < 2 {
             return false;
         }
+        // segment 长度包含长度字段自身的两字节，不包含前面的 marker。
         let payload_len = length - 2;
         if matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) {
             if payload_len < 6 {
@@ -312,6 +321,7 @@ fn validate_jpeg(file: &mut File, byte_size: u64) -> bool {
             return false;
         }
         if marker == 0xda {
+            // SOS 后进入熵编码数据区，不能再按普通 segment 的边界寻找下一个 marker。
             saw_scan = true;
             marker = match next_entropy_marker(file) {
                 Some(next) => next,
@@ -341,6 +351,7 @@ fn next_jpeg_marker<R: Read>(reader: &mut R) -> Option<u8> {
 }
 
 fn next_entropy_marker<R: Read>(reader: &mut R) -> Option<u8> {
+    // 熵编码区的 FF 00 是转义数据，FF D0–D7 是重启标记，连续 FF 是填充；其余值结束扫描区。
     let mut byte = [0];
     loop {
         reader.read_exact(&mut byte).ok()?;
@@ -360,6 +371,7 @@ fn next_entropy_marker<R: Read>(reader: &mut R) -> Option<u8> {
 }
 
 fn validate_webp(file: &mut File, byte_size: u64) -> bool {
+    // RIFF 声明长度不含起始八字节，加回后必须等于文件大小；VP8X 本身不算图像数据。
     let mut header = [0; 12];
     if byte_size < 30
         || !read_exact(file, &mut header)
@@ -379,6 +391,7 @@ fn validate_webp(file: &mut File, byte_size: u64) -> bool {
             return false;
         }
         let length = u64::from(u32::from_le_bytes(chunk[4..].try_into().unwrap()));
+        // RIFF chunk 的奇数字节数据另占一字节填充，跳过时须把填充计入父容器边界。
         let padded = length + (length & 1);
         if position + 8 + padded > byte_size {
             return false;
@@ -394,6 +407,7 @@ fn validate_webp(file: &mut File, byte_size: u64) -> bool {
         {
             return false;
         }
+        // VP8X 检查画布尺寸；VP8L 或 VP8 必须具备相应前缀，完整图像仍由后续解码器复核。
         match &chunk[..4] {
             b"VP8X" if length == 10 => {
                 let width = 1 + u32::from_le_bytes([prefix[4], prefix[5], prefix[6], 0]);
@@ -424,6 +438,7 @@ fn validate_webp(file: &mut File, byte_size: u64) -> bool {
     image_data && position == byte_size
 }
 
+// 限制采样表分配、容器遍历和 HEVC 配置遍历，抑制恶意数量字段放大的内存与 CPU 开销。
 const MAX_MP4_TABLE_ENTRIES: usize = 1_000_000;
 const MAX_CONTAINER_ELEMENTS: usize = 100_000;
 const MAX_HEVC_CONFIGURATION_ARRAYS: usize = 64;
@@ -497,6 +512,7 @@ impl Mp4SampleSizes {
 }
 
 fn validate_mp4(file: &mut File, byte_size: u64) -> bool {
+    // 容器解析收集媒体区间与轨道；必须至少有一个视频轨道通过配置、采样表和样本校验。
     let mut state = Mp4State::default();
     parse_mp4_boxes(file, 0, byte_size, 0, &mut state)
         && state.ftyp
@@ -514,6 +530,7 @@ fn parse_mp4_boxes(
     depth: usize,
     state: &mut Mp4State,
 ) -> bool {
+    // 先验证 box 完整落在父边界内，再递归解析；深度和数量上限用于约束恶意嵌套造成的资源消耗。
     if depth > MAX_PARSE_DEPTH || file.seek(SeekFrom::Start(start)).is_err() {
         return false;
     }
@@ -529,6 +546,7 @@ fn parse_mp4_boxes(
         }
         let mut size = u64::from(u32::from_be_bytes(header[..4].try_into().unwrap()));
         let mut header_size = 8_u64;
+        // size=1 使用 64 位扩展长度和 16 字节头；size=0 不在本解析器支持范围内。
         if size == 1 {
             let mut extended = [0; 8];
             if !read_exact(file, &mut extended) {
@@ -575,6 +593,7 @@ fn parse_mp4_boxes(
                     return false;
                 }
                 if track.video_handler {
+                    // hdlr 与 stsd 的出现顺序不固定，先收集位置，再仅对视频轨道解释样本描述。
                     let Some((start, end)) = track.sample_description else {
                         return false;
                     };
@@ -605,6 +624,7 @@ fn parse_mp4_track_boxes(
     track: &mut Mp4Track,
     boxes_seen: &mut usize,
 ) -> bool {
+    // 轨道内只递归 mdia/minf/stbl，并与外层共享 box 数量预算；此处只接受普通八字节 box 头。
     if depth > MAX_PARSE_DEPTH || file.seek(SeekFrom::Start(start)).is_err() {
         return false;
     }
@@ -666,6 +686,7 @@ fn parse_mp4_handler(file: &mut File, start: u64, end: u64, track: &mut Mp4Track
 }
 
 fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
+    // 仅接受一个视频样本描述；跳过 86 字节样本项头后，在该样本项边界内寻找编码配置。
     let mut header = [0; 8];
     if end - start < header.len() as u64
         || file.seek(SeekFrom::Start(start)).is_err()
@@ -715,6 +736,7 @@ fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
 }
 
 fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Option<usize> {
+    // 在读取表项或分配向量前核对数量上限及“八字节表头 + 数量 × 表项宽度”的最小空间。
     let mut header = [0; 8];
     (end - start >= 8 && read_exact(file, &mut header)).then_some(())?;
     let count = usize::try_from(u32::from_be_bytes(header[4..8].try_into().ok()?)).ok()?;
@@ -724,6 +746,7 @@ fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Op
 }
 
 fn parse_mp4_stts(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
+    // stts 每项给出样本数与单样本时长；这里只要求两者非零并累计样本数，不换算实际播放秒数。
     let Some(count) = read_mp4_entry_count(file, start, end, 8) else {
         return false;
     };
@@ -779,6 +802,7 @@ fn parse_mp4_stsz(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
         return false;
     }
     if default_size != 0 {
+        // 固定大小样本只保存大小与数量，避免为每个样本重复分配相同值。
         track.sample_sizes = Mp4SampleSizes::Fixed {
             size: default_size,
             count,
@@ -810,6 +834,7 @@ fn parse_mp4_chunk_offsets(
     track: &mut Mp4Track,
     wide: bool,
 ) -> bool {
+    // stco 与 co64 分别保存 32 位和 64 位文件绝对偏移，读取时统一为 u64。
     let width = if wide { 8 } else { 4 };
     let Some(count) = read_mp4_entry_count(file, start, end, width) else {
         return false;
@@ -830,6 +855,7 @@ fn parse_mp4_chunk_offsets(
 }
 
 fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -> bool {
+    // stts 与 stsz 样本数须一致；stsc 从第一个 chunk 起递增，且只能引用唯一的样本描述。
     let Some(configuration) = track.codec_configuration.as_ref() else {
         return false;
     };
@@ -860,6 +886,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
         return false;
     }
     let mut sample_index = 0_usize;
+    // stsc 按一基 chunk 编号分段映射；从每个 chunk 的绝对偏移起，按 stsz 大小连续定位样本。
     for (chunk_index, chunk_offset) in track.chunk_offsets.iter().enumerate() {
         let chunk_number = chunk_index as u32 + 1;
         let Some((_, samples_per_chunk, description)) = track
@@ -881,6 +908,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
             let Some(end) = offset.checked_add(u64::from(size)) else {
                 return false;
             };
+            // 每个完整样本须落在同一个 mdat 数据区间内，再按轨道配置校验其长度前缀 NAL。
             if size <= nal_width as u32
                 || !mdats
                     .iter()
@@ -904,6 +932,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
 }
 
 fn validate_hevc_sample(file: &mut File, offset: u64, size: u32, width: usize) -> bool {
+    // 按配置给出的长度前缀逐 NAL 检查边界，并限制数量；这里只读取两字节头，不解码 HEVC 负载。
     let Some(sample_end) = offset.checked_add(u64::from(size)) else {
         return false;
     };
@@ -927,6 +956,7 @@ fn validate_hevc_sample(file: &mut File, offset: u64, size: u32, width: usize) -
             return false;
         };
         let mut nal_header = [0_u8; 2];
+        // 禁止位必须为零，temporal_id_plus1 低三位必须非零；类型 0–31 计为 VCL。
         if length < nal_header.len() as u32
             || next > sample_end
             || file.seek(SeekFrom::Start(cursor)).is_err()
@@ -949,6 +979,7 @@ fn validate_length_prefixed_sample(
     h264: &H264Configuration,
 ) -> bool {
     let width = h264.nal_length_bytes;
+    // NAL 必须非空且完整落在样本内；每个样本至多检查 10,000 个 NAL，并至少包含一个视频切片。
     let Some(sample_end) = offset.checked_add(u64::from(size)) else {
         return false;
     };
@@ -971,6 +1002,7 @@ fn validate_length_prefixed_sample(
         let Some(next) = cursor.checked_add(u64::from(length)) else {
             return false;
         };
+        // 只读最多 256 字节前缀来检查 NAL 头及切片参数集引用，不把整个视频样本载入内存。
         let mut nal_prefix = [0_u8; 256];
         let prefix_len = usize::try_from(length)
             .unwrap_or(usize::MAX)
@@ -1006,6 +1038,7 @@ fn validate_length_prefixed_sample(
 }
 
 fn validate_slice_parameter_set(nal: &RefNal<'_>, context: &H264Context) -> bool {
+    // 切片类型须在允许范围内，且其 PPS 与 PPS 指向的 SPS 都必须已登记；这里不完整解析切片。
     let mut bits = nal.rbsp_bits();
     if bits.read_ue("first_mb_in_slice").is_err() {
         return false;
@@ -1060,6 +1093,7 @@ fn validate_mp4_codec_configuration(
         }
         if &header[4..8] == expected {
             let payload_len = usize::try_from(size - 8).ok()?;
+            // 编码配置整体读入内存前限制为 64 KiB，避免信任 box 长度进行大额分配。
             if payload_len > 65_536 {
                 return None;
             }
@@ -1080,6 +1114,7 @@ fn validate_mp4_codec_configuration(
 }
 
 fn validate_hvcc(payload: &[u8]) -> Option<usize> {
+    // 固定头至少 23 字节，指定保留位必须为一；长度前缀宽度取低两位加一，拒绝三字节形式。
     if payload.len() < 23
         || payload[0] != 1
         || payload[13] & 0xf0 != 0xf0
@@ -1103,6 +1138,7 @@ fn validate_hvcc(payload: &[u8]) -> Option<usize> {
     let mut saw_vps = false;
     let mut saw_sps = false;
     let mut saw_pps = false;
+    // 每个数组及 NAL 都须完整落在配置内；仅核对 NAL 头与声明类型，不解析参数集内部语义。
     for _ in 0..array_count {
         let array_header = *payload.get(cursor)?;
         if array_header & 0x40 != 0 {
@@ -1145,10 +1181,12 @@ fn validate_hvcc(payload: &[u8]) -> Option<usize> {
             cursor = end;
         }
     }
+    // 配置须恰好消费完，并至少包含 VPS、SPS、PPS 三类参数集。
     (cursor == payload.len() && saw_vps && saw_sps && saw_pps).then_some(width)
 }
 
 fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
+    // 先核对固定头、保留位和一/二/四字节 NAL 长度前缀，再逐一检查非空 SPS/PPS 的声明边界。
     if payload.len() < 7
         || payload[0] != 1
         || payload[4] & 0xfc != 0xfc
@@ -1192,6 +1230,8 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
         }
         cursor += length;
     }
+    // High Profile 可在 PPS 后直接结束；若有扩展字节，须检查完整扩展头及保留位。
+    // 扩展 NAL 必须完整且至少两字节，禁止位为零、类型为 13；不解析其内部负载。
     if is_high_avc_profile(payload[1]) && cursor < payload.len() {
         let chroma_format = *payload.get(cursor)?;
         let bit_depth_luma = *payload.get(cursor.checked_add(1)?)?;
@@ -1223,6 +1263,7 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
     }
     let avcc = AvcDecoderConfigurationRecord::try_from(payload).ok()?;
     let context = build_validated_h264_context(&avcc)?;
+    // 解析后的参数集数量须与声明一致，防止重复 ID 覆盖后悄悄丢失参数集。
     (context.sps().count() == usize::from(sps_count)
         && context.pps().count() == usize::from(pps_count))
     .then_some(H264Configuration {
@@ -1232,6 +1273,7 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
 }
 
 fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Option<H264Context> {
+    // 第三方 SPS/PPS 解析的错误及可展开 panic 都转为拒绝，不让畸形参数集沿该路径传播 panic。
     let mut context = H264Context::new();
     for encoded in avcc.sequence_parameter_sets() {
         let encoded = encoded.ok()?;
@@ -1241,6 +1283,7 @@ fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Opt
         }))
         .ok()?
         .ok()?;
+        // SPS 解析后先限制尺寸，再允许依赖它的 PPS 解析；PPS 的 slice-group 参数还须提前检查。
         if !safe_sps_for_dependent_parsing(&sps) {
             return None;
         }
@@ -1263,6 +1306,7 @@ fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Opt
 }
 
 fn safe_sps_for_dependent_parsing(sps: &SeqParameterSet) -> bool {
+    // 同时限制宏块轴长、面积计算和最终像素尺寸，避免异常 SPS 放大后续 PPS 解析的资源需求。
     let Some(width_in_mbs) = sps.pic_width_in_mbs_minus1.checked_add(1) else {
         return false;
     };
@@ -1282,6 +1326,7 @@ fn safe_sps_for_dependent_parsing(sps: &SeqParameterSet) -> bool {
 }
 
 fn prevalidate_pps_slice_groups(nal: &RefNal<'_>, context: &H264Context) -> bool {
+    // 在完整 PPS 解析前核对 SPS 引用、最多八个 slice group，以及各 map 类型中与图像大小相关的参数。
     let mut bits = nal.rbsp_bits();
     let Ok(pps_id) = bits.read_ue("pic_parameter_set_id") else {
         return false;
@@ -1626,6 +1671,7 @@ struct WebmState {
 }
 
 fn validate_webm(file: &mut File, byte_size: u64) -> bool {
+    // 必须识别 webm 文档类型、受支持的视频轨道，以及引用该轨道的 SimpleBlock；不解码视频帧。
     let mut state = WebmState::default();
     let mut elements_seen = 0_usize;
     parse_ebml_elements(file, 0, byte_size, 0, &mut state, &mut elements_seen)
@@ -1642,6 +1688,7 @@ fn parse_ebml_elements(
     state: &mut WebmState,
     elements_seen: &mut usize,
 ) -> bool {
+    // EBML 只递归识别的容器，共享深度与元素数量预算；声明长度必须落在当前父元素内。
     if depth > MAX_PARSE_DEPTH || file.seek(SeekFrom::Start(start)).is_err() {
         return false;
     }
@@ -1678,6 +1725,7 @@ fn parse_ebml_elements(
                 }
             }
             0xae => {
+                // 每个 TrackEntry 单独收集类型、Codec ID、编号和尺寸，防止不同轨道的字段拼成有效轨道。
                 let mut track = WebmState::default();
                 if !parse_ebml_elements(
                     file,
@@ -1705,6 +1753,7 @@ fn parse_ebml_elements(
                 }
             }
             0x4282 | 0x86 => {
+                // 文档类型和 Codec ID 最多读取 64 字节；视频编码只接受 VP8/VP9 对应的标识。
                 if size > 64 {
                     return false;
                 }
@@ -1767,6 +1816,7 @@ fn parse_ebml_elements(
                 }
             }
             0xa3 => {
+                // SimpleBlock 需有轨道号、三字节头和非空负载；标志位 0x06 必须为零，即不支持 lacing。
                 let Some((track_number, width)) = read_ebml_vint(file, false) else {
                     return false;
                 };
@@ -1811,6 +1861,7 @@ fn track_number_set(state: &mut WebmState, number: u64) {
 }
 
 fn read_ebml_vint<R: Read>(reader: &mut R, keep_marker: bool) -> Option<(u64, usize)> {
+    // 首个值为 1 的位确定 VINT 宽度；元素 ID 保留该位且最多四字节，数值去掉该位且最多八字节。
     let mut first = [0];
     reader.read_exact(&mut first).ok()?;
     let width = first[0].leading_zeros() as usize + 1;
@@ -1828,6 +1879,7 @@ fn read_ebml_vint<R: Read>(reader: &mut R, keep_marker: bool) -> Option<(u64, us
         reader.read_exact(&mut byte).ok()?;
         value = (value << 8) | u64::from(byte[0]);
     }
+    // 去掉宽度标志后全为一的未知长度形式不被接受，确保递归始终有明确的父边界。
     let unknown = !keep_marker && value == (1_u64 << (7 * width)) - 1;
     (!unknown).then_some((value, width))
 }
