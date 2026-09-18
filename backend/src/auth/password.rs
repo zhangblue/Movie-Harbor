@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 pub async fn hash(password: String) -> Result<String, AuthError> {
+    // Argon2 是 CPU 密集型计算，移入阻塞线程池以免占用 Tokio 的异步工作线程。
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -18,6 +19,7 @@ pub async fn hash(password: String) -> Result<String, AuthError> {
 }
 
 pub async fn verify(password: String, hash: String) -> Result<bool, AuthError> {
+    // 校验同样可能耗尽 CPU，不能直接在异步执行器上运行。
     tokio::task::spawn_blocking(move || {
         let parsed =
             PasswordHash::new(&hash).map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
@@ -30,12 +32,14 @@ pub async fn verify(password: String, hash: String) -> Result<bool, AuthError> {
 }
 
 pub async fn hash_limited(limit: &Arc<Semaphore>, password: String) -> Result<String, AuthError> {
+    // 信号量限制同时进行的 Argon2 数量，避免密码修改高峰把所有 CPU 时间耗尽。
     let permit = limit
         .clone()
         .acquire_owned()
         .await
         .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
     tokio::task::spawn_blocking(move || {
+        // 持有许可直到阻塞任务结束，确保排队上限覆盖完整的哈希生命周期。
         let _permit = permit;
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -52,12 +56,14 @@ pub async fn verify_limited(
     password: String,
     hash: String,
 ) -> Result<bool, AuthError> {
+    // 登录校验与改密校验共用同一预算，避免其中一路绕开 CPU 并发保护。
     let permit = limit
         .clone()
         .acquire_owned()
         .await
         .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
     tokio::task::spawn_blocking(move || {
+        // 将许可移动进阻塞闭包，任务结束前都不会提前释放并发槽位。
         let _permit = permit;
         let parsed =
             PasswordHash::new(&hash).map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
