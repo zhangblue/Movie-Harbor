@@ -273,7 +273,7 @@ pub async fn create_season(
     } = command;
     require_positive_i64(expected_version)?;
     require_positive_i32(number)?;
-    // 此处不编辑剧集自身字段，只以父版本串行化下级创建，因此已发布剧集仍可新增草稿季。
+    // 此处不编辑剧集自身字段，只以父版本串行化下级创建，因此已发布剧集仍可新增季；单集创建会显式设为草稿。
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, expected_version)?;

@@ -168,7 +168,7 @@ pub async fn update(
     input: UpdateMovieRequest,
 ) -> Result<MovieResponse, MovieError> {
     require_positive_i64(input.version)?;
-    // 草稿更新在同一事务内锁定并校验版本、校验题材、替换关联，再递增版本，避免出现部分更新。
+    // 草稿更新在同一事务内锁定并校验版本、校验题材、持久化并递增版本、替换题材关联，避免出现部分更新。
     let tx = db.begin().await?;
     let mut model = repository::find_locked(&tx, id).await?;
     require_version(model.version, input.version)?;
