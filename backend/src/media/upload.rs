@@ -229,7 +229,7 @@ pub(crate) async fn commit_attachment(
         restore_result.map_err(|_| MediaError::ReplacementFailed)?;
         return Err(MediaError::ReplacementFailed);
     }
-    // 先确认新资产数据库提交并注册，再不可逆地清理旧资产隔离副本；两类 finalize 失败保持不同错误语义。
+    // 数据库提交后，注册新资产或清理旧隔离副本的失败均映射为 ReplacementFinalizationFailed，与提交前的 ReplacementFailed 区分。
     pending
         .stored
         .notify_database_committed()

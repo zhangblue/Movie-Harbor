@@ -25,6 +25,10 @@
 
 - `docs: explain Rust media mutation workflow`
 
+## 修复记录
+
+- 第 1 轮：更正提交后注册新资产与清理旧隔离副本的错误映射；两者均为 `ReplacementFinalizationFailed`，只与提交前可恢复的 `ReplacementFailed` 区分。
+
 ## 担忧
 
 - 无。
