@@ -83,7 +83,7 @@ impl TryFrom<CatalogRequest> for CatalogFilter {
 }
 
 fn escape_like(value: &str) -> String {
-    // 对 `%`、`_` 和转义符本身进行转义，使管理员输入始终按普通文本匹配。
+    // 对 `%`、`_` 和转义符本身进行转义，使访客输入始终按普通文本匹配。
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         if matches!(character, '!' | '%' | '_') {

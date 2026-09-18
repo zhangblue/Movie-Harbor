@@ -61,6 +61,7 @@ impl TryFrom<AdminContentRequest> for AdminContentFilter {
 }
 
 fn escape_like(value: &str) -> String {
+    // 转义 LIKE 通配符及转义符本身，使名称筛选按管理员输入的字面内容匹配。
     let mut escaped = String::with_capacity(value.len());
     for character in value.chars() {
         if matches!(character, '!' | '%' | '_') {

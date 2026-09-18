@@ -171,7 +171,7 @@ where
         .map_err(|_| ConfigError::Invalid("DATABASE_HOST"))?;
     url.set_port(Some(port))
         .map_err(|_| ConfigError::Invalid("DATABASE_PORT"))?;
-    // 先转义原始百分号，使 URL setter 的凭据编码不会误解已有转义序列。
+    // URL setter 不会转义 userinfo 中的原始 `%`，须先编码为 `%25`，防止凭据被按转义序列解码。
     url.set_username(&username.replace('%', "%25"))
         .map_err(|_| ConfigError::Invalid("POSTGRES_USER"))?;
     url.set_password(Some(&password.replace('%', "%25")))
@@ -324,7 +324,7 @@ mod tests {
         assert!(Config::from_lookup(|name| values.get(name).map(ToString::to_string)).is_ok());
     }
 
-    // 防止 Compose 破坏含 URL 分隔符的高强度数据库密码。
+    // 确认拆分配置中的用户名和密码正确编码，保留 URL 分隔符与原始百分号的字面含义。
     #[test]
     fn database_components_are_encoded_into_a_connection_url() {
         let mut values = required_values();

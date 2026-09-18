@@ -26,6 +26,7 @@ impl IntoResponse for ExportError {
 }
 
 pub fn router(auth_state: AuthState) -> Router {
+    // 导出含全部状态的内容和容器内媒体路径，即使只读也必须验证管理员会话。
     Router::new()
         .route("/api/admin/contents/export", get(export))
         .route_layer(middleware::from_fn_with_state(

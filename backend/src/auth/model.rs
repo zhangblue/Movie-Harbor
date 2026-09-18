@@ -27,6 +27,7 @@ pub struct AuthError(pub StatusCode);
 
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
+        // 认证失败统一返回固定文案，并禁止缓存错误响应，避免泄露具体凭据或会话状态。
         let message = match self.0 {
             StatusCode::UNAUTHORIZED => "authentication failed",
             StatusCode::FORBIDDEN => "request forbidden",

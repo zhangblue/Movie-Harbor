@@ -5,7 +5,7 @@ use sea_orm::entity::prelude::*;
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub id: Uuid,
-    /// System-generated relative path beneath the configured media root.
+    /// 系统生成的受控存储键，表示配置媒体根目录下的相对路径。
     pub storage_key: String,
     pub original_name: String,
     pub mime_type: String,

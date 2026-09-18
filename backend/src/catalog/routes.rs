@@ -61,6 +61,7 @@ async fn movie_detail(
     State(state): State<CatalogState>,
     Path(id): Path<String>,
 ) -> Result<Json<MovieDetail>, CatalogError> {
+    // 非法 ID 与查询层过滤掉的未公开内容都返回 404，不向访客区分后台状态。
     let id = parse_uuid(id, CatalogError::NotFound)?;
     query::movie_detail(&state.db, id)
         .await?
@@ -72,6 +73,7 @@ async fn series_detail(
     State(state): State<CatalogState>,
     Path(id): Path<String>,
 ) -> Result<Json<SeriesDetail>, CatalogError> {
+    // 剧集详情沿用相同的不可见语义，草稿、已归档和不存在的记录均返回 404。
     let id = parse_uuid(id, CatalogError::NotFound)?;
     query::series_detail(&state.db, id)
         .await?

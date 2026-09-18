@@ -79,6 +79,7 @@ pub struct MediaSummary {
 
 impl MediaSummary {
     pub fn try_from_asset(value: media_asset::Model, expected_kind: &str) -> Result<Self, DbErr> {
+        // 管理响应的 URL 和容器内路径均由用途匹配的受控存储键派生；异常记录直接报错，不能输出任意路径。
         if value.purpose != expected_kind {
             return Err(DbErr::Custom("invalid media asset purpose".into()));
         }
