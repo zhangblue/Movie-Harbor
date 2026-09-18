@@ -39,7 +39,7 @@ pub async fn hash_limited(limit: &Arc<Semaphore>, password: String) -> Result<St
         .await
         .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
     tokio::task::spawn_blocking(move || {
-        // 持有许可直到阻塞任务结束，确保排队上限覆盖完整的哈希生命周期。
+        // 许可随阻塞任务存活，完整覆盖哈希生命周期，从而限制同时执行的 Argon2 数量。
         let _permit = permit;
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()

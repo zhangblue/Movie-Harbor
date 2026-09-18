@@ -108,7 +108,7 @@ async fn login(
         }));
     }
     let tx = state.db.begin().await?;
-    // 在事务内锁住管理员记录，防止密码在事务外的 Argon2 校验期间被并发修改。
+    // Argon2 后锁行重读管理员记录，并比较哈希以检测校验期间发生的并发改密。
     let admin = admin_user::Entity::find_by_id(admin.id)
         .lock_exclusive()
         .one(&tx)
