@@ -13,6 +13,7 @@ import {
   requiredResponse,
   setCsrfToken,
 } from "./http";
+import type { JsonObject } from "./dataTypes";
 
 afterEach(() => {
   clearCsrfToken();
@@ -155,14 +156,14 @@ describe("apiRequest", () => {
   });
 
   it.each([
-    ["cyclic JSON", (() => { const value: Record<string, unknown> = {}; value.self = value; return value; })()],
+    ["cyclic JSON", (() => { const value: JsonObject = {}; value.self = value; return value; })()],
     ["BigInt JSON", { value: 1n }],
   ])("does not mislabel %s serialization errors as network failures", async (_label, json) => {
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     const error = await apiRequest("/api/admin/movies", { method: "POST", json }).catch(
-      (value: unknown) => value,
+      (error: Error) => error,
     );
     expect(error).toBeInstanceOf(TypeError);
     expect(error).not.toBeInstanceOf(ApiNetworkError);
@@ -222,7 +223,7 @@ describe("apiRequest", () => {
     );
 
     const error = await apiRequest("/api/admin/movies/1/publish", { method: "POST" }).catch(
-      (value: unknown) => value,
+      (error: Error) => error,
     );
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({

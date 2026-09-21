@@ -1,9 +1,11 @@
+import { isJsonObject, normalizeError, type CaughtValue, type JsonObject, type JsonValue } from "./dataTypes";
+
 export type QueryValue = string | number | boolean | null | undefined;
 export type Query = Record<string, QueryValue | readonly QueryValue[]>;
 
-export interface ApiRequestInit extends Omit<RequestInit, "body"> {
+export interface ApiRequestInit<JsonBody extends object = Record<string, never>> extends Omit<RequestInit, "body"> {
   body?: BodyInit | null;
-  json?: unknown;
+  json?: JsonBody;
   query?: Query;
 }
 
@@ -26,9 +28,9 @@ export interface ApiUploadInit {
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
-  readonly details: unknown;
+  readonly details: JsonValue | undefined;
 
-  constructor(status: number, statusText: string, message: string, details: unknown) {
+  constructor(status: number, statusText: string, message: string, details: JsonValue | undefined) {
     super(message);
     this.name = "ApiError";
     this.status = status;
@@ -39,9 +41,9 @@ export class ApiError extends Error {
 
 export class ApiNetworkError extends Error {
   readonly aborted: boolean;
-  override readonly cause: unknown;
+  override readonly cause: Error;
 
-  constructor(cause: unknown) {
+  constructor(cause: Error) {
     const aborted = cause instanceof DOMException && cause.name === "AbortError";
     super(aborted ? "Request was aborted" : "Unable to reach the server", { cause });
     this.name = "ApiNetworkError";
@@ -52,9 +54,9 @@ export class ApiNetworkError extends Error {
 
 export class ApiResponseParseError extends Error {
   readonly status: number;
-  override readonly cause: unknown;
+  override readonly cause: Error;
 
-  constructor(status: number, cause: unknown) {
+  constructor(status: number, cause: Error) {
     super("The server returned invalid JSON", { cause });
     this.name = "ApiResponseParseError";
     this.status = status;
@@ -114,13 +116,13 @@ export function buildApiUrl(path: string, query?: Query): string {
   return encoded ? `${path}?${encoded}` : path;
 }
 
-export async function apiRequest<T = unknown>(
+export async function apiRequest<ResponseBody = JsonValue, JsonBody extends object = Record<string, never>>(
   path: string,
-  init: ApiRequestInit = {},
-): Promise<T | undefined> {
+  init: ApiRequestInit<JsonBody> = {},
+): Promise<ResponseBody | undefined> {
   const response = await performApiFetch(path, init);
   if (response.status === 204 || response.status === 205) return undefined;
-  return parseApiResponse<T>(response);
+  return parseApiResponse<ResponseBody>(response);
 }
 
 export async function apiDownload(
@@ -135,8 +137,8 @@ export async function apiDownload(
   let blob: Blob;
   try {
     blob = await response.blob();
-  } catch (error) {
-    throw new ApiNetworkError(error);
+  } catch (cause) {
+    throw new ApiNetworkError(normalizeError(cause as CaughtValue));
   }
   return { blob, filename: downloadFilename(response.headers.get("content-disposition")) };
 }
@@ -149,10 +151,10 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
     let hasComputableProgress = false;
     let settled = false;
 
-    const rejectNetwork = (cause: unknown) => {
+    const rejectNetwork = (cause: CaughtValue) => {
       if (settled) return;
       settled = true;
-      reject(new ApiNetworkError(cause));
+      reject(new ApiNetworkError(normalizeError(cause)));
     };
 
     xhr.upload.addEventListener("progress", (event) => {
@@ -182,7 +184,7 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
   });
 }
 
-async function performApiFetch(path: string, init: ApiRequestInit): Promise<Response> {
+async function performApiFetch<JsonBody extends object>(path: string, init: ApiRequestInit<JsonBody>): Promise<Response> {
   const { query, json, body, ...requestInit } = init;
   if (json !== undefined && body !== undefined) {
     throw new TypeError("Use either json or body, not both");
@@ -207,8 +209,8 @@ async function performApiFetch(path: string, init: ApiRequestInit): Promise<Resp
       credentials: "same-origin",
       body: requestBody,
     });
-  } catch (error) {
-    throw new ApiNetworkError(error);
+  } catch (cause) {
+    throw new ApiNetworkError(normalizeError(cause as CaughtValue));
   }
 
   if (!response.ok) throw await responseError(response);
@@ -219,16 +221,16 @@ async function parseApiResponse<T>(response: Response): Promise<T | undefined> {
   let text: string;
   try {
     text = await response.text();
-  } catch (error) {
-    throw new ApiNetworkError(error);
+  } catch (cause) {
+    throw new ApiNetworkError(normalizeError(cause as CaughtValue));
   }
   const expectsJson = isJsonContentType(response.headers.get("content-type"));
-  let parsed: unknown = text;
+  let parsed: JsonValue | undefined = text;
   if (text && expectsJson) {
     try {
-      parsed = JSON.parse(text) as unknown;
-    } catch (error) {
-      throw new ApiResponseParseError(response.status, error);
+      parsed = JSON.parse(text) as JsonValue;
+    } catch (cause) {
+      throw new ApiResponseParseError(response.status, normalizeError(cause as CaughtValue));
     }
   } else if (!text) {
     parsed = undefined;
@@ -259,14 +261,14 @@ async function responseError(response: Response): Promise<ApiError> {
   let text: string;
   try {
     text = await response.text();
-  } catch (error) {
-    throw new ApiNetworkError(error);
+  } catch (cause) {
+    throw new ApiNetworkError(normalizeError(cause as CaughtValue));
   }
   const expectsJson = isJsonContentType(response.headers.get("content-type"));
-  let parsed: unknown = text;
+  let parsed: JsonValue | undefined = text;
   if (text && expectsJson) {
     try {
-      parsed = JSON.parse(text) as unknown;
+      parsed = JSON.parse(text) as JsonValue;
     } catch {
       parsed = undefined;
     }
@@ -293,9 +295,9 @@ function isUnsafeAdminRequest(url: string, method: string): boolean {
   return url.startsWith("/api/admin/") && !["GET", "HEAD", "OPTIONS"].includes(method);
 }
 
-function errorMessage(parsed: unknown, rawText: string, statusText: string): string {
-  if (parsed && typeof parsed === "object") {
-    const record = parsed as Record<string, unknown>;
+function errorMessage(parsed: JsonValue | undefined, rawText: string, statusText: string): string {
+  if (isJsonObject(parsed)) {
+    const record: JsonObject = parsed;
     for (const key of ["error", "message"]) {
       if (typeof record[key] === "string" && record[key].trim()) return record[key].trim();
     }
