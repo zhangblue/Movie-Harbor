@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
-import { ApiError, createGenre, deactivateGenre, deleteGenre, listGenres, renameGenre, reorderGenres, type GenreResponse } from "@movie-harbor/api-client";
+import { ApiError, normalizeError, type CaughtValue, createGenre, deactivateGenre, deleteGenre, listGenres, renameGenre, reorderGenres, type GenreResponse } from "@movie-harbor/api-client";
 import { Button, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 
@@ -14,9 +14,10 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
   useEffect(() => {
     void listGenres().then((items) => {
       if (mounted.current) setGenres(items);
-    }).catch((cause: unknown) => {
+    }).catch((cause: CaughtValue) => {
+      const error = normalizeError(cause);
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
+      if (error instanceof ApiError && error.status === 401) onExpired();
       else setError("无法读取题材，请稍后重试。");
     }).finally(() => {
       if (mounted.current) setLoading(false);
@@ -35,9 +36,10 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
       setGenres((items) => [...items, genre].sort((left, right) => left.sort_order - right.sort_order));
       setName("");
     } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
-      else if (cause instanceof ApiError && cause.status === 409) setError("题材名称已存在。");
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      else if (error instanceof ApiError && error.status === 409) setError("题材名称已存在。");
       else setError("新增题材失败，请重试。");
     } finally {
       if (mounted.current) setBusy(false);
@@ -52,9 +54,10 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
       const value = await action();
       if (mounted.current) accept(value);
     } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
-      else if (cause instanceof ApiError && cause.status === 409) setError(conflict);
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      else if (error instanceof ApiError && error.status === 409) setError(conflict);
       else setError("题材操作失败，请重试。");
     } finally {
       if (mounted.current) setBusy(false);

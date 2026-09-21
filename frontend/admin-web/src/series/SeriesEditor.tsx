@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, apiErrorCode, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getEpisodeDeleteImpact, getSeasonDeleteImpact, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type ApiUploadProgress, type ChildDeleteImpactResponse, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
+import { ApiError, normalizeError, type CaughtValue, apiErrorCode, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getEpisodeDeleteImpact, getSeasonDeleteImpact, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type ApiUploadProgress, type ChildDeleteImpactResponse, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -53,9 +53,10 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   useEffect(() => {
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setPoster(null); setDeleting(null); setNewSeasons([]); setExpandedSeasons(new Set());
-    const watch = <T,>(request: Promise<T>) => request.catch((cause: unknown) => {
-      if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
-      throw cause;
+    const watch = <T,>(request: Promise<T>) => request.catch((cause: CaughtValue) => {
+      const error = normalizeError(cause);
+      if (!ignore && error instanceof ApiError && error.status === 401) onExpired();
+      throw error;
     });
     const id = current.current?.id ?? seriesId;
     void Promise.all([id ? watch(getSeries(id)) : null, watch(listGenres())]).then(async ([value, choices]) => {
@@ -72,21 +73,21 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           if (!ignore) { setDeleting({ series: value, impact }); setConfirmation(""); }
         }
       }
-    }).catch((cause: unknown) => { if (!ignore && !(cause instanceof ApiError && cause.status === 401)) { setError("剧集详情加载失败，请重新加载。"); setConflict(true); } })
+    }).catch((cause: CaughtValue) => { const error = normalizeError(cause); if (!ignore && !(error instanceof ApiError && error.status === 401)) { setError("剧集详情加载失败，请重新加载。"); setConflict(true); } })
       .finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
     // App keys the editor by identity; revision explicitly discards pending local drafts.
   }, [revision, onExpired]);
 
-  async function fail(cause: unknown) {
+  async function fail(error: Error) {
     if (!mounted.current) return;
-    if (cause instanceof ApiError && cause.status === 401) onExpired();
-    else if (cause instanceof ApiError && cause.status === 403) {
+    if (error instanceof ApiError && error.status === 401) onExpired();
+    else if (error instanceof ApiError && error.status === 403) {
       const recovery = await recoverForbiddenWrite();
       if (!mounted.current) return;
       if (recovery.expired) onExpired(); else setError(recovery.message);
     } else {
-      const result = classifyEditorWriteError(cause);
+      const result = classifyEditorWriteError(error);
       if (result.kind === "conflict") { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
       else if (result.kind === "validation") setInvalid(result.fields);
       else setError(result.message);
@@ -96,7 +97,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     if (operation.current || loading || conflict || !mounted.current) return false;
     operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice(""); setWarning("");
     try { await action(); return mounted.current; }
-    catch (cause) { await fail(cause); return false; }
+    catch (cause) { const error = normalizeError(cause as CaughtValue); await fail(error); return false; }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   }
   async function refresh(expectedVersion?: number, resetFields = false): Promise<SeriesResponse | null> {
@@ -123,7 +124,8 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       try {
         uploaded = await uploadMedia({ kind: "series", id: saved.id, slot: "poster" }, poster, saved.version);
       } catch (cause) {
-        if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+        const error = normalizeError(cause as CaughtValue);
+        if (!(error instanceof ApiError) || apiErrorCode(error) !== "media_replace_finalization_failed") throw error;
         try { await refresh(undefined, true); } catch { setConflict(true); }
         if (mounted.current) {
           setPoster(null);
@@ -150,7 +152,8 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
         try {
           uploaded = await uploadMedia({ kind: "episodes", id: episode.id, slot: "video" }, file, saved.episode.version, onProgress);
         } catch (cause) {
-          if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+          const error = normalizeError(cause as CaughtValue);
+          if (!(error instanceof ApiError) || apiErrorCode(error) !== "media_replace_finalization_failed") throw error;
           try { await refresh(); } catch { setConflict(true); }
           if (mounted.current) {
             onUploaded();
@@ -272,7 +275,8 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
             else if (target.season) await deleteSeason(target.series.id, target.season.id, target.impact.version);
             else await deleteSeries(target.series.id, target.impact.version);
           } catch (cause) {
-            if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_delete_finalization_failed") throw cause;
+            const error = normalizeError(cause as CaughtValue);
+            if (!(error instanceof ApiError) || apiErrorCode(error) !== "media_delete_finalization_failed") throw error;
             if (!target.season) { if (mounted.current) { onDeleteFinalization(); onBack(); } return; }
             if (mounted.current) setDeleting(null);
             try { await refresh(); } catch { setConflict(true); }

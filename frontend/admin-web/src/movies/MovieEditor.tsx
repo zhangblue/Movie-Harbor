@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, apiErrorCode, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type ApiUploadProgress, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
+import { ApiError, normalizeError, type CaughtValue, apiErrorCode, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type ApiUploadProgress, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -44,9 +44,10 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
     setPoster(null); setVideo(null); setVideoUploadProgress(null);
-    const watch = <T,>(promise: Promise<T>) => promise.catch((cause: unknown) => {
-      if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
-      throw cause;
+    const watch = <T,>(promise: Promise<T>) => promise.catch((cause: CaughtValue) => {
+      const error = normalizeError(cause);
+      if (!ignore && error instanceof ApiError && error.status === 401) onExpired();
+      throw error;
     });
     void Promise.all([id ? watch(getMovie(id)) : null, watch(listGenres())]).then(async ([value, choices]) => {
       if (ignore) return;
@@ -58,21 +59,21 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           if (!ignore) { setDeleting(impact); setConfirmation(""); }
         }
       }
-    }).catch((cause: unknown) => { if (!ignore && !(cause instanceof ApiError && cause.status === 401)) { setError("电影详情加载失败，请重新加载。"); setConflict(true); } })
+    }).catch((cause: CaughtValue) => { const error = normalizeError(cause); if (!ignore && !(error instanceof ApiError && error.status === 401)) { setError("电影详情加载失败，请重新加载。"); setConflict(true); } })
       .finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
     // A new editor is keyed by movieId in App; revision is the explicit refresh boundary.
   }, [movieId, revision, onExpired]);
 
-  async function fail(cause: unknown) {
+  async function fail(error: Error) {
     if (!mounted.current) return;
-    if (cause instanceof ApiError && cause.status === 401) onExpired();
-    else if (cause instanceof ApiError && cause.status === 403) {
+    if (error instanceof ApiError && error.status === 401) onExpired();
+    else if (error instanceof ApiError && error.status === 403) {
       const recovery = await recoverForbiddenWrite();
       if (!mounted.current) return;
       if (recovery.expired) onExpired(); else setError(recovery.message);
     } else {
-      const result = classifyEditorWriteError(cause);
+      const result = classifyEditorWriteError(error);
       if (result.kind === "conflict") { setConflict(true); setDeleting(null); setError("内容已发生变化，请刷新后重试。"); }
       else if (result.kind === "validation") setInvalid(result.fields);
       else setError(result.message);
@@ -81,7 +82,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   async function run(action: () => Promise<void>) {
     if (operation.current || loading || conflict) return;
     operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice(""); setWarning("");
-    try { await action(); } catch (cause) { await fail(cause); }
+    try { await action(); } catch (cause) { const error = normalizeError(cause as CaughtValue); await fail(error); }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   }
   async function refreshAfterWrite() {
@@ -111,7 +112,8 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           slot === "video" ? updateVideoUploadProgress : undefined,
         );
       } catch (cause) {
-        if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
+        const error = normalizeError(cause as CaughtValue);
+        if (!(error instanceof ApiError) || apiErrorCode(error) !== "media_replace_finalization_failed") throw error;
         try { await refreshAfterWrite(); } catch { setConflict(true); }
         if (mounted.current) {
           if (slot === "poster") setPoster(null); else setVideo(null);
@@ -194,7 +196,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>媒体文件：{deleting.media_count}</li></ul>
         {error && <p role="alert" className="error-message">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
-        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; try { await deleteMovie(movie.id, deleting.version); } catch (cause) { if (cause instanceof ApiError && apiErrorCode(cause) === "media_delete_finalization_failed") { if (mounted.current) { onDeleteFinalization(); onBack(); } return; } throw cause; } if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
+        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; try { await deleteMovie(movie.id, deleting.version); } catch (cause) { const error = normalizeError(cause as CaughtValue); if (error instanceof ApiError && apiErrorCode(error) === "media_delete_finalization_failed") { if (mounted.current) { onDeleteFinalization(); onBack(); } return; } throw error; } if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
       </>}
     </Dialog>
   </section>;

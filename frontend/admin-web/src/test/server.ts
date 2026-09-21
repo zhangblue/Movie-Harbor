@@ -1,11 +1,13 @@
 import { vi } from "vitest";
-import type { AdminContentListItem, AdminContentPage, MovieResponse, SeriesResponse } from "@movie-harbor/api-client";
+import type { AdminContentListItem, AdminContentPage, EpisodeEnvelope, JsonValue, MovieResponse, SeriesResponse } from "@movie-harbor/api-client";
+
+type AdminFixturePayload = JsonValue | AdminContentPage | MovieResponse | MovieResponse[] | SeriesResponse | SeriesResponse[] | EpisodeEnvelope | undefined;
 
 export const session = { name: "港口管理员", csrf_token: "session-csrf" };
-export function json(body: unknown, status = 200) {
+export function json(body: AdminFixturePayload, status = 200) {
   return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
 }
-export function jsonDownload(body: unknown, filename = "movie-harbor-content-export-20260916-120000.json") {
+export function jsonDownload(body: JsonValue, filename = "movie-harbor-content-export-20260916-120000.json") {
   return new Response(JSON.stringify(body), {
     headers: {
       "Content-Type": "application/json",
@@ -43,7 +45,14 @@ export function adminContentPage(items = [
 ], total = items.length, page = 1): AdminContentPage {
   return { items, total, page, size: 20 };
 }
-export type Request = { url: string; method: string; body: unknown; headers: Headers; credentials: RequestCredentials | undefined };
+export type TestRequestBody = JsonValue | FormData | undefined;
+export type Request = {
+  url: string;
+  method: string;
+  body: TestRequestBody;
+  headers: Headers;
+  credentials: RequestCredentials | undefined;
+};
 export function requestJson<T extends object>(request: Request): T {
   if (request.body === null || typeof request.body !== "object" || request.body instanceof FormData || Array.isArray(request.body)) {
     throw new TypeError(`Expected JSON request body for ${request.method} ${request.url}`);
@@ -59,7 +68,7 @@ export function requestFormData(request: Request): FormData {
 export function server(handler?: (request: Request) => Response | Promise<Response> | undefined) {
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const request = { url, method: init.method ?? "GET", body: init.body ? JSON.parse(String(init.body)) as unknown : undefined, headers: new Headers(init.headers), credentials: init.credentials };
+    const request: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as JsonValue : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(request);
     const custom = handler?.(request);
     if (custom) return custom;

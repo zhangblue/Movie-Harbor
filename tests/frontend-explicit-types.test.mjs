@@ -38,3 +38,11 @@ test("api-client uses explicit data types", () => {
 test("public web uses explicit data types", () => {
   assert.deepEqual(unknownTypeLocations("frontend/public-web"), []);
 });
+
+test("admin web and e2e helpers use explicit data types", () => {
+  assert.deepEqual([
+    ...unknownTypeLocations("frontend/admin-web"),
+    ...unknownTypeLocations("frontend/packages/ui"),
+    ...unknownTypeLocations("tests/e2e"),
+  ], []);
+});

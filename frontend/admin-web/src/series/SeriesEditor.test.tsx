@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { clearCsrfToken, setCsrfToken, type EpisodeResponse, type SeriesResponse } from "@movie-harbor/api-client";
+import { clearCsrfToken, setCsrfToken, type EpisodeResponse, type JsonValue, type SeriesResponse } from "@movie-harbor/api-client";
 import { SeriesEditor } from "./SeriesEditor";
 import { App } from "../app/App";
 import { adminContentItem, adminContentPage, deferred, json, requestFormData, requestJson, series, session, type Request } from "../test/server";
@@ -37,7 +37,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
   let current = initial; let sequence = 1;
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as unknown : undefined, headers: new Headers(init.headers), credentials: init.credentials };
+    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as JsonValue : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(r); const custom = intercept?.(r); if (custom) return custom;
     if (url.endsWith("/session")) return json(session);
     if (url.endsWith("/genres")) return json([{ id: "g1", name: "剧情", enabled: true, sort_order: 1 }]);

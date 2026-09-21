@@ -1,4 +1,5 @@
 import { expect, type APIRequestContext, type Playwright } from "@playwright/test";
+import type { JsonObject, JsonValue } from "@movie-harbor/api-client";
 import { existsSync, lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -59,8 +60,8 @@ export class AdminApi {
     expect(login.status()).toBe(200);
     const session = await request.get("/api/admin/session");
     expect(session.status()).toBe(200);
-    const body = await session.json();
-    return new AdminApi(request, body.csrf_token as string);
+    const body = await session.json() as { csrf_token: string };
+    return new AdminApi(request, body.csrf_token);
   }
 
   async dispose() { await this.request.dispose(); }
@@ -70,7 +71,7 @@ export class AdminApi {
     expect(response.status(), await response.text()).toBe(200);
     return response.json();
   }
-  async write<T>(method: "post" | "patch" | "put" | "delete", path: string, data?: unknown): Promise<T> {
+  async write<T>(method: "post" | "patch" | "put" | "delete", path: string, data?: JsonObject): Promise<T> {
     const response = await this.request[method](path, { data, headers: this.headers() });
     expect(response.ok(), await response.text()).toBeTruthy();
     return response.status() === 204 ? undefined as T : response.json();
@@ -132,5 +133,5 @@ export async function createSeriesDraftWithMedia(api: AdminApi, name: string, op
   return api.get<Series>(`/api/admin/series/${series.id}`);
 }
 
-export function saveState(state: Record<string, unknown>) { writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 }); }
+export function saveState(state: Record<string, JsonValue>) { writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 }); }
 export function loadState<T>() { return JSON.parse(readFileSync(statePath, "utf8")) as T; }

@@ -55,7 +55,13 @@ class UploadXhr extends EventTarget {
 let manual = false;
 let controllers: UploadController[] = [];
 
-function uploadEvent(type: string, detail: Record<string, unknown> = {}): Event {
+type UploadEventDetail = {
+  lengthComputable?: boolean;
+  loaded?: number;
+  total?: number;
+};
+
+function uploadEvent(type: string, detail: UploadEventDetail = {}): Event {
   return Object.assign(new Event(type), detail);
 }
 

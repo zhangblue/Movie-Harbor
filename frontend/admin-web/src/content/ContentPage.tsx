@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ApiError, downloadAdminContentExport, listAdminContent, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
+import { ApiError, normalizeError, type CaughtValue, downloadAdminContentExport, listAdminContent, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -46,9 +46,10 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       }
       setData(result);
       setConflict(false);
-    }).catch((cause: unknown) => {
+    }).catch((cause: CaughtValue) => {
+      const error = normalizeError(cause);
       if (ignore) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
+      if (error instanceof ApiError && error.status === 401) onExpired();
       else setError("内容列表加载失败，请重新加载。");
     }).finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
@@ -64,17 +65,18 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       await (row.kind === "movie" ? transitionMovie : transitionSeries)(row.id, action, row.version);
       if (mounted.current) setState((value) => ({ ...value, revision: value.revision + 1 }));
     } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
-      else if (cause instanceof ApiError && cause.status === 403) {
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      else if (error instanceof ApiError && error.status === 403) {
         const recovery = await recoverForbiddenWrite();
         if (!mounted.current) return;
         if (recovery.expired) onExpired();
         else setError(recovery.message);
-      } else if (cause instanceof ApiError && cause.status === 409) {
+      } else if (error instanceof ApiError && error.status === 409) {
         setConflict(true);
         setError("内容已发生变化，请刷新后重试。");
-      } else setError(cause instanceof ApiError ? `操作失败：${cause.message}` : "操作失败，请检查网络后重试。");
+      } else setError(error instanceof ApiError ? `操作失败：${error.message}` : "操作失败，请检查网络后重试。");
     } finally {
       operation.current = false;
       if (mounted.current) setMutating(false);
@@ -99,8 +101,9 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
         URL.revokeObjectURL(url);
       }
     } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
       if (!mounted.current) return;
-      if (cause instanceof ApiError && cause.status === 401) onExpired();
+      if (error instanceof ApiError && error.status === 401) onExpired();
       else setExportError("内容导出失败，请重试");
     } finally {
       exportOperation.current = false;

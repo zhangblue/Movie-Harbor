@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, within, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { clearCsrfToken, setCsrfToken, type MovieResponse } from "@movie-harbor/api-client";
+import { clearCsrfToken, setCsrfToken, type JsonValue, type MovieResponse } from "@movie-harbor/api-client";
 import { MovieEditor } from "./MovieEditor";
 import { App } from "../app/App";
 import { adminContentItem, adminContentPage, deferred, json, movie, requestFormData, requestJson, session, type Request } from "../test/server";
@@ -32,7 +32,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
   let current = initial;
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as unknown : undefined, headers: new Headers(init.headers), credentials: init.credentials };
+    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as JsonValue : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(r);
     const response = intercept?.(r);
     if (response) return response;

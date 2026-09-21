@@ -16,7 +16,7 @@ export function mergeGenreChoices(available: GenreChoice[], linked: GenreChoice[
   });
 }
 
-export function classifyEditorWriteError(cause: unknown): EditorWriteError {
+export function classifyEditorWriteError(cause: Error): EditorWriteError {
   if (!(cause instanceof ApiError)) return { kind: "message", message: "操作失败，请检查网络后重试。" };
 
   switch (apiErrorCode(cause)) {
