@@ -12,6 +12,17 @@ export interface ApiDownload {
   filename: string;
 }
 
+export type ApiUploadProgress =
+  | { phase: "uploading"; percent: number | null }
+  | { phase: "processing"; percent: 100 };
+
+export interface ApiUploadInit {
+  method: "POST";
+  body: FormData;
+  query?: Query;
+  onProgress: (progress: ApiUploadProgress) => void;
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
@@ -130,6 +141,47 @@ export async function apiDownload(
   return { blob, filename: downloadFilename(response.headers.get("content-disposition")) };
 }
 
+export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | undefined> {
+  const url = buildApiUrl(path, init.query);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let lastPercent: number | null = 0;
+    let hasComputableProgress = false;
+    let settled = false;
+
+    const rejectNetwork = (cause: unknown) => {
+      if (settled) return;
+      settled = true;
+      reject(new ApiNetworkError(cause));
+    };
+
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable || event.total <= 0) {
+        if (!hasComputableProgress) init.onProgress({ phase: "uploading", percent: null });
+        return;
+      }
+      hasComputableProgress = true;
+      lastPercent = Math.max(lastPercent ?? 0, Math.min(100, Math.floor(event.loaded / event.total * 100)));
+      init.onProgress({ phase: "uploading", percent: lastPercent });
+    });
+    xhr.upload.addEventListener("load", () => init.onProgress({ phase: "processing", percent: 100 }));
+    xhr.addEventListener("load", () => {
+      if (settled) return;
+      settled = true;
+      void resolveXhrResponse<T>(xhr).then(resolve, reject);
+    });
+    xhr.addEventListener("error", () => rejectNetwork(new TypeError("XMLHttpRequest error")));
+    xhr.addEventListener("timeout", () => rejectNetwork(new TypeError("XMLHttpRequest timeout")));
+    xhr.addEventListener("abort", () => rejectNetwork(new DOMException("Request was aborted", "AbortError")));
+
+    xhr.open(init.method, url, true);
+    xhr.setRequestHeader("Accept", "application/json");
+    if (csrfToken) xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    init.onProgress({ phase: "uploading", percent: 0 });
+    xhr.send(init.body);
+  });
+}
+
 async function performApiFetch(path: string, init: ApiRequestInit): Promise<Response> {
   const { query, json, body, ...requestInit } = init;
   if (json !== undefined && body !== undefined) {
@@ -182,6 +234,25 @@ async function parseApiResponse<T>(response: Response): Promise<T | undefined> {
     parsed = undefined;
   }
   return parsed as T | undefined;
+}
+
+async function resolveXhrResponse<T>(xhr: XMLHttpRequest): Promise<T | undefined> {
+  const response = new Response(
+    xhr.status === 204 || xhr.status === 205 ? null : xhr.responseText,
+    { status: xhr.status, statusText: xhr.statusText, headers: xhrResponseHeaders(xhr.getAllResponseHeaders()) },
+  );
+  if (!response.ok) throw await responseError(response);
+  if (response.status === 204 || response.status === 205) return undefined;
+  return parseApiResponse<T>(response);
+}
+
+function xhrResponseHeaders(rawHeaders: string): Headers {
+  const headers = new Headers();
+  for (const line of rawHeaders.split(/\r?\n/)) {
+    const separator = line.indexOf(":");
+    if (separator > 0) headers.append(line.slice(0, separator), line.slice(separator + 1).trim());
+  }
+  return headers;
 }
 
 async function responseError(response: Response): Promise<ApiError> {

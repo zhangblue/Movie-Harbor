@@ -1,4 +1,4 @@
-import { ApiError, apiDownload, apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload } from "./http";
+import { ApiError, apiDownload, apiPath, apiRequest, apiUpload, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload, type ApiUploadProgress } from "./http";
 import type {
   AdminContentListQuery, AdminContentPage, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
@@ -141,10 +141,17 @@ type MediaUploadTarget =
   | { kind: "series"; id: string; slot: "poster" }
   | { kind: "episodes"; id: string; slot: "video" };
 
-export async function uploadMedia(target: MediaUploadTarget, file: File, version: number): Promise<MediaAssetResponse> {
+export async function uploadMedia(
+  target: MediaUploadTarget,
+  file: File,
+  version: number,
+  onProgress?: (progress: ApiUploadProgress) => void,
+): Promise<MediaAssetResponse> {
   const form = new FormData();
   form.append("file", file);
-  return requiredResponse(await apiRequest<MediaAssetResponse>(apiPath("admin", "media", target.kind, target.id, target.slot), {
-    method: "POST", query: { version }, body: form,
-  }));
+  const path = apiPath("admin", "media", target.kind, target.id, target.slot);
+  const response = onProgress
+    ? await apiUpload<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form, onProgress })
+    : await apiRequest<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form });
+  return requiredResponse(response);
 }

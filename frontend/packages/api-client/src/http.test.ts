@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   ApiNetworkError,
+  type ApiUploadProgress,
   ApiResponseParseError,
   apiDownload,
+  apiUpload,
   apiRequest,
   buildApiUrl,
   clearCsrfToken,
@@ -19,6 +21,76 @@ afterEach(() => {
 
 function respond(body: string | null, init: ResponseInit = {}) {
   return new Response(body, init);
+}
+
+class FakeXMLHttpRequest extends EventTarget {
+  readonly upload = new EventTarget();
+  readonly headers = new Map<string, string>();
+  method: string | undefined;
+  url: string | undefined;
+  body: Document | XMLHttpRequestBodyInit | null | undefined;
+  status = 0;
+  statusText = "";
+  responseText = "";
+  private responseHeaders = new Headers();
+
+  open(method: string, url: string): void {
+    this.method = method;
+    this.url = url;
+  }
+
+  setRequestHeader(name: string, value: string): void {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  send(body: Document | XMLHttpRequestBodyInit | null): void {
+    this.body = body;
+  }
+
+  getAllResponseHeaders(): string {
+    return [...this.responseHeaders].map(([name, value]) => `${name}: ${value}`).join("\r\n");
+  }
+
+  uploadProgress(event: { lengthComputable: boolean; loaded: number; total: number }): void {
+    this.upload.dispatchEvent(progressEvent("progress", event));
+  }
+
+  finishUpload(): void {
+    this.upload.dispatchEvent(new Event("load"));
+  }
+
+  respond(status: number, responseText: string, headers: HeadersInit = {}): void {
+    this.status = status;
+    this.statusText = status === 415 ? "Unsupported Media Type" : "OK";
+    this.responseText = responseText;
+    this.responseHeaders = new Headers(headers);
+    this.dispatchEvent(new Event("load"));
+  }
+
+  fail(type: "error" | "timeout" | "abort"): void {
+    this.dispatchEvent(new Event(type));
+  }
+}
+
+function progressEvent(type: string, values: { lengthComputable: boolean; loaded: number; total: number }): ProgressEvent {
+  return Object.assign(new Event(type), values) as ProgressEvent;
+}
+
+function installFakeXhr(): FakeXMLHttpRequest {
+  let instance: FakeXMLHttpRequest | undefined;
+  vi.stubGlobal("XMLHttpRequest", class extends FakeXMLHttpRequest {
+    constructor() {
+      super();
+      instance = this;
+    }
+  });
+  return new Proxy({} as FakeXMLHttpRequest, {
+    get(_target, property, receiver) {
+      if (!instance) throw new Error("XMLHttpRequest was not created");
+      const value = Reflect.get(instance, property, receiver);
+      return typeof value === "function" ? value.bind(instance) : value;
+    },
+  });
 }
 
 it("requiredResponse preserves values and rejects an absent body", () => {
@@ -203,6 +275,115 @@ describe("apiRequest", () => {
       name: "ApiNetworkError",
       aborted: false,
     });
+  });
+});
+
+describe("apiUpload", () => {
+  it("reports monotonic upload progress and a processing phase", async () => {
+    const xhr = installFakeXhr();
+    setCsrfToken("session-csrf");
+    const events: ApiUploadProgress[] = [];
+    const request = apiUpload<{ ok: boolean }>("/api/admin/media/movies/movie-1/video", {
+      method: "POST",
+      query: { version: 4 },
+      body: new FormData(),
+      onProgress: (event) => events.push(event),
+    });
+
+    xhr.uploadProgress({ lengthComputable: true, loaded: 40, total: 100 });
+    xhr.uploadProgress({ lengthComputable: true, loaded: 30, total: 100 });
+    xhr.finishUpload();
+    xhr.respond(200, '{"ok":true}', { "content-type": "application/json" });
+
+    await expect(request).resolves.toEqual({ ok: true });
+    expect(events).toEqual([
+      { phase: "uploading", percent: 0 },
+      { phase: "uploading", percent: 40 },
+      { phase: "uploading", percent: 40 },
+      { phase: "processing", percent: 100 },
+    ]);
+    expect(xhr.method).toBe("POST");
+    expect(xhr.url).toBe("/api/admin/media/movies/movie-1/video?version=4");
+    expect(xhr.headers.get("accept")).toBe("application/json");
+    expect(xhr.headers.get("x-csrf-token")).toBe("session-csrf");
+    expect(xhr.headers.has("content-type")).toBe(false);
+    expect(xhr.body).toBeInstanceOf(FormData);
+  });
+
+  it("reports unknown progress only until a computable percentage is available", async () => {
+    const xhr = installFakeXhr();
+    const events: ApiUploadProgress[] = [];
+    const request = apiUpload("/api/admin/media/movies/movie-1/video", {
+      method: "POST",
+      body: new FormData(),
+      onProgress: (event) => events.push(event),
+    });
+
+    xhr.uploadProgress({ lengthComputable: false, loaded: 20, total: 0 });
+    expect(events.at(-1)).toEqual({ phase: "uploading", percent: null });
+    xhr.uploadProgress({ lengthComputable: true, loaded: 25, total: 100 });
+    xhr.uploadProgress({ lengthComputable: false, loaded: 30, total: 0 });
+    xhr.respond(204, "");
+
+    await expect(request).resolves.toBeUndefined();
+    expect(events).toEqual([
+      { phase: "uploading", percent: 0 },
+      { phase: "uploading", percent: null },
+      { phase: "uploading", percent: 25 },
+    ]);
+  });
+
+  it("does not replace a computable zero percent with unknown progress", async () => {
+    const xhr = installFakeXhr();
+    const events: ApiUploadProgress[] = [];
+    const request = apiUpload("/api/admin/media/movies/movie-1/video", {
+      method: "POST",
+      body: new FormData(),
+      onProgress: (event) => events.push(event),
+    });
+
+    xhr.uploadProgress({ lengthComputable: true, loaded: 0, total: 100 });
+    xhr.uploadProgress({ lengthComputable: false, loaded: 0, total: 0 });
+    xhr.respond(205, "");
+
+    await expect(request).resolves.toBeUndefined();
+    expect(events).toEqual([
+      { phase: "uploading", percent: 0 },
+      { phase: "uploading", percent: 0 },
+    ]);
+  });
+
+  it("preserves API response error and parse error semantics", async () => {
+    const unsupportedXhr = installFakeXhr();
+    const unsupported = apiUpload("/api/admin/media/movies/movie-1/video", {
+      method: "POST", body: new FormData(), onProgress: () => undefined,
+    });
+    unsupportedXhr.respond(415, '{"error":"unsupported media"}', { "content-type": "application/json" });
+    await expect(unsupported).rejects.toMatchObject({
+      name: "ApiError", status: 415, message: "unsupported media",
+    });
+
+    const malformedXhr = installFakeXhr();
+    const malformed = apiUpload("/api/admin/media/movies/movie-1/video", {
+      method: "POST", body: new FormData(), onProgress: () => undefined,
+    });
+    malformedXhr.respond(200, "not-json", { "content-type": "application/json" });
+    await expect(malformed).rejects.toBeInstanceOf(ApiResponseParseError);
+  });
+
+  it.each([
+    ["error", false],
+    ["timeout", false],
+    ["abort", true],
+  ] as const)("maps XHR %s events to network errors", async (event, aborted) => {
+    const xhr = installFakeXhr();
+    const request = apiUpload("/api/admin/media/movies/movie-1/video", {
+      method: "POST", body: new FormData(), onProgress: () => undefined,
+    });
+    xhr.fail(event);
+    xhr.respond(200, '{"ignored":true}', { "content-type": "application/json" });
+
+    await expect(request).rejects.toMatchObject({ name: "ApiNetworkError", aborted });
   });
 });
 

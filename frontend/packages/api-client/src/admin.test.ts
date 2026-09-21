@@ -1,12 +1,65 @@
 import { afterEach, expect, it, vi } from "vitest";
 
-import { apiErrorCode, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession, listAdminContent } from "./admin";
+import { apiErrorCode, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession, listAdminContent, uploadMedia } from "./admin";
 import { ApiError, clearCsrfToken } from "./http";
 
 afterEach(() => {
   clearCsrfToken();
   vi.unstubAllGlobals();
 });
+
+class FakeUploadXMLHttpRequest extends EventTarget {
+  readonly upload = new EventTarget();
+  url: string | undefined;
+  status = 0;
+  statusText = "";
+  responseText = "";
+  private responseHeaders = new Headers();
+
+  open(_method: string, url: string): void {
+    this.url = url;
+  }
+
+  setRequestHeader(): void {}
+  send(): void {}
+
+  getAllResponseHeaders(): string {
+    return [...this.responseHeaders].map(([name, value]) => `${name}: ${value}`).join("\r\n");
+  }
+
+  uploadProgress(loaded: number, total: number): void {
+    this.upload.dispatchEvent(Object.assign(new Event("progress"), {
+      lengthComputable: true,
+      loaded,
+      total,
+    }));
+  }
+
+  respond(body: string): void {
+    this.status = 200;
+    this.statusText = "OK";
+    this.responseText = body;
+    this.responseHeaders = new Headers({ "content-type": "application/json" });
+    this.dispatchEvent(new Event("load"));
+  }
+}
+
+function installFakeUploadXhr(): FakeUploadXMLHttpRequest {
+  let instance: FakeUploadXMLHttpRequest | undefined;
+  vi.stubGlobal("XMLHttpRequest", class extends FakeUploadXMLHttpRequest {
+    constructor() {
+      super();
+      instance = this;
+    }
+  });
+  return new Proxy({} as FakeUploadXMLHttpRequest, {
+    get(_target, property, receiver) {
+      if (!instance) throw new Error("XMLHttpRequest was not created");
+      const value = Reflect.get(instance, property, receiver);
+      return typeof value === "function" ? value.bind(instance) : value;
+    },
+  });
+}
 
 it("acquires the session CSRF token in memory for later admin writes", async () => {
   const requests: RequestInit[] = [];
@@ -126,4 +179,40 @@ it("does not forward unknown runtime query fields", async () => {
   await listAdminContent(query);
 
   expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
+});
+
+it("keeps poster uploads on fetch when no progress callback is supplied", async () => {
+  const fetchMock = vi.fn(async (_url: RequestInfo | URL) => new Response('{"id":"media-1","url":"/media/poster.jpg"}', {
+    headers: { "content-type": "application/json" },
+  }));
+  vi.stubGlobal("fetch", fetchMock);
+
+  await uploadMedia(
+    { kind: "movies", id: "movie/1", slot: "poster" },
+    new File(["poster"], "one.jpg", { type: "image/jpeg" }),
+    7,
+  );
+
+  expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/admin/media/movies/movie%2F1/poster?version=7");
+});
+
+it("uses the progress upload boundary for video uploads and forwards its events", async () => {
+  const xhr = installFakeUploadXhr();
+  const events: Array<{ phase: string; percent: number | null }> = [];
+
+  const request = uploadMedia(
+    { kind: "movies", id: "movie/1", slot: "video" },
+    new File(["video"], "one.mp4", { type: "video/mp4" }),
+    7,
+    (progress) => events.push(progress),
+  );
+  xhr.uploadProgress(40, 100);
+  xhr.respond('{"id":"media-1","url":"/media/video.mp4"}');
+
+  await expect(request).resolves.toEqual({ id: "media-1", url: "/media/video.mp4" });
+  expect(xhr.url).toBe("/api/admin/media/movies/movie%2F1/video?version=7");
+  expect(events).toEqual([
+    { phase: "uploading", percent: 0 },
+    { phase: "uploading", percent: 40 },
+  ]);
 });
