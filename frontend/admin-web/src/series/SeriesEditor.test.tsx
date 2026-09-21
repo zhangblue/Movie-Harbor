@@ -5,8 +5,27 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type EpisodeResponse, type SeriesResponse } from "@movie-harbor/api-client";
 import { SeriesEditor } from "./SeriesEditor";
 import { App } from "../app/App";
-import { adminContentItem, adminContentPage, deferred, json, series, session } from "../test/server";
+import { adminContentItem, adminContentPage, deferred, json, requestFormData, requestJson, series, session, type Request } from "../test/server";
 import { installUploadXhr } from "../test/uploadXhr";
+
+const stateUpdateGuard = vi.hoisted(() => ({ afterUnmount: false, violation: vi.fn() }));
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useState<T>(initial: T | (() => T)) {
+      const [value, setValue] = actual.useState(initial);
+      const guardedSetValue: typeof setValue = (next) => {
+        if (stateUpdateGuard.afterUnmount) {
+          stateUpdateGuard.violation();
+          return;
+        }
+        setValue(next);
+      };
+      return [value, guardedSetValue] as const;
+    },
+  };
+});
 
 const base = "/api/admin/series/series-1";
 const episodePath = `${base}/seasons/s1/episodes/e1`;
@@ -14,12 +33,11 @@ function episode(overrides: Partial<EpisodeResponse> = {}): EpisodeResponse {
   return { id: "e1", season_id: "s1", number: 1, name: "来信", duration_seconds: 2700, status: "draft", version: 2, video: null, published_at: null, archived_at: null, created_at: "2026-09-01", updated_at: "2026-09-01", ...overrides };
 }
 function detail(overrides: Partial<SeriesResponse> = {}) { return series({ status: "draft", seasons: [{ id: "s1", number: 1, episodes: [episode()] }], ...overrides }); }
-type Request = { url: string; method: string; body: any; headers: Headers };
 function fixture(initial = detail(), intercept?: (r: Request) => Response | Promise<Response> | undefined) {
   let current = initial; let sequence = 1;
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const r = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined, headers: new Headers(init.headers) };
+    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as unknown : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(r); const custom = intercept?.(r); if (custom) return custom;
     if (url.endsWith("/session")) return json(session);
     if (url.endsWith("/genres")) return json([{ id: "g1", name: "剧情", enabled: true, sort_order: 1 }]);
@@ -28,35 +46,44 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     ]));
     if (url === "/api/admin/movies") return json([]);
     if (url === "/api/admin/series" && r.method === "GET") return json([current]);
-    if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: r.body.name, version: 1, seasons: [], poster: null }); return json(current, 201); }
+    if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: requestJson<{ name: string }>(r).name, version: 1, seasons: [], poster: null }); return json(current, 201); }
     if (url === base && r.method === "GET") return json(current);
     if (url === `${base}/delete-impact`) return json({ name: current.name, version: current.version, season_count: current.seasons.length, episode_count: current.seasons.flatMap((s) => s.episodes).length, media_count: Number(!!current.poster) + current.seasons.flatMap((s) => s.episodes).filter((ep) => ep.video).length });
     if (url.endsWith("/delete-impact") && url.includes("/episodes/")) { const ep = current.seasons.flatMap((s) => s.episodes).find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: ep.name, version: ep.version, season_count: 0, episode_count: 1, media_count: ep.video ? 1 : 0 }); }
     if (url.endsWith("/delete-impact") && url.includes("/seasons/")) { const season = current.seasons.find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: `第 ${season.number} 季`, version: current.version, season_count: 1, episode_count: season.episodes.length, media_count: season.episodes.filter((ep) => ep.video).length }); }
     if (url.startsWith("/api/admin/media/")) {
-      const file = r.body.get("file") as File;
+      const file = requestFormData(r).get("file") as File;
       const media = { id: "asset", url: "/media/new", local_path: "/media/new", original_name: file.name, mime_type: file.type, byte_size: file.size };
       current = { ...current, version: current.version + 1 };
       if (url.includes("/series/")) { current.poster = media; return json({ ...media, version: current.version }); }
       const id = url.split("/")[5]; const ep = current.seasons.flatMap((s) => s.episodes).find((e) => e.id === id)!;
       ep.video = media; ep.version++; return json({ ...media, version: ep.version, series_version: current.version });
     }
-    if (url === base && r.method === "PATCH") { current = { ...current, ...r.body, version: current.version + 1 }; return json(current); }
+    if (url === base && r.method === "PATCH") {
+      const body = requestJson<{ name: string; synopsis: string; year: number | null; genre_ids: string[]; version: number }>(r);
+      current = { ...current, ...body, version: current.version + 1 };
+      return json(current);
+    }
     if (url === base && r.method === "DELETE") return json({ deleted_media_count: 1 });
     if (/\/series-1\/(publish|archive|draft)$/.test(url)) { current = { ...current, version: current.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" }; return json(current); }
     const seasonId = url.split("/")[6]; const season = current.seasons.find((s) => s.id === seasonId);
-    if (url === `${base}/seasons`) { current = { ...current, version: current.version + 1, seasons: [...current.seasons, { id: `s${++sequence}`, number: r.body.number, episodes: [] }] }; return json(current, 201); }
+    if (url === `${base}/seasons`) { current = { ...current, version: current.version + 1, seasons: [...current.seasons, { id: `s${++sequence}`, number: requestJson<{ number: number }>(r).number, episodes: [] }] }; return json(current, 201); }
     if (season && !url.includes("/episodes")) {
       if (r.method === "DELETE") { current.seasons = current.seasons.filter((s) => s.id !== season.id); current = { ...current, version: current.version + 1 }; return json({ deleted_media_count: season.episodes.filter((ep) => ep.video).length }); }
-      else season.number = r.body.number;
+      else season.number = requestJson<{ number: number }>(r).number;
       current = { ...current, version: current.version + 1 }; return json(current);
     }
-    if (season && url.endsWith("/episodes")) { season.episodes.push(episode({ id: `e${++sequence}`, season_id: season.id, version: 1, name: r.body.name, number: r.body.number, duration_seconds: null })); current = { ...current, version: current.version + 1 }; return json(current, 201); }
+    if (season && url.endsWith("/episodes")) {
+      const body = requestJson<{ name: string; number: number }>(r);
+      season.episodes.push(episode({ id: `e${++sequence}`, season_id: season.id, version: 1, name: body.name, number: body.number, duration_seconds: null })); current = { ...current, version: current.version + 1 }; return json(current, 201);
+    }
     const ep = season?.episodes.find((e) => e.id === url.split("/")[8]);
     if (ep && season) {
       if (r.method === "GET") return json({ episode: ep, series_version: current.version });
       if (r.method === "DELETE") { season.episodes = season.episodes.filter((e) => e.id !== ep.id); current.version++; return json({ deleted_media_count: ep.video ? 1 : 0 }); }
-      const value = r.method === "PATCH" ? { ...ep, ...r.body, version: ep.version + 1 } : { ...ep, version: ep.version + 1, status: url.endsWith("archive") ? "archived" : url.endsWith("draft") ? "draft" : "published" };
+      const value = r.method === "PATCH"
+        ? { ...ep, ...requestJson<{ number: number; name: string; duration_seconds: number | null; version: number }>(r), version: ep.version + 1 }
+        : { ...ep, version: ep.version + 1, status: url.endsWith("archive") ? "archived" as const : url.endsWith("draft") ? "draft" as const : "published" as const };
       season.episodes = season.episodes.map((e) => e.id === ep.id ? value : e); current = { ...current, version: current.version + 1 };
       return json({ episode: value, series_version: current.version });
     }
@@ -64,7 +91,14 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
   });
   return requests;
 }
-beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() })); installUploadXhr(); });
+beforeEach(() => {
+  stateUpdateGuard.afterUnmount = false;
+  stateUpdateGuard.violation.mockClear();
+  setCsrfToken("session-csrf");
+  let n = 0;
+  vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() }));
+  installUploadXhr();
+});
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
@@ -150,6 +184,46 @@ it("clears a failed episode upload progress, retains its file, and skips publica
   expect(within(firstEpisode).queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
   expect(within(firstEpisode).getByText(/待上传：broken.mp4/)).toBeInTheDocument();
   expect(requests.some((request) => request.url === `${episodePath}/publish`)).toBe(false);
+});
+
+it("does not update episode-row state when upload events settle after unmount", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  fixture(detail());
+  const user = userEvent.setup();
+  const view = editor();
+  await expandFirst(user);
+
+  const firstEpisode = screen.getByRole("form", { name: /第 1 集/ });
+  await user.upload(within(firstEpisode).getByLabelText("视频文件"), new File(["video"], "first.mp4", { type: "video/mp4" }));
+  await user.click(within(firstEpisode).getByRole("button", { name: "保存单集草稿" }));
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  view.unmount();
+  stateUpdateGuard.afterUnmount = true;
+
+  await act(async () => {
+    current.progress(42, 100);
+    current.networkError();
+    await Promise.resolve();
+  });
+  expect(stateUpdateGuard.violation).not.toHaveBeenCalled();
+});
+
+it("keeps series poster uploads on fetch without creating an upload XMLHttpRequest", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  const requests = fixture(detail());
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("剧集名称");
+  await user.upload(screen.getByLabelText("海报文件"), new File(["poster"], "series.png", { type: "image/png" }));
+  await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+
+  await waitFor(() => {
+    const posterFetches = requests.filter((request) => request.url.includes("/media/series/")).length;
+    expect(posterFetches + uploads.pendingCount()).toBe(1);
+  });
+  expect(uploads.pendingCount()).toBe(0);
+  expect(requests.filter((request) => request.url.includes("/media/series/") && request.method === "POST")).toHaveLength(1);
 });
 
 it("defaults existing seasons to independent accessible collapses without losing input", async () => {
@@ -624,7 +698,7 @@ it("adds and removes season and episode drafts with fresh, name-confirmed deleti
   await user.click(screen.getByRole("button", { name: "删除本季" })); dialog = within(await screen.findByRole("dialog"));
   expect(dialog.getByText("季：1")).toBeInTheDocument(); await user.type(dialog.getByLabelText("输入完整内容名称"), "第 1 季"); await user.click(dialog.getByRole("button", { name: "确认永久删除" }));
   await waitFor(() => expect(screen.queryByLabelText("季序号")).not.toBeInTheDocument());
-  expect(requests.filter((r) => r.method === "DELETE").map((r) => r.body.version)).toEqual([2, 4]);
+  expect(requests.filter((r) => r.method === "DELETE").map((r) => requestJson<{ version: number }>(r).version)).toEqual([2, 4]);
 });
 
 it("locks on conflict and only restores editing after an explicit reload", async () => {

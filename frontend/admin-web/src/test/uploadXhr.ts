@@ -91,6 +91,9 @@ export function installUploadXhr(options: UploadXhrOptions = {}) {
   controllers = [];
   vi.stubGlobal("XMLHttpRequest", UploadXhr);
   return {
+    pendingCount(): number {
+      return controllers.length;
+    },
     next(): UploadController {
       const controller = controllers.shift();
       if (!controller) throw new Error("No pending upload XMLHttpRequest");

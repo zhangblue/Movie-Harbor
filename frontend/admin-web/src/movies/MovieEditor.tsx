@@ -37,6 +37,9 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   const id = movie?.id ?? movieId;
 
   function accept(value: MovieResponse) { setMovie(value); setFields(fieldsOf(value)); }
+  function updateVideoUploadProgress(progress: ApiUploadProgress) {
+    if (mounted.current) setVideoUploadProgress(progress);
+  }
   useEffect(() => {
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
@@ -105,7 +108,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           { kind: "movies", id: saved.id, slot },
           file,
           saved.version,
-          slot === "video" ? setVideoUploadProgress : undefined,
+          slot === "video" ? updateVideoUploadProgress : undefined,
         );
       } catch (cause) {
         if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;

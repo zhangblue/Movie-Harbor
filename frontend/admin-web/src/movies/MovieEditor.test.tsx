@@ -5,15 +5,34 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type MovieResponse } from "@movie-harbor/api-client";
 import { MovieEditor } from "./MovieEditor";
 import { App } from "../app/App";
-import { adminContentItem, adminContentPage, deferred, json, movie, session, type Request } from "../test/server";
+import { adminContentItem, adminContentPage, deferred, json, movie, requestFormData, requestJson, session, type Request } from "../test/server";
 import { installUploadXhr } from "../test/uploadXhr";
 import styles from "../styles.css?raw";
+
+const stateUpdateGuard = vi.hoisted(() => ({ afterUnmount: false, violation: vi.fn() }));
+vi.mock("react", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react")>();
+  return {
+    ...actual,
+    useState<T>(initial: T | (() => T)) {
+      const [value, setValue] = actual.useState(initial);
+      const guardedSetValue: typeof setValue = (next) => {
+        if (stateUpdateGuard.afterUnmount) {
+          stateUpdateGuard.violation();
+          return;
+        }
+        setValue(next);
+      };
+      return [value, guardedSetValue] as const;
+    },
+  };
+});
 
 function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => Response | Promise<Response> | undefined) {
   let current = initial;
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const r = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined, headers: new Headers(init.headers), credentials: init.credentials };
+    const r: Request = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) as unknown : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(r);
     const response = intercept?.(r);
     if (response) return response;
@@ -24,16 +43,17 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
     ]));
     if (url === "/api/admin/series") return json([]);
     if (url === "/api/admin/movies" && r.method === "GET") return json([current]);
-    if (url === "/api/admin/movies" && r.method === "POST") { current = movie({ name: r.body.name, poster: null, version: 1 }); return json(current, 201); }
+    if (url === "/api/admin/movies" && r.method === "POST") { current = movie({ name: requestJson<{ name: string }>(r).name, poster: null, version: 1 }); return json(current, 201); }
     if (url === "/api/admin/movies/movie-1" && r.method === "GET") return json(current);
     if (url === "/api/admin/movies/movie-1/delete-impact") return json({ name: current.name, version: current.version, season_count: 0, episode_count: 0, media_count: Number(!!current.poster) + Number(!!current.video) });
     if (r.method === "PATCH") {
-      current = { ...current, ...r.body, version: current.version + 1, genres: r.body.genre_ids.map((id: string) => ({ id, name: id === "g1" ? "剧情" : "旧题材", enabled: id === "g1" })) };
+      const body = requestJson<{ name: string; synopsis: string; year: number | null; duration_seconds: number | null; genre_ids: string[]; version: number }>(r);
+      current = { ...current, ...body, version: current.version + 1, genres: body.genre_ids.map((id) => ({ id, name: id === "g1" ? "剧情" : "旧题材", enabled: id === "g1" })) };
       return json(current);
     }
     if (url.startsWith("/api/admin/media/")) {
       const slot = url.includes("/poster?") ? "poster" : "video";
-      const file = r.body.get("file") as File;
+      const file = requestFormData(r).get("file") as File;
       current = { ...current, version: current.version + 1, [slot]: { id: `new-${slot}`, url: `/media/new-${slot}`, local_path: `/media/new-${slot}`, original_name: file.name, mime_type: file.type, byte_size: file.size } };
       return json({ ...current[slot], version: current.version });
     }
@@ -47,6 +67,8 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
   return requests;
 }
 beforeEach(() => {
+  stateUpdateGuard.afterUnmount = false;
+  stateUpdateGuard.violation.mockClear();
   setCsrfToken("session-csrf");
   let next = 0;
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:preview-${++next}`), revokeObjectURL: vi.fn() }));
@@ -112,7 +134,7 @@ it("saves fields and genres before atomically uploading poster then video with r
   const writes = requests.filter((r) => r.method !== "GET");
   expect(writes.map((r) => [r.method, r.url])).toEqual([["PATCH", "/api/admin/movies/movie-1"], ["POST", "/api/admin/media/movies/movie-1/poster?version=4"], ["POST", "/api/admin/media/movies/movie-1/video?version=5"]]);
   expect(writes[0].body).toEqual({ version: 3, name: "新电影", synopsis: "海上故事", year: 2026, duration_seconds: 7200, genre_ids: ["g1"] });
-  expect(writes[1].body.get("file").name).toBe("new.png");
+  expect((requestFormData(writes[1]).get("file") as File).name).toBe("new.png");
   expect(writes[2].headers.get("X-CSRF-Token")).toBe("session-csrf");
   expect(screen.getByRole("img", { name: "当前海报预览" })).toHaveAttribute("src", "/media/new-poster");
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
@@ -165,6 +187,28 @@ it("clears failed movie video progress but preserves its pending retry file", as
   expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
   expect(screen.queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
   expect(screen.getByText(/待上传：broken.mp4/)).toBeInTheDocument();
+});
+
+it("does not update movie state when upload events arrive after unmount", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  fixture();
+  const user = userEvent.setup();
+  const view = editor();
+  await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "feature.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  view.unmount();
+  stateUpdateGuard.afterUnmount = true;
+
+  await act(async () => {
+    current.progress(68, 100);
+    current.networkError();
+    await Promise.resolve();
+  });
+  expect(stateUpdateGuard.violation).not.toHaveBeenCalled();
 });
 
 it("preserves old media and pending selection after a synchronous replacement failure", async () => {
@@ -232,7 +276,7 @@ it("reloads authoritative details after publish, archive and return to draft", a
   for (const action of ["发布", "归档", "转为草稿"]) { await user.click(screen.getByRole("button", { name: action })); await waitFor(() => expect(requests.at(-1)?.method).toBe("GET")); }
   await waitFor(() => expect(screen.getByLabelText("名称")).toBeEnabled());
   const transitions = requests.filter((r) => /\/(publish|archive|draft)$/.test(r.url));
-  expect(transitions.map((r) => r.body.version)).toEqual([4, 5, 6]);
+  expect(transitions.map((r) => requestJson<{ version: number }>(r).version)).toEqual([4, 5, 6]);
   for (const r of transitions) expect(requests[requests.indexOf(r) + 1].url).toBe("/api/admin/movies/movie-1");
 });
 

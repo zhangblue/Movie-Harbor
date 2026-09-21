@@ -1,8 +1,8 @@
 import { Field } from "@movie-harbor/ui";
 import type { ApiUploadProgress, MediaSummary } from "@movie-harbor/api-client";
 
-export function VideoPicker({ current, file, onSelect, readOnly, disabled, progress = null }: {
-  current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean; progress?: ApiUploadProgress | null;
+export function VideoPicker({ current, file, onSelect, readOnly, disabled, progress }: {
+  current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean; progress: ApiUploadProgress | null;
 }) {
   return <div className="movie-field-wide">
     {current ? <><p><a href={current.url} target="_blank" rel="noreferrer">已保存视频：{current.original_name}</a></p><p className="media-local-path"><span>本地存储路径：</span><code>{current.local_path}</code></p></> : <p>尚未上传视频</p>}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ApiUploadProgress, EpisodeResponse } from "@movie-harbor/api-client";
 import { Button, Field } from "@movie-harbor/ui";
+import { useMounted } from "../app/useMounted";
 import { VideoPicker } from "../movies/VideoPicker";
 import { canAct, statusNames } from "./permissions";
 
@@ -23,6 +24,7 @@ export function EpisodeRow({ episode, disabled, actions }: { episode: EpisodeRes
   const [minutes, setMinutes] = useState(episode.duration_seconds === null ? "" : String(episode.duration_seconds / 60));
   const [file, setFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState<ApiUploadProgress | null>(null);
+  const mounted = useMounted();
   useEffect(() => {
     setName(episode.name); setNumber(String(episode.number));
     setMinutes(episode.duration_seconds === null ? "" : String(episode.duration_seconds / 60));
@@ -38,9 +40,9 @@ export function EpisodeRow({ episode, disabled, actions }: { episode: EpisodeRes
       { number: Number(number), name, duration_seconds: minutes === "" ? null : Math.round(Number(minutes) * 60) },
       file,
       publish,
-      () => setFile(null),
-      setUploadProgress,
-    ).finally(() => setUploadProgress(null));
+      () => { if (mounted.current) setFile(null); },
+      (progress) => { if (mounted.current) setUploadProgress(progress); },
+    ).finally(() => { if (mounted.current) setUploadProgress(null); });
   }}>
     <p>第 {episode.number} 集 · {episode.name} <span>{statusNames[episode.status] ?? "未知状态"}</span></p>
     <div className="movie-inline-fields">
