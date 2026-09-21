@@ -43,7 +43,7 @@ export function adminContentPage(items = [
 ], total = items.length, page = 1): AdminContentPage {
   return { items, total, page, size: 20 };
 }
-export type Request = { url: string; method: string; body: unknown; headers: Headers; credentials: RequestCredentials | undefined };
+export type Request = { url: string; method: string; body: any; headers: Headers; credentials: RequestCredentials | undefined };
 export function server(handler?: (request: Request) => Response | Promise<Response> | undefined) {
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {

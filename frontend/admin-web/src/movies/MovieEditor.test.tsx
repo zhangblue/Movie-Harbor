@@ -5,15 +5,15 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type MovieResponse } from "@movie-harbor/api-client";
 import { MovieEditor } from "./MovieEditor";
 import { App } from "../app/App";
-import { adminContentItem, adminContentPage, deferred, json, movie, session } from "../test/server";
+import { adminContentItem, adminContentPage, deferred, json, movie, session, type Request } from "../test/server";
+import { installUploadXhr } from "../test/uploadXhr";
 import styles from "../styles.css?raw";
 
-type Request = { url: string; method: string; body: any; headers: Headers };
 function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => Response | Promise<Response> | undefined) {
   let current = initial;
   const requests: Request[] = [];
   vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
-    const r = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined, headers: new Headers(init.headers) };
+    const r = { url, method: init.method ?? "GET", body: init.body instanceof FormData ? init.body : init.body ? JSON.parse(String(init.body)) : undefined, headers: new Headers(init.headers), credentials: init.credentials };
     requests.push(r);
     const response = intercept?.(r);
     if (response) return response;
@@ -50,6 +50,7 @@ beforeEach(() => {
   setCsrfToken("session-csrf");
   let next = 0;
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:preview-${++next}`), revokeObjectURL: vi.fn() }));
+  installUploadXhr();
 });
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "movie-1") {
@@ -115,6 +116,55 @@ it("saves fields and genres before atomically uploading poster then video with r
   expect(writes[2].headers.get("X-CSRF-Token")).toBe("session-csrf");
   expect(screen.getByRole("img", { name: "当前海报预览" })).toHaveAttribute("src", "/media/new-poster");
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
+});
+
+it("shows monotonic movie video progress through server processing and clears it on success", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  fixture();
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "feature.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  act(() => current.progress(68, 100));
+  expect(screen.getByText("68%")).toBeInTheDocument();
+  act(() => current.progress(50, 100));
+  expect(screen.getByText("68%")).toBeInTheDocument();
+
+  act(() => current.finishUpload());
+  expect(screen.getByText("上传完成，正在校验并保存…")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "发布" })).toBeDisabled();
+  expect(screen.getByLabelText("视频文件")).toBeDisabled();
+
+  await act(async () => { await current.respondFromFetch(); });
+  expect(await screen.findByRole("link", { name: "已保存视频：feature.mp4" })).toBeInTheDocument();
+  expect(screen.queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
+  expect(screen.queryByText(/待上传：feature.mp4/)).not.toBeInTheDocument();
+});
+
+it("clears failed movie video progress but preserves its pending retry file", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  fixture(movie(), (r) => r.url.includes("/video?") ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415) : undefined);
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("视频文件"), new File(["bad"], "broken.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  act(() => current.progress(68, 100));
+  expect(screen.getByText("68%")).toBeInTheDocument();
+  act(() => current.finishUpload());
+  await act(async () => { await current.respondFromFetch(); });
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+  expect(screen.queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
+  expect(screen.getByText(/待上传：broken.mp4/)).toBeInTheDocument();
 });
 
 it("preserves old media and pending selection after a synchronous replacement failure", async () => {

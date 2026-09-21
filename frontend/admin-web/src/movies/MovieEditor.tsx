@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, apiErrorCode, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
+import { ApiError, apiErrorCode, createMovie, deleteMovie, getMovie, getMovieDeleteImpact, listGenres, transitionMovie, updateMovie, uploadMedia, type ApiUploadProgress, type DeleteImpactResponse, type GenreResponse, type MovieResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -21,6 +21,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   const [genres, setGenres] = useState<GenreResponse[]>([]);
   const [poster, setPoster] = useState<File | null>(null);
   const [video, setVideo] = useState<File | null>(null);
+  const [videoUploadProgress, setVideoUploadProgress] = useState<ApiUploadProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [conflict, setConflict] = useState(false);
@@ -39,7 +40,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   useEffect(() => {
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
-    setPoster(null); setVideo(null);
+    setPoster(null); setVideo(null); setVideoUploadProgress(null);
     const watch = <T,>(promise: Promise<T>) => promise.catch((cause: unknown) => {
       if (!ignore && cause instanceof ApiError && cause.status === 401) onExpired();
       throw cause;
@@ -100,7 +101,12 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       if (!file) continue;
       let uploaded;
       try {
-        uploaded = await uploadMedia({ kind: "movies", id: saved.id, slot }, file, saved.version);
+        uploaded = await uploadMedia(
+          { kind: "movies", id: saved.id, slot },
+          file,
+          saved.version,
+          slot === "video" ? setVideoUploadProgress : undefined,
+        );
       } catch (cause) {
         if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
         try { await refreshAfterWrite(); } catch { setConflict(true); }
@@ -109,6 +115,8 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           setWarning("媒体已更新，但媒体存储收尾未完成。系统将在服务下次启动时继续恢复，请稍后刷新确认。");
         }
         return null;
+      } finally {
+        if (slot === "video" && mounted.current) setVideoUploadProgress(null);
       }
       if (!mounted.current) return null;
       // Upload already atomically associates the file; an extra association PUT would be incorrect.
@@ -169,7 +177,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
             const retained = fields.genreIds.filter((genreId) => choices.some((g) => g.id === genreId && !g.enabled));
             setFields({ ...fields, genreIds: [...new Set([...retained, ...Array.from(e.target.selectedOptions).map((option) => option.value)])] });
           }}>{choices.filter((g) => g.enabled || fields.genreIds.includes(g.id)).map((g) => <option key={g.id} value={g.id} disabled={!g.enabled}>{g.name}{!g.enabled ? "（已停用）" : ""}</option>)}</select></Field>
-          <VideoPicker current={movie.video} file={video} onSelect={setVideo} readOnly={readOnly} disabled={locked} />
+          <VideoPicker current={movie.video} file={video} onSelect={setVideo} readOnly={readOnly} disabled={locked} progress={videoUploadProgress} />
           <div className="movie-form-actions">
             {movie.status === "draft" && <><Button type="submit" disabled={locked}>保存草稿</Button><Button variant="primary" type="submit" value="publish" disabled={locked}>发布</Button></>}
             {movie.status === "published" && <Button disabled={locked} onClick={() => { void transition("archive"); }}>归档</Button>}

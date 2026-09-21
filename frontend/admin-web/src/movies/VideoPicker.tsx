@@ -1,8 +1,8 @@
 import { Field } from "@movie-harbor/ui";
-import type { MediaSummary } from "@movie-harbor/api-client";
+import type { ApiUploadProgress, MediaSummary } from "@movie-harbor/api-client";
 
-export function VideoPicker({ current, file, onSelect, readOnly, disabled }: {
-  current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean;
+export function VideoPicker({ current, file, onSelect, readOnly, disabled, progress = null }: {
+  current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean; progress?: ApiUploadProgress | null;
 }) {
   return <div className="movie-field-wide">
     {current ? <><p><a href={current.url} target="_blank" rel="noreferrer">已保存视频：{current.original_name}</a></p><p className="media-local-path"><span>本地存储路径：</span><code>{current.local_path}</code></p></> : <p>尚未上传视频</p>}
@@ -10,6 +10,18 @@ export function VideoPicker({ current, file, onSelect, readOnly, disabled }: {
       const selected = event.currentTarget.files?.[0];
       if (selected) onSelect(selected);
       event.currentTarget.value = "";
-    }} /></Field>{file && <p>待上传：{file.name}（{file.size} 字节）</p>}</>}
+    }} /></Field>{file && <><p>待上传：{file.name}（{file.size} 字节）</p><div className="video-upload-progress-slot">
+      {progress && <div className="video-upload-progress" aria-live="polite">
+        <div className="video-upload-progress__label">
+          <span>{progress.phase === "processing" ? "上传完成，正在校验并保存…" : "正在上传视频…"}</span>
+          {progress.phase === "uploading" && progress.percent !== null && <strong>{progress.percent}%</strong>}
+        </div>
+        <progress
+          aria-label="视频上传进度"
+          max={100}
+          value={progress.phase === "processing" ? 100 : progress.percent ?? undefined}
+        />
+      </div>}
+    </div></>}</>}
   </div>;
 }

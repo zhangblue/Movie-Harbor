@@ -82,6 +82,14 @@ p { color: var(--mh-color-text-muted); }
 .movie-poster-frame img { width: 100%; height: 100%; object-fit: cover; }
 .movie-poster-change { position: absolute; inset: auto 0 0; padding: 12px; background: #0a0d13d6; }
 .movie-poster p { overflow-wrap: anywhere; color: var(--mh-color-text-muted); font-size: 12px; }
+.video-upload-progress-slot { min-height: 50px; }
+.video-upload-progress { padding-top: 4px; color: var(--mh-color-text-muted); }
+.video-upload-progress__label { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 5px; font-size: 12px; }
+.video-upload-progress__label strong { color: var(--mh-color-text); }
+.video-upload-progress progress { display: block; width: 100%; height: 7px; accent-color: var(--mh-color-accent); }
+.video-upload-progress progress::-webkit-progress-bar { background: #273348; border-radius: 999px; }
+.video-upload-progress progress::-webkit-progress-value { border-radius: 999px; background: var(--mh-color-accent); }
+.video-upload-progress progress::-moz-progress-bar { border-radius: 999px; background: var(--mh-color-accent); }
 @media (max-width: 700px) { .movie-editor-card { grid-template-columns: minmax(0, 1fr); padding: 18px; } .movie-inline-fields { flex-wrap: wrap; } }
 @media (max-width: 900px) {
   .admin-layout { grid-template-columns: 1fr; width: calc(100% - 32px); }
