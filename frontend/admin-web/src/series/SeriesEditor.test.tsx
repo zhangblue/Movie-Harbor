@@ -6,6 +6,7 @@ import { clearCsrfToken, setCsrfToken, type EpisodeResponse, type SeriesResponse
 import { SeriesEditor } from "./SeriesEditor";
 import { App } from "../app/App";
 import { adminContentItem, adminContentPage, deferred, json, series, session } from "../test/server";
+import { installUploadXhr } from "../test/uploadXhr";
 
 const base = "/api/admin/series/series-1";
 const episodePath = `${base}/seasons/s1/episodes/e1`;
@@ -63,7 +64,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
   });
   return requests;
 }
-beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() })); });
+beforeEach(() => { setCsrfToken("session-csrf"); let n = 0; vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() })); installUploadXhr(); });
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
@@ -90,6 +91,65 @@ it("shows each persisted episode video path and no path for an episode without a
   const noVideoEpisode = screen.getByRole("form", { name: "第 1 集 · 无视频" });
   expect(within(noVideoEpisode).getByText("尚未上传视频")).toBeInTheDocument();
   expect(within(noVideoEpisode).queryByText("本地存储路径：")).not.toBeInTheDocument();
+});
+
+it("isolates first-episode video progress through processing and preserves its sibling draft", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [
+    episode({ id: "e1", number: 1, name: "来信" }),
+    episode({ id: "e2", number: 2, name: "回声" }),
+  ] }] }));
+  const user = userEvent.setup();
+  editor();
+  await expandFirst(user);
+
+  const firstEpisode = screen.getByRole("form", { name: /第 1 集/ });
+  const secondEpisode = screen.getByRole("form", { name: /第 2 集/ });
+  await user.clear(within(secondEpisode).getByLabelText("单集名称"));
+  await user.type(within(secondEpisode).getByLabelText("单集名称"), "未保存回声");
+  await user.upload(within(firstEpisode).getByLabelText("视频文件"), new File(["video"], "first.mp4", { type: "video/mp4" }));
+  await user.click(within(firstEpisode).getByRole("button", { name: "保存单集草稿" }));
+
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  act(() => current.progress(42, 100));
+  expect(within(firstEpisode).getByText("42%")).toBeInTheDocument();
+  expect(within(firstEpisode).getByRole("progressbar", { name: "视频上传进度" })).toBeInTheDocument();
+  expect(within(secondEpisode).queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
+
+  act(() => current.finishUpload());
+  expect(within(firstEpisode).getByText("上传完成，正在校验并保存…")).toBeInTheDocument();
+  await act(async () => { await current.respondFromFetch(); });
+
+  expect(await within(firstEpisode).findByRole("link", { name: "已保存视频：first.mp4" })).toBeInTheDocument();
+  expect(within(firstEpisode).queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
+  expect(within(secondEpisode).getByLabelText("单集名称")).toHaveValue("未保存回声");
+});
+
+it("clears a failed episode upload progress, retains its file, and skips publication", async () => {
+  const uploads = installUploadXhr({ manual: true });
+  const requests = fixture(detail(), (request) => request.url.includes("/media/episodes/")
+    ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
+    : undefined);
+  const user = userEvent.setup();
+  editor();
+  await expandFirst(user);
+
+  const firstEpisode = screen.getByRole("form", { name: /第 1 集/ });
+  await user.upload(within(firstEpisode).getByLabelText("视频文件"), new File(["bad"], "broken.mp4", { type: "video/mp4" }));
+  await user.click(within(firstEpisode).getByRole("button", { name: "发布单集" }));
+
+  let current!: ReturnType<typeof uploads.next>;
+  await waitFor(() => { current = uploads.next(); });
+  act(() => current.progress(42, 100));
+  expect(within(firstEpisode).getByRole("progressbar", { name: "视频上传进度" })).toBeInTheDocument();
+  act(() => current.finishUpload());
+  await act(async () => { await current.respondFromFetch(); });
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+  expect(within(firstEpisode).queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
+  expect(within(firstEpisode).getByText(/待上传：broken.mp4/)).toBeInTheDocument();
+  expect(requests.some((request) => request.url === `${episodePath}/publish`)).toBe(false);
 });
 
 it("defaults existing seasons to independent accessible collapses without losing input", async () => {

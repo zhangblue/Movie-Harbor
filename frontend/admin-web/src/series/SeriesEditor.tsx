@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ApiError, apiErrorCode, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getEpisodeDeleteImpact, getSeasonDeleteImpact, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type ChildDeleteImpactResponse, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
+import { ApiError, apiErrorCode, createSeries, createSeason, createEpisode, deleteSeries, deleteSeason, deleteEpisode, getEpisodeDeleteImpact, getSeasonDeleteImpact, getSeries, getSeriesDeleteImpact, listGenres, transitionSeries, transitionEpisode, updateSeries, updateSeason, updateEpisode, uploadMedia, type ApiUploadProgress, type ChildDeleteImpactResponse, type DeleteImpactResponse, type EpisodeEnvelope, type EpisodeResponse, type GenreResponse, type SeasonResponse, type SeriesResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -138,7 +138,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     }
     return saved;
   }
-  async function saveEpisode(episode: EpisodeResponse, values: EpisodeFields, file: File | null, publish: boolean, onUploaded: () => void) {
+  async function saveEpisode(episode: EpisodeResponse, values: EpisodeFields, file: File | null, publish: boolean, onUploaded: () => void, onProgress: (progress: ApiUploadProgress) => void) {
     return run(async () => {
       const parent = current.current;
       if (!parent || !knownStatus(parent.status) || !canAct(episode, "edit")) return;
@@ -148,7 +148,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       if (file) {
         let uploaded;
         try {
-          uploaded = await uploadMedia({ kind: "episodes", id: episode.id, slot: "video" }, file, saved.episode.version);
+          uploaded = await uploadMedia({ kind: "episodes", id: episode.id, slot: "video" }, file, saved.episode.version, onProgress);
         } catch (cause) {
           if (!(cause instanceof ApiError) || apiErrorCode(cause) !== "media_replace_finalization_failed") throw cause;
           try { await refresh(); } catch { setConflict(true); }
