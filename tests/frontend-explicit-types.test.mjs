@@ -34,3 +34,7 @@ function unknownTypeLocations(directory) {
 test("api-client uses explicit data types", () => {
   assert.deepEqual(unknownTypeLocations("frontend/packages/api-client"), []);
 });
+
+test("public web uses explicit data types", () => {
+  assert.deepEqual(unknownTypeLocations("frontend/public-web"), []);
+});

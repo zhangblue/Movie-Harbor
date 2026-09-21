@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
+import { normalizeError, type CaughtValue } from "@movie-harbor/api-client";
 
-type Result<T> = { status: "loading" } | { status: "ready"; data: T } | { status: "error"; error: unknown };
+type Result<T> =
+  | { status: "loading" }
+  | { status: "ready"; data: T }
+  | { status: "error"; error: Error };
 
 export function usePublicRequest<T>(load: () => Promise<T>) {
   const [attempt, setAttempt] = useState(0);
@@ -8,8 +12,12 @@ export function usePublicRequest<T>(load: () => Promise<T>) {
   useEffect(() => {
     let ignore = false;
     load().then(
-      (data) => { if (!ignore) setResult({ load, attempt, value: { status: "ready", data } }); },
-      (error: unknown) => { if (!ignore) setResult({ load, attempt, value: { status: "error", error } }); },
+      (data) => {
+        if (!ignore) setResult({ load, attempt, value: { status: "ready", data } });
+      },
+      (cause: CaughtValue) => {
+        if (!ignore) setResult({ load, attempt, value: { status: "error", error: normalizeError(cause) } });
+      },
     );
     return () => { ignore = true; };
   }, [load, attempt]);

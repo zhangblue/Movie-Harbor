@@ -1,4 +1,4 @@
-import type { CatalogCard, MovieDetail, SeriesDetail } from "@movie-harbor/api-client";
+import type { CatalogCard, CatalogPage, JsonValue, MovieDetail, SeriesDetail } from "@movie-harbor/api-client";
 import { vi } from "vitest";
 
 export const movieCard: CatalogCard = {
@@ -30,7 +30,9 @@ export const series: SeriesDetail = {
     ] },
   ],
 };
-export function json(value: unknown, status = 200) {
+type PublicFixturePayload = JsonValue | CatalogPage | MovieDetail | SeriesDetail;
+
+export function json(value: PublicFixturePayload, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 export function catalog(items: CatalogCard[], total = items.length, page = 1) {

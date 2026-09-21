@@ -1,3 +1,5 @@
+import type { JsonObject, JsonValue } from "@movie-harbor/api-client";
+
 export const PROGRESS_STORAGE_KEY = "movie-harbor:playback:v1";
 
 export type PlaybackContentKey = `movie:${string}` | `episode:${string}`;
@@ -26,7 +28,7 @@ function resolveStorage(storage?: Storage): Storage | null {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
@@ -36,20 +38,26 @@ function readState(storage?: Storage): ProgressState {
   try {
     const raw = target.getItem(PROGRESS_STORAGE_KEY);
     if (raw === null) return emptyState();
-    const value: unknown = JSON.parse(raw);
-    if (!isRecord(value) || value.version !== 1 || !isRecord(value.progress) || !isRecord(value.recentEpisodes)) {
+    const value = JSON.parse(raw) as JsonValue;
+    if (!isJsonObject(value)) return emptyState();
+    const { version, progress: storedProgress, recentEpisodes: storedRecentEpisodes } = value;
+    if (
+      version !== 1
+      || storedProgress === undefined || !isJsonObject(storedProgress)
+      || storedRecentEpisodes === undefined || !isJsonObject(storedRecentEpisodes)
+    ) {
       return emptyState();
     }
     const progress: Record<string, PlaybackProgress> = {};
-    for (const [key, item] of Object.entries(value.progress)) {
-      if (!isRecord(item)
+    for (const [key, item] of Object.entries(storedProgress)) {
+      if (item === undefined || !isJsonObject(item)
         || typeof item.position !== "number" || !Number.isFinite(item.position) || item.position < 0
         || typeof item.duration !== "number" || !Number.isFinite(item.duration) || item.duration <= 0
         || typeof item.updatedAt !== "number" || !Number.isFinite(item.updatedAt)) return emptyState();
       progress[key] = { position: item.position, duration: item.duration, updatedAt: item.updatedAt };
     }
     const recentEpisodes: Record<string, string> = {};
-    for (const [key, episodeId] of Object.entries(value.recentEpisodes)) {
+    for (const [key, episodeId] of Object.entries(storedRecentEpisodes)) {
       if (typeof episodeId !== "string" || episodeId.length === 0) return emptyState();
       recentEpisodes[key] = episodeId;
     }
