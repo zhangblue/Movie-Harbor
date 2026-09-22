@@ -1,0 +1,43 @@
+<h2>上传进度条放在哪里最合适？</h2>
+<p class="subtitle">以下都沿用管理后台的深色、紧凑表单风格。请重点比较：上传状态是否容易发现，以及页面是否会因进度出现而跳动。</p>
+
+<div class="cards">
+  <div class="card" data-choice="a" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#0f1723;color:#e8eef7;min-height:210px">
+      <div style="font-size:12px;color:#8fa4bd;margin-bottom:7px">视频文件</div>
+      <div style="border:1px solid #31445b;border-radius:7px;padding:10px;background:#182434">待上传：海港往事.mp4</div>
+      <div style="margin-top:12px;display:flex;justify-content:space-between;font-size:12px"><span>正在上传视频…</span><strong>68%</strong></div>
+      <div style="height:8px;background:#2a394c;border-radius:99px;margin-top:7px;overflow:hidden"><div style="width:68%;height:100%;background:#4e8fcb"></div></div>
+      <div style="display:flex;gap:8px;margin-top:18px"><span style="background:#26384b;border-radius:6px;padding:7px 12px">保存电影草稿</span><span style="background:#356f9f;border-radius:6px;padding:7px 12px">发布电影</span></div>
+    </div>
+    <div class="card-body">
+      <h3>A · 文件区内联（推荐）</h3>
+      <p>进度紧贴待上传文件，百分比与进度条同时显示。电影视频和单集视频可复用同一组件，含义最清楚。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#0f1723;color:#e8eef7;min-height:210px">
+      <div style="font-size:12px;color:#8fa4bd;margin-bottom:7px">视频文件</div>
+      <div style="border:1px solid #31445b;border-radius:7px;padding:10px;background:#182434">待上传：海港往事.mp4</div>
+      <div style="display:flex;gap:8px;margin-top:18px"><span style="position:relative;background:#26384b;border-radius:6px;padding:7px 12px;overflow:hidden"><i style="position:absolute;left:0;bottom:0;width:68%;height:3px;background:#55a0df"></i>保存中 68%</span><span style="opacity:.45;background:#356f9f;border-radius:6px;padding:7px 12px">发布电影</span></div>
+    </div>
+    <div class="card-body">
+      <h3>B · 操作按钮内</h3>
+      <p>更节省空间，但上传细节容易被忽略；一次保存包含字段、海报和视频时，按钮百分比的对象不够明确。</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c" onclick="toggleSelect(this)">
+    <div class="card-image" style="padding:18px;background:#0f1723;color:#e8eef7;min-height:210px">
+      <div style="font-size:12px;color:#8fa4bd;margin-bottom:7px">视频文件</div>
+      <div style="border:1px solid #31445b;border-radius:7px;padding:10px;background:#182434">待上传：海港往事.mp4</div>
+      <div style="display:flex;gap:8px;margin-top:18px"><span style="background:#26384b;border-radius:6px;padding:7px 12px">保存电影草稿</span><span style="background:#356f9f;border-radius:6px;padding:7px 12px">发布电影</span></div>
+      <div style="margin-top:20px;border:1px solid #3c5875;border-radius:8px;padding:10px;background:#1a2a3b"><div style="display:flex;justify-content:space-between;font-size:12px"><span>正在上传 海港往事.mp4</span><strong>68%</strong></div><div style="height:6px;background:#2a394c;border-radius:99px;margin-top:7px;overflow:hidden"><div style="width:68%;height:100%;background:#4e8fcb"></div></div></div>
+    </div>
+    <div class="card-body">
+      <h3>C · 页面级状态卡</h3>
+      <p>反馈醒目，也适合未来并发上传；但当前一次只会顺序上传一个媒体，额外的全局状态卡略显笨重。</p>
+    </div>
+  </div>
+</div>
