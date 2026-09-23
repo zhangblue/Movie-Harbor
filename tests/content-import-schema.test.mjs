@@ -7,10 +7,12 @@ import test from "node:test";
 import { loadAndValidateExport } from "../tools/content-import/schema.mjs";
 import { resolveMediaReference } from "../tools/content-import/media-path.mjs";
 
+const posterName = "ab000000000000000000000000000001.jpg";
+const videoName = "ab000000000000000000000000000002.mp4";
 const movie = (name = "Movie") => ({
   name, synopsis: "Synopsis", year: 2024, genres: ["Drama"],
-  poster_path: "/media/poster/ab/poster.jpg",
-  video_path: "/media/video/ab/movie.mp4", duration_seconds: 90,
+  poster_path: `/media/poster/ab/${posterName}`,
+  video_path: `/media/video/ab/${videoName}`, duration_seconds: 90,
 });
 const series = (name = "Series", episodes = []) => ({
   name, synopsis: "Synopsis", year: null, genres: [],
@@ -27,8 +29,8 @@ async function exportFixture(t, contents = {}) {
   const mediaRoot = join(directory, "media");
   await mkdir(join(mediaRoot, "poster", "ab"), { recursive: true });
   await mkdir(join(mediaRoot, "video", "ab"), { recursive: true });
-  const posterPath = join(mediaRoot, "poster", "ab", "poster.jpg");
-  const videoPath = join(mediaRoot, "video", "ab", "movie.mp4");
+  const posterPath = join(mediaRoot, "poster", "ab", posterName);
+  const videoPath = join(mediaRoot, "video", "ab", videoName);
   await writeFile(posterPath, "poster");
   await writeFile(videoPath, "video");
   const jsonPath = join(directory, "export.json");
@@ -109,14 +111,49 @@ test("rejects blank names and repeated or nonpositive episode coordinates", asyn
   }
 });
 
+test("rejects out-of-range i32 fields and negative durations", async (t) => {
+  const fixture = await exportFixture(t, { movies: [movie()], series: [series("Show", [episode()])] });
+  for (const [change, message] of [
+    [(value) => { value.movies[0].year = 2147483648; }, /year/],
+    [(value) => { value.movies[0].year = -2147483649; }, /year/],
+    [(value) => { value.series[0].year = 2147483648; }, /year/],
+    [(value) => { value.movies[0].duration_seconds = 2147483648; }, /duration_seconds/],
+    [(value) => { value.movies[0].duration_seconds = -1; }, /duration_seconds/],
+    [(value) => { value.series[0].episodes[0].duration_seconds = -1; }, /duration_seconds/],
+    [(value) => { value.series[0].episodes[0].duration_seconds = 2147483648; }, /duration_seconds/],
+    [(value) => { value.series[0].episodes[0].season_number = 2147483648; }, /season_number/],
+    [(value) => { value.series[0].episodes[0].episode_number = 2147483648; }, /episode_number/],
+  ]) {
+    const value = structuredClone(fixture.exported);
+    change(value);
+    await writeFile(fixture.jsonPath, JSON.stringify(value));
+    await assert.rejects(loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot), message);
+  }
+});
+
 test("rejects traversal, wrong purpose, empty segments and backslashes", async (t) => {
   const fixture = await exportFixture(t);
   for (const path of [
-    "/media/poster/../../outside", "/media/video/ab/movie.mp4",
-    "/media/poster//poster.jpg", "/media/poster/./poster.jpg",
-    "/media/poster/ab\\poster.jpg", "/media/poster/ab/poster.jpg\0",
+    "/media/poster/../../outside", `/media/video/ab/${videoName}`,
+    `/media/poster//${posterName}`, `/media/poster/./${posterName}`,
+    `/media/poster/ab\\${posterName}`, `/media/poster/ab/${posterName}\0`,
   ]) {
     await assert.rejects(resolveMediaReference(fixture.mediaRoot, path, "poster"), /invalid poster media path/);
+  }
+});
+
+test("rejects media paths outside the backend controlled key format", async (t) => {
+  const fixture = await exportFixture(t);
+  for (const path of [
+    "/media/poster/ab/poster.jpg",
+    `/media/poster/ab/nested/${posterName}`,
+    `/media/poster/zz/${posterName}`,
+    `/media/poster/ac/${posterName}`,
+    "/media/poster/ab/AB000000000000000000000000000001.jpg",
+    `/media/poster/ab/${posterName.replace(".jpg", ".mp4")}`,
+    `/media/video/ab/${videoName.replace(".mp4", ".jpg")}`,
+  ]) {
+    await assert.rejects(resolveMediaReference(fixture.mediaRoot, path, path.includes("/video/") ? "video" : "poster"), /invalid (poster|video) media path/);
   }
 });
 
@@ -124,17 +161,21 @@ test("rejects links outside media root, missing files and directories", async (t
   const fixture = await exportFixture(t);
   const outside = join(fixture.directory, "outside.jpg");
   await writeFile(outside, "outside");
-  await symlink(outside, join(fixture.mediaRoot, "poster", "ab", "escape.jpg"));
+  const escapeName = "ab000000000000000000000000000003.jpg";
+  const missingName = "ab000000000000000000000000000004.jpg";
+  const directoryName = "ab000000000000000000000000000005.jpg";
+  await symlink(outside, join(fixture.mediaRoot, "poster", "ab", escapeName));
   await assert.rejects(
-    resolveMediaReference(fixture.mediaRoot, "/media/poster/ab/escape.jpg", "poster"),
+    resolveMediaReference(fixture.mediaRoot, `/media/poster/ab/${escapeName}`, "poster"),
     /media path escapes media root/,
   );
   await assert.rejects(
-    resolveMediaReference(fixture.mediaRoot, "/media/poster/ab/missing.jpg", "poster"),
-    /missing media file: \/media\/poster\/ab\/missing.jpg/,
+    resolveMediaReference(fixture.mediaRoot, `/media/poster/ab/${missingName}`, "poster"),
+    new RegExp(`missing media file: /media/poster/ab/${missingName.replace(".", "\\.")}`),
   );
+  await mkdir(join(fixture.mediaRoot, "poster", "ab", directoryName));
   await assert.rejects(
-    resolveMediaReference(fixture.mediaRoot, "/media/poster/ab", "poster"),
+    resolveMediaReference(fixture.mediaRoot, `/media/poster/ab/${directoryName}`, "poster"),
     /media path is not a regular file/,
   );
 });

@@ -22,10 +22,10 @@ function string(source, name, context, nonblank = false) {
   return value;
 }
 
-function nullableInteger(source, name, context) {
+function nullableInteger(source, name, context, minimum = -2147483648) {
   const value = field(source, name, context);
-  if (value !== null && !Number.isSafeInteger(value)) {
-    throw new Error(`${context}.${name} must be an integer or null`);
+  if (value !== null && (!Number.isInteger(value) || value < minimum || value > 2147483647)) {
+    throw new Error(`${context}.${name} must be an i32${minimum === 0 ? " nonnegative" : ""} integer or null`);
   }
   return value;
 }
@@ -81,7 +81,7 @@ async function parseMovies(source, mediaRoot) {
       genres: stringArray(item, "genres", context),
       poster: await media(item, "poster_path", "poster", mediaRoot, context),
       video: await media(item, "video_path", "video", mediaRoot, context),
-      durationSeconds: nullableInteger(item, "duration_seconds", context),
+      durationSeconds: nullableInteger(item, "duration_seconds", context, 0),
     });
   }
   return result;
@@ -113,7 +113,7 @@ async function parseSeries(source, mediaRoot) {
         episodeNumber,
         name: string(entry, "name", episodeContext, true),
         video: await media(entry, "video_path", "video", mediaRoot, episodeContext),
-        durationSeconds: nullableInteger(entry, "duration_seconds", episodeContext),
+        durationSeconds: nullableInteger(entry, "duration_seconds", episodeContext, 0),
       });
     }
     result.push({
