@@ -12,7 +12,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
 - 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
 - 管理导出：详情展示视频容器内路径，支持一次下载全部内容的只读 JSON。
-- 发布工具：支持生成 `linux/arm64` 半离线 Docker 部署包。
+- 发布工具：支持生成 `linux/arm64` 和 `linux/amd64` 单平台半离线 Docker 部署包，默认使用 `linux/arm64`。
 
 ## 核心设计
 
@@ -47,6 +47,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [媒体独占归属与发布体验](docs/superpowers/specs/2026-09-12-media-ownership-and-publishing-design.md)
 - [宿主机数据目录映射](docs/superpowers/specs/2026-09-12-host-data-bind-mounts-design.md)
 - [半离线 Docker 发布包](docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md)
+- [Linux AMD64 半离线发布包](docs/superpowers/specs/2026-09-23-linux-amd64-offline-package-design.md)
 - [本机默认配置一致性](docs/superpowers/specs/2026-09-13-default-local-config-design.md)
 - [HEVC MP4 上传与中文错误反馈](docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md)
 - [管理与公开内容列表分页](docs/superpowers/specs/2026-09-15-admin-and-public-content-pagination-design.md)
@@ -126,22 +127,23 @@ docker compose -p movie-harbor up -d --build --wait
 
 ## 半离线发布包
 
-构建机与目标机首版都必须使用 `linux/arm64` Docker 平台，并安装 Docker Engine 与 Docker Compose v2。构建机还需要 Node.js、Git 和 tar，并能下载构建依赖。在仓库根目录执行：
+构建机需要 Docker Engine、Docker Buildx、Docker Compose v2、Node.js、Git 和 tar，并能下载构建依赖。原生 AMD64 Linux 是生成 AMD64 发布包的首选；在其他架构上构建依赖 Docker/BuildKit 的模拟支持。工具按指定平台构建并校验最终镜像元数据，Docker 守护进程的架构无需与目标平台相同。在仓库根目录执行：
 
 ```bash
-./tools/build-offline-package.sh [版本]
-# 或使用等价的 npm 入口：
-npm run package:offline -- [版本]
+./tools/build-offline-package.sh [版本]                       # 默认 linux/arm64
+./tools/build-offline-package.sh --platform linux/amd64 [版本] # Intel/AMD 64 位 Linux
+# npm 入口透传相同参数，例如：
+npm run package:offline -- --platform linux/amd64 [版本]
 ```
 
-`[版本]` 是可选参数，使用时替换为实际版本字符串并去掉方括号；省略时使用当前 Git 提交的 12 位短 SHA。产物固定写入 `dist/offline/movie-harbor-offline-linux-arm64-<版本>.tar.gz`，同名产物已存在时构建会拒绝覆盖。
+`[版本]` 是可选参数，使用时替换为实际版本字符串并去掉方括号；省略时使用当前 Git 提交的 12 位短 SHA。也可显式指定 `--platform linux/arm64`。产物写入 `dist/offline/`，两个平台分别生成 `movie-harbor-offline-linux-arm64-<版本>.tar.gz` 和 `movie-harbor-offline-linux-amd64-<版本>.tar.gz`；同名产物已存在时构建会拒绝覆盖。每个归档只包含所选平台的三个自研镜像。
 
 包中只内置 API、公开站、管理后台这 3 个自研镜像。目标机仍必须能访问 Docker Hub 获取 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`，因此不支持完全断网部署。包内 Compose 使用固定版本的本地自研镜像且不包含源码构建上下文，启动时不会拉取或构建自研镜像。
 
-将发布包复制到目标机后，解压到部署目录并执行：
+目标机需要 64 位 Linux、Docker Engine 和 Docker Compose v2。Intel/AMD 64 位 Ubuntu 必须选择 `linux/amd64` 包；ARM64 Linux 选择 `linux/arm64` 包。将对应发布包复制到目标机后，解压到部署目录并执行（下例使用 AMD64 包；ARM64 部署时将归档名中的 `linux-amd64` 改为 `linux-arm64`）：
 
 ```bash
-tar -xzf movie-harbor-offline-linux-arm64-<版本>.tar.gz
+tar -xzf movie-harbor-offline-linux-amd64-<版本>.tar.gz
 cd movie-harbor
 ./load-images.sh
 cp .env.example .env
@@ -150,7 +152,7 @@ docker compose --env-file .env config
 docker compose up -d --no-build --wait
 ```
 
-`load-images.sh` 先用 `sha256sum` 校验包内文件，再导入镜像并验证 `linux/arm64` 平台；目标机需要提供该命令。校验用于检查文件完整性，分发时还应通过可信渠道核对外层归档的 SHA-256。公开站、管理后台及 HTTPS、初始管理员和代理秘密要求与上述生产部署说明一致。
+`load-images.sh` 先用 `sha256sum` 校验包内文件，再导入镜像并验证三个精确标签与包声明的平台一致；目标机需要提供该命令。校验用于检查文件完整性，分发时还应通过可信渠道核对外层归档的 SHA-256。公开站、管理后台及 HTTPS、初始管理员和代理秘密要求与上述生产部署说明一致。
 
 `DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`，`MEDIA_HOST_DIR` 映射到 API 的 `/media` 和 Caddy 的只读 `/srv/media`。默认分别为解压目录下的 `./data/postgres` 和 `./data/media`；建议改为固定的宿主机绝对路径，以便升级时复用同一套数据。初始化容器会设置媒体目录的属主和权限。
 
