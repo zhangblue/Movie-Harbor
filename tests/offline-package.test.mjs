@@ -454,11 +454,13 @@ test("renders the same local configuration fallbacks in the offline Compose", ()
     {
       PUBLIC_ORIGIN: environment.PUBLIC_ORIGIN,
       COOKIE_SECURE: environment.COOKIE_SECURE,
+      ALLOW_INSECURE_LAN_HTTP: environment.ALLOW_INSECURE_LAN_HTTP,
       MAX_UPLOAD_BYTES: environment.MAX_UPLOAD_BYTES,
     },
     {
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
       COOKIE_SECURE: "${COOKIE_SECURE:-false}",
+      ALLOW_INSECURE_LAN_HTTP: "${ALLOW_INSECURE_LAN_HTTP:-false}",
       MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-53687091200}",
     },
   );
@@ -537,6 +539,7 @@ test("renders an image-only Compose deployment with the production topology", ()
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}",
       MEDIA_DIR: "/media",
       COOKIE_SECURE: "${COOKIE_SECURE:-false}",
+      ALLOW_INSECURE_LAN_HTTP: "${ALLOW_INSECURE_LAN_HTTP:-false}",
       PUBLIC_ORIGIN: "${PUBLIC_ORIGIN:-http://localhost:8080}",
       TRUST_PROXY_HEADERS: "true",
       TRUST_PROXY_SECRET: "${TRUST_PROXY_SECRET:?set TRUST_PROXY_SECRET}",
@@ -633,10 +636,15 @@ test("bundle guidance explains HTTPS termination and matching origin and cookie 
   assert.match(readme, /修改 `APP_PORT`[^。\n]*localhost[^。\n]*必须同步[^。\n]*`PUBLIC_ORIGIN`[^。\n]*包含该端口[^。\n]*`http:\/\/localhost:9090`/);
   assert.doesNotMatch(readme, /默认入口为 `http:\/\/服务器地址:8080`/);
   assert.match(readme, /Caddy[^\n]*仅提供 HTTP/);
-  assert.match(readme, /其他机器[^\n]*域名[^\n]*局域网[^\n]*公网/);
   assert.match(readme, /`PUBLIC_ORIGIN`[^\n]*实际访问[^\n]*`https:\/\/` 来源/);
   assert.match(readme, /`COOKIE_SECURE=true`[^\n]*外部 TLS 终止层/);
-  assert.match(readme, /HTTP[^\n]*COOKIE_SECURE=false/);
+  assert.match(readme, /默认[^\n]*`ALLOW_INSECURE_LAN_HTTP=false`[^\n]*`http:\/\/localhost:8080\/admin\/`/);
+  assert.match(readme, /可信局域网[^\n]*`PUBLIC_ORIGIN=http:\/\/localhost:8080`[^\n]*`COOKIE_SECURE=false`[^\n]*`ALLOW_INSECURE_LAN_HTTP=true`/);
+  assert.match(readme, /`http:\/\/192\.168\.1\.20:8080\/admin\/`/);
+  assert.match(readme, /RFC1918[^\n]*ULA[^\n]*数字 IP[^\n]*不接受域名/);
+  assert.match(readme, /localhost[^\n]*IP[^\n]*Cookie[^\n]*分别登录/);
+  assert.match(readme, /域名[^\n]*公网[^\n]*不可信网络[^\n]*`ALLOW_INSECURE_LAN_HTTP=false`/);
+  assert.match(readme, /不得[^\n]*公网[^\n]*不可信网络/);
 });
 
 test("bundle guidance explains initial administrator credentials and independent proxy secrets", () => {

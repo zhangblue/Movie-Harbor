@@ -9,6 +9,7 @@ const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const expectedDefaults = {
   PUBLIC_ORIGIN: "http://localhost:8080",
   COOKIE_SECURE: "false",
+  ALLOW_INSECURE_LAN_HTTP: "false",
   MAX_UPLOAD_BYTES: "53687091200",
 };
 
@@ -58,6 +59,7 @@ test("production Compose owns the same fallback expressions", () => {
   const source = readFileSync(path.join(projectRoot, "docker-compose.yml"), "utf8");
   assert.match(source, /PUBLIC_ORIGIN: \$\{PUBLIC_ORIGIN:-http:\/\/localhost:8080\}/);
   assert.match(source, /COOKIE_SECURE: \$\{COOKIE_SECURE:-false\}/);
+  assert.match(source, /ALLOW_INSECURE_LAN_HTTP: \$\{ALLOW_INSECURE_LAN_HTTP:-false\}/);
   assert.match(source, /MAX_UPLOAD_BYTES: \$\{MAX_UPLOAD_BYTES:-53687091200\}/);
 });
 
@@ -72,10 +74,12 @@ test("explicit environment values override the production defaults", () => {
   const environment = composeConfig({
     PUBLIC_ORIGIN: "https://media.example.com",
     COOKIE_SECURE: "true",
+    ALLOW_INSECURE_LAN_HTTP: "true",
     MAX_UPLOAD_BYTES: "1073741824",
   }).services.api.environment;
   assert.equal(environment.PUBLIC_ORIGIN, "https://media.example.com");
   assert.equal(environment.COOKIE_SECURE, "true");
+  assert.equal(environment.ALLOW_INSECURE_LAN_HTTP, "true");
   assert.equal(environment.MAX_UPLOAD_BYTES, "1073741824");
 });
 
