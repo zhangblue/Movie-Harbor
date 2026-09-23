@@ -65,6 +65,10 @@ test("README explains the local, trusted LAN, and HTTPS deployment boundaries", 
   assert.match(readme, /localhost[^。\n]*分别登录/);
   assert.match(readme, /明文 HTTP[^。\n]*(受信任|可信)[^。\n]*局域网/);
   assert.match(readme, /(公网|公共网络|访客 Wi-Fi)[^。\n]*(不得|不要|禁用)/);
+  assert.match(
+    readme,
+    /仅在受信任局域网内[^\n]*\.env[^\n]*ALLOW_INSECURE_LAN_HTTP=true[^\n]*docker compose -p movie-harbor up -d --build --wait/,
+  );
 });
 
 test("production Compose owns the same fallback expressions", () => {

@@ -91,7 +91,7 @@ docker compose -p movie-harbor up -d --build --wait
 
 默认 `ALLOW_INSECURE_LAN_HTTP=false`，配合 `PUBLIC_ORIGIN=http://localhost:8080` 和 `COOKIE_SECURE=false`，只能从本机的 localhost 或环回地址完整操作管理后台。若改用 `http://127.0.0.1:8080`，必须将 `PUBLIC_ORIGIN` 改为这个实际来源；仅打开另一台电脑上的管理页面并不能完成登录和管理操作。
 
-仅在受信任局域网内需要从其他设备管理时，可在 `.env` 中保持 `PUBLIC_ORIGIN=http://localhost:8080` 和 `COOKIE_SECURE=false`，将 `ALLOW_INSECURE_LAN_HTTP=true`，再重启 Compose 服务。从另一台电脑访问 `http://192.168.1.20:8080/admin/`，把 `192.168.1.20` 换成服务器的私有数字 IP。允许的 LAN 来源只接受私有 IPv4 或 IPv6 ULA 数字 IP，不接受局域网主机名；端口必须与 `PUBLIC_ORIGIN` 一致。localhost 与 IP 的 Cookie 分开保存，因此需要分别登录。此开关不会自动配置主机防火墙、路由器或网络可达性。
+仅在受信任局域网内需要从其他设备管理时，可在 `.env` 中保持 `PUBLIC_ORIGIN=http://localhost:8080` 和 `COOKIE_SECURE=false`，将 `ALLOW_INSECURE_LAN_HTTP=true`，然后执行 `docker compose -p movie-harbor up -d --build --wait` 重新创建容器，使新的环境变量生效；仅执行 `docker compose restart` 不会更新容器环境变量。从另一台电脑访问 `http://192.168.1.20:8080/admin/`，把 `192.168.1.20` 换成服务器的私有数字 IP。允许的 LAN 来源只接受私有 IPv4 或 IPv6 ULA 数字 IP，不接受局域网主机名；端口必须与 `PUBLIC_ORIGIN` 一致。localhost 与 IP 的 Cookie 分开保存，因此需要分别登录。此开关不会自动配置主机防火墙、路由器或网络可达性。
 
 正式部署使用 HTTPS：把 `PUBLIC_ORIGIN` 设置为浏览器实际访问的 `https://` 来源（协议、主机名和非默认端口，不含路径），设置 `COOKIE_SECURE=true`、`ALLOW_INSECURE_LAN_HTTP=false`，并由部署者配置域名和 TLS 终止层。包内 Caddy 只提供 HTTP，不会自动取得证书。
 
