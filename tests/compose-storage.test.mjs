@@ -55,6 +55,18 @@ test("declares the local deployment defaults in the root environment example", (
   }
 });
 
+test("README explains the local, trusted LAN, and HTTPS deployment boundaries", () => {
+  const readme = readFileSync(path.join(projectRoot, "README.md"), "utf8");
+
+  assert.match(readme, /ALLOW_INSECURE_LAN_HTTP/);
+  assert.match(readme, /默认[^。\n]*false[^。\n]*localhost/);
+  assert.match(readme, /http:\/\/192\.168\.1\.20:8080\/admin\//);
+  assert.match(readme, /私有[^。\n]*数字 IP/);
+  assert.match(readme, /localhost[^。\n]*分别登录/);
+  assert.match(readme, /明文 HTTP[^。\n]*(受信任|可信)[^。\n]*局域网/);
+  assert.match(readme, /(公网|公共网络|访客 Wi-Fi)[^。\n]*(不得|不要|禁用)/);
+});
+
 test("production Compose owns the same fallback expressions", () => {
   const source = readFileSync(path.join(projectRoot, "docker-compose.yml"), "utf8");
   assert.match(source, /PUBLIC_ORIGIN: \$\{PUBLIC_ORIGIN:-http:\/\/localhost:8080\}/);
