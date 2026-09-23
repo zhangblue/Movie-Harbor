@@ -21,19 +21,32 @@ function rejectUnknownKeys(value, allowed) {
   }
 }
 
-function validateItemMap(items, allowedFields, nested = false) {
-  for (const item of Object.values(items)) {
-    if (!isRecord(item)) throw new Error("progress item must be an object");
-    rejectUnknownKeys(item, allowedFields);
-    if (nested && item.seasons !== undefined) {
-      if (!isRecord(item.seasons)) throw new Error("progress seasons must be an object");
-      validateItemMap(item.seasons, new Set(["id", "episodes"]));
-      for (const season of Object.values(item.seasons)) {
-        if (season.episodes !== undefined) {
-          if (!isRecord(season.episodes)) throw new Error("progress episodes must be an object");
-          validateItemMap(season.episodes, new Set(["id", "version", "metadataUpdated", "videoUploaded", "completed"]));
-        }
-      }
+function validateRecord(record, allowedFields, { version = false, flags = [], seasons = false, episodes = false } = {}) {
+  if (!isRecord(record)) throw new Error("progress item must be an object");
+  rejectUnknownKeys(record, allowedFields);
+  if (typeof record.id !== "string" || record.id.trim() === "") {
+    throw new Error("progress item id must be a nonblank string");
+  }
+  if (version && (!Number.isInteger(record.version) || record.version <= 0)) {
+    throw new Error("progress item version must be a positive integer");
+  }
+  for (const flag of flags) {
+    if (record[flag] !== undefined && typeof record[flag] !== "boolean") {
+      throw new Error(`progress ${flag} must be a boolean`);
+    }
+  }
+  if (seasons && record.seasons !== undefined) {
+    if (!isRecord(record.seasons)) throw new Error("progress seasons must be an object");
+    for (const season of Object.values(record.seasons)) {
+      validateRecord(season, new Set(["id", "episodes"]), { episodes: true });
+    }
+  }
+  if (episodes && record.episodes !== undefined) {
+    if (!isRecord(record.episodes)) throw new Error("progress episodes must be an object");
+    for (const episode of Object.values(record.episodes)) {
+      validateRecord(episode,
+        new Set(["id", "version", "metadataUpdated", "videoUploaded", "completed"]),
+        { version: true, flags: ["metadataUpdated", "videoUploaded", "completed"] });
     }
   }
 }
@@ -53,11 +66,19 @@ function validateProgress(progress, targetOrigin, sourceIdentity) {
   for (const key of ["genres", "movies", "series"]) {
     if (!isRecord(progress[key])) throw new Error(`progress ${key} must be an object`);
   }
-  if (Object.values(progress.genres).some((id) => typeof id !== "string")) {
-    throw new Error("progress genre IDs must be strings");
+  if (Object.values(progress.genres).some((id) => typeof id !== "string" || id.trim() === "")) {
+    throw new Error("progress genre IDs must be nonblank strings");
   }
-  validateItemMap(progress.movies, new Set(["id", "version", "metadataUpdated", "posterUploaded", "videoUploaded", "completed"]));
-  validateItemMap(progress.series, new Set(["id", "version", "metadataUpdated", "posterUploaded", "seasons", "completed"]), true);
+  for (const movie of Object.values(progress.movies)) {
+    validateRecord(movie,
+      new Set(["id", "version", "metadataUpdated", "posterUploaded", "videoUploaded", "completed"]),
+      { version: true, flags: ["metadataUpdated", "posterUploaded", "videoUploaded", "completed"] });
+  }
+  for (const series of Object.values(progress.series)) {
+    validateRecord(series,
+      new Set(["id", "version", "metadataUpdated", "posterUploaded", "seasons", "completed"]),
+      { version: true, flags: ["metadataUpdated", "posterUploaded", "completed"], seasons: true });
+  }
   return progress;
 }
 
@@ -84,19 +105,23 @@ export async function openProgressStore({ path, targetOrigin, sourceIdentity, fs
       validateProgress(state, targetOrigin, sourceIdentity);
       const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
       let handle;
+      let renamed = false;
       try {
         handle = await fs.open(temporaryPath, "wx", 0o600);
         await handle.writeFile(`${JSON.stringify(state, null, 2)}\n`, "utf8");
         await handle.sync();
         await handle.close();
         handle = undefined;
+        await fs.chmod(temporaryPath, 0o600);
         await fs.rename(temporaryPath, path);
-        await fs.chmod(path, 0o600);
+        renamed = true;
       } finally {
         if (handle) await handle.close().catch(() => {});
-        await fs.unlink(temporaryPath).catch((error) => {
-          if (error.code !== "ENOENT") throw error;
-        });
+        if (!renamed) {
+          await fs.unlink(temporaryPath).catch((error) => {
+            if (error.code !== "ENOENT") throw error;
+          });
+        }
       }
     },
   };
