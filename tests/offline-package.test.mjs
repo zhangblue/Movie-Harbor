@@ -33,20 +33,26 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const mode = process.env.DOCKER_TEST_MODE;
+const targetPlatform = process.env.DOCKER_TEST_PLATFORM;
 fs.appendFileSync(process.env.DOCKER_TEST_LOG, JSON.stringify(args) + '\\n');
 function fail(message) { console.error(message); process.exit(1); }
 if (args[0] === 'info') {
   if (mode === 'docker-down') fail('Docker daemon unavailable');
-  console.log(mode === 'wrong-host' ? 'linux/x86_64' : 'linux/aarch64');
+  console.log(mode === 'wrong-host' ? 'linux/arm64' : 'linux/aarch64');
+} else if (args[0] === 'buildx' && args[1] === 'version') {
+  if (mode === 'buildx-down') fail('Buildx unavailable');
+  console.log('github.com/docker/buildx v0.27.0');
 } else if (args[0] === 'compose' && args[1] === 'version') {
   if (mode === 'compose-down') fail('Compose unavailable');
   console.log(mode === 'compose-new-major' ? '5.1.2' : '2.39.1');
-} else if (args[0] === 'build') {
+} else if (args[0] === 'buildx' && args[1] === 'build') {
+  if (!args.includes('--load')) fail('Expected a loaded single-platform image');
+  if (args[args.indexOf('--platform') + 1] !== targetPlatform) fail('Wrong build platform');
   if (!fs.existsSync(args[args.indexOf('--file') + 1])) fail('Dockerfile unavailable in build context');
   if (mode === 'build-fails') fail('Build failed');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (mode === 'inspect-fails') fail('Image missing');
-  console.log(mode === 'wrong-image' ? 'linux/amd64' : 'linux/arm64');
+  console.log(mode === 'wrong-image' ? (targetPlatform === 'linux/amd64' ? 'linux/arm64' : 'linux/amd64') : targetPlatform);
 } else if (args[0] === 'image' && args[1] === 'save') {
   if (args[2] !== '--output') fail('Expected explicit output');
   const output = args[3];
@@ -67,7 +73,7 @@ if (args[0] === 'info') {
     try {
       const manifest = tags.map(tag => ({ Config: 'config.json', RepoTags: [tag], Layers: ['layer.tar'] }));
       fs.writeFileSync(path.join(temp, 'manifest.json'), mode === 'bad-manifest' ? '{' : JSON.stringify(manifest));
-      fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ os: 'linux', architecture: 'arm64' }));
+      fs.writeFileSync(path.join(temp, 'config.json'), JSON.stringify({ os: 'linux', architecture: targetPlatform.split('/')[1] }));
       fs.writeFileSync(path.join(temp, 'layer.tar'), 'fixture runtime layer');
       const result = spawnSync('tar', ['-cf', output, '-C', temp, 'manifest.json', 'config.json', 'layer.tar']);
       if (result.status !== 0) fail('Fixture tar failed');
@@ -83,7 +89,7 @@ if (args[0] === 'info') {
 } else { fail('Unexpected Docker command: ' + args.join(' ')); }
 `;
 
-async function fixture(t, mode = "success") {
+async function fixture(t, mode = "success", platform = "linux/arm64") {
   const root = await mkdtemp(join(tmpdir(), "offline-package-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, "repo with spaces");
@@ -103,11 +109,12 @@ async function fixture(t, mode = "success") {
   }
   await writeFile(join(bin, "docker"), DOCKER_DOUBLE);
   await chmod(join(bin, "docker"), 0o755);
-  const destination = join(repo, "dist/offline", BUNDLE_NAME);
+  const destination = join(repo, "dist/offline", `movie-harbor-offline-${platform.replace("/", "-")}-${VERSION}.tar.gz`);
   const log = join(root, "docker.log");
   const env = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: temporary,
-    DOCKER_TEST_MODE: mode, DOCKER_TEST_LOG: log, DOCKER_TEST_DESTINATION: destination,
+    DOCKER_TEST_MODE: mode, DOCKER_TEST_PLATFORM: platform,
+    DOCKER_TEST_LOG: log, DOCKER_TEST_DESTINATION: destination,
   };
   return {
     repo, root, temporary, destination, env,
@@ -148,13 +155,14 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
     "movie-harbor-public-web:test-v1-linux-arm64",
     "movie-harbor-admin-web:test-v1-linux-arm64",
   ]);
-  const builds = calls.filter(args => args[0] === "build");
+  const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
   assert.equal(builds.length, 3);
   assert.deepEqual(builds.map(args => args[args.indexOf("--file") + 1]), [
     "backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
   ]);
   assert.deepEqual(builds.map(args => args[args.indexOf("--tag") + 1]), savedTags);
   for (const args of builds) {
+    assert.equal(args.includes("--load"), true);
     assert.equal(args[args.indexOf("--platform") + 1], "linux/arm64");
     assert.equal(args.at(-1), ".");
   }
@@ -183,9 +191,75 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+test("shell CLI builds and packages a linux/amd64 release", async t => {
+  const f = await fixture(t, "success", "linux/amd64");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(f.destination.endsWith("movie-harbor-offline-linux-amd64-test-v1.tar.gz"), true);
+
+  const calls = await f.calls();
+  const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
+  assert.equal(builds.length, 3);
+  for (const args of builds) {
+    assert.equal(args.includes("--load"), true);
+    assert.equal(args[args.indexOf("--platform") + 1], "linux/amd64");
+  }
+  const savedTags = calls.find(args => args[0] === "image" && args[1] === "save").slice(4);
+  assert.deepEqual(savedTags, [
+    "movie-harbor-api:test-v1-linux-amd64",
+    "movie-harbor-public-web:test-v1-linux-amd64",
+    "movie-harbor-admin-web:test-v1-linux-amd64",
+  ]);
+  const unpacked = join(f.root, "unpacked");
+  await mkdir(unpacked);
+  tar(["-xzf", f.destination, "-C", unpacked]);
+  const bundle = join(unpacked, "movie-harbor");
+  const manifest = JSON.parse(tar(["-xOf", join(bundle, "images.tar"), "manifest.json"]));
+  assert.deepEqual(manifest.flatMap(image => image.RepoTags), savedTags);
+  const config = JSON.parse(tar(["-xOf", join(bundle, "images.tar"), "config.json"]));
+  assert.deepEqual(config, { os: "linux", architecture: "amd64" });
+  const compose = JSON.parse(await readFile(join(bundle, "compose.yml"), "utf8"));
+  assert.deepEqual(["api", "public-web", "admin-web"].map(name => compose.services[name].image), savedTags);
+  const loader = await readFile(join(bundle, "load-images.sh"), "utf8");
+  const readme = await readFile(join(bundle, "README.md"), "utf8");
+  assert.match(loader, /linux\/amd64/);
+  assert.match(readme, /linux\/amd64/);
+  for (const tag of savedTags) {
+    assert.equal(loader.includes(tag), true);
+    assert.equal(readme.includes(tag), true);
+  }
+  await assertClean(f, ["movie-harbor-offline-linux-amd64-test-v1.tar.gz"]);
+});
+
+test("shell CLI accepts an explicit linux/arm64 target", async t => {
+  const f = await fixture(t);
+  const result = f.run(["--platform", "linux/arm64", VERSION]);
+  assert.equal(result.status, 0, result.stderr);
+  await assertClean(f, [BUNDLE_NAME]);
+});
+
+test("shell CLI can build AMD64 from an ARM64 Docker daemon", async t => {
+  const f = await fixture(t, "wrong-host", "linux/amd64");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.equal(result.status, 0, result.stderr);
+  await assertClean(f, ["movie-harbor-offline-linux-amd64-test-v1.tar.gz"]);
+});
+
+test("shell CLI rejects a non-target AMD64 image and leaves no artifact", async t => {
+  const f = await fixture(t, "wrong-image", "linux/amd64");
+  const result = f.run(["--platform", "linux/amd64", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Expected.*linux\/amd64.*linux\/arm64/i);
+  await assertClean(f);
+});
+
 for (const [args, error] of [
   [["../secret"], /invalid version/i], [["bad version"], /invalid version/i],
   [["one", "two"], /usage|argument/i], [["--output-dir", "elsewhere"], /usage|argument/i],
+  [["--platform"], /usage|argument/i],
+  [["--platform", "linux/386"], /linux\/arm64.*linux\/amd64/i],
+  [["--platform", "linux/amd64", "one", "two"], /usage|argument/i],
+  [["--unknown"], /usage|argument/i],
 ]) {
   test(`shell CLI rejects invalid arguments ${JSON.stringify(args)} before Docker runs`, async t => {
     const f = await fixture(t);
@@ -210,13 +284,13 @@ test("shell CLI rejects an unavailable Compose plugin before building", async t 
   const result = f.run();
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Compose unavailable/);
-  assert.equal((await f.calls()).some(args => args[0] === "build"), false);
+  assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
   await assertClean(f);
 });
 
 for (const [mode, error] of [
   ["docker-down", /Docker/i],
-  ["wrong-host", /only supports linux\/arm64/i], ["build-fails", /Build failed/i],
+  ["buildx-down", /Buildx unavailable/i], ["build-fails", /Build failed/i],
   ["inspect-fails", /inspect|Image missing/i], ["wrong-image", /linux\/arm64/i],
   ["save-fails", /Save/i], ["extra-tag", /RepoTags|tags/i], ["missing-tag", /RepoTags|tags/i],
   ["duplicate-tag", /RepoTags|tags/i], ["bad-manifest", /JSON|manifest/i],
@@ -240,7 +314,7 @@ test("shell CLI refuses an existing artifact before building and preserves its b
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /exists/i);
   assert.equal(await readFile(f.destination, "utf8"), "previous release");
-  assert.equal((await f.calls()).some(args => args[0] === "build"), false);
+  assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
   await assertClean(f, [BUNDLE_NAME]);
 });
 
@@ -277,6 +351,7 @@ test("shell CLI help succeeds without Docker or output", async t => {
   const result = f.run(["--help"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /build-offline-package\.sh.*\[.*\]/);
+  assert.match(result.stdout, /--platform linux\/arm64\|linux\/amd64/);
   assert.deepEqual(await f.calls(), []);
   await assertClean(f);
 });
@@ -308,11 +383,11 @@ test("validates the release version against a strict tag-safe whitelist", () => 
   assert.throws(() => validateVersion(""), /invalid version/);
 });
 
-test("normalizes only the supported Linux ARM64 Docker platform", () => {
-  assert.equal(normalizePlatform("linux", "aarch64"), "linux/arm64");
-  assert.equal(normalizePlatform("linux", "arm64"), "linux/arm64");
-  assert.throws(() => normalizePlatform("linux", "x86_64"), /only supports linux\/arm64/);
-  assert.throws(() => normalizePlatform("darwin", "arm64"), /only supports linux\/arm64/);
+test("accepts only the two supported target platforms", () => {
+  assert.equal(normalizePlatform(), "linux/arm64");
+  assert.equal(normalizePlatform("linux/arm64"), "linux/arm64");
+  assert.equal(normalizePlatform("linux/amd64"), "linux/amd64");
+  assert.throws(() => normalizePlatform("linux/386"), /linux\/arm64.*linux\/amd64/i);
 });
 
 test("uses the three exact self-hosted image tags", () => {
@@ -321,6 +396,18 @@ test("uses the three exact self-hosted image tags", () => {
     "movie-harbor-public-web:test-v1-linux-arm64",
     "movie-harbor-admin-web:test-v1-linux-arm64",
   ]);
+});
+
+test("uses AMD64 image tags and templates when requested", () => {
+  assert.deepEqual(imageTags("test-v1", "linux/amd64"), [
+    "movie-harbor-api:test-v1-linux-amd64",
+    "movie-harbor-public-web:test-v1-linux-amd64",
+    "movie-harbor-admin-web:test-v1-linux-amd64",
+  ]);
+  const compose = JSON.parse(renderCompose("test-v1", "linux/amd64"));
+  assert.equal(compose.services.api.image, "movie-harbor-api:test-v1-linux-amd64");
+  assert.match(renderLoadScript("test-v1", "linux/amd64"), /linux\/amd64/);
+  assert.match(renderBundleReadme("test-v1", "linux/amd64"), /linux\/amd64/);
 });
 
 function assertDeploymentMounts(compose) {
