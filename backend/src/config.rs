@@ -14,6 +14,7 @@ pub struct Config {
     pub media_dir: PathBuf,
     pub cookie_secure: bool,
     pub public_origin: String,
+    pub allow_insecure_lan_http: bool,
     pub trust_proxy_headers: bool,
     pub trusted_proxy_secret: Option<String>,
     pub max_upload_bytes: u64,
@@ -64,6 +65,12 @@ impl Config {
                 .parse()
                 .map_err(|_| ConfigError::Invalid("COOKIE_SECURE"))
         })?;
+        let allow_insecure_lan_http =
+            lookup("ALLOW_INSECURE_LAN_HTTP").map_or(Ok(false), |value| {
+                value
+                    .parse()
+                    .map_err(|_| ConfigError::Invalid("ALLOW_INSECURE_LAN_HTTP"))
+            })?;
         let max_upload_bytes = required(&lookup, "MAX_UPLOAD_BYTES").and_then(|value| {
             value
                 .parse::<u64>()
@@ -96,6 +103,7 @@ impl Config {
             media_dir,
             cookie_secure,
             public_origin: required(&lookup, "PUBLIC_ORIGIN")?,
+            allow_insecure_lan_http,
             trust_proxy_headers,
             trusted_proxy_secret,
             max_upload_bytes,
@@ -119,6 +127,11 @@ impl Config {
             }
             _ => false,
         };
+        if self.allow_insecure_lan_http
+            && (self.cookie_secure || origin.scheme() != "http" || !loopback)
+        {
+            return Err(ConfigError::Invalid("ALLOW_INSECURE_LAN_HTTP"));
+        }
         if !self.cookie_secure && !loopback {
             // 非回环部署必须使用安全 Cookie，防止会话标识经 HTTP 暴露。
             return Err(ConfigError::Invalid("COOKIE_SECURE"));
@@ -243,6 +256,56 @@ mod tests {
             ("VIDEO_MIME_ALLOWLIST", "video/mp4,video/webm"),
             ("ADMIN_NAME", "admin"),
         ])
+    }
+
+    #[test]
+    fn insecure_lan_http_is_disabled_when_omitted_and_strictly_parsed() {
+        let values = required_values();
+        let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+        assert!(!config.allow_insecure_lan_http);
+
+        let mut invalid = required_values();
+        invalid.insert("ALLOW_INSECURE_LAN_HTTP", "yes");
+        assert!(matches!(
+            Config::from_lookup(|name| invalid.get(name).map(ToString::to_string)),
+            Err(ConfigError::Invalid("ALLOW_INSECURE_LAN_HTTP"))
+        ));
+    }
+
+    #[test]
+    fn insecure_lan_http_requires_loopback_http_and_insecure_cookies() {
+        for (origin, cookie_secure) in [
+            ("https://localhost:8080", "false"),
+            ("http://localhost:8080", "true"),
+            ("http://192.168.1.20:8080", "false"),
+            ("https://harbor.test", "true"),
+        ] {
+            let mut values = required_values();
+            values.insert("ALLOW_INSECURE_LAN_HTTP", "true");
+            values.insert("PUBLIC_ORIGIN", origin);
+            values.insert("COOKIE_SECURE", cookie_secure);
+            assert!(matches!(
+                Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+                Err(ConfigError::Invalid("ALLOW_INSECURE_LAN_HTTP"))
+            ));
+        }
+    }
+
+    #[test]
+    fn insecure_lan_http_accepts_loopback_http_configuration() {
+        for origin in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            let mut values = required_values();
+            values.insert("ALLOW_INSECURE_LAN_HTTP", "true");
+            values.insert("PUBLIC_ORIGIN", origin);
+            values.insert("COOKIE_SECURE", "false");
+            let config =
+                Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
+            assert!(config.allow_insecure_lan_http);
+        }
     }
 
     #[test]

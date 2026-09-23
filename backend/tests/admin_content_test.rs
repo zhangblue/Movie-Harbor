@@ -53,6 +53,7 @@ fn config(root: &Path) -> Config {
         media_dir: root.into(),
         cookie_secure: true,
         public_origin: "https://harbor.test".into(),
+        allow_insecure_lan_http: false,
         trust_proxy_headers: false,
         trusted_proxy_secret: None,
         max_upload_bytes: 4096,
