@@ -640,6 +640,8 @@ test("bundle guidance explains HTTPS termination and matching origin and cookie 
   assert.match(readme, /`COOKIE_SECURE=true`[^\n]*外部 TLS 终止层/);
   assert.match(readme, /默认[^\n]*`ALLOW_INSECURE_LAN_HTTP=false`[^\n]*`http:\/\/localhost:8080\/admin\/`/);
   assert.match(readme, /可信局域网[^\n]*`PUBLIC_ORIGIN=http:\/\/localhost:8080`[^\n]*`COOKIE_SECURE=false`[^\n]*`ALLOW_INSECURE_LAN_HTTP=true`/);
+  assert.match(readme, /`ALLOW_INSECURE_LAN_HTTP=true`[^。\n]*`docker compose up -d --no-build --wait`[^。\n]*重新创建容器/);
+  assert.match(readme, /`docker compose restart`[^。\n]*不会更新容器环境变量/);
   assert.match(readme, /`http:\/\/192\.168\.1\.20:8080\/admin\/`/);
   assert.match(readme, /RFC1918[^\n]*ULA[^\n]*数字 IP[^\n]*不接受域名/);
   assert.match(readme, /localhost[^\n]*IP[^\n]*Cookie[^\n]*分别登录/);

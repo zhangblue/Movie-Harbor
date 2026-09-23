@@ -381,7 +381,7 @@ export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
     "",
     "默认 `ALLOW_INSECURE_LAN_HTTP=false`：仅从 `http://localhost:8080/admin/` 或规范环回来源访问，才能完整使用管理后台。",
     "",
-    "可信局域网：保持 `PUBLIC_ORIGIN=http://localhost:8080`、`COOKIE_SECURE=false`，设置 `ALLOW_INSECURE_LAN_HTTP=true` 并重启服务，然后通过服务器私有数字 IP 访问，例如 `http://192.168.1.20:8080/admin/`。只接受 RFC1918/ULA 范围的数字 IP，不接受域名。localhost 与 IP 的 Cookie 彼此隔离，需要分别登录。自定义 `APP_PORT` 时同步修改 `PUBLIC_ORIGIN` 的端口。",
+    "可信局域网：保持 `PUBLIC_ORIGIN=http://localhost:8080`、`COOKIE_SECURE=false`，设置 `ALLOW_INSECURE_LAN_HTTP=true` 后，在交付目录执行 `docker compose up -d --no-build --wait` 重新创建容器；单独执行 `docker compose restart` 不会更新容器环境变量。然后通过服务器私有数字 IP 访问，例如 `http://192.168.1.20:8080/admin/`。只接受 RFC1918/ULA 范围的数字 IP，不接受域名。localhost 与 IP 的 Cookie 彼此隔离，需要分别登录。自定义 `APP_PORT` 时同步修改 `PUBLIC_ORIGIN` 的端口。",
     "",
     "域名、公网或不可信网络：把 `PUBLIC_ORIGIN` 设置为浏览器实际访问的 `https://` 来源（协议、主机名和非默认端口，不含路径），设置 `COOKIE_SECURE=true` 和 `ALLOW_INSECURE_LAN_HTTP=false`，并由外部 TLS 终止层或 VPN 提供加密访问。不得在公网或不可信网络启用局域网明文 HTTP 开关；该开关不能替代传输加密。",
     "",
