@@ -257,7 +257,6 @@ for (const [args, error] of [
   [["../secret"], /invalid version/i], [["bad version"], /invalid version/i],
   [["one", "two"], /usage|argument/i], [["--output-dir", "elsewhere"], /usage|argument/i],
   [["--platform"], /usage|argument/i],
-  [["--platform", "linux/386"], /linux\/arm64.*linux\/amd64/i],
   [["--platform", "linux/amd64", "one", "two"], /usage|argument/i],
   [["--unknown"], /usage|argument/i],
 ]) {
@@ -270,6 +269,16 @@ for (const [args, error] of [
     await assertClean(f);
   });
 }
+
+test("shell CLI explains supported platforms and usage for an unsupported target", async t => {
+  const f = await fixture(t);
+  const result = f.run(["--platform", "linux/386", VERSION]);
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /linux\/arm64.*linux\/amd64/i);
+  assert.match(result.stderr, /Usage:.*--platform linux\/arm64\|linux\/amd64/);
+  assert.deepEqual(await f.calls(), []);
+  await assertClean(f);
+});
 
 test("shell CLI accepts a compatible Compose plugin with version 5.1.2", async t => {
   const f = await fixture(t, "compose-new-major");

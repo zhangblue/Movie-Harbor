@@ -21,7 +21,11 @@ function parseArguments(args) {
   let remaining = args;
   if (args[0] === "--platform") {
     if (args.length < 2 || args[1].startsWith("-")) throw new Error(USAGE);
-    platform = normalizePlatform(args[1]);
+    try {
+      platform = normalizePlatform(args[1]);
+    } catch (error) {
+      throw new Error(`${error.message}\n${USAGE}`);
+    }
     remaining = args.slice(2);
   }
   if (remaining.length > 1 || remaining[0]?.startsWith("-")) throw new Error(USAGE);
