@@ -39,6 +39,10 @@ pub async fn require_session(
     mut request: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
+    // 所有管理请求先验证 Host；即使携带有效 Cookie，也不能从禁止的来源读取数据。
+    if !state.origin_policy.host_allowed(request.headers()) {
+        return Err(AuthError(StatusCode::FORBIDDEN));
+    }
     // 先从 Cookie 查找未过期会话；认证失败时不会把请求交给受保护的业务处理器。
     let current = session::authenticate(&state.db, request.headers()).await?;
     if !matches!(
@@ -46,7 +50,7 @@ pub async fn require_session(
         Method::GET | Method::HEAD | Method::OPTIONS
     ) {
         // 读请求不要求 CSRF；其余方法必须同时通过 Cookie、CSRF 令牌和同源校验。
-        session::authorize_write(&current, request.headers(), &state.public_origin)?;
+        session::authorize_write(&current, request.headers(), &state.origin_policy)?;
     }
     request.extensions_mut().insert(current);
     let mut response = next.run(request).await;
@@ -64,7 +68,7 @@ async fn login(
     Json(input): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
     // 登录也要求严格同源，避免第三方站点诱导浏览器携带请求创建会话。
-    if !csrf::same_origin(&headers, &state.public_origin) {
+    if !state.origin_policy.same_origin(&headers) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
     let proxy_authenticated = state.trust_proxy_headers

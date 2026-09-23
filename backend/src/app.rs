@@ -25,7 +25,10 @@ pub async fn build(
     let state = crate::auth::AuthState {
         db: db.clone(),
         cookie_secure: config.cookie_secure,
-        public_origin,
+        origin_policy: crate::auth::csrf::OriginPolicy::new(
+            public_origin,
+            config.allow_insecure_lan_http,
+        ),
         trust_proxy_headers: config.trust_proxy_headers,
         trusted_proxy_secret_digest: config
             .trusted_proxy_secret

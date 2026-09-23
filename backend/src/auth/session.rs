@@ -89,11 +89,11 @@ pub async fn authenticate<C: ConnectionTrait>(
 pub fn authorize_write(
     current: &CurrentSession,
     headers: &HeaderMap,
-    public_origin: &url::Url,
+    origin_policy: &csrf::OriginPolicy,
 ) -> Result<(), AuthError> {
     // 对写请求叠加严格同源、客户端 CSRF 令牌和数据库摘要校验，Cookie 单独存在不足以放行。
     let token = headers.get("x-csrf-token").and_then(|v| v.to_str().ok());
-    if !csrf::same_origin(headers, public_origin)
+    if !origin_policy.same_origin(headers)
         || !token.is_some_and(|token| csrf::matches(token, &current.session.csrf_token_hash))
     {
         return Err(AuthError(StatusCode::FORBIDDEN));

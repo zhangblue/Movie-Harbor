@@ -114,6 +114,281 @@ async fn request_from(
     app.clone().oneshot(req).await.unwrap()
 }
 
+async fn request_for_authority(
+    app: &Router,
+    method: &str,
+    path: &str,
+    body: Value,
+    authority: &str,
+    auth: (Option<&str>, Option<&str>, Option<&str>),
+) -> Response {
+    let (cookie, csrf, origin) = auth;
+    let mut req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", authority)
+        .header("content-type", "application/json");
+    for (name, value) in [
+        ("cookie", cookie),
+        ("x-csrf-token", csrf),
+        ("origin", origin),
+    ] {
+        if let Some(value) = value {
+            req = req.header(name, value);
+        }
+    }
+    let mut req = req.body(Body::from(body.to_string())).unwrap();
+    req.extensions_mut().insert(ConnectInfo(
+        "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+    ));
+    app.clone().oneshot(req).await.unwrap()
+}
+
+// Catches policy accepted in isolation but missing from login, read or write authentication.
+#[tokio::test]
+async fn enabled_lan_http_allows_private_ip_login_session_and_write() {
+    let db = database().await;
+    let mut cfg = config();
+    cfg.cookie_secure = false;
+    cfg.public_origin = "http://localhost:8080".into();
+    cfg.allow_insecure_lan_http = true;
+    let app = app::build(db, &cfg).await.unwrap();
+    let login = request_for_authority(
+        &app,
+        "POST",
+        "/api/admin/login",
+        json!({"name":"Admin","password":"initial-password"}),
+        "192.168.1.20:8080",
+        (None, None, Some("http://192.168.1.20:8080")),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::OK);
+    let set_cookie = login.headers()["set-cookie"].to_str().unwrap();
+    assert!(set_cookie.contains("HttpOnly"));
+    assert!(set_cookie.contains("SameSite=Lax"));
+    assert!(!set_cookie.contains("; Secure"));
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    let session = request_for_authority(
+        &app,
+        "GET",
+        "/api/admin/session",
+        json!(null),
+        "192.168.1.20:8080",
+        (Some(&cookie), None, None),
+    )
+    .await;
+    assert_eq!(session.status(), StatusCode::OK);
+    let csrf = body(session).await["csrf_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    for (token, origin) in [
+        (None, Some("http://192.168.1.20:8080")),
+        (Some("wrong-token"), Some("http://192.168.1.20:8080")),
+        (Some(csrf.as_str()), None),
+        (Some(csrf.as_str()), Some("http://192.168.1.21:8080")),
+    ] {
+        assert_eq!(request_for_authority(
+            &app, "POST", "/api/admin/password",
+            json!({"current_password":"initial-password","new_password":"replacement-password"}),
+            "192.168.1.20:8080", (Some(&cookie), token, origin),
+        ).await.status(), StatusCode::FORBIDDEN);
+    }
+    let changed = request_for_authority(
+        &app,
+        "POST",
+        "/api/admin/password",
+        json!({"current_password":"initial-password","new_password":"replacement-password"}),
+        "192.168.1.20:8080",
+        (Some(&cookie), Some(&csrf), Some("http://192.168.1.20:8080")),
+    )
+    .await;
+    assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+}
+
+// Catches matching-but-untrusted headers bypassing either login or authenticated reads.
+#[tokio::test]
+async fn lan_http_rejects_disabled_public_domain_wrong_port_and_mismatched_origin() {
+    let db = database().await;
+    let mut cfg = config();
+    cfg.cookie_secure = false;
+    cfg.public_origin = "http://localhost:8080".into();
+    let disabled = app::build(db.clone(), &cfg).await.unwrap();
+    assert_eq!(
+        request_for_authority(
+            &disabled,
+            "POST",
+            "/api/admin/login",
+            json!({"name":"Admin","password":"initial-password"}),
+            "192.168.1.20:8080",
+            (None, None, Some("http://192.168.1.20:8080")),
+        )
+        .await
+        .status(),
+        StatusCode::FORBIDDEN
+    );
+    cfg.allow_insecure_lan_http = true;
+    let enabled = app::build(db, &cfg).await.unwrap();
+    for (host, origin) in [
+        ("8.8.8.8:8080", "http://8.8.8.8:8080"),
+        ("printer.local:8080", "http://printer.local:8080"),
+        ("192.168.1.20:8081", "http://192.168.1.20:8081"),
+        ("192.168.1.20:8080", "http://192.168.1.21:8080"),
+    ] {
+        assert_eq!(
+            request_for_authority(
+                &enabled,
+                "POST",
+                "/api/admin/login",
+                json!({"name":"Admin","password":"initial-password"}),
+                host,
+                (None, None, Some(origin)),
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let allowed = request_for_authority(
+        &enabled,
+        "POST",
+        "/api/admin/login",
+        json!({"name":"Admin","password":"initial-password"}),
+        "192.168.1.20:8080",
+        (None, None, Some("http://192.168.1.20:8080")),
+    )
+    .await;
+    assert_eq!(allowed.status(), StatusCode::OK);
+    let cookie = allowed.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    for (app, host) in [
+        (&disabled, "192.168.1.20:8080"),
+        (&enabled, "8.8.8.8:8080"),
+        (&enabled, "printer.local:8080"),
+        (&enabled, "192.168.1.20:8081"),
+    ] {
+        for cookie in [None, Some(cookie.as_str())] {
+            for path in ["/api/admin/session", "/api/admin/contents"] {
+                assert_eq!(
+                    request_for_authority(
+                        app,
+                        "GET",
+                        path,
+                        json!(null),
+                        host,
+                        (cookie, None, None)
+                    )
+                    .await
+                    .status(),
+                    StatusCode::FORBIDDEN
+                );
+            }
+        }
+        assert_eq!(
+            request_for_authority(
+                app,
+                "GET",
+                "/api/catalog",
+                json!(null),
+                host,
+                (None, None, None)
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+}
+
+// Catches duplicate headers being silently reduced to their first value by authentication.
+#[tokio::test]
+async fn lan_http_rejects_invalid_headers_before_session_authentication() {
+    let mut cfg = config();
+    cfg.cookie_secure = false;
+    cfg.public_origin = "http://localhost:8080".into();
+    cfg.allow_insecure_lan_http = true;
+    let app = app::build(database().await, &cfg).await.unwrap();
+    for path in [
+        "/api/admin/login",
+        "/api/admin/session",
+        "/api/admin/contents",
+        "/api/admin/logout",
+    ] {
+        for invalid in [
+            "missing-host",
+            "duplicate-host",
+            "malformed-host",
+            "forwarded-host",
+            "missing-origin",
+            "duplicate-origin",
+            "malformed-origin",
+        ] {
+            let read = path == "/api/admin/session" || path == "/api/admin/contents";
+            if read && invalid.ends_with("origin") {
+                continue;
+            }
+            let mut req = Request::builder()
+                .method(if read { "GET" } else { "POST" })
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"name":"Admin","password":"initial-password"}).to_string(),
+                ))
+                .unwrap();
+            let headers = req.headers_mut();
+            headers.insert("host", "192.168.1.20:8080".parse().unwrap());
+            headers.insert("origin", "http://192.168.1.20:8080".parse().unwrap());
+            match invalid {
+                "missing-host" => {
+                    headers.remove("host");
+                }
+                "duplicate-host" => {
+                    headers.append("host", "192.168.1.20:8080".parse().unwrap());
+                }
+                "malformed-host" => {
+                    headers.insert("host", "192.168.1.20:bad".parse().unwrap());
+                }
+                "forwarded-host" => {
+                    headers.insert("host", "printer.local:8080".parse().unwrap());
+                    headers.insert(
+                        "forwarded",
+                        "host=192.168.1.20:8080;proto=http".parse().unwrap(),
+                    );
+                    headers.insert("x-forwarded-host", "192.168.1.20:8080".parse().unwrap());
+                }
+                "missing-origin" => {
+                    headers.remove("origin");
+                }
+                "duplicate-origin" => {
+                    headers.append("origin", "http://192.168.1.20:8080".parse().unwrap());
+                }
+                "malformed-origin" => {
+                    headers.insert("origin", "null".parse().unwrap());
+                }
+                _ => unreachable!(),
+            }
+            req.extensions_mut().insert(ConnectInfo(
+                "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            let expected = if path == "/api/admin/logout" && invalid.ends_with("origin") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            assert_eq!(
+                app.clone().oneshot(req).await.unwrap().status(),
+                expected,
+                "{path}: {invalid}"
+            );
+        }
+    }
+}
+
 // Catches Argon2 verification running while an exclusive administrator-row lock and pooled
 // connection are held. Unknown-name work must finish while an unrelated writer owns the row.
 #[tokio::test]
