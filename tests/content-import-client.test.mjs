@@ -1,0 +1,233 @@
+import assert from "node:assert/strict";
+import { createReadStream, writeFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { createAdminClient, ImportRequestError } from "../tools/content-import/client.mjs";
+
+async function fakeMovieHarbor(handler = async (_request, response) => {
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end("{}");
+}, { readDelayMs = 0 } = {}) {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    try {
+      for await (const chunk of request) {
+        chunks.push(chunk);
+        if (readDelayMs) await new Promise((resolve) => setTimeout(resolve, readDelayMs));
+      }
+    } catch { return; }
+    const received = { method: request.method, url: request.url, headers: request.headers, body: Buffer.concat(chunks) };
+    requests.push(received);
+    if (request.url === "/api/admin/login") {
+      response.writeHead(200, { "set-cookie": "mh_session=session-value; HttpOnly; SameSite=Lax", "content-type": "application/json" });
+      response.end('{"name":"admin"}');
+    } else if (request.url === "/api/admin/session") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"name":"admin","csrf_token":"csrf-value"}');
+    } else {
+      await handler(received, response);
+    }
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return { origin: `http://127.0.0.1:${server.address().port}`, requests, close: () => new Promise((resolve) => server.close(resolve)) };
+}
+
+async function withServer(handler, run, options) {
+  const server = await fakeMovieHarbor(handler, options);
+  try { return await run(server); } finally { await server.close(); }
+}
+
+test("rejects non-origin targets and normalizes a trailing slash", async () => {
+  for (const target of ["ftp://localhost", "http://user:secret@localhost", "http://localhost/admin", "http://localhost/?token=x", "http://localhost/?", "http://localhost/#fragment", "http://localhost/#", "not-a-url"]) {
+    assert.throws(() => createAdminClient(target), /origin|target|URL/i, target);
+  }
+  await withServer(undefined, async ({ origin }) => {
+    const client = createAdminClient(`${origin}/`);
+    await client.login("admin", "secret");
+  });
+});
+
+test("retains login cookie, gets session CSRF, and sends exact JSON length", async () => {
+  await withServer(undefined, async ({ origin, requests }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    await client.json("POST", "/api/admin/genres", { name: "自定义" });
+    assert.deepEqual(requests.map((request) => request.url), ["/api/admin/login", "/api/admin/session", "/api/admin/genres"]);
+    assert.deepEqual(JSON.parse(requests[0].body), { name: "admin", password: "secret" });
+    assert.equal(requests[1].headers.cookie, "mh_session=session-value");
+    assert.equal(requests[2].headers.cookie, "mh_session=session-value");
+    assert.equal(requests[2].headers["x-csrf-token"], "csrf-value");
+    assert.equal(requests[2].headers.origin, origin);
+    assert.equal(requests[2].headers["content-length"], String(requests[2].body.length));
+    assert.equal(requests[2].headers["content-type"], "application/json");
+  });
+});
+
+test("classifies content and fatal HTTP failures without exposing response secrets", async () => {
+  for (const [status, fatal] of [[422, false], [401, true], [403, true]]) {
+    await withServer((_request, response) => {
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(JSON.stringify({ code: "INVALID", detail: `private-${"x".repeat(20_000)}` }));
+    }, async ({ origin }) => {
+      const client = createAdminClient(origin);
+      await client.login("admin", "secret");
+      await assert.rejects(client.json("POST", "/api/admin/genres", { name: "test" }), (error) => {
+        assert.ok(error instanceof ImportRequestError);
+        assert.equal(error.status, status);
+        assert.equal(error.fatal, fatal);
+        assert.equal(error.category, fatal ? "auth" : "content");
+        assert.ok(error.message.length < 1000);
+        assert.doesNotMatch(error.message, /secret|session-value|csrf-value|private-/);
+        return true;
+      });
+    });
+  }
+});
+
+test("connection refusal, timeout and interrupted response are fatal", async () => {
+  const unavailable = await fakeMovieHarbor();
+  const origin = unavailable.origin;
+  await unavailable.close();
+  await assert.rejects(createAdminClient(origin, { timeoutMs: 100 }).login("admin", "secret"), (error) => error instanceof ImportRequestError && error.fatal);
+
+  await withServer((_request, _response) => {}, async ({ origin: slow }) => {
+    const client = createAdminClient(slow, { timeoutMs: 30 });
+    await client.login("admin", "secret");
+    await assert.rejects(client.json("GET", "/api/admin/hang"), (error) => error instanceof ImportRequestError && error.fatal && error.category === "network");
+  });
+
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json", "content-length": "100" });
+    response.write("{\"partial\":");
+    response.destroy();
+  }, async ({ origin: cut }) => {
+    const client = createAdminClient(cut);
+    await client.login("admin", "secret");
+    await assert.rejects(client.json("GET", "/api/admin/cut"), (error) => error instanceof ImportRequestError && error.fatal);
+  });
+});
+
+test("streams a file with exact multipart length and preserves query", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    const localPath = join(directory, "movie.mp4");
+    const payload = Buffer.alloc(256 * 1024, 0x61);
+    writeFileSync(localPath, payload);
+    let readChunks = 0;
+    await withServer(async (_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end('{"version":3}');
+    }, async ({ origin, requests }) => {
+      const client = createAdminClient(origin, { createReadStream: (path) => {
+        const stream = createReadStream(path, { highWaterMark: 4096 });
+        stream.on("data", () => { readChunks += 1; });
+        return stream;
+      } });
+      await client.login("admin", "secret");
+      const result = await client.upload("/api/admin/media/movies/id/video?version=2", { localPath, byteSize: payload.length });
+      assert.equal(result.version, 3);
+      const received = requests[2];
+      assert.equal(received.url, "/api/admin/media/movies/id/video?version=2");
+      assert.equal(received.headers["content-length"], String(received.body.length));
+      assert.equal(received.headers.cookie, "mh_session=session-value");
+      assert.equal(received.headers["x-csrf-token"], "csrf-value");
+      assert.match(received.headers["content-type"], /^multipart\/form-data; boundary=/);
+      assert.match(received.body.toString("latin1"), /name="file"; filename="movie.mp4"/);
+      assert.match(received.body.toString("latin1"), /Content-Type: video\/mp4/);
+      assert.ok(received.body.includes(payload));
+      assert.ok(readChunks > 1);
+    }, { readDelayMs: 1 });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("rejects unsupported or unsafe filenames before uploading", async () => {
+  await withServer(undefined, async ({ origin, requests }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    for (const localPath of ["/tmp/evil.txt", "/tmp/bad\rname.mp4", "/tmp/bad\nname.mp4", "/tmp/bad\"name.mp4"]) {
+      await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 1 }), ImportRequestError);
+    }
+    assert.equal(requests.length, 2);
+  });
+});
+
+test("file read errors and early remote close fail fatally", async () => {
+  await withServer(undefined, async ({ origin }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath: "/tmp/missing-mh.mp4", byteSize: 1 }), (error) => error instanceof ImportRequestError && error.fatal);
+  });
+
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    const localPath = join(directory, "movie.mp4");
+    writeFileSync(localPath, Buffer.alloc(1024 * 1024, 0x62));
+    await withServer((_request, response) => response.destroy(), async ({ origin }) => {
+      const client = createAdminClient(origin, { timeoutMs: 1000 });
+      await client.login("admin", "secret");
+      await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 1024 * 1024 }), (error) => error instanceof ImportRequestError && error.fatal);
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("upload timeout destroys the request and fails fatally", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    const localPath = join(directory, "movie.webm");
+    writeFileSync(localPath, Buffer.alloc(64 * 1024, 0x61));
+    await withServer((_request, _response) => {}, async ({ origin }) => {
+      const client = createAdminClient(origin, { timeoutMs: 30 });
+      await client.login("admin", "secret");
+      await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 64 * 1024 }), (error) => error instanceof ImportRequestError && error.fatal && error.category === "network");
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("remote close during multipart upload fails fatally", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  const server = createServer((request) => request.socket.destroy());
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const localPath = join(directory, "movie.mp4");
+    writeFileSync(localPath, Buffer.alloc(1024 * 1024, 0x61));
+    const client = createAdminClient(`http://127.0.0.1:${server.address().port}`, { timeoutMs: 500 });
+    await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 1024 * 1024 }), (error) => error instanceof ImportRequestError && error.fatal);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("uses supported image and video MIME types", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    await withServer(undefined, async ({ origin, requests }) => {
+      const client = createAdminClient(origin);
+      await client.login("admin", "secret");
+      const formats = [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"], ["mp4", "video/mp4"], ["webm", "video/webm"], ["ogv", "video/ogg"]];
+      for (const [extension] of formats) {
+        const localPath = join(directory, `media.${extension}`);
+        writeFileSync(localPath, "x");
+        await client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 1 });
+      }
+      for (const [index, [, mimeType]] of formats.entries()) {
+        assert.match(requests[index + 2].body.toString("latin1"), new RegExp(`Content-Type: ${mimeType.replace("/", "\\/")}`));
+      }
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("bounds response memory when server sends an oversized body", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(422, { "content-type": "application/json" });
+    response.end("x".repeat(128 * 1024));
+  }, async ({ origin }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    await assert.rejects(client.json("GET", "/api/admin/oversized"), (error) => error instanceof ImportRequestError && error.fatal && error.message.length < 1000);
+  });
+});
