@@ -43,8 +43,8 @@ impl OriginPolicy {
         let Some(request_origin) = self.request_origin(headers) else {
             return false;
         };
-        let Some(origin) = single_header(headers, axum::http::header::ORIGIN)
-            .and_then(crate::config::parse_origin)
+        let Some(origin) =
+            single_header(headers, axum::http::header::ORIGIN).and_then(parse_request_origin)
         else {
             return false;
         };
@@ -54,8 +54,7 @@ impl OriginPolicy {
     fn request_origin(&self, headers: &HeaderMap) -> Option<url::Url> {
         // 仅采信唯一 Host，不从转发头推导管理请求的来源。
         let host = single_header(headers, axum::http::header::HOST)?;
-        host.parse::<axum::http::uri::Authority>().ok()?;
-        crate::config::parse_origin(&format!("{}://{host}", self.configured.scheme()))
+        parse_request_origin(&format!("{}://{host}", self.configured.scheme()))
     }
 
     fn origin_allowed(&self, origin: &url::Url) -> bool {
@@ -81,6 +80,17 @@ impl OriginPolicy {
             _ => false,
         }
     }
+}
+
+fn parse_request_origin(value: &str) -> Option<url::Url> {
+    // 请求头必须先满足来源文法，不能让 URL 解析器补斜杠、清理路径或丢弃空 userinfo。
+    // 配置来源仍使用既有解析规则；这里只收紧浏览器发来的 Host/Origin。
+    let (_, authority) = value.split_once("://")?;
+    if authority.contains(['@', '/', '\\', '?', '#']) {
+        return None;
+    }
+    authority.parse::<axum::http::uri::Authority>().ok()?;
+    crate::config::parse_origin(value)
 }
 
 fn single_header(headers: &HeaderMap, name: axum::http::header::HeaderName) -> Option<&str> {
@@ -202,6 +212,70 @@ mod tests {
         forwarded.insert("x-forwarded-host", "192.168.1.20:8080".parse().unwrap());
         assert!(!policy.host_allowed(&forwarded));
         assert!(!policy.same_origin(&forwarded));
+    }
+
+    #[test]
+    fn request_syntax_rejects_userinfo_in_host_and_origin() {
+        let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
+        for authority in [
+            "@192.168.1.20:8080",
+            ":@192.168.1.20:8080",
+            "user@192.168.1.20:8080",
+            "@localhost:8080",
+            "@[fd12:3456::8]:8080",
+        ] {
+            let request = headers(authority, "http://192.168.1.20:8080");
+            assert!(!policy.host_allowed(&request), "accepted Host {authority}");
+            assert!(!policy.same_origin(&request), "accepted Host {authority}");
+            assert!(
+                !policy.same_origin(&headers(
+                    "192.168.1.20:8080",
+                    &format!("http://{authority}")
+                )),
+                "accepted Origin {authority}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_syntax_rejects_origins_without_two_scheme_slashes() {
+        let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
+        for origin in [
+            "http:192.168.1.20:8080",
+            "http:/192.168.1.20:8080",
+            "http:localhost:8080",
+        ] {
+            assert!(
+                !policy.same_origin(&headers("192.168.1.20:8080", origin)),
+                "accepted {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_syntax_rejects_origins_with_extra_slashes_or_paths() {
+        let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
+        for origin in [
+            "http:///192.168.1.20:8080",
+            "http:////192.168.1.20:8080",
+            "http://192.168.1.20:8080/",
+            "http://192.168.1.20:8080/.",
+            "http://192.168.1.20:8080/a/..",
+            "http://192.168.1.20:8080/%2e",
+        ] {
+            assert!(
+                !policy.same_origin(&headers("192.168.1.20:8080", origin)),
+                "accepted {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn request_syntax_keeps_legal_ipv6_case_and_default_port_normalization() {
+        let policy = OriginPolicy::new(url::Url::parse("HTTPS://HARBOR.TEST:443/").unwrap(), false);
+        assert!(policy.same_origin(&headers("HARBOR.TEST:443", "HTTPS://harbor.test")));
+        let policy = OriginPolicy::new(url::Url::parse("http://localhost:80/").unwrap(), true);
+        assert!(policy.same_origin(&headers("[FD12:3456::8]:80", "HTTP://[fd12:3456::8]")));
     }
 
     #[test]
