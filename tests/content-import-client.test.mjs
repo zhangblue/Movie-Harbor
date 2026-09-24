@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { createReadStream, writeFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { Transform } from "node:stream";
 import { createAdminClient, ImportRequestError } from "../tools/content-import/client.mjs";
 
 async function fakeMovieHarbor(handler = async (_request, response) => {
@@ -54,6 +55,116 @@ async function withEarlySuccessServer(run) {
     await new Promise((resolve) => server.close(resolve));
   }
 }
+
+function pacedFile(path, delayMs) {
+  const source = createReadStream(path, { highWaterMark: 4096 });
+  let timer;
+  const stream = new Transform({
+    transform(chunk, _encoding, callback) {
+      timer = setTimeout(() => { timer = undefined; callback(null, chunk); }, delayMs);
+    },
+    destroy(error, callback) {
+      clearTimeout(timer);
+      source.destroy();
+      callback(error);
+    },
+  });
+  source.on("error", (error) => stream.destroy(error));
+  source.pipe(stream);
+  return { source, stream };
+}
+
+test("multipart keeps progressing beyond its timeout and releases file streams and timers", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-paced-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localPath = join(directory, "long.mp4");
+  const payload = Buffer.alloc(4096 * 16, 0x61);
+  writeFileSync(localPath, payload);
+  const timers = new Set();
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", (callback, delay, ...args) => {
+    const timer = realSetTimeout(() => { timers.delete(timer); callback(...args); }, delay);
+    timers.add(timer);
+    return timer;
+  });
+  t.mock.method(globalThis, "clearTimeout", (timer) => { timers.delete(timer); realClearTimeout(timer); });
+  let paced;
+  await withServer(undefined, async ({ origin, requests }) => {
+    const client = createAdminClient(origin, { timeoutMs: 200, createReadStream(path) {
+      paced = pacedFile(path, 40);
+      return paced.stream;
+    } });
+    const started = performance.now();
+    await client.upload("/upload", { localPath, byteSize: payload.length });
+    assert.ok(performance.now() - started > 200);
+    assert.ok(requests[0].body.includes(payload));
+    assert.equal(paced.stream.destroyed, true);
+    assert.equal(paced.source.destroyed, true);
+    assert.equal(timers.size, 0, "completed requests must clear their timeout");
+  });
+});
+
+test("multipart stalls during file delivery or after delivery time out and close streams", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-stalled-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localPath = join(directory, "stalled.mp4");
+  writeFileSync(localPath, Buffer.alloc(4096 * 4, 0x61));
+  for (const delayMs of [1000, 1]) {
+    let paced;
+    await withServer(() => {}, async ({ origin, requests }) => {
+      const client = createAdminClient(origin, { timeoutMs: 100, createReadStream(path) {
+        paced = pacedFile(path, delayMs);
+        return paced.stream;
+      } });
+      await assert.rejects(client.upload("/upload", { localPath, byteSize: 4096 * 4 }),
+        (error) => error.fatal && error.category === "network" && /timed out/.test(error.message));
+      assert.equal(paced.stream.destroyed, true);
+      assert.equal(paced.source.destroyed, true);
+      assert.equal(requests.length, delayMs === 1 ? 1 : 0);
+    });
+  }
+});
+
+test("multipart times out when the peer stops reading and closes the backpressured file", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-backpressure-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localPath = join(directory, "large.mp4");
+  const byteSize = 64 * 1024 * 1024;
+  const handle = await open(localPath, "w");
+  await handle.truncate(byteSize);
+  await handle.close();
+  let file;
+  let requestSeen = false;
+  const server = createServer((request) => { requestSeen = true; request.pause(); });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const client = createAdminClient(`http://127.0.0.1:${server.address().port}`, {
+      timeoutMs: 100,
+      createReadStream(path) { file = createReadStream(path); return file; },
+    });
+    await assert.rejects(client.upload("/upload", { localPath, byteSize }),
+      (error) => error.fatal && /timed out/.test(error.message));
+    assert.equal(requestSeen, true);
+    assert.ok(file.bytesRead < byteSize, "backpressure must stop reading the entire file");
+    assert.equal(file.destroyed, true);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("JSON requests retain a total deadline even while the response makes progress", async () => {
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.write('{"value":"');
+    const interval = setInterval(() => response.write("x"), 20);
+    response.once("close", () => clearInterval(interval));
+  }, async ({ origin }) => {
+    await assert.rejects(createAdminClient(origin, { timeoutMs: 100 }).json("GET", "/slow-json"),
+      (error) => error.fatal && /timed out/.test(error.message));
+  });
+});
 
 test("rejects non-origin targets and normalizes a trailing slash", async () => {
   for (const target of ["ftp://localhost", "http://user:secret@localhost", "http://localhost/admin", "http://localhost/?token=x", "http://localhost/?", "http://localhost/#fragment", "http://localhost/#", "not-a-url"]) {

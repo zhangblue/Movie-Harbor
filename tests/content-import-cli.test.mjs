@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadAndValidateExport } from "../tools/content-import/schema.mjs";
 import { run, readPassword } from "../tools/import-content.mjs";
 
 const args = ["--json", "/source/export.json", "--media-root", "/source/media", "--target", "https://example.test/", "--admin-name", "admin"];
@@ -62,6 +66,21 @@ test("empty passwords and preflight failures prevent login", async () => {
   const invalid = setup({ loadAndValidateExport: async () => { throw new Error("invalid source"); } });
   assert.equal(await run(args, invalid.deps), 1);
   assert.deepEqual(invalid.calls, ["password"]);
+});
+
+test("blank genres fail real source preflight before login or progress creation", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-cli-genres-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const jsonPath = join(directory, "export.json");
+  await writeFile(jsonPath, JSON.stringify({ exported_at: "2026-09-24T00:00:00Z", series: [],
+    movies: [{ name: "Film", synopsis: "", year: null, genres: [" \t"], poster_path: null, video_path: null, duration_seconds: null }] }));
+  const { deps, calls, output } = setup({ loadAndValidateExport });
+  const argv = [...args];
+  argv[1] = jsonPath;
+  argv[3] = directory;
+  assert.equal(await run(argv, deps), 1);
+  assert.deepEqual(calls, ["password"]);
+  assert.match(output.text, /genres.*nonblank/);
 });
 
 test("skips succeed, content failures fail, and all output redacts password", async () => {

@@ -246,7 +246,7 @@ const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
 const contentLength = prefix.length + byteSize + suffix.length;
 ```
 
-使用 `createReadStream` 与显式背压循环发送；最后 `request.end(suffix)`。一侧错误销毁另一侧。MIME 映射覆盖 JPEG、PNG、WebP、MP4、WebM、Ogg Video。
+使用 `createReadStream` 与显式背压循环发送；最后 `request.end(suffix)`。一侧错误销毁另一侧。MIME 映射覆盖 JPEG、PNG、WebP；视频仅支持 MP4、WebM（按用户最终裁决）。multipart 按实际传输进展刷新空闲超时，同时保护连接停滞和发送完成后的响应等待；JSON 请求保留明确总时限。
 
 - [ ] **步骤 6：验证并提交**
 

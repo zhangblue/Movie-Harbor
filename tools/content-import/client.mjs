@@ -72,11 +72,13 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
       let responseValue;
       let responseReceived = false;
       const req = send(url, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(csrfToken && !["GET", "HEAD"].includes(method) ? { "x-csrf-token": csrfToken } : {}), ...headers } }, (res) => {
+        progress();
         const chunks = [];
         let size = 0;
         const maxResponseBytes = res.statusCode >= 200 && res.statusCode < 300
           ? MAX_SUCCESS_JSON_BYTES : MAX_ERROR_RESPONSE_BYTES;
         res.on("data", (chunk) => {
+          progress();
           size += chunk.length;
           if (size > maxResponseBytes) {
             fail(networkError("response exceeds size limit"));
@@ -105,6 +107,8 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
       });
 
       const timer = setTimeout(() => fail(networkError("request timed out")), timeoutMs);
+      // Uploads may run for hours: only inactivity is bounded. JSON retains its total deadline.
+      function progress() { if (writeBody && !done) timer.refresh(); }
       function finish(error, value) {
         if (done) return;
         done = true;
@@ -122,6 +126,7 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
       req.on("error", () => fail(networkError()));
       req.on("close", () => { if (!done) fail(networkError("request interrupted")); });
       req.on("finish", () => {
+        progress();
         requestFinished = true;
         finishIfComplete();
       });
@@ -130,7 +135,7 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
           if (!done) return writeBody(req, (stream) => {
             file = stream;
             if (done) stream.destroy();
-          });
+          }, progress);
         }).then(() => {
           writerDone = true;
           finishIfComplete();
@@ -182,18 +187,22 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
     const contentLength = prefix.length + byteSize + suffix.length;
     const { result } = await request("POST", path, {
       headers: { "content-type": `multipart/form-data; boundary=${boundary}`, "content-length": String(contentLength) },
-      async writeBody(req, setFile) {
-        const file = createReadStream(localPath);
-        setFile(file);
-        async function write(chunk) {
-          if (!req.write(chunk)) await new Promise((resolve, reject) => {
-            function drained() { req.off("error", failed); resolve(); }
-            function failed(error) { req.off("drain", drained); reject(error); }
-            req.once("drain", drained);
-            req.once("error", failed);
+      async writeBody(req, setFile, progress) {
+        function write(chunk) {
+          // Await actual flushing, bounding buffering and refreshing only on transmission progress.
+          return new Promise((resolve, reject) => {
+            function closed() { reject(new Error("request closed")); }
+            req.once("close", closed);
+            req.write(chunk, (error) => {
+              req.off("close", closed);
+              if (error) reject(error);
+              else { progress(); resolve(); }
+            });
           });
         }
         await write(prefix);
+        const file = createReadStream(localPath);
+        setFile(file);
         let sent = 0;
         for await (const chunk of file) {
           sent += chunk.length;

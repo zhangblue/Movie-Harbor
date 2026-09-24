@@ -95,6 +95,21 @@ test("requires every contract field with its declared type", async (t) => {
   }
 });
 
+test("rejects blank movie and series genres without trimming valid exact names", async (t) => {
+  const fixture = await exportFixture(t);
+  for (const kind of ["movies", "series"]) {
+    for (const name of ["", " \t\n", "\u3000"]) {
+      const item = kind === "movies" ? movie() : series();
+      item.genres = [name];
+      await writeFile(fixture.jsonPath, JSON.stringify({ ...fixture.exported, [kind]: [item] }));
+      await assert.rejects(loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot), /genres.*nonblank/);
+    }
+  }
+  fixture.exported.movies = [{ ...movie(), genres: [" Drama "] }];
+  await fixture.save();
+  assert.deepEqual((await loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot)).movies[0].genres, [" Drama "]);
+});
+
 test("rejects blank names and repeated or nonpositive episode coordinates", async (t) => {
   const fixture = await exportFixture(t, { series: [series("Show", [episode()])] });
   for (const [change, message] of [

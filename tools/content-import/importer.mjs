@@ -78,7 +78,7 @@ function saveMovieStep(progress, name, changes) {
   return progress.save();
 }
 
-async function importMovie({ movie, client, progress, genreIds }) {
+async function importMovie({ movie, client, progress, genreIds, logger }) {
   const name = movie.name;
   let state = ownEntry(progress.state.movies, name);
   const resumed = !!state;
@@ -115,10 +115,12 @@ async function importMovie({ movie, client, progress, genreIds }) {
     await saveMovieStep(progress, name, { version: updated.version, metadataUpdated: true });
   }
   if (movie.poster && !state.posterUploaded) {
+    logger?.info?.(`UPLOAD movie ${name} poster`);
     const uploaded = await client.upload(`/api/admin/media/movies/${encodeURIComponent(state.id)}/poster?version=${state.version}`, movie.poster);
     await saveMovieStep(progress, name, { version: uploaded.version, posterUploaded: true });
   }
   if (movie.video && !state.videoUploaded) {
+    logger?.info?.(`UPLOAD movie ${name} video`);
     const uploaded = await client.upload(`/api/admin/media/movies/${encodeURIComponent(state.id)}/video?version=${state.version}`, movie.video);
     await saveMovieStep(progress, name, { version: uploaded.version, videoUploaded: true });
   }
@@ -158,7 +160,7 @@ function validateSeriesResume(target, state, name) {
   }
 }
 
-async function importSeries({ series, client, progress, genreIds }) {
+async function importSeries({ series, client, progress, genreIds, logger }) {
   const name = series.name;
   let state = ownEntry(progress.state.series, name);
   const resumed = !!state;
@@ -193,6 +195,7 @@ async function importSeries({ series, client, progress, genreIds }) {
     await saveSeriesStep(progress, name, { version: updated.version, metadataUpdated: true });
   }
   if (series.poster && !state.posterUploaded) {
+    logger?.info?.(`UPLOAD series ${name} poster`);
     const uploaded = await client.upload(`/api/admin/media/series/${encodeURIComponent(state.id)}/poster?version=${state.version}`, series.poster);
     await saveSeriesStep(progress, name, { version: uploaded.version, posterUploaded: true });
   }
@@ -233,6 +236,7 @@ async function importSeries({ series, client, progress, genreIds }) {
         { version: updated.episode.version, metadataUpdated: true });
     }
     if (episode.video && !savedEpisode.videoUploaded) {
+      logger?.info?.(`UPLOAD episode ${name} ${seasonKey}x${episodeKey} video`);
       const uploaded = await client.upload(`/api/admin/media/episodes/${encodeURIComponent(savedEpisode.id)}/video?version=${savedEpisode.version}`, episode.video);
       await saveEpisodeStep(progress, name, seasonKey, episodeKey, uploaded.series_version,
         { version: uploaded.version, videoUploaded: true });
@@ -258,7 +262,8 @@ export async function importContent({ source, client, progress, logger }) {
       continue;
     }
     try {
-      const outcome = await importMovie({ movie, client, progress, genreIds });
+      logger?.info?.(`IMPORT movie ${movie.name}`);
+      const outcome = await importMovie({ movie, client, progress, genreIds, logger });
       if (outcome === "already") continue;
       result[outcome].push(identity);
       logger?.info?.(`${outcome === "resumed" ? "RESUMED" : "COMPLETED"} movie ${movie.name}`);
@@ -277,7 +282,8 @@ export async function importContent({ source, client, progress, logger }) {
       continue;
     }
     try {
-      const outcome = await importSeries({ series, client, progress, genreIds });
+      logger?.info?.(`IMPORT series ${series.name}`);
+      const outcome = await importSeries({ series, client, progress, genreIds, logger });
       if (outcome === "already") continue;
       result[outcome].push(identity);
       logger?.info?.(`${outcome === "resumed" ? "RESUMED" : "COMPLETED"} series ${series.name}`);

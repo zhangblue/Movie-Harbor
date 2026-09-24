@@ -481,6 +481,61 @@ test("series resumes after an episode video checkpoint without reuploading it", 
   assert.equal(client.calls.filter((call) => call.method === "UPLOAD" && call.path.includes("/episodes/")).length, 1);
 });
 
+for (const [checkpoint, version] of [["season", 3], ["episode", 4], ["duration", 5]]) {
+  test(`series reopens disk after saved ${checkpoint} checkpoint without repeating writes`, async (t) => {
+    const { path, progress, logger } = await setup(t);
+    const originalSave = progress.save;
+    progress.save = async () => {
+      await originalSave();
+      if (progress.state.series.Show?.version === version) throw new Error(`stopped after ${checkpoint} saved`);
+    };
+    const client = fakeClient();
+    const video = { localPath: "/safe/episode.mp4", byteSize: 12 };
+    const input = source([], [series("Show", [episode(1, 1, { video })])]);
+    await assert.rejects(importContent({ source: input, client, progress, logger }), /stopped after .* saved/);
+    const reopened = await openProgressStore({ path, targetOrigin: "https://target.example.test", sourceIdentity: identity });
+    assert.notEqual(reopened.state, progress.state);
+    const saved = reopened.state.series.Show;
+    assert.equal(saved.version, version);
+    assert.equal(saved.seasons[1].id, "season-2");
+    if (checkpoint === "season") assert.deepEqual(saved.seasons[1].episodes, {});
+    else assert.deepEqual(saved.seasons[1].episodes[1], checkpoint === "episode"
+      ? { id: "episode-3", version: 1 }
+      : { id: "episode-3", version: 2, metadataUpdated: true });
+    const second = await importContent({ source: input, client, progress: reopened, logger });
+    assert.deepEqual(second.resumed, [{ kind: "series", name: "Show" }]);
+    for (const [method, route] of [["POST", "/api/admin/series"], ["POST", "/seasons"], ["POST", "/episodes"], ["PATCH", "/episodes/episode-3"]]) {
+      assert.equal(client.calls.filter((call) => call.method === method && call.path.endsWith(route)).length, 1, route);
+    }
+    assert.equal(client.records.get(saved.id).seasons[0].episodes[0].duration_seconds, 45);
+    assert.equal(JSON.parse(await readFile(path, "utf8")).series.Show.completed, true);
+  });
+}
+
+test("logs import and upload stages before their work without paths or authentication data", async (t) => {
+  const { progress, messages, logger } = await setup(t);
+  const client = fakeClient();
+  const poster = { localPath: "/private/source/poster.png", fileName: "private-poster.png", byteSize: 8 };
+  const video = { localPath: "/private/source/film.mp4", fileName: "private-film.mp4", byteSize: 12 };
+  const originalUpload = client.upload;
+  client.upload = async (path, file) => {
+    assert.match(messages.at(-1)?.[1] ?? "", /^UPLOAD /, "stage must be visible while upload is pending");
+    return originalUpload(path, file);
+  };
+  const originalJson = client.json;
+  client.json = async (method, path, body) => {
+    if (method === "POST" && ["/api/admin/movies", "/api/admin/series"].includes(path)) {
+      assert.match(messages.at(-1)?.[1] ?? "", /^IMPORT /, "stage must precede content creation");
+    }
+    return originalJson(method, path, body);
+  };
+  await importContent({ source: source([movie("Film", { poster, video })], [series("Show", [episode(1, 1, { video })], { poster })]), client, progress, logger });
+  const stages = messages.map(([, message]) => message).filter((message) => /^(IMPORT|UPLOAD) /.test(message));
+  assert.deepEqual(stages, ["IMPORT movie Film", "UPLOAD movie Film poster", "UPLOAD movie Film video",
+    "IMPORT series Show", "UPLOAD series Show poster", "UPLOAD episode Show 1x1 video"]);
+  assert.doesNotMatch(messages.flat().join("\n"), /\/private|private-poster|private-film|cookie|csrf|password/i);
+});
+
 test("series exact-name conflict skips only series and prototype-like name resumes safely", async (t) => {
   const { path, progress, logger } = await setup(t);
   const client = fakeClient({ existingSeries: [listItem("Existing", "series")], existingMovies: [listItem("constructor", "movie")] });

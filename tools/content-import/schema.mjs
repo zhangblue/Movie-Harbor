@@ -32,8 +32,8 @@ function nullableInteger(source, name, context, minimum = -2147483648) {
 
 function stringArray(source, name, context) {
   const value = field(source, name, context);
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`${context}.${name} must be an array of strings`);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
+    throw new Error(`${context}.${name} must be an array of nonblank strings`);
   }
   return value;
 }
