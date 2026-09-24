@@ -4,7 +4,8 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { basename, extname } from "node:path";
 
-const MAX_RESPONSE_BYTES = 64 * 1024;
+const MAX_SUCCESS_JSON_BYTES = 16 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES = 64 * 1024;
 const CONTENT_FAILURE_STATUSES = new Set([400, 404, 409, 413, 415, 422]);
 const MIME_TYPES = new Map([
   [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"],
@@ -73,9 +74,11 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
       const req = send(url, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(csrfToken && !["GET", "HEAD"].includes(method) ? { "x-csrf-token": csrfToken } : {}), ...headers } }, (res) => {
         const chunks = [];
         let size = 0;
+        const maxResponseBytes = res.statusCode >= 200 && res.statusCode < 300
+          ? MAX_SUCCESS_JSON_BYTES : MAX_ERROR_RESPONSE_BYTES;
         res.on("data", (chunk) => {
           size += chunk.length;
-          if (size > MAX_RESPONSE_BYTES) {
+          if (size > maxResponseBytes) {
             fail(networkError("response exceeds size limit"));
             return;
           }

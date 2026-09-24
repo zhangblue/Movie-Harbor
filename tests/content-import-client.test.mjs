@@ -305,3 +305,48 @@ test("bounds response memory when server sends an oversized body", async () => {
     await assert.rejects(client.json("GET", "/api/admin/oversized"), (error) => error instanceof ImportRequestError && error.fatal && error.message.length < 1000);
   });
 });
+
+test("parses a complete series response larger than 64 KiB", async () => {
+  const episodes = Array.from({ length: 600 }, (_, index) => ({
+    id: `episode-${index + 1}`, season_id: "season-1", number: index + 1,
+    name: `Episode ${index + 1}`, duration_seconds: null, status: "draft", version: 1,
+    published_at: null, archived_at: null, created_at: "2026-09-24T00:00:00Z",
+    updated_at: "2026-09-24T00:00:00Z", video: null,
+  }));
+  const series = { id: "series-1", name: "Large show", synopsis: "", year: 2024,
+    status: "draft", version: 602, published_at: null, archived_at: null,
+    created_at: "2026-09-24T00:00:00Z", updated_at: "2026-09-24T00:00:00Z",
+    genres: [], poster: null, seasons: [{ id: "season-1", number: 1, episodes }] };
+  const payload = JSON.stringify(series);
+  assert.ok(Buffer.byteLength(payload) > 64 * 1024);
+  assert.ok(Buffer.byteLength(payload) < 16 * 1024 * 1024);
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(payload);
+  }, async ({ origin }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    const response = await client.json("GET", "/api/admin/series/series-1");
+    assert.equal(response.version, 602);
+    assert.equal(response.seasons[0].episodes.length, 600);
+    assert.equal(response.seasons[0].episodes[599].id, "episode-600");
+  });
+});
+
+test("rejects a successful JSON response larger than 16 MiB", async () => {
+  const payload = JSON.stringify({ value: "x".repeat(16 * 1024 * 1024) });
+  await withServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(payload);
+  }, async ({ origin }) => {
+    const client = createAdminClient(origin);
+    await client.login("admin", "secret");
+    await assert.rejects(client.json("GET", "/api/admin/series/large"), (error) => {
+      assert.ok(error instanceof ImportRequestError);
+      assert.equal(error.fatal, true);
+      assert.equal(error.category, "network");
+      assert.match(error.message, /size limit/);
+      return true;
+    });
+  });
+});
