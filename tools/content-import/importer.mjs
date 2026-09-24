@@ -126,6 +126,125 @@ async function importMovie({ movie, client, progress, genreIds }) {
   return resumed ? "resumed" : "completed";
 }
 
+function saveSeriesStep(progress, name, changes) {
+  Object.assign(ownEntry(progress.state.series, name), changes);
+  return progress.save();
+}
+
+function saveEpisodeStep(progress, seriesName, seasonNumber, episodeNumber, seriesVersion, changes) {
+  const state = ownEntry(progress.state.series, seriesName);
+  const season = ownEntry(state.seasons, String(seasonNumber));
+  Object.assign(ownEntry(season.episodes, String(episodeNumber)), changes);
+  state.version = seriesVersion;
+  return progress.save();
+}
+
+function validateSeriesResume(target, state, name) {
+  if (target.id !== state.id || target.status !== "draft" || target.version !== state.version || target.name !== name) {
+    throw new ImportRequestError(`resume target changed: ${name}`, { status: 409 });
+  }
+  for (const [seasonNumber, savedSeason] of Object.entries(state.seasons ?? {})) {
+    const targetSeason = target.seasons?.find((season) => season.number === Number(seasonNumber));
+    if (!targetSeason || targetSeason.id !== savedSeason.id) {
+      throw new ImportRequestError(`resume season changed: ${name} season ${seasonNumber}`, { status: 409 });
+    }
+    for (const [episodeNumber, savedEpisode] of Object.entries(savedSeason.episodes ?? {})) {
+      const targetEpisode = targetSeason.episodes?.find((episode) => episode.number === Number(episodeNumber));
+      if (!targetEpisode || targetEpisode.id !== savedEpisode.id || targetEpisode.season_id !== savedSeason.id ||
+          targetEpisode.status !== "draft" || targetEpisode.version !== savedEpisode.version) {
+        throw new ImportRequestError(`resume episode changed: ${name} ${seasonNumber}x${episodeNumber}`, { status: 409 });
+      }
+    }
+  }
+}
+
+async function importSeries({ series, client, progress, genreIds }) {
+  const name = series.name;
+  let state = ownEntry(progress.state.series, name);
+  const resumed = !!state;
+  if (state) {
+    let target;
+    try {
+      target = await client.json("GET", `/api/admin/series/${encodeURIComponent(state.id)}`);
+    } catch (error) {
+      if (error instanceof ImportRequestError && error.status === 404) {
+        throw new ImportRequestError(`resume target is missing: ${name}`, { status: 404 });
+      }
+      throw error;
+    }
+    validateSeriesResume(target, state, name);
+    if (state.completed) return "already";
+  } else {
+    const created = await client.json("POST", "/api/admin/series", { name });
+    state = { id: created.id, version: created.version };
+    setOwnEntry(progress.state.series, name, state);
+    await progress.save();
+  }
+
+  const seriesPath = `/api/admin/series/${encodeURIComponent(state.id)}`;
+  if (!state.metadataUpdated) {
+    const updated = await client.json("PATCH", seriesPath, {
+      version: state.version,
+      name,
+      synopsis: series.synopsis,
+      year: series.year,
+      genre_ids: series.genres.map((genre) => genreIds.get(genre)),
+    });
+    await saveSeriesStep(progress, name, { version: updated.version, metadataUpdated: true });
+  }
+  if (series.poster && !state.posterUploaded) {
+    const uploaded = await client.upload(`/api/admin/media/series/${encodeURIComponent(state.id)}/poster?version=${state.version}`, series.poster);
+    await saveSeriesStep(progress, name, { version: uploaded.version, posterUploaded: true });
+  }
+
+  const episodes = [...series.episodes].sort((left, right) =>
+    left.seasonNumber - right.seasonNumber || left.episodeNumber - right.episodeNumber);
+  for (const episode of episodes) {
+    const seasonKey = String(episode.seasonNumber);
+    let savedSeason = ownEntry(state.seasons ?? {}, seasonKey);
+    if (!savedSeason) {
+      const updated = await client.json("POST", `${seriesPath}/seasons`, { version: state.version, number: episode.seasonNumber });
+      const createdSeason = updated.seasons?.find((season) => season.number === episode.seasonNumber);
+      if (!createdSeason) throw fatal(`created season missing from response: ${name} season ${seasonKey}`);
+      state.seasons ??= {};
+      savedSeason = { id: createdSeason.id, episodes: {} };
+      setOwnEntry(state.seasons, seasonKey, savedSeason);
+      await saveSeriesStep(progress, name, { version: updated.version });
+    }
+    const episodeKey = String(episode.episodeNumber);
+    let savedEpisode = ownEntry(savedSeason.episodes ?? {}, episodeKey);
+    if (!savedEpisode) {
+      const updated = await client.json("POST", `${seriesPath}/seasons/${encodeURIComponent(savedSeason.id)}/episodes`, {
+        version: state.version, number: episode.episodeNumber, name: episode.name,
+      });
+      const createdEpisode = updated.seasons?.find((season) => season.id === savedSeason.id)?.episodes
+        ?.find((item) => item.number === episode.episodeNumber);
+      if (!createdEpisode) throw fatal(`created episode missing from response: ${name} ${seasonKey}x${episodeKey}`);
+      savedSeason.episodes ??= {};
+      savedEpisode = { id: createdEpisode.id, version: createdEpisode.version };
+      setOwnEntry(savedSeason.episodes, episodeKey, savedEpisode);
+      await saveSeriesStep(progress, name, { version: updated.version });
+    }
+    if (!savedEpisode.metadataUpdated) {
+      const updated = await client.json("PATCH", `${seriesPath}/seasons/${encodeURIComponent(savedSeason.id)}/episodes/${encodeURIComponent(savedEpisode.id)}`, {
+        version: savedEpisode.version, duration_seconds: episode.durationSeconds,
+      });
+      await saveEpisodeStep(progress, name, seasonKey, episodeKey, updated.series_version,
+        { version: updated.episode.version, metadataUpdated: true });
+    }
+    if (episode.video && !savedEpisode.videoUploaded) {
+      const uploaded = await client.upload(`/api/admin/media/episodes/${encodeURIComponent(savedEpisode.id)}/video?version=${savedEpisode.version}`, episode.video);
+      await saveEpisodeStep(progress, name, seasonKey, episodeKey, uploaded.series_version,
+        { version: uploaded.version, videoUploaded: true });
+    }
+    if (!savedEpisode.completed) {
+      await saveEpisodeStep(progress, name, seasonKey, episodeKey, state.version, { completed: true });
+    }
+  }
+  await saveSeriesStep(progress, name, { completed: true });
+  return resumed ? "resumed" : "completed";
+}
+
 export async function importContent({ source, client, progress, logger }) {
   const genreIds = await syncGenres({ source, client, progress, logger });
   const conflicts = await loadConflictIndex(client);
@@ -147,6 +266,25 @@ export async function importContent({ source, client, progress, logger }) {
       if (!(error instanceof ImportRequestError) || error.fatal) throw error;
       result.failed.push({ ...identity, error: error.message });
       logger?.error?.(`FAILED movie ${movie.name}: ${error.message}`);
+    }
+  }
+  for (const series of source.series) {
+    const identity = { kind: "series", name: series.name };
+    const existing = ownEntry(progress.state.series, series.name);
+    if (!existing && conflicts.series.has(series.name)) {
+      result.skipped.push(identity);
+      logger?.warn?.(`SKIP series ${series.name}: same-kind target already exists`);
+      continue;
+    }
+    try {
+      const outcome = await importSeries({ series, client, progress, genreIds });
+      if (outcome === "already") continue;
+      result[outcome].push(identity);
+      logger?.info?.(`${outcome === "resumed" ? "RESUMED" : "COMPLETED"} series ${series.name}`);
+    } catch (error) {
+      if (!(error instanceof ImportRequestError) || error.fatal) throw error;
+      result.failed.push({ ...identity, error: error.message });
+      logger?.error?.(`FAILED series ${series.name}: ${error.message}`);
     }
   }
   return result;
