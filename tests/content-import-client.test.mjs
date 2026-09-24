@@ -41,6 +41,20 @@ async function withServer(handler, run, options) {
   try { return await run(server); } finally { await server.close(); }
 }
 
+async function withEarlySuccessServer(run) {
+  const server = createServer((request, response) => {
+    request.resume();
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end('{"version":3}');
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try { return await run(`http://127.0.0.1:${server.address().port}`); }
+  finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
 test("rejects non-origin targets and normalizes a trailing slash", async () => {
   for (const target of ["ftp://localhost", "http://user:secret@localhost", "http://localhost/admin", "http://localhost/?token=x", "http://localhost/?", "http://localhost/#fragment", "http://localhost/#", "not-a-url"]) {
     assert.throws(() => createAdminClient(target), /origin|target|URL/i, target);
@@ -83,6 +97,27 @@ test("classifies content and fatal HTTP failures without exposing response secre
         assert.ok(error.message.length < 1000);
         assert.doesNotMatch(error.message, /secret|session-value|csrf-value|private-/);
         return true;
+      });
+    });
+  }
+});
+
+test("redirect and rate limit responses are fatal", async (t) => {
+  for (const status of [302, 429, 500]) {
+    await t.test(`HTTP ${status}`, async () => {
+      await withServer((_request, response) => {
+        response.writeHead(status, { "content-type": "application/json" });
+        response.end("{}");
+      }, async ({ origin }) => {
+        const client = createAdminClient(origin);
+        await client.login("admin", "secret");
+        await assert.rejects(client.json("GET", "/api/admin/status"), (error) => {
+          assert.ok(error instanceof ImportRequestError);
+          assert.equal(error.status, status);
+          assert.equal(error.fatal, true);
+          assert.notEqual(error.category, "content");
+          return true;
+        });
       });
     });
   }
@@ -151,6 +186,7 @@ test("rejects unsupported or unsafe filenames before uploading", async () => {
     for (const localPath of ["/tmp/evil.txt", "/tmp/bad\rname.mp4", "/tmp/bad\nname.mp4", "/tmp/bad\"name.mp4"]) {
       await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 1 }), ImportRequestError);
     }
+    await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath: "/tmp/evil.ogv", byteSize: 1 }), (error) => error instanceof ImportRequestError && error.category === "content" && !error.fatal);
     assert.equal(requests.length, 2);
   });
 });
@@ -202,13 +238,51 @@ test("remote close during multipart upload fails fatally", async () => {
   }
 });
 
+test("early success response cannot hide an incomplete file body", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    const localPath = join(directory, "short.mp4");
+    writeFileSync(localPath, "x");
+    await withEarlySuccessServer(async (origin) => {
+      const client = createAdminClient(origin, { createReadStream(path) {
+        const stream = createReadStream(path, { highWaterMark: 1 });
+        stream.once("data", () => {
+          stream.pause();
+          setTimeout(() => stream.resume(), 40);
+        });
+        return stream;
+      } });
+      await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 2 }), (error) => error instanceof ImportRequestError && error.fatal && error.message === "file upload failed");
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("early success response cannot hide a later file stream error", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
+  try {
+    const localPath = join(directory, "broken.mp4");
+    writeFileSync(localPath, Buffer.alloc(128 * 1024, 0x61));
+    await withEarlySuccessServer(async (origin) => {
+      const client = createAdminClient(origin, { createReadStream(path) {
+        const stream = createReadStream(path, { highWaterMark: 1 });
+        stream.once("data", () => {
+          stream.pause();
+          setTimeout(() => stream.destroy(new Error("source failed")), 40);
+        });
+        return stream;
+      } });
+      await assert.rejects(client.upload("/api/admin/media/movies/id/video", { localPath, byteSize: 128 * 1024 }), (error) => error instanceof ImportRequestError && error.fatal && error.message === "file upload failed");
+    });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 test("uses supported image and video MIME types", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mh-client-"));
   try {
     await withServer(undefined, async ({ origin, requests }) => {
       const client = createAdminClient(origin);
       await client.login("admin", "secret");
-      const formats = [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"], ["mp4", "video/mp4"], ["webm", "video/webm"], ["ogv", "video/ogg"]];
+      const formats = [["jpg", "image/jpeg"], ["jpeg", "image/jpeg"], ["png", "image/png"], ["webp", "image/webp"], ["mp4", "video/mp4"], ["webm", "video/webm"]];
       for (const [extension] of formats) {
         const localPath = join(directory, `media.${extension}`);
         writeFileSync(localPath, "x");

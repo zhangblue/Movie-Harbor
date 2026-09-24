@@ -5,10 +5,11 @@ import { request as httpsRequest } from "node:https";
 import { basename, extname } from "node:path";
 
 const MAX_RESPONSE_BYTES = 64 * 1024;
+const CONTENT_FAILURE_STATUSES = new Set([400, 404, 409, 413, 415, 422]);
 const MIME_TYPES = new Map([
   [".jpg", "image/jpeg"], [".jpeg", "image/jpeg"],
   [".png", "image/png"], [".webp", "image/webp"],
-  [".mp4", "video/mp4"], [".webm", "video/webm"], [".ogv", "video/ogg"],
+  [".mp4", "video/mp4"], [".webm", "video/webm"],
 ]);
 
 export class ImportRequestError extends Error {
@@ -41,9 +42,9 @@ function requestPath(origin, path) {
 }
 
 function responseError(status) {
-  const fatal = status === 401 || status === 403 || status >= 500;
+  const fatal = !CONTENT_FAILURE_STATUSES.has(status);
   return new ImportRequestError(`request failed (HTTP ${status})`, {
-    fatal, category: status === 401 || status === 403 ? "auth" : fatal ? "network" : "content", status,
+    fatal, category: status === 401 || status === 403 ? "auth" : status === 429 ? "rate_limit" : fatal ? "network" : "content", status,
   });
 }
 
@@ -65,6 +66,10 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
     return new Promise((resolve, reject) => {
       let done = false;
       let file;
+      let writerDone = !writeBody;
+      let requestFinished = false;
+      let responseValue;
+      let responseReceived = false;
       const req = send(url, { method, headers: { origin, ...(cookie ? { cookie } : {}), ...(csrfToken && !["GET", "HEAD"].includes(method) ? { "x-csrf-token": csrfToken } : {}), ...headers } }, (res) => {
         const chunks = [];
         let size = 0;
@@ -90,7 +95,9 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
           if (data) {
             try { result = JSON.parse(data); } catch { return fail(networkError("invalid JSON response")); }
           }
-          finish(null, { result, headers: res.headers });
+          responseValue = { result, headers: res.headers };
+          responseReceived = true;
+          finishIfComplete();
         });
       });
 
@@ -106,14 +113,24 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
         } else resolve(value);
       }
       function fail(error) { finish(error); }
+      function finishIfComplete() {
+        if (writerDone && requestFinished && responseReceived) finish(null, responseValue);
+      }
       req.on("error", () => fail(networkError()));
       req.on("close", () => { if (!done) fail(networkError("request interrupted")); });
+      req.on("finish", () => {
+        requestFinished = true;
+        finishIfComplete();
+      });
       if (writeBody) {
         Promise.resolve().then(() => {
           if (!done) return writeBody(req, (stream) => {
             file = stream;
             if (done) stream.destroy();
           });
+        }).then(() => {
+          writerDone = true;
+          finishIfComplete();
         }).catch(() => fail(networkError("file upload failed")));
       } else {
         try { req.end(body); } catch { fail(networkError()); }
