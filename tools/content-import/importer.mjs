@@ -4,6 +4,14 @@ function fatal(message) {
   return new ImportRequestError(message, { fatal: true, category: "content" });
 }
 
+function ownEntry(record, name) {
+  return Object.hasOwn(record, name) ? record[name] : undefined;
+}
+
+function setOwnEntry(record, name, value) {
+  Object.defineProperty(record, name, { value, writable: true, enumerable: true, configurable: true });
+}
+
 function collectGenreNames(source) {
   const names = new Set();
   for (const content of [...source.movies, ...source.series]) {
@@ -36,8 +44,8 @@ export async function syncGenres({ source, client, progress, logger }) {
     }
     if (!matching.enabled) throw fatal(`genre is disabled: ${name}`);
     genreIds.set(name, matching.id);
-    if (progress.state.genres[name] !== matching.id) {
-      progress.state.genres[name] = matching.id;
+    if (ownEntry(progress.state.genres, name) !== matching.id) {
+      setOwnEntry(progress.state.genres, name, matching.id);
       await progress.save();
     }
   }
@@ -66,13 +74,13 @@ export async function loadConflictIndex(client) {
 }
 
 function saveMovieStep(progress, name, changes) {
-  Object.assign(progress.state.movies[name], changes);
+  Object.assign(ownEntry(progress.state.movies, name), changes);
   return progress.save();
 }
 
 async function importMovie({ movie, client, progress, genreIds }) {
   const name = movie.name;
-  let state = progress.state.movies[name];
+  let state = ownEntry(progress.state.movies, name);
   const resumed = !!state;
   if (state) {
     let target;
@@ -91,7 +99,7 @@ async function importMovie({ movie, client, progress, genreIds }) {
   } else {
     const created = await client.json("POST", "/api/admin/movies", { name });
     state = { id: created.id, version: created.version };
-    progress.state.movies[name] = state;
+    setOwnEntry(progress.state.movies, name, state);
     await progress.save();
   }
 
@@ -124,7 +132,7 @@ export async function importContent({ source, client, progress, logger }) {
   const result = { completed: [], resumed: [], skipped: [], failed: [] };
   for (const movie of source.movies) {
     const identity = { kind: "movie", name: movie.name };
-    const existing = progress.state.movies[movie.name];
+    const existing = ownEntry(progress.state.movies, movie.name);
     if (!existing && conflicts.movie.has(movie.name)) {
       result.skipped.push(identity);
       logger?.warn?.(`SKIP movie ${movie.name}: same-kind target already exists`);

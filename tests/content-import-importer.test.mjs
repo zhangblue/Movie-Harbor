@@ -233,3 +233,55 @@ test("auth failure stops immediately and does not persist an incomplete genre", 
   assert.equal(client.calls.filter((call) => call.path === "/api/admin/movies").length, 0);
   await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" });
 });
+
+test("a __proto__ genre is stored as an own progress entry and reused on rerun", async (t) => {
+  const { path, progress, logger } = await setup(t);
+  const client = fakeClient();
+  const input = source([movie("Film", { genres: ["__proto__"] })]);
+  const first = await importContent({ source: input, client, progress, logger });
+  assert.deepEqual(first.completed, [{ kind: "movie", name: "Film" }]);
+  assert.deepEqual(client.calls.filter((call) => call.path === "/api/admin/genres").map((call) => [call.method, call.body]), [
+    ["GET", undefined], ["POST", { name: "__proto__" }],
+  ]);
+  assert.deepEqual(client.calls.find((call) => call.method === "PATCH").body.genre_ids, ["genre-1"]);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(Object.hasOwn(saved.genres, "__proto__"), true);
+  assert.equal(saved.genres["__proto__"], "genre-1");
+  assert.equal(Object.getPrototypeOf(progress.state.genres), Object.prototype);
+  await importContent({ source: input, client, progress, logger });
+  assert.equal(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/genres").length, 1);
+  assert.equal(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").length, 1);
+});
+
+test("constructor and toString movie names create own checkpoints and resume without duplicates", async (t) => {
+  const { path, progress, logger } = await setup(t);
+  let failVideo = true;
+  const client = fakeClient({ failure({ method, path }) {
+    if (failVideo && method === "UPLOAD" && path.includes("/video?")) {
+      failVideo = false;
+      return new ImportRequestError("connection lost", { fatal: true, category: "network" });
+    }
+  } });
+  const input = source([
+    movie("constructor", { video: { localPath: "/safe/one.mp4", fileName: "one.mp4", byteSize: 12 } }),
+    movie("toString"),
+  ]);
+  await assert.rejects(importContent({ source: input, client, progress, logger }), /connection lost/);
+  const checkpoint = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(Object.hasOwn(checkpoint.movies, "constructor"), true);
+  assert.deepEqual(checkpoint.movies.constructor, { id: "new-movie-1", version: 2, metadataUpdated: true });
+  const second = await importContent({ source: input, client, progress, logger });
+  assert.deepEqual(second.resumed, [{ kind: "movie", name: "constructor" }]);
+  assert.deepEqual(second.completed, [{ kind: "movie", name: "toString" }]);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(Object.hasOwn(saved.movies, "constructor"), true);
+  assert.equal(Object.hasOwn(saved.movies, "toString"), true);
+  assert.equal(saved.movies.constructor.completed, true);
+  assert.equal(saved.movies.toString.completed, true);
+  assert.equal(Object.getPrototypeOf(progress.state.movies), Object.prototype);
+  await importContent({ source: input, client, progress, logger });
+  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").map((call) => call.body), [{ name: "constructor" }, { name: "toString" }]);
+  assert.deepEqual(client.calls.filter((call) => call.method === "GET" && call.path.startsWith("/api/admin/movies/")).map((call) => call.path), [
+    "/api/admin/movies/new-movie-1", "/api/admin/movies/new-movie-1", "/api/admin/movies/new-movie-2",
+  ]);
+});
