@@ -7,8 +7,8 @@ export async function resolveMediaReference(mediaRoot, mediaPath, expectedKind) 
   const parts = typeof mediaPath === "string" ? mediaPath.split("/") : [];
   const shard = parts[3];
   const filename = parts[4];
-  const file = /^([0-9a-f]{32})\.(jpg|png|webp|mp4|webm|ogv)$/.exec(filename ?? "");
-  const extensions = expectedKind === "poster" ? new Set(["jpg", "png", "webp"]) : new Set(["mp4", "webm", "ogv"]);
+  const file = /^([0-9a-f]{32})\.(jpg|png|webp|mp4|webm)$/.exec(filename ?? "");
+  const extensions = expectedKind === "poster" ? new Set(["jpg", "png", "webp"]) : new Set(["mp4", "webm"]);
   if (
     !["poster", "video"].includes(expectedKind)
     || typeof mediaPath !== "string"

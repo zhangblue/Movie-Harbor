@@ -179,3 +179,12 @@ test("rejects links outside media root, missing files and directories", async (t
     /media path is not a regular file/,
   );
 });
+
+test("preflight rejects OGV even when its controlled source file exists", async (t) => {
+  const fixture = await exportFixture(t, { movies: [movie()] });
+  const ogvName = videoName.replace(".mp4", ".ogv");
+  await writeFile(join(fixture.mediaRoot, "video", "ab", ogvName), "video");
+  fixture.exported.movies[0].video_path = `/media/video/ab/${ogvName}`;
+  await fixture.save();
+  await assert.rejects(loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot), /invalid video media path/);
+});
