@@ -55,18 +55,21 @@ test("declares the local deployment defaults in the root environment example", (
   }
 });
 
-test("README explains the local, trusted LAN, and HTTPS deployment boundaries", () => {
-  const readme = readFileSync(path.join(projectRoot, "README.md"), "utf8");
+test("deployment guide explains the local, trusted LAN, and HTTPS deployment boundaries", () => {
+  const deploymentGuide = readFileSync(
+    path.join(projectRoot, "docs/guides/deployment.md"),
+    "utf8",
+  );
 
-  assert.match(readme, /ALLOW_INSECURE_LAN_HTTP/);
-  assert.match(readme, /默认[^。\n]*false[^。\n]*localhost/);
-  assert.match(readme, /http:\/\/192\.168\.1\.20:8080\/admin\//);
-  assert.match(readme, /私有[^。\n]*数字 IP/);
-  assert.match(readme, /localhost[^。\n]*分别登录/);
-  assert.match(readme, /明文 HTTP[^。\n]*(受信任|可信)[^。\n]*局域网/);
-  assert.match(readme, /(公网|公共网络|访客 Wi-Fi)[^。\n]*(不得|不要|禁用)/);
+  assert.match(deploymentGuide, /ALLOW_INSECURE_LAN_HTTP/);
+  assert.match(deploymentGuide, /默认[^。\n]*false[^。\n]*localhost/);
+  assert.match(deploymentGuide, /http:\/\/192\.168\.1\.20:8080\/admin\//);
+  assert.match(deploymentGuide, /私有[^。\n]*数字 IP/);
+  assert.match(deploymentGuide, /localhost[^。\n]*分别登录/);
+  assert.match(deploymentGuide, /明文 HTTP[^。\n]*(受信任|可信)[^。\n]*局域网/);
+  assert.match(deploymentGuide, /(公网|公共网络|访客 Wi-Fi)[^。\n]*(不得|不要|禁用)/);
   assert.match(
-    readme,
+    deploymentGuide,
     /仅在受信任局域网内[^\n]*\.env[^\n]*ALLOW_INSECURE_LAN_HTTP=true[^\n]*docker compose -p movie-harbor up -d --build --wait/,
   );
 });
