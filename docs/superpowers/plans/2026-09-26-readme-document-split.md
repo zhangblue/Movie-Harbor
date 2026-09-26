@@ -19,65 +19,16 @@
 - 创建：`docs/guides/media-and-backup.md`，记录媒体安全、所有权、迁移 v5 和一致备份恢复。
 - 创建：`docs/guides/development.md`，记录开发环境、自动化验收、UI Demo 和目录结构。
 - 创建：`docs/guides/database-schema.md`，记录当前数据库对象、字段、约束、索引、触发器和关系。
-- 创建：`tests/documentation.test.mjs`，检查文档入口、回链与数据库结构说明的最低契约。
+- 创建：`tests/documentation.test.mjs`，解析 Markdown 本地链接并检查入口、回链和目标文件完整性。
 - 修改：`tests/compose-storage.test.mjs`，让部署边界断言读取新的部署指南。
 
 ### 任务 1：记录当前数据库表设计
 
 **文件：**
 
-- 创建：`tests/documentation.test.mjs`
 - 创建：`docs/guides/database-schema.md`
 
-- [ ] **步骤 1：编写失败的数据库文档契约测试**
-
-创建 `tests/documentation.test.mjs`，读取数据库指南，并要求 11 张当前表、v5 所有权触发器和已移除的 `file_cleanup_job` 都有明确说明：
-
-```javascript
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test from "node:test";
-import { fileURLToPath } from "node:url";
-
-const projectRoot = fileURLToPath(new URL("..", import.meta.url));
-
-test("database guide describes the current migrated schema", () => {
-  const guide = readFileSync(
-    new URL("../docs/guides/database-schema.md", import.meta.url),
-    "utf8",
-  );
-  const tables = [
-    "admin_user",
-    "admin_session",
-    "genre",
-    "media_asset",
-    "movie",
-    "series",
-    "season",
-    "episode",
-    "movie_genre",
-    "series_genre",
-    "media_asset_ownership",
-  ];
-
-  for (const table of tables) {
-    assert.match(guide, new RegExp(`\\b${table}\\b`));
-  }
-  assert.match(guide, /file_cleanup_job[^\n]*(移除|删除)/);
-  assert.match(guide, /sync_movie_media_ownership/);
-  assert.match(guide, /sync_series_media_ownership/);
-  assert.match(guide, /sync_episode_media_ownership/);
-  assert.match(guide, /唯一事实来源/);
-});
-```
-
-- [ ] **步骤 2：运行测试并确认因指南不存在而失败**
-
-运行：`node --test tests/documentation.test.mjs`
-
-预期：FAIL，错误包含 `ENOENT` 和 `docs/guides/database-schema.md`。
-
-- [ ] **步骤 3：编写数据库表设计指南**
+- [ ] **步骤 1：编写数据库表设计指南**
 
 创建 `docs/guides/database-schema.md`，并包含以下结构：
 
@@ -117,20 +68,26 @@ test("database guide describes the current migrated schema", () => {
 - 题材关联表使用复合主键；季号和集号使用作用域内唯一约束。
 - 公共目录和搜索索引包含部分 B-tree 索引及 `pg_trgm` GIN 索引。
 
-- [ ] **步骤 4：运行数据库文档测试**
+- [ ] **步骤 2：对照迁移和 entity 核验当前结构**
 
-运行：`node --test tests/documentation.test.mjs`
+逐项对照以下事实来源人工核验表格、关系、索引和触发器，不通过匹配说明文字的自动化测试锁定人类文案：
 
-预期：PASS，1 个测试通过。
+- `backend/migration/src/m20260911_000001_core_schema.rs`
+- `backend/migration/src/m20260911_000003_public_catalog_indexes.rs`
+- `backend/migration/src/m20260912_000004_drop_episode_synopsis.rs`
+- `backend/migration/src/m20260912_000005_media_ownership.rs`
+- `backend/src/entities/*.rs`
 
-- [ ] **步骤 5：检查排版与提交**
+核验结果必须确认当前共有 11 张业务表，`episode` 不含 `synopsis`，`file_cleanup_job` 不属于当前结构，并且 `media_asset_ownership` 的触发器维护逻辑有明确说明。
 
-运行：`git diff --check -- docs/guides/database-schema.md tests/documentation.test.mjs`
+- [ ] **步骤 3：检查排版与提交**
+
+运行：`git diff --check -- docs/guides/database-schema.md`
 
 预期：退出码为 0。
 
 ```bash
-git add docs/guides/database-schema.md tests/documentation.test.mjs
+git add docs/guides/database-schema.md
 git commit -m "docs: 记录当前数据库表设计"
 ```
 
@@ -144,7 +101,7 @@ git commit -m "docs: 记录当前数据库表设计"
 - 创建：`docs/guides/content-transfer.md`
 - 创建：`docs/guides/media-and-backup.md`
 - 创建：`docs/guides/development.md`
-- 修改：`tests/documentation.test.mjs`
+- 创建：`tests/documentation.test.mjs`
 - 修改：`tests/compose-storage.test.mjs`
 
 - [ ] **步骤 1：让部署边界测试指向新指南并确认失败**
@@ -164,13 +121,29 @@ const deploymentGuide = readFileSync(
 
 预期：FAIL，错误包含 `ENOENT` 和 `docs/guides/deployment.md`。
 
-- [ ] **步骤 2：扩展入口与回链契约测试**
+- [ ] **步骤 2：编写本地 Markdown 链接完整性测试**
 
-在 `tests/documentation.test.mjs` 增加测试，要求 README 链接 6 份指南，并要求每份指南都回链 `../../README.md`：
+创建 `tests/documentation.test.mjs`，解析 README 和 6 份指南中的本地 Markdown 链接，要求 README 能到达每份指南、指南能返回 README，且所有本地目标都真实存在。不要匹配数据库说明正文或其他面向人的文案：
 
 ```javascript
-test("README links every guide and every guide links back", () => {
-  const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+import assert from "node:assert/strict";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import test from "node:test";
+import { fileURLToPath } from "node:url";
+
+const projectRoot = fileURLToPath(new URL("..", import.meta.url));
+const readmePath = path.join(projectRoot, "README.md");
+
+function localMarkdownTargets(file) {
+  const content = readFileSync(file, "utf8");
+  return [...content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)]
+    .map((match) => match[1].split("#", 1)[0])
+    .filter((target) => target && !/^[a-z]+:/i.test(target))
+    .map((target) => path.resolve(path.dirname(file), decodeURI(target)));
+}
+
+test("README guide navigation and guide links resolve", () => {
   const guides = [
     "deployment.md",
     "offline-package.md",
@@ -179,14 +152,16 @@ test("README links every guide and every guide links back", () => {
     "development.md",
     "database-schema.md",
   ];
+  const readmeTargets = new Set(localMarkdownTargets(readmePath));
 
   for (const name of guides) {
-    assert.match(readme, new RegExp(`docs/guides/${name.replace(".", "\\.")}`));
-    const guide = readFileSync(
-      new URL(`../docs/guides/${name}`, import.meta.url),
-      "utf8",
-    );
-    assert.match(guide, /\[返回项目 README\]\(\.\.\/\.\.\/README\.md\)/);
+    const guidePath = path.join(projectRoot, "docs/guides", name);
+    assert.ok(readmeTargets.has(guidePath), `${name} is missing from README`);
+    const targets = localMarkdownTargets(guidePath);
+    assert.ok(targets.includes(readmePath), `${name} does not link back to README`);
+    for (const target of targets) {
+      assert.ok(existsSync(target), `${name} has a broken link to ${target}`);
+    }
   }
 });
 ```
