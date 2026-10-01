@@ -23,11 +23,20 @@ ffprobe -version
 
 ```bash
 npm run convert:video -- --help
-npm run convert:video -- "/videos/示例电影.mkv"
-npm run convert:video -- "/videos/示例电影.mp4"
+npm run convert:video -- '/videos/示例电影.mkv'
+npm run convert:video -- '/videos/示例电影.mp4'
 ```
 
-每次只接受一个本机普通文件；扩展名限 `.mkv` 或 `.mp4`，大小写均可。不支持目录、批量输入或远程 URL，也没有自定义输出路径或强制覆盖选项。文件名含空格或特殊字符时，请像示例一样使用终端支持的引号。
+每次只接受一个本机普通文件；扩展名限 `.mkv` 或 `.mp4`，大小写均可。不支持目录、批量输入或远程 URL，也没有自定义输出路径或强制覆盖选项。
+
+以上示例适用于 Bash 和 Zsh：路径不含单引号时，优先用单引号包裹，避免空格分词以及 `$变量`、`$()` 和反引号展开；双引号仍会执行这些展开。路径含单引号时，可关闭单引号、用 `\'` 表示字面单引号，再重新打开，例如下面的第二条命令传入 `/videos/Director's cut.mkv`：
+
+```bash
+npm run convert:video -- '/videos/电影 $USER $(date) `date`.mkv'
+npm run convert:video -- '/videos/Director'\''s cut.mkv'
+```
+
+这里的 `--` 是 npm 的参数透传分隔符；本工具不接受额外的 `--` 选项。以 `-` 开头的文件名请写成绝对路径或 `./文件名.mkv`。其他终端的引用规则可能不同，请按所用终端处理路径。
 
 输出固定在输入目录，名称为 `<输入基本名>.movie-harbor.mp4`：
 
