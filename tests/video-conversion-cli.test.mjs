@@ -78,15 +78,29 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   test(`${signal} after FFmpeg close prevents publication and cleans the temporary file`, async (t) => {
     const s = await sandbox(t);
     const gate = join(s.directory, "publication-ready");
+    const signalHandled = join(s.directory, "publication-signal-handled");
+    const release = join(s.directory, "publication-release");
     const preload = join(s.directory, "publication-gate.mjs");
     await writeFile(preload, `
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 const original = fs.promises.lstat;
+const originalEmit = process.emit;
+process.emit = function(event, ...args) {
+  const result = originalEmit.call(this, event, ...args);
+  if (event === 'SIGINT' || event === 'SIGTERM') {
+    fs.writeFileSync(${JSON.stringify(signalHandled)}, event);
+  }
+  return result;
+};
 fs.promises.lstat = async (...args) => {
   if (String(args[0]).endsWith('.tmp.mp4')) {
-    fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    await new Promise((resolve) => {
+      const watcher = fs.watch(${JSON.stringify(s.directory)}, () => {
+        if (fs.existsSync(${JSON.stringify(release)})) { watcher.close(); resolve(); }
+      });
+      fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
+    });
   }
   return original(...args);
 };
@@ -101,6 +115,19 @@ syncBuiltinESMExports();
     }
     assert.ok(ready, "post-close temporary-file validation must be reached");
     child.kill(signal);
+    let acknowledged = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (child.exitCode !== null || child.signalCode !== null) break;
+      try { await access(signalHandled); acknowledged = true; break; }
+      catch (error) { if (error.code !== "ENOENT") throw error; await delay(30); }
+    }
+    // Observing process.emit adds no signal listener: missing production protection still terminates the CLI.
+    if (acknowledged) {
+      assert.equal(await readFile(signalHandled, "utf8"), signal);
+      await writeFile(release, "release");
+    } else {
+      child.kill("SIGKILL");
+    }
     const result = await finished;
     assert.equal(result.code, 1, `must return CLI error instead of default signal termination: ${result.signal}`);
     assert.match(result.stderr, new RegExp(`已中断.*${signal}`));
