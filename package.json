@@ -12,6 +12,8 @@
     "test": "npm test --workspaces",
     "test:content-import": "node --test tests/content-import-*.test.mjs",
     "import:content": "node tools/import-content.mjs",
+    "convert:video": "node tools/convert-video.mjs",
+    "test:video-conversion": "node --test tests/video-conversion-*.test.mjs",
     "test:e2e": "node tests/e2e/run.mjs",
     "package:offline": "sh tools/build-offline-package.sh"
   },

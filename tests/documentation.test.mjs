@@ -20,6 +20,7 @@ test("README guide navigation and guide links resolve", () => {
     "deployment.md",
     "offline-package.md",
     "content-transfer.md",
+    "video-conversion.md",
     "media-and-backup.md",
     "development.md",
     "database-schema.md",
