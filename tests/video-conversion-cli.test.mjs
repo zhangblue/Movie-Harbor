@@ -59,8 +59,8 @@ else {
   return { directory, input, env, output: join(directory, name.slice(0, -4) + ".movie-harbor.mp4") };
 }
 
-function launch(args, env) {
-  const child = spawn(process.execPath, [entry, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
+function launch(args, env, nodeArguments = []) {
+  const child = spawn(process.execPath, [...nodeArguments, entry, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
   child.stdout.on("data", (chunk) => { stdout += chunk; });
   child.stderr.on("data", (chunk) => { stderr += chunk; });
@@ -72,6 +72,42 @@ function launch(args, env) {
 }
 const absent = async (path) => assert.rejects(access(path), { code: "ENOENT" });
 const noTemporary = async (directory) => assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".tmp.mp4")), []);
+
+// Breakage caught: removing listeners on child close leaves the publication/cleanup window unprotected.
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`${signal} after FFmpeg close prevents publication and cleans the temporary file`, async (t) => {
+    const s = await sandbox(t);
+    const gate = join(s.directory, "publication-ready");
+    const preload = join(s.directory, "publication-gate.mjs");
+    await writeFile(preload, `
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
+const original = fs.promises.lstat;
+fs.promises.lstat = async (...args) => {
+  if (String(args[0]).endsWith('.tmp.mp4')) {
+    fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return original(...args);
+};
+syncBuiltinESMExports();
+`);
+    const { child, finished } = launch([s.input], s.env, ["--import", preload]);
+    t.after(() => child.kill("SIGKILL"));
+    let ready = false;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      try { await access(gate); ready = true; break; }
+      catch (error) { if (error.code !== "ENOENT") throw error; await delay(30); }
+    }
+    assert.ok(ready, "post-close temporary-file validation must be reached");
+    child.kill(signal);
+    const result = await finished;
+    assert.equal(result.code, 1, `must return CLI error instead of default signal termination: ${result.signal}`);
+    assert.match(result.stderr, new RegExp(`已中断.*${signal}`));
+    await absent(s.output); await noTemporary(s.directory);
+    assert.equal(await readFile(s.input, "utf8"), "original");
+  });
+}
 
 // Breakage caught: help/invalid arguments must never start external programs.
 test("help and invalid arguments stop before external programs", async (t) => {

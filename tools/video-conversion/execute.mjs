@@ -14,13 +14,8 @@ function processError(executable, error) {
 function runProcess(executable, args, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env: options.env ?? process.env });
-    let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), stderrBytes = 0, failure, interrupted;
-    const forward = (signal) => { interrupted = signal; child.kill(signal); };
-    const onInterrupt = () => forward("SIGINT");
-    const onTerminate = () => forward("SIGTERM");
-    if (options.forwardSignals) {
-      process.on("SIGINT", onInterrupt); process.on("SIGTERM", onTerminate);
-    }
+    let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), stderrBytes = 0, failure;
+    options.onChild?.(child);
     child.on("error", (error) => { failure = processError(executable, error); });
     child.stdout.on("data", (chunk) => {
       if (options.onStdout) {
@@ -42,11 +37,8 @@ function runProcess(executable, args, options = {}) {
       }
     });
     child.on("close", (code, signal) => {
-      if (options.forwardSignals) {
-        process.off("SIGINT", onInterrupt); process.off("SIGTERM", onTerminate);
-      }
+      options.onChild?.(null);
       if (failure) reject(failure);
-      else if (interrupted) reject(new Error(`转换已中断（${interrupted}），已停止 FFmpeg`));
       else if (code !== 0) reject(new Error(`${executable} 失败（${signal ?? code}）：${stderr.toString("utf8").trim() || "请检查输入文件、编码器和可用磁盘空间"}`));
       else resolve(stdout.toString("utf8"));
     });
@@ -72,12 +64,18 @@ export async function verifyRequiredEncoders(requiredEncoders, options = {}) {
 
 export async function executeConversion({ inputPath, outputPath, media, plan }, options = {}) {
   const temporaryPath = join(dirname(outputPath), `.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp.mp4`);
-  let failure, published = false;
+  let failure, published = false, activeChild, interrupted;
   let partial = "", seconds = 0;
+  const forward = (signal) => { interrupted ??= signal; activeChild?.kill(signal); };
+  const onInterrupt = () => forward("SIGINT");
+  const onTerminate = () => forward("SIGTERM");
+  const interruptionError = () => new Error(`转换已中断（${interrupted}），已停止 FFmpeg${published ? "；最终文件已完整发布" : ""}`);
+  const checkInterrupted = () => { if (interrupted) throw interruptionError(); };
+  process.on("SIGINT", onInterrupt); process.on("SIGTERM", onTerminate);
   try {
     await runProcess(options.ffmpeg ?? "ffmpeg", plan.buildArguments({ inputPath, temporaryPath }), {
       ...options,
-      forwardSignals: true,
+      onChild(child) { activeChild = child; },
       onStdout(chunk) {
         partial += chunk.toString("utf8");
         const lines = partial.split("\n"); partial = lines.pop();
@@ -93,15 +91,17 @@ export async function executeConversion({ inputPath, outputPath, media, plan }, 
         if (partial.length > 16 * 1024) throw new Error("FFmpeg 进度行超过大小限制");
       },
     });
+    checkInterrupted();
     let temporaryFile;
     try { temporaryFile = await lstat(temporaryPath); }
     catch (error) { throw new Error(`FFmpeg 未生成普通临时文件 ${temporaryPath}：${error.message}`); }
     if (!temporaryFile.isFile()) throw new Error(`FFmpeg 未生成普通临时文件：${temporaryPath}`);
+    checkInterrupted();
     try { await link(temporaryPath, outputPath); published = true; }
     catch (error) {
       throw new Error(error.code === "EEXIST" ? `目标已存在：${outputPath}` : `无法发布输出：${error.message}`);
     }
-  } catch (error) { failure = error; }
+  } catch (error) { failure = interrupted ? interruptionError() : error; }
   finally {
     try { await unlink(temporaryPath); }
     catch (error) {
@@ -109,6 +109,11 @@ export async function executeConversion({ inputPath, outputPath, media, plan }, 
         const cleanup = `${published ? "最终文件已完整发布；" : ""}无法清理临时文件，可安全手动删除 ${temporaryPath}：${error.message}`;
         failure = new Error(failure ? `${failure.message}\n${cleanup}` : cleanup);
       }
+    }
+    finally {
+      // Keep signal protection until publication and cleanup have both settled.
+      if (interrupted && !failure) failure = interruptionError();
+      process.off("SIGINT", onInterrupt); process.off("SIGTERM", onTerminate);
     }
   }
   if (failure) throw failure;
