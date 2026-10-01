@@ -72,11 +72,40 @@ test("plan emits complete explicit maps and independent audio/subtitle encoders"
     "-i", "/中文/a ' ; $(test).mkv",
     "-map", "0:1", "-map", "0:2", "-map", "0:3", "-map", "0:4", "-map", "0:5",
     "-c:v:0", "libx264", "-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p",
-    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-tag:v:0", "avc1",
-    "-c:a:0", "copy", "-c:a:1", "aac", "-b:a:1", "192k",
-    "-c:s:0", "mov_text", "-c:s:1", "mov_text",
+    "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-tag:v:0", "avc1", "-disposition:v:0", "0",
+    "-c:a:0", "copy", "-disposition:a:0", "0", "-c:a:1", "aac", "-b:a:1", "192k", "-disposition:a:1", "0",
+    "-c:s:0", "mov_text", "-disposition:s:0", "0", "-c:s:1", "mov_text", "-disposition:s:1", "0",
     "-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart", "/中文/a.tmp.mp4",
   ]);
+});
+
+// Catch FFmpeg adding default to the first track when all input flags are zero.
+test("plan explicitly clears dispositions for every output track when defaults are zero", async () => {
+  const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
+  const media = parseProbeOutput(JSON.stringify({ streams: [
+    { index: 0, codec_type: "video", codec_name: "h264", pix_fmt: "yuv420p", disposition: { default: 0, attached_pic: 0 } },
+    { index: 3, codec_type: "audio", codec_name: "aac", disposition: { default: 0, forced: 0 } },
+    { index: 8, codec_type: "audio", codec_name: "dts", disposition: { default: 0 } },
+    { index: 11, codec_type: "subtitle", codec_name: "subrip", disposition: { default: 0 } },
+    { index: 14, codec_type: "subtitle", codec_name: "ass", disposition: { default: 0 } },
+  ] }));
+  const args = buildConversionPlan(media).buildArguments({ inputPath: "/in.mkv", temporaryPath: "/out.mp4" });
+  const flags = args.flatMap((arg, index) => arg.startsWith("-disposition:") ? [arg, args[index + 1]] : []);
+  assert.deepEqual(flags, ["-disposition:v:0", "0", "-disposition:a:0", "0", "-disposition:a:1", "0", "-disposition:s:0", "0", "-disposition:s:1", "0"]);
+});
+
+// Catch discarding forced/original flags, keeping cleared flags, or copying attached_pic.
+test("plan replaces dispositions with exactly enabled input flags and excludes cover flags", async () => {
+  const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
+  const plan = buildConversionPlan({
+    video: { index: 1, codec: "hevc", pixelFormat: "yuv420p10le", disposition: { default: 1, attached_pic: 1, forced: 0 } },
+    audio: [{ index: 5, codec: "aac", disposition: { default: 0, original: 1, comment: 1 } }, { index: 9, codec: "dts", disposition: { default: 1, hearing_impaired: 1 } }],
+    subtitles: [{ index: 20, codec: "subrip", disposition: { default: 0, forced: 1 } }, { index: 21, codec: "ass", disposition: { default: 1, forced: 1 } }],
+  });
+  const args = plan.buildArguments({ inputPath: "/中文/输入 ; $(test).mkv", temporaryPath: "/out.mp4" });
+  const flags = args.flatMap((arg, index) => arg.startsWith("-disposition:") ? [arg, args[index + 1]] : []);
+  assert.deepEqual(flags, ["-disposition:v:0", "default", "-disposition:a:0", "original+comment", "-disposition:a:1", "default+hearing_impaired", "-disposition:s:0", "forced", "-disposition:s:1", "default+forced"]);
+  assert.equal(args[args.indexOf("-i") + 1], "/中文/输入 ; $(test).mkv");
 });
 
 // Catch copying HEVC, high bit-depth H.264, or unknown codecs as compatible video.

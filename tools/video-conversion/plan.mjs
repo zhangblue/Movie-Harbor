@@ -2,6 +2,13 @@ export const IMAGE_SUBTITLE_CODECS = new Set([
   "hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub",
 ]);
 
+function dispositionValue(track) {
+  const flags = Object.entries(track.disposition ?? {})
+    .filter(([name, value]) => value === 1 && name !== "attached_pic")
+    .map(([name]) => name);
+  return flags.join("+") || "0";
+}
+
 export function buildConversionPlan(media) {
   for (const subtitle of media.subtitles) {
     if (IMAGE_SUBTITLE_CODECS.has(subtitle.codec)) {
@@ -34,12 +41,15 @@ export function buildConversionPlan(media) {
         args.push("-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p",
           "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2");
       }
-      args.push("-tag:v:0", "avc1");
+      args.push("-tag:v:0", "avc1", "-disposition:v:0", dispositionValue(video));
       audio.forEach((track, index) => {
         args.push(`-c:a:${index}`, track.encoder);
         if (track.mode === "transcode") args.push(`-b:a:${index}`, "192k");
+        args.push(`-disposition:a:${index}`, dispositionValue(track));
       });
-      subtitles.forEach((track, index) => args.push(`-c:s:${index}`, track.encoder));
+      subtitles.forEach((track, index) => {
+        args.push(`-c:s:${index}`, track.encoder, `-disposition:s:${index}`, dispositionValue(track));
+      });
       args.push("-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart", temporaryPath);
       return args;
     },
