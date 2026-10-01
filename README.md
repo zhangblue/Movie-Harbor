@@ -13,7 +13,6 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
 - 管理导出：详情展示视频容器内路径，支持一次下载全部内容的只读 JSON。
 - 发布工具：支持生成 `linux/arm64` 和 `linux/amd64` 单平台半离线 Docker 部署包，默认使用 `linux/arm64`。
-- 本地转换工具：支持在上传前将单个 MKV/MP4 转成网站兼容 MP4，详见[视频转换指南](docs/guides/video-conversion.md)。
 
 ## 核心设计
 
