@@ -75,12 +75,23 @@ test("plan emits complete explicit maps and independent audio/subtitle encoders"
     "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-tag:v:0", "avc1", "-disposition:v:0", "0",
     "-c:a:0", "copy", "-disposition:a:0", "0", "-c:a:1", "aac", "-b:a:1", "192k", "-disposition:a:1", "0",
     "-c:s:0", "mov_text", "-disposition:s:0", "0", "-c:s:1", "mov_text", "-disposition:s:1", "0",
-    "-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart", "/中文/a.tmp.mp4",
+    "-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart+use_metadata_tags", "/中文/a.tmp.mp4",
   ]);
 });
 
-// Catch FFmpeg adding default to the first track when all input flags are zero.
-test("plan explicitly clears dispositions for every output track when defaults are zero", async () => {
+// Catch omitting MP4's mdta metadata mode while retaining the faststart requirement.
+test("plan enables custom global metadata tags alongside faststart", async () => {
+  const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
+  const plan = buildConversionPlan({
+    video: { index: 0, codec: "h264", pixelFormat: "yuv420p" }, audio: [], subtitles: [],
+  });
+  const args = plan.buildArguments({ inputPath: "/in.mkv", temporaryPath: "/out.mp4" });
+  assert.equal(args[args.indexOf("-movflags") + 1], "+faststart+use_metadata_tags");
+  assert.equal(args[args.indexOf("-map_metadata") + 1], "0");
+});
+
+// Catch omitting explicit zero disposition requests; the MP4 muxer may still infer defaults.
+test("plan requests zero dispositions explicitly for every output track", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const media = parseProbeOutput(JSON.stringify({ streams: [
     { index: 0, codec_type: "video", codec_name: "h264", pix_fmt: "yuv420p", disposition: { default: 0, attached_pic: 0 } },
@@ -94,8 +105,8 @@ test("plan explicitly clears dispositions for every output track when defaults a
   assert.deepEqual(flags, ["-disposition:v:0", "0", "-disposition:a:0", "0", "-disposition:a:1", "0", "-disposition:s:0", "0", "-disposition:s:1", "0"]);
 });
 
-// Catch discarding forced/original flags, keeping cleared flags, or copying attached_pic.
-test("plan replaces dispositions with exactly enabled input flags and excludes cover flags", async () => {
+// Catch missing enabled disposition arguments or forwarding attached_pic; MP4 may not represent every flag.
+test("plan passes enabled input disposition flags explicitly and excludes cover flags", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({
     video: { index: 1, codec: "hevc", pixelFormat: "yuv420p10le", disposition: { default: 1, attached_pic: 1, forced: 0 } },

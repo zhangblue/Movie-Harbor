@@ -75,7 +75,7 @@ const noTemporary = async (directory) => assert.deepEqual((await readdir(directo
 
 // Breakage caught: removing listeners on child close leaves the publication/cleanup window unprotected.
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  test(`${signal} after FFmpeg close prevents publication and cleans the temporary file`, async (t) => {
+  test(`${signal} after FFmpeg close prevents publication and cleans the temporary file`, { timeout: 10_000 }, async (t) => {
     const s = await sandbox(t);
     const gate = join(s.directory, "publication-ready");
     const signalHandled = join(s.directory, "publication-signal-handled");
@@ -84,6 +84,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     await writeFile(preload, `
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import { setTimeout as delay } from 'node:timers/promises';
 const original = fs.promises.lstat;
 const originalEmit = process.emit;
 process.emit = function(event, ...args) {
@@ -95,19 +96,22 @@ process.emit = function(event, ...args) {
 };
 fs.promises.lstat = async (...args) => {
   if (String(args[0]).endsWith('.tmp.mp4')) {
-    await new Promise((resolve) => {
-      const watcher = fs.watch(${JSON.stringify(s.directory)}, () => {
-        if (fs.existsSync(${JSON.stringify(release)})) { watcher.close(); resolve(); }
-      });
-      fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
-    });
+    fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
+    const deadline = Date.now() + 5000;
+    for (;;) {
+      try { await fs.promises.access(${JSON.stringify(release)}); break; }
+      catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (Date.now() >= deadline) throw new Error('publication release handshake timed out');
+      await delay(10);
+    }
   }
   return original(...args);
 };
 syncBuiltinESMExports();
 `);
     const { child, finished } = launch([s.input], s.env, ["--import", preload]);
-    t.after(() => child.kill("SIGKILL"));
+    const emergency = setTimeout(() => child.kill("SIGKILL"), 8000);
+    t.after(async () => { clearTimeout(emergency); child.kill("SIGKILL"); await finished; });
     let ready = false;
     for (let attempt = 0; attempt < 100; attempt++) {
       try { await access(gate); ready = true; break; }

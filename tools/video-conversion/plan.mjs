@@ -50,7 +50,7 @@ export function buildConversionPlan(media) {
       subtitles.forEach((track, index) => {
         args.push(`-c:s:${index}`, track.encoder, `-disposition:s:${index}`, dispositionValue(track));
       });
-      args.push("-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart", temporaryPath);
+      args.push("-map_metadata", "0", "-map_chapters", "0", "-movflags", "+faststart+use_metadata_tags", temporaryPath);
       return args;
     },
   };

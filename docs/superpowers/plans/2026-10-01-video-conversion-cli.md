@@ -119,7 +119,7 @@ assert.deepEqual(plan.subtitles.map(({ encoder }) => encoder), ["mov_text", "mov
 - 转码视频包含 `libx264`、CRF 20、`medium`、`yuv420p` 和偶数尺寸表达式。
 - 每条 AAC 使用 `-c:a:N copy`，每条非 AAC 使用 `-c:a:N aac -b:a:N 192k`。
 - 每条字幕使用 `-c:s:N mov_text`。
-- 参数包含 `-map_metadata 0`、`-map_chapters 0`、`-movflags +faststart`，不含附件或自动映射。
+- 参数包含 `-map_metadata 0`、`-map_chapters 0`、`-movflags +faststart+use_metadata_tags`，不含附件或自动映射。
 - `hdmv_pgs_subtitle`、`dvd_subtitle`、`dvb_subtitle`、`xsub` 分别在规划阶段抛错，并包含轨道索引和编码名称。
 - 零音轨或零字幕仍能产生有效计划。
 
