@@ -1,5 +1,6 @@
 pub mod admin_content;
 pub mod admin_export;
+pub mod admin_users;
 pub mod app;
 pub mod auth;
 pub mod catalog;
