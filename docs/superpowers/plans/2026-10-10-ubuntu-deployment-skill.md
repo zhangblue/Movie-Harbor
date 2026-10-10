@@ -194,11 +194,12 @@ node --test tests/documentation.test.mjs
 ```bash
 python3 /Users/zhangdi/.codex/skills/.system/skill-creator/scripts/quick_validate.py .agents/skills/deploy-movie-harbor-ubuntu
 node --test tests/documentation.test.mjs
-rg -n "Ubuntu 半离线部署流程|2026-10-10-ubuntu-offline-deployment-runbook" AGENTS.md docs/superpowers/plans || true
+rg -n "Ubuntu 半离线部署流程|2026-10-10-ubuntu-offline-deployment-runbook" AGENTS.md || true
+test ! -e docs/superpowers/plans/2026-10-10-ubuntu-offline-deployment-runbook.md
 git diff --check
 ```
 
-预期：技能校验成功；Node 测试 3 项通过、0 失败；`rg` 无输出；无空白错误。
+预期：技能校验成功；Node 测试 3 项通过、0 失败；`rg` 检查 AGENTS 无输出；`test ! -e` 退出码为 0，确认旧计划不存在；无空白错误。
 
 - [ ] **步骤 5：核对最终差异与秘密保护**
 
