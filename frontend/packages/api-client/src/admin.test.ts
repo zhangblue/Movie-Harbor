@@ -6,7 +6,7 @@ import * as client from "./index";
 import type {
   AdminContentListItem, CatalogCard, CreateMovieRequest, CreateSeriesRequest,
   MovieDetail, MovieResponse, PrivacyRequest, SeriesDetail, SeriesResponse,
-  ViewerSessionResponse, ViewerUserPage, ViewerUserSummary,
+  ViewerSessionResponse, ViewerUserPage, ViewerUserSummary, JsonValue,
 } from "./index";
 
 afterEach(() => {
@@ -241,7 +241,7 @@ const series = {
 };
 
 function recordRequests(responses: Response[]) {
-  const requests: Array<{ url: string; method: string | undefined; json: unknown; csrf: string | null; credentials: string | undefined }> = [];
+  const requests: Array<{ url: string; method: string | undefined; json: JsonValue | undefined; csrf: string | null; credentials: string | undefined }> = [];
   vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
     requests.push({
       url: String(url), method: init?.method,
@@ -255,7 +255,7 @@ function recordRequests(responses: Response[]) {
   return requests;
 }
 
-function jsonResponse(value: unknown, status = 200): Response {
+function jsonResponse(value: JsonValue | ViewerUserPage | ViewerUserSummary, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 

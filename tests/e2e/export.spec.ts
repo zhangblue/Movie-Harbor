@@ -3,9 +3,9 @@ import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AdminApi, adminName, initialPassword, createMovieDraftWithMedia, createSeriesDraftWithMedia, createPublishableMovie, type Genre, type Movie, type Series } from "./helpers";
 
-type ExportMovie = { name: string; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; video_path: string | null; duration_seconds: number | null };
+type ExportMovie = { name: string; is_private: boolean; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; video_path: string | null; duration_seconds: number | null };
 type ExportEpisode = { season_number: number; episode_number: number; name: string; video_path: string | null; duration_seconds: number | null };
-type ExportSeries = { name: string; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; episodes: ExportEpisode[] };
+type ExportSeries = { name: string; is_private: boolean; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; episodes: ExportEpisode[] };
 type ContentExport = { exported_at: string; movies: ExportMovie[]; series: ExportSeries[] };
 
 test("JSON export includes every state and page with exact media paths and seconds", async ({ page, playwright }, testInfo) => {
@@ -78,20 +78,20 @@ test("JSON export includes every state and page with exact media paths and secon
     expect(exportedMovie.year).toBe(2024);
     expect(exportedMovie.genres).toEqual([firstGenre.name, secondGenre.name]);
     expect(exportedMovie).toEqual({
-      name: movie.name, synopsis: "Movie export synopsis", year: 2024, genres: [firstGenre.name, secondGenre.name], poster_path: movie.poster!.local_path,
+      name: movie.name, is_private: false, synopsis: "Movie export synopsis", year: 2024, genres: [firstGenre.name, secondGenre.name], poster_path: movie.poster!.local_path,
       video_path: movie.video!.local_path, duration_seconds: 125,
     });
     expect(exportedMovie.poster_path).toMatch(/^\/media\/poster\//);
     expect(exportedMovie.video_path).toMatch(/^\/media\/video\//);
     expect(exported.movies.map((item) => item.name)).toEqual(expect.arrayContaining([published.name, archived.name, ...emptyNames]));
     for (const name of emptyNames) expect(exported.movies.find((item) => item.name === name)).toEqual({
-      name, synopsis: "", year: null, genres: [], poster_path: null, video_path: null, duration_seconds: null,
+      name, is_private: false, synopsis: "", year: null, genres: [], poster_path: null, video_path: null, duration_seconds: null,
     });
     const exportedSeries = exported.series.find((item) => item.name === series.name)!;
     expect(exportedSeries.year).toBe(2023);
     expect(exportedSeries.genres).toEqual([secondGenre.name]);
     expect(exportedSeries).toEqual({
-      name: series.name, synopsis: "Series export synopsis", year: 2023, genres: [secondGenre.name], poster_path: series.poster!.local_path,
+      name: series.name, is_private: false, synopsis: "Series export synopsis", year: 2023, genres: [secondGenre.name], poster_path: series.poster!.local_path,
       episodes: [
         { season_number: 4, episode_number: 7, name: `${prefix} Episode`, video_path: episode.video!.local_path, duration_seconds: 367 },
         { season_number: 4, episode_number: 9, name: `${prefix} Empty Episode`, video_path: null, duration_seconds: null },
@@ -100,7 +100,7 @@ test("JSON export includes every state and page with exact media paths and secon
     expect(exportedSeries.poster_path).toMatch(/^\/media\/poster\//);
     expect(exportedSeries.episodes[0].video_path).toMatch(/^\/media\/video\//);
     expect(exported.series.find((item) => item.name === emptySeries.name)).toEqual({
-      name: emptySeries.name, synopsis: "", year: null, genres: [], poster_path: null, episodes: [],
+      name: emptySeries.name, is_private: false, synopsis: "", year: null, genres: [], poster_path: null, episodes: [],
     });
     await expect(page.getByText("共 21 条 · 第 2/2 页")).toBeVisible();
 

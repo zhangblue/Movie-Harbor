@@ -1,6 +1,65 @@
 import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
-import { AdminApi, adminName, baseURL, changedPassword, createPublishableMovie, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Movie } from "./helpers";
+import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublishableMovie, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Movie, type ViewerUser } from "./helpers";
+
+test("user management preserves Unicode usernames and resets or deletes every viewer session", async ({ page, playwright }) => {
+  const api = await AdminApi.login(playwright);
+  const name = `ui-viewer-${Date.now()}`;
+  // U+FEFF is not Unicode White_Space: backend normalization preserves it.
+  const username = `\uFEFF${name}\uFEFF`;
+  await page.goto("/admin/");
+  await page.getByLabel("管理员名称").fill(adminName);
+  await page.getByLabel("密码").fill(initialPassword);
+  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "用户管理", exact: true }).click();
+  await page.getByRole("button", { name: "＋ 添加用户" }).click();
+  await page.getByRole("dialog").getByLabel("用户名").fill(username);
+  await page.getByRole("dialog").getByLabel("初始密码").fill("viewer-initial-password");
+  await page.getByRole("button", { name: "创建用户", exact: true }).click();
+  await expect(page.getByText("用户已添加。", { exact: true })).toBeVisible();
+  const users = await api.get<{ items: ViewerUser[] }>(`/api/admin/users?q=${name}`);
+  expect(users.items[0].username).toBe(username);
+  const first = await ViewerApi.login(playwright, username);
+  const second = await ViewerApi.login(playwright, username);
+  try {
+    const movie = await api.setPrivacy("movies", await createPublishableMovie(api, `Reset Protected ${Date.now()}`), true);
+    await page.getByLabel("搜索用户名").fill(name);
+    await page.getByRole("button", { name: "查询", exact: true }).click();
+    const row = page.getByRole("row", { name: new RegExp(name) });
+    await row.getByRole("button", { name: "修改密码" }).click();
+    await expect(page.getByRole("dialog").getByLabel("用户名")).toBeDisabled();
+    await page.getByRole("dialog").getByLabel("新密码").fill("viewer-reset-password");
+    await page.getByRole("button", { name: "保存新密码" }).click();
+    await expect(page.getByText("密码已修改，该用户现有的登录会话已失效。", { exact: true })).toBeVisible();
+    for (const client of [first.request, second.request]) {
+      expect((await client.get("/api/viewer/session")).status()).toBe(401);
+      expect((await client.get(movie.video!.url, { headers: { Range: "bytes=0-1" } })).status()).toBe(404);
+    }
+    expect((await first.request.post("/api/viewer/login", { data: { username, password: "viewer-initial-password" } })).status()).toBe(401);
+    const fresh = await ViewerApi.login(playwright, username, "viewer-reset-password");
+    expect((await fresh.request.get(movie.video!.url)).status()).toBe(200);
+    await row.getByRole("button", { name: "删除", exact: true }).click();
+    await expect(page.getByRole("dialog", { name: "删除用户？" })).toBeVisible();
+    expect((await fresh.request.get("/api/viewer/session")).status()).toBe(200);
+    await page.getByRole("button", { name: "确认删除" }).click();
+    await expect(row).toHaveCount(0);
+    expect((await fresh.request.get("/api/viewer/session")).status()).toBe(401);
+    expect((await fresh.request.get(movie.video!.url)).status()).toBe(404);
+    await fresh.dispose();
+    await page.getByRole("button", { name: "内容管理", exact: true }).click();
+    await page.getByLabel("名称", { exact: true }).fill(movie.name);
+    await page.getByLabel("访问范围", { exact: true }).selectOption("private");
+    await page.getByRole("button", { name: "查询", exact: true }).click();
+    await page.getByRole("row", { name: new RegExp(movie.name) }).getByRole("button", { name: "设为公开" }).click();
+    await expect(page.getByRole("row", { name: new RegExp(movie.name) })).toHaveCount(0);
+    expect((await first.request.get(movie.video!.url, { headers: { Range: "bytes=0-1" } })).status()).toBe(206);
+    await page.getByLabel("访问范围", { exact: true }).selectOption("public");
+    await page.getByRole("button", { name: "查询", exact: true }).click();
+    await page.getByRole("row", { name: new RegExp(movie.name) }).getByRole("button", { name: "设为私密" }).click();
+    await expect(page.getByRole("row", { name: new RegExp(movie.name) })).toHaveCount(0);
+    expect((await first.request.get(movie.video!.url, { headers: { Range: "bytes=0-1" } })).status()).toBe(404);
+  } finally { await first.dispose(); await second.dispose(); await api.dispose(); }
+});
 
 test("empty deployment initializes the admin and a movie completes its lifecycle", async ({ page, playwright, request }) => {
   await page.goto("/admin/");

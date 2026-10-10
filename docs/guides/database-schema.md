@@ -6,11 +6,12 @@
 
 ## 关系概览
 
-当前共有 11 张业务表，不计迁移工具自身的记录表。管理员与会话是一对多关系；剧集通过季组织单集；电影和剧集分别通过关联表与题材建立多对多关系。
+当前共有 13 张业务表，不计迁移工具自身的记录表。管理员、普通用户各自与独立会话表建立一对多关系；剧集通过季组织单集；电影和剧集分别通过关联表与题材建立多对多关系。
 
 | 关系 | 外键与删除行为 |
 | --- | --- |
 | 管理员 → 会话 | `admin_session.admin_user_id`，`ON DELETE CASCADE` |
+| 普通用户 → 会话 | `viewer_session.viewer_user_id`，`ON DELETE CASCADE` |
 | 剧集 → 季 → 单集 | `season.series_id`、`episode.season_id`，均为 `ON DELETE CASCADE` |
 | 电影 / 剧集 → 题材关联 | `movie_genre.movie_id`、`series_genre.series_id`，`ON DELETE CASCADE` |
 | 题材 → 内容关联 | 两张关联表的 `genre_id`，`ON DELETE RESTRICT` |
@@ -44,7 +45,39 @@
 | `expires_at` | `timestamptz` | 否 | — | 会话过期时间 |
 | `created_at` | `timestamptz` | 否 | `CURRENT_TIMESTAMP` | 创建时间 |
 
+### 普通用户与独立会话
+
+`viewer_user` 与管理员表无角色或身份继承关系：
+
+| 字段 | PostgreSQL 类型 | 可空 | 默认值 | 约束 / 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | 否 | — | 主键 |
+| `username` | `text` | 否 | — | `length(btrim(username)) > 0`；显示名称，创建后不可修改 |
+| `normalized_username` | `text` | 否 | — | 唯一；`length(normalized_username) > 0`；应用去除 Unicode 首尾空白并转小写 |
+| `password_hash` | `text` | 否 | — | 密码哈希，不保存明文 |
+| `last_login_at` | `timestamptz` | 是 | — | 最近成功登录时间 |
+| `version` | `bigint` | 否 | `1` | `version > 0`；改密与删除并发校验 |
+| `created_at` | `timestamptz` | 否 | `CURRENT_TIMESTAMP` | 创建时间 |
+| `updated_at` | `timestamptz` | 否 | `CURRENT_TIMESTAMP` | 更新时间 |
+
+`normalized_username` 的归一化由应用执行，数据库唯一约束作用于存入的归一化值，不自动替调用方转换。管理员名称不参与此唯一约束。
+
+| `viewer_session` 字段 | PostgreSQL 类型 | 可空 | 默认值 | 约束 / 含义 |
+| --- | --- | --- | --- | --- |
+| `id` | `uuid` | 否 | — | 主键 |
+| `viewer_user_id` | `uuid` | 否 | — | 外键 → `viewer_user.id`；删除级联 |
+| `token_hash` | `text` | 否 | — | 唯一；会话令牌摘要 |
+| `csrf_token_hash` | `text` | 否 | — | CSRF 令牌摘要 |
+| `expires_at` | `timestamptz` | 否 | — | 会话过期时间 |
+| `created_at` | `timestamptz` | 否 | `CURRENT_TIMESTAMP` | 创建时间 |
+
+管理员或普通用户本人改密时，在同一事务中更新用户密码、版本并删除其全部会话；删除用户依赖外键级联清理会话。
+
 ## 内容与题材
+
+### 内容访问范围
+
+`movie` 和 `series` 均增加 `is_private boolean NOT NULL DEFAULT false`。迁移时旧内容保持公开；私密范围与生命周期独立，修改使用内容 `version` 乐观并发校验。`season` 和 `episode` 无此字段，授权时通过父剧集继承范围；单集还要求其自身与父剧集均处于已发布状态。
 
 `movie`、`series`、`episode` 的生命周期字段含义一致：`status` 取 `draft`（草稿）、`published`（已发布）、`archived`（已归档）；`version` 是应用并发更新使用的版本号；`published_at` 和 `archived_at` 分别记录发布、归档时间。数据库只约束状态取值和版本为正数，状态转换、只允许编辑草稿及发布时间与状态的一致性由后端执行。
 
@@ -175,6 +208,10 @@
 | 显式索引 | 类型与列 / 表达式 | 条件 / 附加列 |
 | --- | --- | --- |
 | `admin_session_admin_user_idx` | B-tree：`admin_session(admin_user_id)` | 无 |
+| `viewer_session_user_idx` | B-tree：`viewer_session(viewer_user_id)` | 无 |
+| `viewer_session_expiry_idx` | B-tree：`viewer_session(expires_at)` | 无 |
+| `movie_public_catalog_idx` | B-tree：`movie(published_at DESC, id)` | `status = 'published' AND is_private = false` |
+| `series_public_catalog_idx` | B-tree：`series(published_at DESC, id)` | `status = 'published' AND is_private = false` |
 | `movie_public_published_idx` | B-tree：`movie(published_at DESC, id)` | 已发布且发布时间非空；`INCLUDE (year, poster_asset_id)` |
 | `series_public_published_idx` | B-tree：`series(published_at DESC, id)` | 已发布且发布时间非空；`INCLUDE (year, poster_asset_id)` |
 | `episode_public_season_idx` | B-tree：`episode(season_id, number, id)` | 已发布且发布时间非空 |
@@ -214,5 +251,6 @@ v5 新增所有权表，先从四种现有媒体引用回填，再安装 3 组�
 | `m20260911_000003_public_catalog_indexes.rs`（v3） | 安装 `pg_trgm`，增加公共目录、搜索及引用查询索引 |
 | `m20260912_000004_drop_episode_synopsis.rs`（v4） | 删除 `episode.synopsis` |
 | `m20260912_000005_media_ownership.rs`（v5） | 删除 `file_cleanup_job`；新增、回填 `media_asset_ownership`，安装同步函数和触发器 |
+| `m20261010_000006_private_content_and_viewers.rs`（v6） | 电影、整剧新增默认公开的 `is_private`；新增普通用户与会话表、用户与过期索引、匿名目录部分索引 |
 
-v5 升级前检查旧清理队列和重复媒体引用；有待处理清理任务或共享资产时会拒绝升级，须先处理这些数据。`file_cleanup_job` 不属于当前结构，不能继续把它当作正在运行的周期清理队列。v5 用所有权表替换该旧表，因此最终仍为 11 张业务表；所有权表没有对应的 SeaORM entity，核对当前结构应以迁移为准。
+v5 升级前检查旧清理队列和重复媒体引用；有待处理清理任务或共享资产时会拒绝升级，须先处理这些数据。`file_cleanup_job` 不属于当前结构，不能继续把它当作正在运行的周期清理队列。v5 用所有权表替换该旧表，v6 再增加两张用户表，因此当前为 13 张业务表；所有权表没有对应的 SeaORM entity，核对当前结构应以迁移为准。v6 回滚会删除普通用户、其会话及访问范围字段，不能用于保留这些数据的降级。

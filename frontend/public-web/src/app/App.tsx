@@ -5,7 +5,7 @@ import { SeriesDetails } from "../details/SeriesDetails";
 import { NotFound } from "./RequestState";
 import { Brand } from "./Brand";
 import { MoviePlayerPage, SeriesPlayerPage } from "../player/PlayerPage";
-import { ApiError, clearCsrfToken, getViewerSession, viewerLogout, type ViewerSessionResponse } from "@movie-harbor/api-client";
+import { ApiError, clearCsrfToken, getViewerSession, viewerLogout, type CaughtValue, type ViewerSessionResponse } from "@movie-harbor/api-client";
 import { ViewerContext } from "../auth/ViewerContext";
 import { ViewerLoginDialog } from "../auth/ViewerLoginDialog";
 import { ViewerPasswordDialog } from "../auth/ViewerPasswordDialog";
@@ -86,7 +86,7 @@ export function App() {
     const startedAt = identity.current;
     const request = getViewerSession((session) => acceptSession(session, startedAt)).then(
       () => startedAt === identity.current,
-      (cause: unknown) => {
+      (cause: CaughtValue) => {
         if (startedAt !== identity.current) return false;
         if (cause instanceof ApiError && cause.status === 401) { expire(); return false; }
         setMessage("暂时无法确认登录状态，请稍后重试。");
@@ -99,7 +99,7 @@ export function App() {
   useEffect(() => {
     let ignore = false;
     const startedAt = identity.current;
-    getViewerSession((session) => !ignore && acceptSession(session, startedAt)).catch((cause: unknown) => {
+    getViewerSession((session) => !ignore && acceptSession(session, startedAt)).catch((cause: CaughtValue) => {
       if (ignore || startedAt !== identity.current) return;
       if (cause instanceof ApiError && cause.status === 401) transitionViewer({ status: "anonymous" });
       else transitionViewer({ status: "error" }, "暂时无法确认登录状态，请稍后重试。");

@@ -3,6 +3,7 @@ import { ApiError, listViewerUsers, type ViewerUserPage, type ViewerUserSummary 
 import { Button } from "@movie-harbor/ui";
 import { ContentPagination } from "../content/ContentPagination";
 import { UserDialog, type UserOperation } from "./UserDialog";
+import { trimViewerWhitespace } from "./userInput";
 
 function dateLabel(value: string | null) {
   if (!value) return "从未登录";
@@ -39,7 +40,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
 
   function submitSearch(event: FormEvent) {
     event.preventDefault();
-    setSearch(query.trim());
+    setSearch(trimViewerWhitespace(query));
     setPage(1);
     setRevision((value) => value + 1);
     setNotice("");

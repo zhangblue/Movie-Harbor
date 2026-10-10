@@ -54,6 +54,8 @@ test("media authorization applies to posters, movie and episode ranges, lifecycl
     }
     movie = await api.write<Movie>("put", `/api/admin/movies/${movie.id}/privacy`, { version: movie.version, is_private: true });
     series = await api.write<Series>("put", `/api/admin/series/${series.id}/privacy`, { version: series.version, is_private: true });
+    expect((await request.get(`/api/catalog/series/${series.id}`)).status()).toBe(404);
+    expect((await (await request.get(`/api/catalog?q=${encodeURIComponent(series.name)}`)).json()).items).toEqual([]);
     for (const url of publishedUrls) {
       const denied = await request.get(url, { headers: { Range: "bytes=0-1" } });
       expect(denied.status()).toBe(404);
@@ -61,6 +63,11 @@ test("media authorization applies to posters, movie and episode ranges, lifecycl
       expect((await api.request.get(url)).status()).toBe(200);
     }
     expect((await viewer.post("/api/viewer/login", { data: { username, password: "media-viewer-password" } })).status()).toBe(200);
+    const seriesDetails = await viewer.get(`/api/catalog/series/${series.id}`);
+    expect(seriesDetails.status()).toBe(200);
+    const visibleSeries = await seriesDetails.json();
+    expect(visibleSeries.is_private).toBe(true);
+    expect(visibleSeries.seasons.flatMap((item: { episodes: Array<{ id: string }> }) => item.episodes).map((item: { id: string }) => item.id)).toEqual([episode.id]);
     for (const url of publishedUrls) {
       const response = await viewer.get(url);
       expect(response.status()).toBe(200);

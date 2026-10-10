@@ -2,7 +2,7 @@ import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
-import { clearCsrfToken, setCsrfToken, type ViewerUserPage, type ViewerUserSummary } from "@movie-harbor/api-client";
+import { clearCsrfToken, setCsrfToken, type JsonValue, type ViewerUserPage, type ViewerUserSummary } from "@movie-harbor/api-client";
 import { server } from "../test/server";
 import { UserPage } from "./UserPage";
 
@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 
 const summer: ViewerUserSummary = { id: "u1", username: "Summer", version: 3, created_at: "2026-10-08T00:00:00Z", last_login_at: null, has_active_session: false };
 const robin: ViewerUserSummary = { ...summer, id: "u2", username: "robin", version: 7, last_login_at: "2026-10-10T00:00:00Z", has_active_session: true };
-function response(body: unknown, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }); }
+function response(body: JsonValue | ViewerUserPage | ViewerUserSummary, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }); }
 function page(items = [summer, robin], total = items.length, current = 1): ViewerUserPage {
   return { items, total, page: current, size: 20, summary: { total_users: total, active_users: 1, latest_user: robin } };
 }
@@ -54,6 +54,19 @@ it("searches usernames on the server and resets fixed twenty-item pagination", a
   expect(screen.getByRole("button", { name: "第 1 页" })).toHaveAttribute("aria-current", "page");
 });
 
+// FEFF must remain searchable; NEL is whitespace under the server's Unicode rules.
+it.each([
+  ["\u0085Summer\u0085", "Summer"],
+  ["\uFEFFSummer\uFEFF", "\uFEFFSummer\uFEFF"],
+])("searches Unicode usernames using the same normalization as account creation: %s", async (input, normalized) => {
+  const requests = setup();
+  render(<UserPage onExpired={() => {}} />);
+  await screen.findByRole("row", { name: /Summer/ });
+  fireEvent.change(screen.getByRole("searchbox", { name: "搜索用户名" }), { target: { value: input } });
+  fireEvent.submit(screen.getByRole("search"));
+  await waitFor(() => expect(requests.at(-1)?.url).toBe(`/api/admin/users?q=${encodeURIComponent(normalized)}&page=1&size=20`));
+});
+
 // Creating must send only ordinary-account fields and refresh both table and overview.
 it("creates a user then refreshes the list and global overview", async () => {
   let created = false;
@@ -76,6 +89,20 @@ it("creates a user then refreshes the list and global overview", async () => {
   expect(mutation.body).toEqual({ username: "hanmei", password: "new-password" });
   expect(mutation.headers.get("X-CSRF-Token")).toBe("session-csrf");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+// Catch client-only rejection or rewriting of credentials accepted by the server.
+it("normalizes Unicode White_Space like the server while preserving FEFF in usernames and passwords", async () => {
+  const requests = setup((request) => request.method === "POST" ? response({ ...summer, version: 4 }) : undefined);
+  const user = userEvent.setup();
+  render(<UserPage onExpired={() => {}} />);
+  await screen.findByRole("row", { name: /Summer/ });
+  await user.click(screen.getByRole("button", { name: /添加用户/ }));
+  fireEvent.change(screen.getByLabelText("用户名"), { target: { value: "\u0085\uFEFFSummer\uFEFF\u0085" } });
+  fireEvent.change(screen.getByLabelText("初始密码"), { target: { value: "\uFEFF".repeat(8) } });
+  fireEvent.submit(screen.getByLabelText("初始密码").closest("form")!);
+  await screen.findByText("用户已添加。");
+  expect(requests.find((request) => request.method === "POST")?.body).toEqual({ username: "\uFEFFSummer\uFEFF", password: "\uFEFF".repeat(8) });
 });
 
 // Catches a UTF-16 code-unit check accepting fewer than eight ordinary-user password characters.

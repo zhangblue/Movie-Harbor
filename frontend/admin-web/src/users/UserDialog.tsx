@@ -3,6 +3,7 @@ import { ApiError, changeViewerUserPassword, createViewerUser, deleteViewerUser,
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
+import { trimViewerWhitespace } from "./userInput";
 
 export type UserOperation = { mode: "create" } | { mode: "password" | "delete"; user: ViewerUserSummary };
 
@@ -23,13 +24,13 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending.current || conflict) return;
-    if (!deleting && (!password.trim() || Array.from(password).length < 8)) { setError("密码至少需要 8 个字符。"); return; }
-    if (creating && !username.trim()) { setError("请输入用户名。"); return; }
+    if (!deleting && (!trimViewerWhitespace(password) || Array.from(password).length < 8)) { setError("密码至少需要 8 个字符。"); return; }
+    if (creating && !trimViewerWhitespace(username)) { setError("请输入用户名。"); return; }
     pending.current = true;
     setBusy(true);
     setError("");
     try {
-      if (operation.mode === "create") await createViewerUser({ username: username.trim(), password });
+      if (operation.mode === "create") await createViewerUser({ username: trimViewerWhitespace(username), password });
       else if (operation.mode === "password") await changeViewerUserPassword(operation.user.id, { version: operation.user.version, new_password: password });
       else await deleteViewerUser(operation.user.id, operation.user.version);
       if (mounted.current) onDone(creating ? "用户已添加。" : deleting ? "用户已删除。" : "密码已修改，该用户现有的登录会话已失效。");

@@ -47,9 +47,10 @@ export function video() {
 
 export type MediaSummary = { url: string; local_path: string };
 export type Genre = { id: string; name: string; sort_order: number; enabled: boolean };
-export type Movie = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; video: MediaSummary | null };
+export type Movie = { id: string; version: number; name: string; status: string; is_private: boolean; poster: MediaSummary | null; video: MediaSummary | null };
 export type Episode = { id: string; version: number; number: number; name: string; status: string; video: MediaSummary | null };
-export type Series = { id: string; version: number; name: string; status: string; poster: MediaSummary | null; seasons: Array<{ id: string; number: number; episodes: Episode[] }> };
+export type Series = { id: string; version: number; name: string; status: string; is_private: boolean; poster: MediaSummary | null; seasons: Array<{ id: string; number: number; episodes: Episode[] }> };
+export type ViewerUser = { id: string; username: string; version: number };
 
 export class AdminApi {
   constructor(readonly request: APIRequestContext, readonly csrf: string) {}
@@ -65,6 +66,12 @@ export class AdminApi {
   }
 
   async dispose() { await this.request.dispose(); }
+  createUser(username: string, password = "viewer-initial-password") { return this.write<ViewerUser>("post", "/api/admin/users", { username, password }); }
+  changeUserPassword(user: ViewerUser, password: string) { return this.write<ViewerUser>("put", `/api/admin/users/${user.id}/password`, { version: user.version, new_password: password }); }
+  deleteUser(user: ViewerUser) { return this.write<void>("delete", `/api/admin/users/${user.id}`, { version: user.version }); }
+  setPrivacy<T extends Movie | Series>(kind: "movies" | "series", content: T, isPrivate: boolean) {
+    return this.write<T>("put", `/api/admin/${kind}/${content.id}/privacy`, { version: content.version, is_private: isPrivate });
+  }
   private headers() { return { "X-CSRF-Token": this.csrf, Origin: baseURL }; }
   async get<T>(path: string): Promise<T> {
     const response = await this.request.get(path);
@@ -81,6 +88,23 @@ export class AdminApi {
     expect(response.status(), await response.text()).toBe(200);
     return response.json();
   }
+}
+
+export class ViewerApi {
+  constructor(readonly request: APIRequestContext, readonly csrf: string) {}
+  static async login(playwright: Playwright, username: string, password = "viewer-initial-password") {
+    const request = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Origin: baseURL } });
+    const response = await request.post("/api/viewer/login", { data: { username, password } });
+    expect(response.status(), await response.text()).toBe(200);
+    const session = await request.get("/api/viewer/session");
+    expect(session.status()).toBe(200);
+    expect((await request.storageState()).cookies.some((cookie) => cookie.name === "mh_viewer_session" && cookie.path === "/" && cookie.httpOnly)).toBe(true);
+    return new ViewerApi(request, (await session.json()).csrf_token);
+  }
+  async changePassword(currentPassword: string, newPassword: string) {
+    return this.request.patch("/api/viewer/password", { data: { current_password: currentPassword, new_password: newPassword }, headers: { "X-CSRF-Token": this.csrf } });
+  }
+  async dispose() { await this.request.dispose(); }
 }
 
 export async function createMovieDraftWithMedia(api: AdminApi, name: string, options: {

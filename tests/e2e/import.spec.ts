@@ -1,9 +1,10 @@
 import { expect, test } from "@playwright/test";
+import type { JsonValue } from "@movie-harbor/api-client";
 import { spawn } from "node:child_process";
 import { copyFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
-import { AdminApi, adminName, baseURL, initialPassword, poster, type Genre, type Movie, type Series } from "./helpers";
+import { AdminApi, adminName, baseURL, initialPassword, poster, mediaHostDir, createMovieDraftWithMedia, createSeriesDraftWithMedia, type Genre, type Movie, type Series } from "./helpers";
 
 type Metadata = { synopsis: string; year: number | null; genres: Genre[]; duration_seconds: number | null };
 type ImportedSeries = Series & Metadata & { seasons: Array<{ id: string; number: number; episodes: Array<{ id: string; name: string; number: number; status: string; duration_seconds: number | null; video: { local_path: string } | null }> }> };
@@ -58,12 +59,12 @@ test("CLI imports media and hierarchy as drafts, resumes without duplicates, and
   const api = await AdminApi.login(playwright);
   try {
     const movie = await api.get<Movie & Metadata>(`/api/admin/movies/${checkpoint.movies[movieName].id}`);
-    expect(movie).toMatchObject({ name: movieName, synopsis: "Imported movie", year: 2024, duration_seconds: 123, status: "draft" });
+    expect(movie).toMatchObject({ name: movieName, synopsis: "Imported movie", year: 2024, duration_seconds: 123, status: "draft", is_private: false });
     expect(movie.genres.map((genre) => genre.name)).toEqual([genreName]);
     expect(movie.poster?.local_path).toMatch(/^\/media\/poster\//);
     expect(movie.video?.local_path).toMatch(/^\/media\/video\//);
     const series = await api.get<ImportedSeries>(`/api/admin/series/${checkpoint.series[seriesName].id}`);
-    expect(series).toMatchObject({ name: seriesName, synopsis: "Imported series", year: 2025, status: "draft" });
+    expect(series).toMatchObject({ name: seriesName, synopsis: "Imported series", year: 2025, status: "draft", is_private: false });
     expect(series.genres.map((genre) => genre.name)).toEqual([genreName]);
     expect(series.poster?.local_path).toMatch(/^\/media\/poster\//);
     expect(series.seasons.map((season) => season.number)).toEqual([1, 2]);
@@ -91,5 +92,42 @@ test("CLI imports media and hierarchy as drafts, resumes without duplicates, and
       expect(contents.total).toBe(1);
     }
     expect((await api.get<Genre[]>("/api/admin/genres")).filter((genre) => genre.name === genreName)).toHaveLength(1);
+  } finally { await api.dispose(); }
+});
+
+test("export and CLI import preserve public and private movies and whole series", async ({ playwright }) => {
+  test.setTimeout(180_000);
+  const api = await AdminApi.login(playwright);
+  const prefix = `Scope roundtrip ${randomUUID()}`;
+  try {
+    for (const isPrivate of [false, true]) {
+      const movie = await createMovieDraftWithMedia(api, `${prefix} Movie ${isPrivate}`, { synopsis: "scope", durationSeconds: 1 });
+      const series = await createSeriesDraftWithMedia(api, `${prefix} Series ${isPrivate}`, { synopsis: "scope", seasonNumber: 1, episodeNumber: 1, episodeName: "Inherited", durationSeconds: 1 });
+      await api.setPrivacy("movies", movie, isPrivate);
+      await api.setPrivacy("series", series, isPrivate);
+    }
+    const exported = await (await api.request.get("/api/admin/contents/export")).json();
+    type ExportItem = { name: string; is_private: boolean; episodes?: JsonValue[] };
+    for (const kind of ["movies", "series"] as const) {
+      exported[kind] = exported[kind].filter((item: ExportItem) => item.name.startsWith(prefix));
+      expect(exported[kind]).toHaveLength(2);
+      expect(exported[kind].map((item: ExportItem) => item.is_private).sort()).toEqual([false, true]);
+      for (const item of exported[kind] as ExportItem[]) item.name += " Imported";
+    }
+    for (const item of exported.series as ExportItem[]) for (const episode of item.episodes!) expect(episode).not.toHaveProperty("is_private");
+    const source = resolve(process.env.E2E_RUN_DIR!, `scope-${randomUUID()}.json`);
+    await writeFile(source, JSON.stringify(exported));
+    const imported = await runImport(source, mediaHostDir);
+    expect(imported.code, imported.output).toBe(0);
+    expect(imported.output).toContain("completed=4");
+    const checkpoint = JSON.parse(await readFile(`${source}.movie-harbor-import-progress.json`, "utf8")) as Checkpoint;
+    for (const kind of ["movies", "series"] as const) for (const item of exported[kind] as ExportItem[]) {
+      const detail = await api.get<Movie | Series>(`/api/admin/${kind}/${checkpoint[kind][item.name].id}`);
+      expect(detail).toMatchObject({ name: item.name, is_private: item.is_private, status: "draft" });
+      if ("seasons" in detail) for (const season of detail.seasons) {
+        expect(season).not.toHaveProperty("is_private");
+        for (const episode of season.episodes) expect(episode).not.toHaveProperty("is_private");
+      }
+    }
   } finally { await api.dispose(); }
 });
