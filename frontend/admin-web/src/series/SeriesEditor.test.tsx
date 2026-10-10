@@ -539,6 +539,8 @@ it("loads basic information and number-only seasons with a disposable poster pre
 it("creates a named series and one season, requiring the administrator to name its initial episode", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(null);
   await user.type(await screen.findByLabelText("剧集名称"), "新剧"); await user.click(screen.getByRole("button", { name: "创建草稿" }));
+  expect(requests.find((r) => r.url === "/api/admin/series" && r.method === "POST")?.body)
+    .toEqual({ name: "新剧", is_private: false });
   const name = await screen.findByLabelText("单集名称"); expect(name).toHaveValue("");
   expect(within(screen.getByRole("form", { name: "新单集草稿" })).getByText("保存单集草稿后可填写时长并上传视频。")).toBeInTheDocument();
   expect(screen.getAllByLabelText("季序号")).toHaveLength(1); expect(screen.getAllByLabelText("集序号")).toHaveLength(1);

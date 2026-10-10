@@ -22,6 +22,7 @@ export function deferred<T>() {
 }
 export function movie(overrides: Partial<MovieResponse> = {}): MovieResponse {
   return {
+    is_private: false,
     id: "movie-1", name: "潮汐尽头", synopsis: "海上故事", year: 2026, duration_seconds: 7200,
     status: "draft", version: 3, published_at: null, archived_at: null,
     created_at: "2026-09-01T00:00:00Z", updated_at: "2026-09-02T00:00:00Z", genres: [],
@@ -35,6 +36,7 @@ export function series(overrides: Partial<SeriesResponse> = {}): SeriesResponse 
 }
 export function adminContentItem(overrides: Partial<AdminContentListItem> = {}): AdminContentListItem {
   return {
+    is_private: false,
     id: "movie-1", kind: "movie", name: "潮汐尽头", status: "draft", version: 3,
     created_at: "2026-09-01T00:00:00Z", poster_url: "/media/poster.webp", ...overrides,
   };

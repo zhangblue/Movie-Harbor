@@ -2,21 +2,25 @@ import type { CatalogCard, CatalogPage, JsonValue, MovieDetail, SeriesDetail } f
 import { vi } from "vitest";
 
 export const movieCard: CatalogCard = {
+  is_private: false,
   id: "movie-1", kind: "movie", name: "远方来信", year: 2024,
   poster_url: "/media/poster-1", published_at: "2026-09-01T00:00:00Z",
   genres: [{ id: "g1", name: "剧情" }, { id: "g2", name: "冒险" }, { id: "g3", name: "悬疑" }], genre_count: 4,
 };
 export const seriesCard: CatalogCard = {
+  is_private: false,
   id: "series-1", kind: "series", name: "群星之间", year: 2025,
   poster_url: "/media/poster-2", published_at: "2026-09-02T00:00:00Z",
   genres: [{ id: "g4", name: "科幻" }], genre_count: 1,
 };
 export const movie: MovieDetail = {
+  is_private: false,
   id: "movie-1", kind: "movie", name: "远方来信", synopsis: "一封信，穿越山海。", year: 2024,
   duration_seconds: 5400, poster_url: "/media/poster-1", video_url: "/media/video-1",
   genres: [...movieCard.genres, { id: "g5", name: "家庭" }],
 };
 export const series: SeriesDetail = {
+  is_private: false,
   id: "series-1", kind: "series", name: "群星之间", synopsis: "在遥远星系重逢。", year: 2025,
   poster_url: "/media/poster-2", genres: seriesCard.genres,
   seasons: [

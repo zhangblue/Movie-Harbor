@@ -286,7 +286,7 @@ it("creates a named draft first and opens it from the App content entry", async 
   await user.type(await screen.findByLabelText("名称"), "新片");
   await user.click(screen.getByRole("button", { name: "创建草稿" }));
   await screen.findByRole("button", { name: "保存草稿" });
-  expect(requests.find((r) => r.method === "POST")?.body).toEqual({ name: "新片" });
+  expect(requests.find((r) => r.method === "POST")?.body).toEqual({ name: "新片", is_private: false });
   await user.click(screen.getByRole("button", { name: "返回列表" }));
   await user.click(within(await screen.findByRole("row", { name: /新片/ })).getByRole("button", { name: "编辑" }));
   expect(await screen.findByLabelText("名称")).toHaveValue("新片");

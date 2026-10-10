@@ -168,7 +168,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {notice && <p role="status">{notice}</p>}
       {warning && <p role="alert" className="error-message">{warning}</p>}
       {loading ? <p role="status">正在加载电影…</p> : !movie ? <form className="movie-form" onSubmit={(event) => {
-        event.preventDefault(); void run(async () => { const created = await createMovie(fields.name); if (mounted.current) accept(created); });
+        event.preventDefault(); void run(async () => { const created = await createMovie(fields.name, false); if (mounted.current) accept(created); });
       }}><Field label="名称" className="movie-field-medium"><input required value={fields.name} disabled={locked} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><Button variant="primary" type="submit" disabled={locked}>创建草稿</Button></form> : <div className="movie-editor-card">
         <PosterPicker current={movie.poster} file={poster} onSelect={setPoster} readOnly={readOnly} disabled={locked} />
         <form className="movie-form" onSubmit={(event) => { event.preventDefault(); const submitter = (event.nativeEvent as SubmitEvent).submitter; void save(submitter?.getAttribute("value") === "publish"); }}>

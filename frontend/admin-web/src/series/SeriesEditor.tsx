@@ -212,7 +212,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       {loading ? <p role="status">正在加载剧集…</p> : !series ? <form className="movie-form" onSubmit={(event) => {
         event.preventDefault(); if (!fields.name.trim()) return;
         void run(async () => {
-          const created = await createSeries(fields.name); if (!mounted.current) return;
+          const created = await createSeries(fields.name, false); if (!mounted.current) return;
           accept(created, true); onCreated(created.id);
           const saved = await createSeason(created.id, 1, created.version); if (!mounted.current) return;
           const seasonIds = saved.seasons.map((season) => season.id);
