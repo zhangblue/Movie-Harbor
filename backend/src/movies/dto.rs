@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct CreateMovieRequest {
     pub name: String,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyRequest {
+    pub version: i64,
+    pub is_private: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,6 +108,7 @@ impl MediaSummary {
 #[derive(Clone, Debug, Serialize)]
 pub struct MovieResponse {
     pub id: String,
+    pub is_private: bool,
     pub name: String,
     pub synopsis: String,
     pub year: Option<i32>,
@@ -125,6 +133,7 @@ impl MovieResponse {
     ) -> Result<Self, DbErr> {
         Ok(Self {
             id: value.id.to_string(),
+            is_private: value.is_private,
             name: value.name,
             synopsis: value.synopsis,
             year: value.year,

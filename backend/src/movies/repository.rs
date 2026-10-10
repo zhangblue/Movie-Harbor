@@ -8,6 +8,32 @@ use uuid::Uuid;
 
 use super::service::MovieError;
 
+pub async fn set_privacy(
+    tx: &DatabaseTransaction,
+    id: Uuid,
+    expected_version: i64,
+    is_private: bool,
+) -> Result<movie::Model, MovieError> {
+    // 隐私与生命周期独立，只更新访问范围、版本和更新时间；条件更新由数据库原子执行。
+    let updated = movie::Entity::update_many()
+        .col_expr(movie::Column::IsPrivate, Expr::value(is_private))
+        .col_expr(
+            movie::Column::Version,
+            Expr::col(movie::Column::Version).add(1),
+        )
+        .col_expr(movie::Column::UpdatedAt, Expr::cust("CURRENT_TIMESTAMP"))
+        .filter(movie::Column::Id.eq(id))
+        .filter(movie::Column::Version.eq(expected_version))
+        .exec_with_returning(tx)
+        .await?;
+    if let Some(model) = updated.into_iter().next() {
+        return Ok(model);
+    }
+    // 匹配不到时保留领域不存在语义，已存在的记录则是旧版本冲突。
+    find(tx, id).await?;
+    Err(MovieError::Conflict)
+}
+
 pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<movie::Model, MovieError> {
     movie::Entity::find_by_id(id)
         .one(db)

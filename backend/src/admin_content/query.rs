@@ -10,18 +10,20 @@ use uuid::Uuid;
 const ADMIN_CONTENT_COUNT_SQL: &str = r#"
 WITH candidates AS (
     SELECT movie.id, 'movie'::text AS kind, movie.name, movie.status,
-           movie.version, movie.created_at, movie.poster_asset_id
+           movie.version, movie.created_at, movie.poster_asset_id, movie.is_private
     FROM movie
     WHERE $1::text IN ('all', 'movie')
       AND ($2::text IS NULL OR movie.status = $2::text)
       AND ($3::text IS NULL OR lower(movie.name) LIKE lower($3::text) ESCAPE '!')
+      AND ($4::boolean IS NULL OR movie.is_private = $4::boolean)
     UNION ALL
     SELECT series.id, 'series'::text AS kind, series.name, series.status,
-           series.version, series.created_at, series.poster_asset_id
+           series.version, series.created_at, series.poster_asset_id, series.is_private
     FROM series
     WHERE $1::text IN ('all', 'series')
       AND ($2::text IS NULL OR series.status = $2::text)
       AND ($3::text IS NULL OR lower(series.name) LIKE lower($3::text) ESCAPE '!')
+      AND ($4::boolean IS NULL OR series.is_private = $4::boolean)
 )
 SELECT count(*)::bigint AS total
 FROM candidates
@@ -30,31 +32,34 @@ FROM candidates
 pub const ADMIN_CONTENT_ITEMS_SQL: &str = r#"
 WITH candidates AS (
     SELECT movie.id, 'movie'::text AS kind, movie.name, movie.status,
-           movie.version, movie.created_at, movie.poster_asset_id
+           movie.version, movie.created_at, movie.poster_asset_id, movie.is_private
     FROM movie
     WHERE $1::text IN ('all', 'movie')
       AND ($2::text IS NULL OR movie.status = $2::text)
       AND ($3::text IS NULL OR lower(movie.name) LIKE lower($3::text) ESCAPE '!')
+      AND ($4::boolean IS NULL OR movie.is_private = $4::boolean)
     UNION ALL
     SELECT series.id, 'series'::text AS kind, series.name, series.status,
-           series.version, series.created_at, series.poster_asset_id
+           series.version, series.created_at, series.poster_asset_id, series.is_private
     FROM series
     WHERE $1::text IN ('all', 'series')
       AND ($2::text IS NULL OR series.status = $2::text)
       AND ($3::text IS NULL OR lower(series.name) LIKE lower($3::text) ESCAPE '!')
+      AND ($4::boolean IS NULL OR series.is_private = $4::boolean)
 )
 SELECT candidates.id, candidates.kind, candidates.name, candidates.status,
-       candidates.version, candidates.created_at,
+       candidates.version, candidates.created_at, candidates.is_private,
        poster.storage_key AS poster_storage_key
 FROM candidates
 LEFT JOIN media_asset poster ON poster.id = candidates.poster_asset_id
 ORDER BY candidates.created_at DESC, candidates.kind ASC, candidates.id ASC
-LIMIT $4 OFFSET $5
+LIMIT $5 OFFSET $6
 "#;
 
 #[derive(Debug, FromQueryResult)]
 struct AdminContentRow {
     id: Uuid,
+    is_private: bool,
     kind: String,
     name: String,
     status: String,
@@ -83,6 +88,7 @@ pub async fn list(
                 filter.kind.clone().into(),
                 filter.status.clone().into(),
                 filter.name_pattern.clone().into(),
+                filter.is_private.into(),
             ],
         ))
         .await?
@@ -98,6 +104,7 @@ pub async fn list(
                 filter.kind.into(),
                 filter.status.into(),
                 filter.name_pattern.into(),
+                filter.is_private.into(),
                 i64::try_from(ADMIN_CONTENT_PAGE_SIZE).unwrap().into(),
                 i64::try_from(filter.offset).unwrap().into(),
             ],
@@ -110,6 +117,7 @@ pub async fn list(
         .into_iter()
         .map(|row| AdminContentItem {
             id: row.id.to_string(),
+            is_private: row.is_private,
             kind: row.kind,
             name: row.name,
             status: row.status,

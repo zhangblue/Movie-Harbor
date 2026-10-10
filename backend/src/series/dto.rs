@@ -9,6 +9,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize)]
 pub struct CreateSeriesRequest {
     pub name: String,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrivacyRequest {
+    pub version: i64,
+    pub is_private: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -131,6 +138,7 @@ impl SeasonResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct SeriesResponse {
     pub id: String,
+    pub is_private: bool,
     pub name: String,
     pub synopsis: String,
     pub year: Option<i32>,
@@ -154,6 +162,7 @@ impl SeriesResponse {
     ) -> Result<Self, DbErr> {
         Ok(Self {
             id: value.id.to_string(),
+            is_private: value.is_private,
             name: value.name,
             synopsis: value.synopsis,
             year: value.year,

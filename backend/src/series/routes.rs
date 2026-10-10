@@ -9,14 +9,14 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
-    routing::{get, patch, post},
+    routing::{get, patch, post, put},
 };
 use sea_orm::DatabaseConnection;
 
 use super::{
     dto::{
         ChildDeleteImpactResponse, CreateEpisodeRequest, CreateSeasonRequest, CreateSeriesRequest,
-        EpisodeEnvelope, SeriesListQuery, SeriesResponse, UpdateEpisodeRequest,
+        EpisodeEnvelope, PrivacyRequest, SeriesListQuery, SeriesResponse, UpdateEpisodeRequest,
         UpdateSeasonRequest, UpdateSeriesRequest, VersionRequest,
     },
     service::{
@@ -44,6 +44,7 @@ pub fn router(
     };
     Router::new()
         .route("/api/admin/series", get(list).post(create))
+        .route("/api/admin/series/{series_id}/privacy", put(set_privacy))
         .route(
             "/api/admin/series/{series_id}",
             get(detail).patch(update).delete(delete_series),
@@ -115,7 +116,23 @@ async fn create(
 ) -> Result<(StatusCode, Json<SeriesResponse>), SeriesError> {
     Ok((
         StatusCode::CREATED,
-        Json(service::create(&state.db, input.name).await?),
+        Json(service::create(&state.db, input.name, input.is_private).await?),
+    ))
+}
+
+async fn set_privacy(
+    State(state): State<SeriesState>,
+    Path(id): Path<String>,
+    Json(input): Json<PrivacyRequest>,
+) -> Result<Json<SeriesResponse>, SeriesError> {
+    Ok(Json(
+        service::set_privacy(
+            &state.db,
+            parse_uuid(id, SeriesError::Invalid)?,
+            input.version,
+            input.is_private,
+        )
+        .await?,
     ))
 }
 

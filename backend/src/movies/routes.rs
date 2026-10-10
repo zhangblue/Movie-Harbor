@@ -8,14 +8,14 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use sea_orm::DatabaseConnection;
 
 use super::{
     dto::{
         CreateMovieRequest, DeleteImpactResponse, DeleteResultResponse, MovieListQuery,
-        MovieResponse, UpdateMovieRequest, VersionRequest,
+        MovieResponse, PrivacyRequest, UpdateMovieRequest, VersionRequest,
     },
     service::{self, MovieError},
 };
@@ -39,6 +39,7 @@ pub fn router(
     };
     Router::new()
         .route("/api/admin/movies", get(list).post(create))
+        .route("/api/admin/movies/{id}/privacy", put(set_privacy))
         .route(
             "/api/admin/movies/{id}",
             get(detail).patch(update).delete(delete_movie),
@@ -67,7 +68,23 @@ async fn create(
 ) -> Result<(StatusCode, Json<MovieResponse>), MovieError> {
     Ok((
         StatusCode::CREATED,
-        Json(service::create(&state.db, input.name).await?),
+        Json(service::create(&state.db, input.name, input.is_private).await?),
+    ))
+}
+
+async fn set_privacy(
+    State(state): State<MovieState>,
+    Path(id): Path<String>,
+    Json(input): Json<PrivacyRequest>,
+) -> Result<Json<MovieResponse>, MovieError> {
+    Ok(Json(
+        service::set_privacy(
+            &state.db,
+            parse_uuid(id, MovieError::Invalid)?,
+            input.version,
+            input.is_private,
+        )
+        .await?,
     ))
 }
 

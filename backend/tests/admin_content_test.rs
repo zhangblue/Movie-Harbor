@@ -435,6 +435,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
             AdminContentFilter {
                 kind: "movie".into(),
                 status: None,
+                is_private: None,
                 name_pattern: None,
                 page: 1,
                 offset: 0,
@@ -465,4 +466,49 @@ INSERT INTO movie (id, name, status, created_at) VALUES
     assert_eq!(page.total, 1);
     assert_eq!(page.items.len(), 1);
     assert_eq!(page.items[0].name, "Old movie");
+}
+#[tokio::test]
+async fn private_admin_content_filter_applies_to_both_kinds_and_totals() {
+    let (db, _root, app) = seeded_app().await;
+    db.execute_unprepared("UPDATE movie SET is_private=true WHERE name IN ('Movie 01','Movie 07','Movie 10'); UPDATE series SET is_private=true WHERE name IN ('100%_! Series','Series 02','Series 03');").await.unwrap();
+    let cookie = credentials(&app).await;
+    let private = list(&app, &cookie, "?privacy=private").await;
+    assert_eq!(private["total"], 6);
+    assert_eq!(private["items"].as_array().unwrap().len(), 6);
+    assert!(
+        private["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["is_private"] == true)
+    );
+    assert_eq!(
+        list(&app, &cookie, "?privacy=private&kind=movie").await["total"],
+        3
+    );
+    assert_eq!(
+        list(
+            &app,
+            &cookie,
+            "?privacy=private&kind=series&status=published"
+        )
+        .await["total"],
+        1
+    );
+    let public = list(&app, &cookie, "?privacy=public").await;
+    assert_eq!(public["total"], 16);
+    assert!(
+        public["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["is_private"] == false)
+    );
+    assert_eq!(list(&app, &cookie, "").await["total"], 22);
+    assert_eq!(
+        request(&app, "/api/admin/contents?privacy=all", Some(&cookie))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
 }

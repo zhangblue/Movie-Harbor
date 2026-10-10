@@ -7,6 +7,7 @@ pub const MAX_ADMIN_CONTENT_PAGE: u64 = 1_000_000;
 pub struct AdminContentRequest {
     pub kind: Option<String>,
     pub status: Option<String>,
+    pub privacy: Option<String>,
     pub name: Option<String>,
     pub page: Option<u64>,
 }
@@ -14,6 +15,7 @@ pub struct AdminContentRequest {
 pub struct AdminContentFilter {
     pub kind: String,
     pub status: Option<String>,
+    pub is_private: Option<bool>,
     pub name_pattern: Option<String>,
     pub page: u64,
     pub offset: u64,
@@ -37,6 +39,12 @@ impl TryFrom<AdminContentRequest> for AdminContentFilter {
             Some(_) => return Err(()),
             None => None,
         };
+        let is_private = match value.privacy.as_deref() {
+            Some("public") => Some(false),
+            Some("private") => Some(true),
+            None => None,
+            Some(_) => return Err(()),
+        };
         let name_pattern = value
             .name
             .map(|name| name.trim().to_owned())
@@ -53,6 +61,7 @@ impl TryFrom<AdminContentRequest> for AdminContentFilter {
         Ok(Self {
             kind,
             status,
+            is_private,
             name_pattern,
             page,
             offset,
@@ -75,6 +84,7 @@ fn escape_like(value: &str) -> String {
 #[derive(Debug, Serialize)]
 pub struct AdminContentItem {
     pub id: String,
+    pub is_private: bool,
     pub kind: String,
     pub name: String,
     pub status: String,

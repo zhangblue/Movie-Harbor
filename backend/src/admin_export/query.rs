@@ -10,6 +10,7 @@ use uuid::Uuid;
 #[derive(FromQueryResult)]
 struct MovieRow {
     id: Uuid,
+    is_private: bool,
     name: String,
     synopsis: String,
     year: Option<i32>,
@@ -21,6 +22,7 @@ struct MovieRow {
 #[derive(FromQueryResult)]
 struct SeriesRow {
     id: Uuid,
+    is_private: bool,
     name: String,
     synopsis: String,
     year: Option<i32>,
@@ -59,11 +61,11 @@ pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<Cont
         .await?;
     let movies = MovieRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
-        "SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.poster_asset_id, movie.video_asset_id, movie.duration_seconds FROM movie ORDER BY movie.name ASC, movie.id ASC",
+        "SELECT movie.id, movie.is_private, movie.name, movie.synopsis, movie.year, movie.poster_asset_id, movie.video_asset_id, movie.duration_seconds FROM movie ORDER BY movie.name ASC, movie.id ASC",
     )).all(&tx).await?;
     let series = SeriesRow::find_by_statement(Statement::from_string(
         DatabaseBackend::Postgres,
-        "SELECT series.id, series.name, series.synopsis, series.year, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
+        "SELECT series.id, series.is_private, series.name, series.synopsis, series.year, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
     )).all(&tx).await?;
     // 批量读取全部父级题材并按系统顺序归组，既避免 N+1，也保留已停用的历史关联。
     let movie_genres = GenreRow::find_by_statement(Statement::from_string(
@@ -106,6 +108,7 @@ WHERE media_asset.id IN (
         .map(|row| {
             Ok(ExportMovie {
                 name: row.name,
+                is_private: row.is_private,
                 synopsis: row.synopsis,
                 year: row.year,
                 genres: movie_genres.remove(&row.id).unwrap_or_default(),
@@ -135,6 +138,7 @@ WHERE media_asset.id IN (
         .map(|row| {
             Ok(ExportSeries {
                 name: row.name,
+                is_private: row.is_private,
                 synopsis: row.synopsis,
                 year: row.year,
                 genres: series_genres.remove(&row.id).unwrap_or_default(),

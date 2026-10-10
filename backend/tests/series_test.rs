@@ -210,7 +210,7 @@ async fn create_series(app: &Router, cookie: &str, csrf: &str, name: &str) -> Va
         app,
         "POST",
         "/api/admin/series",
-        json!({"name":name}),
+        json!({"name":name,"is_private":false}),
         cookie,
         csrf,
     )
@@ -376,7 +376,7 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
             &app,
             "POST",
             "/api/admin/series",
-            json!({"name":"The Expanse"}),
+            json!({"name":"The Expanse","is_private":false}),
             None,
             None,
             Some("https://harbor.test"),
@@ -391,7 +391,7 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
             &app,
             "POST",
             "/api/admin/series",
-            json!({"name":"The Expanse"}),
+            json!({"name":"The Expanse","is_private":false}),
             Some(&cookie),
             None,
             Some("https://harbor.test"),
@@ -405,7 +405,7 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
             &app,
             "POST",
             "/api/admin/series",
-            json!({"name":"The Expanse"}),
+            json!({"name":"The Expanse","is_private":false}),
             Some(&cookie),
             Some(&csrf),
             Some("https://evil.test"),
@@ -2561,4 +2561,262 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
         .status(),
         StatusCode::OK
     );
+}
+
+#[tokio::test]
+async fn private_series_creation_requires_explicit_scope_and_returns_it() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let missing = write(
+        &app,
+        "POST",
+        "/api/admin/series",
+        json!({"name":"Missing scope"}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    for is_private in [false, true] {
+        let created = write(
+            &app,
+            "POST",
+            "/api/admin/series",
+            json!({"name":"Explicit scope","is_private":is_private}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let created = body(created).await;
+        assert_eq!(created["is_private"], is_private);
+        let detail = request(
+            &app,
+            "GET",
+            &format!("/api/admin/series/{}", created["id"].as_str().unwrap()),
+            json!(null),
+            Some(&cookie),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(detail.status(), StatusCode::OK);
+        assert_eq!(body(detail).await["is_private"], is_private);
+    }
+}
+
+#[tokio::test]
+async fn private_series_switch_is_independent_of_lifecycle_and_rejects_stale_versions() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    for status in ["draft", "published", "archived"] {
+        let id = Uuid::new_v4();
+        db.execute_unprepared(&format!("INSERT INTO series (id,name,status,version,published_at,archived_at) VALUES ('{id}','Scope test','{status}',3,'2026-01-01T00:00:00Z','2026-01-02T00:00:00Z')")).await.unwrap();
+        let uri = format!("/api/admin/series/{id}/privacy");
+        let before = series::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let updated = write(
+            &app,
+            "PUT",
+            &uri,
+            json!({"version":3,"is_private":true}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK, "{status}");
+        let updated = body(updated).await;
+        assert_eq!(updated["is_private"], true);
+        assert_eq!(updated["version"], 4);
+        assert_eq!(updated["status"], status);
+        let after = series::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(after.updated_at > before.updated_at);
+        assert_eq!(after.published_at, before.published_at);
+        assert_eq!(after.archived_at, before.archived_at);
+        let stale = write(
+            &app,
+            "PUT",
+            &uri,
+            json!({"version":3,"is_private":false}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let unchanged = series::Entity::find_by_id(id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(unchanged.is_private);
+        assert_eq!(unchanged.version, 4);
+        let updated = write(
+            &app,
+            "PUT",
+            &uri,
+            json!({"version":4,"is_private":false}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(updated.status(), StatusCode::OK);
+        let updated = body(updated).await;
+        assert_eq!(updated["is_private"], false);
+        assert_eq!(updated["version"], 5);
+    }
+    let missing = write(
+        &app,
+        "PUT",
+        &format!("/api/admin/series/{}/privacy", Uuid::new_v4()),
+        json!({"version":1,"is_private":true}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let invalid = write(
+        &app,
+        "PUT",
+        "/api/admin/series/not-a-uuid/privacy",
+        json!({"version":1,"is_private":true}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn private_series_concurrent_switch_has_exactly_one_winner() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let id = Uuid::new_v4();
+    db.execute_unprepared(&format!(
+        "INSERT INTO series (id,name,version) VALUES ('{id}','Concurrent scope',1)"
+    ))
+    .await
+    .unwrap();
+    let uri = format!("/api/admin/series/{id}/privacy");
+    let (first, second) = tokio::join!(
+        write(
+            &app,
+            "PUT",
+            &uri,
+            json!({"version":1,"is_private":true}),
+            &cookie,
+            &csrf
+        ),
+        write(
+            &app,
+            "PUT",
+            &uri,
+            json!({"version":1,"is_private":false}),
+            &cookie,
+            &csrf
+        )
+    );
+    let mut statuses = [first.status().as_u16(), second.status().as_u16()];
+    statuses.sort();
+    assert_eq!(statuses, [200, 409]);
+    let winner = if first.status() == StatusCode::OK {
+        body(first).await
+    } else {
+        body(second).await
+    };
+    let stored = series::Entity::find_by_id(id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.version, 2);
+    assert_eq!(winner["is_private"], stored.is_private);
+    let invalid = write(
+        &app,
+        "PUT",
+        &uri,
+        json!({"version":0,"is_private":true}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let missing = write(&app, "PUT", &uri, json!({"version":2}), &cookie, &csrf).await;
+    assert_eq!(missing.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let unauthorized = request(
+        &app,
+        "PUT",
+        &uri,
+        json!({"version":2,"is_private":true}),
+        None,
+        None,
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn private_series_scope_stays_on_parent_without_child_fields_or_versions() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = write(
+        &app,
+        "POST",
+        "/api/admin/series",
+        json!({"name":"Private hierarchy","is_private":true}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created = body(created).await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let added =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "First").await).await;
+    assert_eq!(added["version"], 3);
+    let switched = write(
+        &app,
+        "PUT",
+        &format!("/api/admin/series/{series_id}/privacy"),
+        json!({"version":3,"is_private":false}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(switched.status(), StatusCode::OK);
+    let detail = body(switched).await;
+    assert_eq!(detail["is_private"], false);
+    assert_eq!(detail["version"], 4);
+    assert!(detail["seasons"][0].get("is_private").is_none());
+    assert!(
+        detail["seasons"][0]["episodes"][0]
+            .get("is_private")
+            .is_none()
+    );
+    assert_eq!(detail["seasons"][0]["episodes"][0]["version"], 1);
 }

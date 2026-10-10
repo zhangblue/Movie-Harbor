@@ -169,11 +169,30 @@ pub struct DeleteEpisodeCommand {
     pub expected_episode_version: i64,
 }
 
-pub async fn create(db: &DatabaseConnection, name: String) -> Result<SeriesResponse, SeriesError> {
+pub async fn set_privacy(
+    db: &DatabaseConnection,
+    id: Uuid,
+    expected_version: i64,
+    is_private: bool,
+) -> Result<SeriesResponse, SeriesError> {
+    require_positive_i64(expected_version)?;
+    let tx = db.begin().await?;
+    let updated = repository::set_privacy(&tx, id, expected_version, is_private).await?;
+    let result = response(&tx, updated).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+pub async fn create(
+    db: &DatabaseConnection,
+    name: String,
+    is_private: bool,
+) -> Result<SeriesResponse, SeriesError> {
     let name = normalize_required(name)?;
     let model = series::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name),
+        is_private: Set(is_private),
         synopsis: Set(String::new()),
         status: Set("draft".into()),
         version: Set(1),

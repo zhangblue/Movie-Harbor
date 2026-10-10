@@ -198,18 +198,18 @@ async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_o
         json!({
             "exported_at": payload["exported_at"],
             "movies": [
-                {"name":"Alpha","synopsis":"draft movie","year":2024,"genres":["动作","科幻","剧情"],"poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
-                {"name":"Alpha","synopsis":"published movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null},
-                {"name":"Zulu","synopsis":"archived movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null}
+                {"name":"Alpha","is_private":false,"synopsis":"draft movie","year":2024,"genres":["动作","科幻","剧情"],"poster_path":"/media/poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png","video_path":"/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4","duration_seconds":123},
+                {"name":"Alpha","is_private":false,"synopsis":"published movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null},
+                {"name":"Zulu","is_private":false,"synopsis":"archived movie","year":null,"genres":[],"poster_path":null,"video_path":null,"duration_seconds":null}
             ],
             "series": [
-                {"name":"Alpha","synopsis":"draft series","year":2023,"genres":["悬疑","犯罪","恐怖"],"poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
+                {"name":"Alpha","is_private":false,"synopsis":"draft series","year":2023,"genres":["悬疑","犯罪","恐怖"],"poster_path":"/media/poster/cc/cccccccccccccccccccccccccccccccc.jpg","episodes":[
                     {"season_number":1,"episode_number":1,"name":"First","video_path":"/media/video/dd/dddddddddddddddddddddddddddddddd.webm","duration_seconds":45},
                     {"season_number":1,"episode_number":2,"name":"Second","video_path":null,"duration_seconds":null},
                     {"season_number":2,"episode_number":1,"name":"Season two","video_path":null,"duration_seconds":null}
                 ]},
-                {"name":"Alpha","synopsis":"published series","year":null,"genres":[],"poster_path":null,"episodes":[]},
-                {"name":"Zulu","synopsis":"archived series","year":null,"genres":[],"poster_path":null,"episodes":[
+                {"name":"Alpha","is_private":false,"synopsis":"published series","year":null,"genres":[],"poster_path":null,"episodes":[]},
+                {"name":"Zulu","is_private":false,"synopsis":"archived series","year":null,"genres":[],"poster_path":null,"episodes":[
                     {"season_number":1,"episode_number":1,"name":"Hidden parent episode","video_path":null,"duration_seconds":null}
                 ]}
             ]
@@ -337,9 +337,9 @@ async fn export_content_genres_and_media_share_one_snapshot() {
         panic!("export did not wait for the locked movie_genre table");
     }
     blocker.execute_unprepared(r#"
-UPDATE movie SET synopsis = 'concurrent movie' WHERE id = '10000000-0000-0000-0000-000000000001';
+UPDATE movie SET synopsis = 'concurrent movie', is_private = true WHERE id = '10000000-0000-0000-0000-000000000001';
 UPDATE movie SET year = 2025 WHERE id = '10000000-0000-0000-0000-000000000001';
-UPDATE series SET synopsis = 'concurrent series' WHERE id = '20000000-0000-0000-0000-000000000001';
+UPDATE series SET synopsis = 'concurrent series', is_private = true WHERE id = '20000000-0000-0000-0000-000000000001';
 UPDATE episode SET name = 'concurrent episode' WHERE id = '40000000-0000-0000-0000-000000000003';
 UPDATE genre SET name = 'concurrent genre' WHERE id = '00000000-0000-0000-0001-000000000004';
 UPDATE media_asset SET storage_key = 'video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4' WHERE id = 'a0000000-0000-0000-0000-000000000002';
@@ -353,6 +353,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     assert_eq!(response.status(), StatusCode::OK);
     let payload = body(response).await;
     assert_eq!(payload["movies"][0]["synopsis"], "draft movie");
+    assert_eq!(payload["movies"][0]["is_private"], false);
     assert_eq!(payload["movies"][0]["year"], 2024);
     assert_eq!(
         payload["movies"][0]["genres"],
@@ -363,6 +364,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
         "/media/video/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.mp4"
     );
     assert_eq!(payload["series"][0]["synopsis"], "draft series");
+    assert_eq!(payload["series"][0]["is_private"], false);
     assert_eq!(payload["series"][0]["episodes"][0]["name"], "First");
     assert_eq!(
         payload["series"][0]["episodes"][0]["video_path"],
@@ -370,6 +372,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     );
     let fresh = body(request(&app, EXPORT_URI, Some(&cookie)).await).await;
     assert_eq!(fresh["movies"][0]["synopsis"], "concurrent movie");
+    assert_eq!(fresh["movies"][0]["is_private"], true);
     assert_eq!(fresh["movies"][0]["year"], 2025);
     assert_eq!(
         fresh["movies"][0]["genres"],
@@ -380,6 +383,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
         "/media/video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4"
     );
     assert_eq!(fresh["series"][0]["synopsis"], "concurrent series");
+    assert_eq!(fresh["series"][0]["is_private"], true);
     assert_eq!(
         fresh["series"][0]["episodes"][0]["name"],
         "concurrent episode"
@@ -388,4 +392,29 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
         fresh["series"][0]["episodes"][0]["video_path"],
         "/media/video/ff/ffffffffffffffffffffffffffffffff.webm"
     );
+}
+#[tokio::test]
+async fn private_export_scope_is_boolean_only_on_movies_and_series() {
+    let (db, _root, app, cookie) = setup().await;
+    seed(&db).await;
+    db.execute_unprepared("UPDATE movie SET is_private=true WHERE synopsis='draft movie'; UPDATE series SET is_private=true WHERE synopsis='draft series';").await.unwrap();
+    let response = request(
+        &app,
+        "/api/admin/contents/export?privacy=public",
+        Some(&cookie),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body(response).await;
+    assert_eq!(payload["movies"][0]["is_private"], true);
+    assert_eq!(payload["series"][0]["is_private"], true);
+    assert_eq!(payload["movies"][1]["is_private"], false);
+    assert_eq!(payload["series"][1]["is_private"], false);
+    for series in payload["series"].as_array().unwrap() {
+        for episode in series["episodes"].as_array().unwrap() {
+            assert!(episode.get("is_private").is_none());
+        }
+    }
+    assert!(payload.get("viewer_users").is_none());
+    assert!(payload.get("viewer_sessions").is_none());
 }

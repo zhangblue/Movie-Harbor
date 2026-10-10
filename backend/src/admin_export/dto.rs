@@ -10,6 +10,7 @@ pub struct ContentExport {
 #[derive(Debug, Serialize)]
 pub struct ExportMovie {
     pub name: String,
+    pub is_private: bool,
     pub synopsis: String,
     pub year: Option<i32>,
     pub genres: Vec<String>,
@@ -21,6 +22,7 @@ pub struct ExportMovie {
 #[derive(Debug, Serialize)]
 pub struct ExportSeries {
     pub name: String,
+    pub is_private: bool,
     pub synopsis: String,
     pub year: Option<i32>,
     pub genres: Vec<String>,
