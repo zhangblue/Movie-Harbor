@@ -55,3 +55,24 @@ test("project deployment skill has resolvable local references", () => {
     assert.ok(existsSync(target), `deployment skill has a broken link to ${target}`);
   }
 });
+
+test("AGENTS delegates Ubuntu deployment details to the project skill", () => {
+  const agents = readFileSync(agentsPath, "utf8");
+  assert.ok(
+    !agents.includes("## Ubuntu 半离线部署流程"),
+    "AGENTS still duplicates the Ubuntu deployment runbook",
+  );
+  assert.ok(
+    !agents.includes("2026-10-10-ubuntu-offline-deployment-runbook"),
+    "AGENTS still links the superseded deployment documents",
+  );
+  assert.ok(
+    !existsSync(
+      path.join(
+        projectRoot,
+        "docs/superpowers/plans/2026-10-10-ubuntu-offline-deployment-runbook.md",
+      ),
+    ),
+    "superseded AGENTS deployment plan still exists",
+  );
+});
