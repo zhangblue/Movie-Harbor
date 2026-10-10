@@ -17,6 +17,7 @@ export function DetailsLayout({ detail, children }: { detail: MovieDetail | Seri
       <div className="detail-copy">
         <p className="eyebrow">{detail.kind === "movie" ? "MOVIE" : "SERIES"}</p>
         <h1>{detail.name}</h1>
+        {detail.is_private && <span className="privacy-badge">私密</span>}
         <p className="detail-meta">{detail.kind === "movie" ? "电影" : "剧集"} · {detail.year ?? "年份未知"}
           {detail.kind === "movie" ? ` · ${durationLabel(detail.duration_seconds)}` : ""}</p>
         <div className="detail-genres" aria-label="全部题材">{detail.genres.map((genre) => <span className="mh-genre" key={genre.id}>{genre.name}</span>)}</div>

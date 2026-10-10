@@ -22,12 +22,15 @@ class MemoryStorage implements Storage {
 }
 
 beforeEach(() => {
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
   vi.stubGlobal("localStorage", new MemoryStorage());
   localStorage.clear();
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.useRealTimers();
   vi.unstubAllGlobals();
   window.history.replaceState(null, "", "/");
@@ -60,6 +63,8 @@ it("offers continue or start over and restores only after metadata is ready with
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(500);
 
+  // Leave a resumable position before unmount now flushes progress and releases the media source.
+  setMediaTime(video, 350, 900);
   cleanup();
   render(<App />);
   const replacement = await screen.findByTestId<HTMLVideoElement>("native-video");

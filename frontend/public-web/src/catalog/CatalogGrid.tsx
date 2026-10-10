@@ -7,6 +7,7 @@ export function CatalogGrid({ items }: { items: CatalogCard[] }) {
       <PosterCard href={`/${item.kind === "movie" ? "movies" : "series"}/${encodeURIComponent(item.id)}`}
         title={item.name} kind={item.kind} year={item.year} posterUrl={item.poster_url}
         genres={item.genres} genreCount={item.genre_count} />
+      {item.is_private && <span className="privacy-badge"><span aria-hidden="true">▣ </span>私密</span>}
     </li>)}
   </ul>;
 }

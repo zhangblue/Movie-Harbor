@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, type ReactNode } from "react";
+import { useViewer } from "../auth/ViewerContext";
 import { listCatalog, type CatalogKind } from "@movie-harbor/api-client";
 import { Brand } from "../app/Brand";
 import { Loading, RequestError } from "../app/RequestState";
@@ -7,7 +8,8 @@ import { CatalogGrid } from "./CatalogGrid";
 import { CatalogPagination } from "./CatalogPagination";
 import { CatalogToolbar } from "./CatalogToolbar";
 
-export function CatalogPage({ search, navigate }: { search: string; navigate: (href: string, replace?: boolean) => void }) {
+export function CatalogPage({ search, navigate, account }: { search: string; navigate: (href: string, replace?: boolean) => void; account?: ReactNode }) {
+  const { authenticated } = useViewer();
   const params = new URLSearchParams(search);
   const rawKind = params.get("kind");
   const kind: CatalogKind = rawKind === "movie" || rawKind === "series" ? rawKind : "all";
@@ -55,6 +57,7 @@ export function CatalogPage({ search, navigate }: { search: string; navigate: (h
       <Brand />
       <CatalogToolbar kind={kind} query={query} onKindChange={(value) => update({ kind: value })}
         onQueryChange={(value) => update({ q: value }, true)} />
+      {account}
     </header>
     <section aria-labelledby="catalog-title" aria-busy={loading}>
       <div className="section-heading">
@@ -63,7 +66,7 @@ export function CatalogPage({ search, navigate }: { search: string; navigate: (h
       </div>
       {loading ? <><Loading /><div className="pagination-slot" /></>
         : state.status === "error" ? <><RequestError error={state.error} retry={retry} /><div className="pagination-slot" /></> : <>
-        {state.data.items.length > 0 ? <CatalogGrid items={state.data.items} /> :
+        {state.data.items.length > 0 ? <CatalogGrid items={state.data.items.filter((item) => authenticated || !item.is_private)} /> :
           <div className="empty-state"><strong>没有找到匹配内容</strong><p>换个名称，或切换内容类型再试试。</p></div>}
         <div className="pagination-slot">
           {(state.data.total > state.data.size || page > 1) && <CatalogPagination page={page}

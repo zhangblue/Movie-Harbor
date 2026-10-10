@@ -44,7 +44,10 @@ export function catalog(items: CatalogCard[], total = items.length, page = 1) {
 }
 // Only the network boundary is replaced; shared request encoding and error handling run unchanged.
 export function serve(handler: (url: URL) => Response | Promise<Response>) {
-  vi.stubGlobal("fetch", (input: string) => handler(new URL(input, "http://localhost")));
+  vi.stubGlobal("fetch", (input: string) => {
+    const url = new URL(input, "http://localhost");
+    return url.pathname === "/api/viewer/session" ? json({ error: "未登录" }, 401) : handler(url);
+  });
 }
 export function deferred<T>() {
   let resolve!: (value: T) => void;

@@ -15,9 +15,8 @@ export function VideoPlayer({ contentKey, src, title }: {
   );
   const [playbackState, setPlaybackState] = useState<"checking" | "ready" | "error">("checking");
 
-  const persist = () => {
+  const persist = (video = videoRef.current) => {
     if (!canPersist.current) return;
-    const video = videoRef.current;
     if (!video) return;
     saveProgress(contentKey, video.currentTime, video.duration);
     lastSavedAt.current = Date.now();
@@ -29,15 +28,21 @@ export function VideoPlayer({ contentKey, src, title }: {
   };
 
   useEffect(() => {
+    const video = videoRef.current;
+    // Restore the source when React replays the Effect during development.
+    if (video && video.getAttribute("src") !== src) video.setAttribute("src", src);
     const flush = () => persist();
     window.addEventListener("pagehide", flush);
     window.addEventListener("beforeunload", flush);
     return () => {
       window.removeEventListener("pagehide", flush);
       window.removeEventListener("beforeunload", flush);
-      persist();
+      persist(video);
+      video?.pause();
+      video?.removeAttribute("src");
+      video?.load();
     };
-  }, [contentKey]);
+  }, [contentKey, src]);
 
   const chooseStart = () => {
     canPersist.current = true;
@@ -69,7 +74,7 @@ export function VideoPlayer({ contentKey, src, title }: {
       onTimeUpdate={() => {
         if (Date.now() - lastSavedAt.current >= 5_000) persist();
       }}
-      onPause={persist}
+      onPause={() => persist()}
       onEnded={() => clearProgress(contentKey)}
       onCanPlay={() => setPlaybackState("ready")}
       onError={() => setPlaybackState("error")}
