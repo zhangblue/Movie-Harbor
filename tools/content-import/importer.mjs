@@ -92,12 +92,12 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
       }
       throw error;
     }
-    if (target.status !== "draft" || target.version !== state.version || target.name !== name) {
+    if (target.status !== "draft" || target.version !== state.version || target.name !== name || target.is_private !== movie.isPrivate) {
       throw new ImportRequestError(`resume target changed: ${name}`, { status: 409 });
     }
     if (state.completed) return "already";
   } else {
-    const created = await client.json("POST", "/api/admin/movies", { name });
+    const created = await client.json("POST", "/api/admin/movies", { name, is_private: movie.isPrivate });
     state = { id: created.id, version: created.version };
     setOwnEntry(progress.state.movies, name, state);
     await progress.save();
@@ -141,8 +141,8 @@ function saveEpisodeStep(progress, seriesName, seasonNumber, episodeNumber, seri
   return progress.save();
 }
 
-function validateSeriesResume(target, state, name) {
-  if (target.id !== state.id || target.status !== "draft" || target.version !== state.version || target.name !== name) {
+function validateSeriesResume(target, state, name, isPrivate) {
+  if (target.id !== state.id || target.status !== "draft" || target.version !== state.version || target.name !== name || target.is_private !== isPrivate) {
     throw new ImportRequestError(`resume target changed: ${name}`, { status: 409 });
   }
   for (const [seasonNumber, savedSeason] of Object.entries(state.seasons ?? {})) {
@@ -174,10 +174,10 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
       }
       throw error;
     }
-    validateSeriesResume(target, state, name);
+    validateSeriesResume(target, state, name, series.isPrivate);
     if (state.completed) return "already";
   } else {
-    const created = await client.json("POST", "/api/admin/series", { name });
+    const created = await client.json("POST", "/api/admin/series", { name, is_private: series.isPrivate });
     state = { id: created.id, version: created.version };
     setOwnEntry(progress.state.series, name, state);
     await progress.save();

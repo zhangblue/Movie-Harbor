@@ -10,20 +10,20 @@ import { openProgressStore } from "../tools/content-import/progress.mjs";
 const identity = { exportedAt: "2026-09-24T00:00:00Z", sha256: "a".repeat(64) };
 const timestamp = "2026-09-24T00:00:00Z";
 const source = (movies = [], series = []) => ({ identity, movies, series });
-const movie = (name, overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, durationSeconds: 100, genres: [], poster: null, video: null, ...overrides });
-const series = (name, episodes = [], overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, genres: [], poster: null, episodes, ...overrides });
+const movie = (name, overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, durationSeconds: 100, genres: [], poster: null, video: null, isPrivate: false, ...overrides });
+const series = (name, episodes = [], overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, genres: [], poster: null, episodes, isPrivate: false, ...overrides });
 const episode = (seasonNumber, episodeNumber, overrides = {}) => ({ seasonNumber, episodeNumber, name: `Episode ${episodeNumber}`, durationSeconds: 45, video: null, ...overrides });
 const genre = (name, id, enabled = true) => ({ id, name, sort_order: 10, enabled });
 const listItem = (name, kind, id = `${kind}-${name}`) => ({ id, kind, name, status: "draft", version: 1, created_at: timestamp, poster_url: null });
 const media = (id, slot) => ({ id: `${id}-${slot}`, url: `/media/${id}-${slot}`, local_path: `/media/${id}-${slot}`,
   original_name: `${slot}.${slot === "poster" ? "png" : "mp4"}`, mime_type: slot === "poster" ? "image/png" : "video/mp4", byte_size: 8 });
 function movieResponse(name, id, version = 1, fields = {}) {
-  return { id, name, synopsis: "", year: null, duration_seconds: null, status: "draft", version,
+  return { id, name, synopsis: "", year: null, duration_seconds: null, is_private: false, status: "draft", version,
     published_at: null, archived_at: null, created_at: timestamp, updated_at: timestamp,
     genres: [], poster: null, video: null, ...fields };
 }
 function seriesResponse(name, id, version = 1, fields = {}) {
-  return { id, name, synopsis: "", year: null, status: "draft", version,
+  return { id, name, synopsis: "", year: null, is_private: false, status: "draft", version,
     published_at: null, archived_at: null, created_at: timestamp, updated_at: timestamp,
     genres: [], poster: null, seasons: [], ...fields };
 }
@@ -54,7 +54,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
         return { page, size: 20, total: all.length, items: all.slice((page - 1) * 20, page * 20) };
       }
       if (method === "POST" && path === "/api/admin/movies") {
-        const created = movieResponse(body.name, `new-movie-${next++}`);
+        const created = movieResponse(body.name, `new-movie-${next++}`, 1, { is_private: body.is_private });
         records.set(created.id, created);
         return { ...created };
       }
@@ -76,7 +76,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
         return { ...updated };
       }
       if (method === "POST" && path === "/api/admin/series") {
-        const created = seriesResponse(body.name, `new-series-${next++}`);
+        const created = seriesResponse(body.name, `new-series-${next++}`, 1, { is_private: body.is_private });
         records.set(created.id, created);
         return snapshot(created);
       }
@@ -184,7 +184,7 @@ test("reuses enabled genres, creates missing genres, and skips only same-kind co
   const result = await importContent({ source: source([movie("Existing", { genres: ["剧情"] }), movie("New", { genres: ["自定义"] })]), client, progress, logger });
   assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/genres").map((call) => call.body), [{ name: "自定义" }]);
   assert.deepEqual(result.skipped, [{ kind: "movie", name: "Existing" }]);
-  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").map((call) => call.body), [{ name: "New" }]);
+  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").map((call) => call.body), [{ name: "New", is_private: false }]);
   assert.deepEqual(client.calls.filter((call) => call.path.startsWith("/api/admin/contents?")).map((call) => call.path), ["/api/admin/contents?kind=movie&page=1", "/api/admin/contents?kind=series&page=1"]);
   assert.equal(progress.state.genres["剧情"], "genre-drama");
   assert.equal(progress.state.genres["自定义"], "genre-1");
@@ -305,6 +305,27 @@ test("a completed checkpoint still reports a deleted target and continues", asyn
   assert.equal(client.calls.filter((call) => call.method === "GET" && call.path === "/api/admin/movies/gone-id").length, 1);
 });
 
+test("preserves private state on create and rejects privacy changes during resume", async (t) => {
+  const { progress, logger } = await setup(t);
+  const input = source([movie("Private film", { isPrivate: true })], [series("Private show", [], { isPrivate: true })]);
+  const client = fakeClient();
+  await importContent({ source: input, client, progress, logger });
+  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && ["/api/admin/movies", "/api/admin/series"].includes(call.path))
+    .map((call) => call.body), [
+    { name: "Private film", is_private: true },
+    { name: "Private show", is_private: true },
+  ]);
+
+  for (const target of client.records.values()) target.is_private = false;
+  const priorWrites = client.calls.filter((call) => ["POST", "PATCH", "UPLOAD"].includes(call.method)).length;
+  const result = await importContent({ source: input, client, progress, logger });
+  assert.deepEqual(result.failed.map(({ kind, name, error }) => [kind, name, error]), [
+    ["movie", "Private film", "resume target changed: Private film"],
+    ["series", "Private show", "resume target changed: Private show"],
+  ]);
+  assert.equal(client.calls.filter((call) => ["POST", "PATCH", "UPLOAD"].includes(call.method)).length, priorWrites);
+});
+
 test("auth failure stops immediately and does not persist an incomplete genre", async (t) => {
   const { path, progress, logger } = await setup(t);
   const client = fakeClient({ failure({ method, path }) {
@@ -362,7 +383,9 @@ test("constructor and toString movie names create own checkpoints and resume wit
   assert.equal(saved.movies.toString.completed, true);
   assert.equal(Object.getPrototypeOf(progress.state.movies), Object.prototype);
   await importContent({ source: input, client, progress, logger });
-  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").map((call) => call.body), [{ name: "constructor" }, { name: "toString" }]);
+  assert.deepEqual(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").map((call) => call.body), [
+    { name: "constructor", is_private: false }, { name: "toString", is_private: false },
+  ]);
   assert.deepEqual(client.calls.filter((call) => call.method === "GET" && call.path.startsWith("/api/admin/movies/")).map((call) => call.path), [
     "/api/admin/movies/new-movie-1", "/api/admin/movies/new-movie-1", "/api/admin/movies/new-movie-2",
   ]);
@@ -378,7 +401,7 @@ test("series imports sorted seasons and episodes with returned parent and child 
   assert.deepEqual(result.completed, [{ kind: "series", name: "Show" }]);
   assert.deepEqual(client.calls.filter((call) => ["POST", "PATCH", "UPLOAD"].includes(call.method) && call.path !== "/api/admin/genres")
     .map(({ method, path, body }) => [method, path, body]), [
-    ["POST", "/api/admin/series", { name: "Show" }],
+    ["POST", "/api/admin/series", { name: "Show", is_private: false }],
     ["PATCH", "/api/admin/series/new-series-1", { version: 1, name: "Show", synopsis: "Show synopsis", year: 2024, genre_ids: [] }],
     ["UPLOAD", "/api/admin/media/series/new-series-1/poster?version=2", undefined],
     ["POST", "/api/admin/series/new-series-1/seasons", { version: 3, number: 1 }],

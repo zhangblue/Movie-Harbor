@@ -22,6 +22,12 @@ function string(source, name, context, nonblank = false) {
   return value;
 }
 
+function optionalBoolean(source, name, context, fallback = false) {
+  if (!Object.hasOwn(source, name)) return fallback;
+  if (typeof source[name] !== "boolean") throw new Error(`${context}.${name} must be a boolean`);
+  return source[name];
+}
+
 function nullableInteger(source, name, context, minimum = -2147483648) {
   const value = field(source, name, context);
   if (value !== null && (!Number.isInteger(value) || value < minimum || value > 2147483647)) {
@@ -76,6 +82,7 @@ async function parseMovies(source, mediaRoot) {
     names.add(name);
     result.push({
       name,
+      isPrivate: optionalBoolean(item, "is_private", context),
       synopsis: string(item, "synopsis", context),
       year: nullableInteger(item, "year", context),
       genres: stringArray(item, "genres", context),
@@ -118,6 +125,7 @@ async function parseSeries(source, mediaRoot) {
     }
     result.push({
       name,
+      isPrivate: optionalBoolean(item, "is_private", context),
       synopsis: string(item, "synopsis", context),
       year: nullableInteger(item, "year", context),
       genres: stringArray(item, "genres", context),

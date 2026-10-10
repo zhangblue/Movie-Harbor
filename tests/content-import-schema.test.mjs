@@ -58,9 +58,37 @@ test("loads valid export and resolves controlled media", async (t) => {
   assert.equal(loaded.movies[0].video.localPath, await realpath(fixture.videoPath));
   assert.equal(loaded.movies[0].video.byteSize, 5);
   assert.equal(loaded.movies[0].name, "Movie");
+  assert.equal(loaded.movies[0].isPrivate, false);
   assert.equal(loaded.movies[0].durationSeconds, 90);
+  assert.equal(loaded.series[0].isPrivate, false);
   assert.equal(loaded.series[0].episodes[0].seasonNumber, 2);
   assert.equal(loaded.series[0].episodes[0].episodeNumber, 3);
+  assert.equal(Object.hasOwn(loaded.series[0].episodes[0], "isPrivate"), false);
+});
+
+test("loads movie and series privacy booleans while rejecting non-booleans", async (t) => {
+  const fixture = await exportFixture(t, {
+    movies: [{ ...movie(), is_private: true }],
+    series: [{ ...series("Series", [episode()]), is_private: false }],
+  });
+  let loaded = await loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot);
+  assert.equal(loaded.movies[0].isPrivate, true);
+  assert.equal(loaded.series[0].isPrivate, false);
+
+  for (const invalid of ["true", null, 1]) {
+    for (const kind of ["movies", "series"]) {
+      const value = structuredClone(fixture.exported);
+      value[kind][0].is_private = invalid;
+      await writeFile(fixture.jsonPath, JSON.stringify(value));
+      await assert.rejects(loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot), /is_private must be a boolean/);
+    }
+  }
+
+  const value = structuredClone(fixture.exported);
+  value.series[0].episodes[0].is_private = true;
+  await writeFile(fixture.jsonPath, JSON.stringify(value));
+  loaded = await loadAndValidateExport(fixture.jsonPath, fixture.mediaRoot);
+  assert.equal(Object.hasOwn(loaded.series[0].episodes[0], "isPrivate"), false);
 });
 
 test("rejects duplicate names within each content type", async (t) => {
