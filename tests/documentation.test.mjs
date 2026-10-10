@@ -84,3 +84,23 @@ test("AGENTS delegates Ubuntu deployment details to the project skill", () => {
     "superseded AGENTS deployment plan still exists",
   );
 });
+
+test("AGENTS scopes project process rules to the actual change", () => {
+  const agents = readFileSync(agentsPath, "utf8");
+
+  assert.match(agents, /修改产品行为、接口、数据结构、媒体生命周期或部署机制前/);
+  assert.match(agents, /纯文档、格式、注释、已有流程执行和只读审阅/);
+  assert.match(agents, /用户本次明确要求[\s\S]*最新且已确认的增量规格[\s\S]*主规格/);
+  assert.match(agents, /当前实现只作为现状证据，不自动覆盖规格/);
+  assert.match(agents, /当任务已有经用户确认的实现计划时/);
+  assert.match(agents, /文档、Skill、静态配置和一次性运维规则/);
+  assert.match(agents, /不需要为跳过无关检查向用户确认/);
+  assert.match(agents, /只执行已发布且已验证的部署包/);
+});
+
+test("AGENTS distinguishes disaster recovery from deployment safety backup", () => {
+  const agents = readFileSync(agentsPath, "utf8");
+  assert.match(agents, /完整灾难恢复[\s\S]*数据库和媒体作为同一一致性备份集/);
+  assert.match(agents, /仅升级应用且保证媒体目录不变[\s\S]*只创建数据库和部署文件安全备份/);
+  assert.match(agents, /迁移前置条件要求媒体一致备份[\s\S]*取得媒体备份明确授权/);
+});

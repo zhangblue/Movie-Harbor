@@ -2,12 +2,12 @@
 
 ## 当前阶段
 
-项目已完成需求设计、UI Demo、生产应用、Docker Compose 部署、半离线发布工具、管理与公开内容分页，以及前后端公共函数整理。任何变更前都必须先阅读主设计与主实现计划：
+项目已完成需求设计、UI Demo、生产应用、Docker Compose 部署、半离线发布工具、管理与公开内容分页，以及前后端公共函数整理。修改产品行为、接口、数据结构、媒体生命周期或部署机制前，必须先阅读主设计与主实现计划：
 
 - `docs/superpowers/specs/2026-09-11-self-hosted-media-library-design.md`
 - `docs/superpowers/plans/2026-09-11-self-hosted-media-library-implementation.md`
 
-然后按变更领域阅读对应的增量设计与实现计划：
+然后按变更领域阅读与本次变更直接相关的最新增量设计与实现计划，不要求读取该分类下所有历史文件。纯文档、格式、注释、已有流程执行和只读审阅只读取直接相关资料。以下索引用于按需选择：
 
 ### 内容与界面
 
@@ -49,7 +49,7 @@
 - `docs/superpowers/specs/2026-09-15-common-function-extraction-design.md`
 - `docs/superpowers/plans/2026-09-15-common-function-extraction.md`
 
-当前实现与日期较新的增量规格覆盖主规格中的旧约定，发生冲突时以当前实现与日期较新的增量规格为准。
+需求冲突按以下优先级处理：用户本次明确要求、同领域最新且已确认的增量规格、主规格。当前实现只作为现状证据，不自动覆盖规格。能够按上述优先级消解的冲突直接处理并说明依据；只有无法按优先级消解，且会实质改变结果、数据安全或任务范围的冲突才询问用户。
 
 `demo/` 是已通过用户审核的视觉与交互参考。实现生产页面时应保持其信息层级、深色主题、紧凑表单和操作按钮布局，但不要把 Demo 的原生 DOM 代码直接当作生产架构。
 
@@ -62,7 +62,9 @@
 - 异步运行时与异步文件操作：Tokio。
 - 部署：Docker Compose；同一域名下暴露 `/`、`/admin`、`/api` 和 `/media`。
 
-使用库、框架、SDK、API 或 CLI 前，必须先通过 Context7 查询当前官方文档。优先采用稳定版本，除非任务明确要求预览版或候选版本。
+回答库、框架、SDK、API、CLI 或云服务的用法问题，以及选择、修改或排查其 API/CLI 参数、配置和版本差异时，必须先通过 Context7 查询当前官方文档。优先采用稳定版本，除非任务明确要求预览版或候选版本。
+
+执行仓库已经固定且验证过的命令、运行现有测试脚本，以及普通 `git status`、`git diff`、`git add`、`git commit` 等仓库操作，不要求重复查询 Context7。这只减少资料查询，不扩大文件、网络或外部系统权限。
 
 ## 实际目录边界
 
@@ -114,7 +116,9 @@
 
 - `DATABASE_HOST_DIR` 默认 `./data/postgres`，映射 PostgreSQL 的 `/var/lib/postgresql/data`。
 - `MEDIA_HOST_DIR` 默认 `./data/media`，同时映射 API 的 `/media` 和 Caddy 的只读 `/srv/media`。
-- 数据库与媒体目录必须作为同一一致性备份集；从既有命名卷部署切换到 bind mount 不会自动迁移数据。
+- 完整灾难恢复，以及任何可能同时改变数据库与媒体的操作，必须把数据库和媒体作为同一一致性备份集。
+- 仅升级应用且保证媒体目录不变时，可以只创建数据库和部署文件安全备份，但不得称为完整灾备。如果迁移前置条件要求媒体一致备份，则必须暂停并取得媒体备份明确授权。
+- 从既有命名卷部署切换到 bind mount 不会自动迁移数据。
 
 ## 半离线发布边界
 
@@ -127,8 +131,8 @@
 
 ## 开发工作流
 
-- 按实现计划中的任务顺序推进，每个任务形成可独立测试和审查的交付物。
-- 新功能、修复和行为变更必须先编写失败测试，确认失败原因后再实现最少代码。
+- 当任务已有经用户确认的实现计划时，按计划中的任务顺序推进，每个任务形成可独立测试和审查的交付物。诊断、审阅和小型维护任务可以直接执行；改变多个组件或引入新的产品行为时，仍先完成设计和计划。
+- 可执行代码的新功能、修复和行为变更必须先编写失败测试，确认失败原因后再实现最少代码。文档、Skill、静态配置和一次性运维规则采用与风险相符的契约测试、链接校验、schema 校验、构建或聚焦检查，不为满足形式要求编写无意义测试。
 - 后端路由测试优先使用 `Router::oneshot`；事务、迁移和约束测试使用真实 PostgreSQL。
 - 文件上传必须使用 Tokio 流式写入临时文件，校验成功后原子替换，禁止把大视频完整载入内存。
 - 状态转换和删除约束必须在后端执行，不能只依赖前端隐藏按钮。
@@ -139,18 +143,17 @@
 
 ## 完成前验证
 
-根据变更范围执行以下命令的相关子集；只有运行并读取整组命令的最新输出后，才能声称完整交付通过：
+按实际变更范围运行足以验证本次工作的检查。无关检查不需要执行，也不需要为跳过无关检查向用户确认。只有实际运行并读取最新输出的检查才能报告为通过，不得将未运行的检查计入通过范围。
 
-```bash
-docker compose -f docker-compose.test.yml up -d postgres
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test' cargo test --workspace
-npm test --workspaces
-npm run build --workspaces
-node --test tests/*.test.mjs tests/e2e/run-safety.test.mjs
-npm run test:e2e
-git diff --check
-```
+| 变更类型 | 必须执行的相关验证 |
+| --- | --- |
+| Rust 代码或迁移 | `cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets -- -D warnings` 与相关 Rust 测试；涉及数据库约束、事务或迁移时使用真实 PostgreSQL。 |
+| 前端代码 | 受影响 workspace 的测试与构建；覆盖全部 workspace 时使用 `npm test --workspaces` 和 `npm run build --workspaces`。 |
+| 根工具或契约 | 相关 Node 测试；覆盖根契约和 E2E runner 安全规则时使用 `node --test tests/*.test.mjs tests/e2e/run-safety.test.mjs`。 |
+| 修改跨服务代码、部署配置或发布工具 | 隔离的 Docker Compose 与 Playwright E2E：`npm run test:e2e`。 |
+| 只执行已发布且已验证的部署包 | 使用项目部署 Skill 的生产验收，不要求重新运行本地构建与 E2E。 |
+| 仅文档或 Skill | 相关文档契约（例如 `node --test tests/documentation.test.mjs`）、链接校验、适用的 Skill 校验和 `git diff --check`。 |
 
-涉及跨服务流程或部署时，还必须运行 Docker Compose 和 Playwright 端到端测试。E2E runner 自行创建隔离的 Compose 项目和数据目录，不得改用生产默认的 `data/postgres` 或 `data/media`。不在文档中加入固定的数据库测试服务强制清理命令，以免误伤并行任务。
+所有变更提交前均执行 `git diff --check`。Rust 数据库测试可用 `docker compose -f docker-compose.test.yml up -d postgres` 启动测试服务，再用 `TEST_DATABASE_URL='postgresql://postgres:postgres@127.0.0.1:55432/movie_harbor_test' cargo test --workspace` 执行相关测试；可按变更范围聚焦测试目标。
+
+E2E runner 自行创建隔离的 Compose 项目和数据目录，不得改用生产默认的 `data/postgres` 或 `data/media`。不在文档中加入固定的数据库测试服务强制清理命令，以免误伤并行任务。
