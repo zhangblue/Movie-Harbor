@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from "react";
-import { ApiError, viewerLogin } from "@movie-harbor/api-client";
+import { ApiError, viewerLogin, type ViewerSessionResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 
-export function ViewerLoginDialog({ onClose, onLogin }: { onClose: () => void; onLogin: (username: string) => void }) {
+export function ViewerLoginDialog({ onClose, onLogin }: { onClose: () => void; onLogin: (session: ViewerSessionResponse) => boolean }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
@@ -11,7 +11,7 @@ export function ViewerLoginDialog({ onClose, onLogin }: { onClose: () => void; o
     event.preventDefault();
     if (pending) return;
     setPending(true); setError("");
-    try { const result = await viewerLogin({ username, password }); onLogin(result.username); }
+    try { await viewerLogin({ username, password }, onLogin); }
     catch (cause) {
       setError(cause instanceof ApiError && [400, 401].includes(cause.status)
         ? "用户名或密码错误" : "登录失败，请稍后重试。");

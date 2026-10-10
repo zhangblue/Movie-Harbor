@@ -5,18 +5,19 @@ import { SeriesDetails } from "../details/SeriesDetails";
 import { NotFound } from "./RequestState";
 import { Brand } from "./Brand";
 import { MoviePlayerPage, SeriesPlayerPage } from "../player/PlayerPage";
-import { ApiError, clearCsrfToken, getViewerSession, viewerLogout } from "@movie-harbor/api-client";
+import { ApiError, clearCsrfToken, getViewerSession, viewerLogout, type ViewerSessionResponse } from "@movie-harbor/api-client";
 import { ViewerContext } from "../auth/ViewerContext";
 import { ViewerLoginDialog } from "../auth/ViewerLoginDialog";
 import { ViewerPasswordDialog } from "../auth/ViewerPasswordDialog";
 
 const currentLocation = () => window.location.pathname + window.location.search;
 const contentPath = (path: string) => /^\/(movies|series)\/[^/]+/.exec(path)?.[0];
+type ViewerState = { status: "loading" | "anonymous" | "authenticated" | "error"; username?: string };
 
 export function App() {
   const [location, setLocation] = useState(currentLocation);
   const mainRef = useRef<HTMLElement>(null);
-  const [viewer, setViewer] = useState<{ status: "loading" | "anonymous" | "authenticated" | "error"; username?: string }>({ status: "loading" });
+  const [viewer, setViewer] = useState<ViewerState>({ status: "loading" });
   const [revision, setRevision] = useState(0);
   const [dialog, setDialog] = useState<"login" | "password">();
   const [message, setMessage] = useState("");
@@ -24,7 +25,6 @@ export function App() {
   const identity = useRef(0);
   const privateContent = useRef(false);
   const viewerRef = useRef(viewer);
-  viewerRef.current = viewer;
   const validation = useRef<Promise<boolean> | undefined>(undefined);
   const url = new URL(location, window.location.origin);
   const detailsMatch = /^\/(movies|series)\/([^/]+)\/?$/.exec(url.pathname);
@@ -56,54 +56,56 @@ export function App() {
     else window.history.pushState(null, "", href);
     setLocation(currentLocation());
   }, []);
-  const becomeAnonymous = useCallback((notice = "") => {
+  const transitionViewer = useCallback((next: ViewerState, notice = "") => {
+    const wasAuthenticated = viewerRef.current.status === "authenticated";
+    const refreshContent = wasAuthenticated || next.status === "authenticated";
+    const closePrivateContent = wasAuthenticated && privateContent.current;
     identity.current += 1;
     validation.current = undefined;
     clearCsrfToken();
-    viewerRef.current = { status: "anonymous" };
+    viewerRef.current = next;
     setViewer(viewerRef.current);
     setDialog(undefined); setMessage(notice);
-    setRevision((value) => value + 1);
-    if (privateContent.current) navigate("/", true);
-    privateContent.current = false;
+    if (refreshContent) setRevision((value) => value + 1);
+    if (closePrivateContent) navigate("/", true);
+    if (closePrivateContent || next.status !== "authenticated") privateContent.current = false;
   }, [navigate]);
+  const becomeAnonymous = useCallback((notice = "") => transitionViewer({ status: "anonymous" }, notice), [transitionViewer]);
+  const acceptSession = useCallback((session: ViewerSessionResponse, generation: number) => {
+    if (generation !== identity.current) return false;
+    if (viewerRef.current.status !== "authenticated" || viewerRef.current.username !== session.username) {
+      transitionViewer({ status: "authenticated", username: session.username });
+    } else setMessage("");
+    return true;
+  }, [transitionViewer]);
   const expire = useCallback(() => becomeAnonymous("登录已失效，请重新登录。"), [becomeAnonymous]);
   const recordScope = useCallback((isPrivate: boolean) => { privateContent.current = isPrivate; }, []);
   const validate = useCallback(() => {
     if (viewerRef.current.status !== "authenticated") return Promise.resolve(true);
     if (validation.current) return validation.current;
     const startedAt = identity.current;
-    const request = getViewerSession().then(() => {
-      if (startedAt !== identity.current) {
-        if (viewerRef.current.status !== "authenticated") clearCsrfToken();
-        return false;
-      }
-      setMessage("");
-      return true;
-    }, (cause: unknown) => {
-      if (startedAt !== identity.current) return false;
-      if (cause instanceof ApiError && cause.status === 401) { expire(); return false; }
-      setMessage("暂时无法确认登录状态，请稍后重试。");
-      return true;
-    }).finally(() => { if (validation.current === request) validation.current = undefined; });
+    const request = getViewerSession((session) => acceptSession(session, startedAt)).then(
+      () => startedAt === identity.current,
+      (cause: unknown) => {
+        if (startedAt !== identity.current) return false;
+        if (cause instanceof ApiError && cause.status === 401) { expire(); return false; }
+        setMessage("暂时无法确认登录状态，请稍后重试。");
+        return true;
+      },
+    ).finally(() => { if (validation.current === request) validation.current = undefined; });
     validation.current = request;
     return request;
-  }, [expire]);
+  }, [acceptSession, expire]);
   useEffect(() => {
     let ignore = false;
     const startedAt = identity.current;
-    getViewerSession().then((session) => {
+    getViewerSession((session) => !ignore && acceptSession(session, startedAt)).catch((cause: unknown) => {
       if (ignore || startedAt !== identity.current) return;
-      setViewer({ status: "authenticated", username: session.username });
-      setRevision((value) => value + 1);
-    }, (cause: unknown) => {
-      if (ignore || startedAt !== identity.current) return;
-      clearCsrfToken();
-      if (cause instanceof ApiError && cause.status === 401) setViewer({ status: "anonymous" });
-      else { setViewer({ status: "error" }); setMessage("暂时无法确认登录状态，请稍后重试。"); }
+      if (cause instanceof ApiError && cause.status === 401) transitionViewer({ status: "anonymous" });
+      else transitionViewer({ status: "error" }, "暂时无法确认登录状态，请稍后重试。");
     });
     return () => { ignore = true; };
-  }, []);
+  }, [acceptSession, transitionViewer]);
   useEffect(() => {
     const onFocus = () => { void validate(); };
     const onVisible = () => { if (document.visibilityState === "visible") void validate(); };
@@ -139,6 +141,7 @@ export function App() {
     navigate(target.pathname + target.search);
   }
 
+  const loginGeneration = identity.current;
   return (
     <ViewerContext.Provider value={{ revision, authenticated, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
     <main className="site-shell" ref={mainRef} tabIndex={-1} onClick={followLink} onErrorCapture={() => { void validate(); }}>
@@ -155,14 +158,7 @@ export function App() {
         </>
       )}
     </main>
-    {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(username) => {
-      identity.current += 1; validation.current = undefined;
-      viewerRef.current = { status: "authenticated", username };
-      setViewer(viewerRef.current); setMessage(""); setDialog(undefined);
-      setRevision((value) => value + 1);
-      if (privateContent.current) navigate("/", true);
-      privateContent.current = false;
-    }} />}
+    {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
     {dialog === "password" && <ViewerPasswordDialog onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}
     </ViewerContext.Provider>
   );

@@ -292,6 +292,17 @@ it("restores viewer session and clears CSRF after successful self password chang
   expect(requests[2]?.csrf).toBeNull();
 });
 
+it("does not overwrite current CSRF when a viewer session is rejected by its identity owner", async () => {
+  setCsrfToken("winter-csrf");
+  const requests = recordRequests([
+    jsonResponse({ username: "Summer", csrf_token: "summer-csrf" }),
+    new Response(null, { status: 204 }),
+  ]);
+  await client.getViewerSession(() => false);
+  await apiRequest("/api/viewer/password", { method: "PATCH" });
+  expect(requests[1]?.csrf).toBe("winter-csrf");
+});
+
 it("preserves viewer CSRF when a self password change is rejected", async () => {
   const requests = recordRequests([
     jsonResponse({ username: "Summer", csrf_token: "still-valid" }),

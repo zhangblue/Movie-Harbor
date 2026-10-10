@@ -13,7 +13,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearCsrfToken(); window.history.replaceState(null, "", "/"); });
 
 function server(initial = false) {
-  const state = { authenticated: initial, sessionNetworkError: false, loginStatus: 200, passwordStatus: 204, logoutStatus: 204,
+  const state = { authenticated: initial, username: "Summer", csrfToken: "viewer-csrf", sessionNetworkError: false, loginStatus: 200, passwordStatus: 204, logoutStatus: 204,
     requests: [] as Array<{ url: URL; init?: RequestInit }>, catalogResponse: undefined as Promise<Response> | undefined,
     sessionResponse: undefined as Promise<Response> | undefined };
   vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
@@ -22,19 +22,21 @@ function server(initial = false) {
     if (url.pathname === "/api/viewer/session") {
       if (state.sessionResponse) return state.sessionResponse;
       if (state.sessionNetworkError) throw new TypeError("network unavailable");
-      return state.authenticated ? json({ username: "Summer", csrf_token: "viewer-csrf" }) : json({ error: "未登录" }, 401);
+      return state.authenticated ? json({ username: state.username, csrf_token: state.csrfToken }) : json({ error: "未登录" }, 401);
     }
     if (url.pathname === "/api/viewer/login") {
       if (state.loginStatus !== 200) return json({ error: "account missing internal details" }, state.loginStatus);
       state.authenticated = true;
-      return json({ username: "Summer" });
+      state.username = JSON.parse(String(init?.body)).username;
+      return json({ username: state.username });
     }
     if (url.pathname === "/api/viewer/logout") {
-      if (new Headers(init?.headers).get("x-csrf-token") !== "viewer-csrf") return json({}, 403);
+      if (new Headers(init?.headers).get("x-csrf-token") !== state.csrfToken) return json({}, 403);
       if (state.logoutStatus !== 204) return json({}, state.logoutStatus);
       state.authenticated = false; return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/viewer/password") {
+      if (new Headers(init?.headers).get("x-csrf-token") !== state.csrfToken) return json({}, 403);
       if (state.passwordStatus !== 204) return json({ error: "当前密码不正确" }, state.passwordStatus);
       state.authenticated = false;
       return new Response(null, { status: 204 });
@@ -50,11 +52,11 @@ function server(initial = false) {
   return state;
 }
 
-async function login() {
+async function login(username = "Summer") {
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "登录" }));
   const dialog = screen.getByRole("dialog", { name: "登录" });
-  await user.type(within(dialog).getByLabelText("用户名"), "Summer");
+  await user.type(within(dialog).getByLabelText("用户名"), username);
   await user.type(within(dialog).getByLabelText("密码", { exact: true }), "old-password");
   await user.click(within(dialog).getByRole("button", { name: "登录" }));
   return user;
@@ -253,4 +255,48 @@ it("detects a revoked viewer session when a private poster fails", async () => {
   state.authenticated = false; fireEvent.error(poster);
   expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
   expect(location.pathname).toBe("/");
+});
+
+it.each(["/", "/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
+  "accepts a different viewer from another tab and clears the previous private view at %s", async (path) => {
+    window.history.replaceState(null, "", path);
+    const state = server(true); render(<App />); await screen.findByText("Summer");
+    if (path === "/") await screen.findByText("私密");
+    else await screen.findByRole("heading", { level: 1 });
+    const previousVideo = screen.queryByTestId("native-video");
+    const catalogRequests = state.requests.filter(({ url }) => url.pathname === "/api/catalog").length;
+    state.username = "Winter"; state.csrfToken = "winter-csrf";
+    act(() => window.dispatchEvent(new Event("focus")));
+    expect(await screen.findByText("Winter")).toBeInTheDocument();
+    expect(screen.queryByText("Summer")).not.toBeInTheDocument();
+    expect(location.pathname).toBe("/");
+    expect(screen.queryByTestId("native-video")).not.toBeInTheDocument();
+    if (previousVideo) expect(previousVideo).not.toHaveAttribute("src");
+    await screen.findByRole("link", { name: "查看群星之间详情" });
+    expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").length).toBeGreaterThan(catalogRequests);
+  },
+);
+
+it("does not let a previous viewer session response replace the new viewer's CSRF after password change and login", async () => {
+  const state = server(true); state.csrfToken = "summer-csrf";
+  const user = userEvent.setup(); render(<App />); await screen.findByText("Summer"); await screen.findByText("私密");
+  const old = deferred<Response>(); state.sessionResponse = old.promise;
+  act(() => window.dispatchEvent(new Event("focus")));
+  state.sessionResponse = undefined;
+  async function changePassword() {
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    const dialog = screen.getByRole("dialog", { name: "修改密码" });
+    await user.type(within(dialog).getByLabelText("当前密码"), "old-password");
+    await user.type(within(dialog).getByLabelText("新密码"), "new-password");
+    await user.click(within(dialog).getByRole("button", { name: "保存新密码" }));
+  }
+  await changePassword(); await screen.findByRole("button", { name: "登录" });
+  state.csrfToken = "winter-csrf"; await login("Winter");
+  await screen.findByText("Winter"); await screen.findByText("私密");
+  await act(async () => old.resolve(json({ username: "Summer", csrf_token: "summer-csrf" })));
+  expect(screen.getByText("Winter")).toBeInTheDocument();
+  await changePassword();
+  const writes = state.requests.filter(({ url }) => url.pathname === "/api/viewer/password");
+  expect(new Headers(writes.at(-1)?.init?.headers).get("x-csrf-token")).toBe("winter-csrf");
+  expect(await screen.findByText("密码已修改，请重新登录")).toBeInTheDocument();
 });

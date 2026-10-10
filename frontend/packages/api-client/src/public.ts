@@ -3,15 +3,16 @@ import type { CatalogKind, CatalogPage, ChangePasswordRequest, MovieDetail, Seri
 
 export interface CatalogQuery { kind?: CatalogKind; q?: string; page?: number; size?: number }
 
-export async function viewerLogin(input: ViewerLoginRequest): Promise<ViewerLoginResponse> {
+export async function viewerLogin(input: ViewerLoginRequest, acceptSession?: (session: ViewerSessionResponse) => boolean): Promise<ViewerLoginResponse> {
   clearCsrfToken();
   const viewer = requiredResponse(await apiRequest<ViewerLoginResponse, ViewerLoginRequest>("/api/viewer/login", { method: "POST", json: input }));
-  await getViewerSession();
+  await getViewerSession(acceptSession);
   return viewer;
 }
-export async function getViewerSession(): Promise<ViewerSessionResponse> {
+export async function getViewerSession(acceptSession: (session: ViewerSessionResponse) => boolean = () => true): Promise<ViewerSessionResponse> {
   const session = requiredResponse(await apiRequest<ViewerSessionResponse>("/api/viewer/session"));
-  setCsrfToken(session.csrf_token);
+  // The identity owner must accept a response before it can replace the current CSRF token.
+  if (acceptSession(session)) setCsrfToken(session.csrf_token);
   return session;
 }
 export async function viewerLogout(): Promise<void> {
