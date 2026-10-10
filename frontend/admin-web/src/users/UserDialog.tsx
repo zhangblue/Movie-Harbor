@@ -23,7 +23,7 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending.current || conflict) return;
-    if (!deleting && password.length < 8) { setError("密码至少需要 8 个字符。"); return; }
+    if (!deleting && (!password.trim() || Array.from(password).length < 8)) { setError("密码至少需要 8 个字符。"); return; }
     if (creating && !username.trim()) { setError("请输入用户名。"); return; }
     pending.current = true;
     setBusy(true);
@@ -47,7 +47,8 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
       } else if (cause instanceof ApiError && cause.status === 404) {
         setConflict(true);
         setError("用户已不存在，请重新加载列表。");
-      } else if (cause instanceof ApiError && cause.status === 422) setError(`输入不符合要求：${cause.message}`);
+      } else if (cause instanceof ApiError && cause.status === 400) setError(cause.message);
+      else if (cause instanceof ApiError && cause.status === 422) setError(`输入不符合要求：${cause.message}`);
       else setError("操作失败，请检查网络后重试。");
     } finally {
       pending.current = false;

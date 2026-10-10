@@ -172,6 +172,137 @@ fn assert_safe(user: &Value) {
     );
 }
 
+// Catches short ordinary-user passwords bypassing the frontend or being counted by UTF-8 bytes.
+#[tokio::test]
+async fn viewer_creation_requires_at_least_eight_password_characters() {
+    let (db, app, admin) = setup().await;
+    for password in ["1234567", "😀😀😀😀😀😀😀"] {
+        let response = admin_json(
+            &app,
+            "POST",
+            "/api/admin/users",
+            json!({"username":"short-user","password":password}),
+            &admin,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"密码至少需要 8 个字符。"})
+        );
+        assert!(
+            viewer_user::Entity::find()
+                .all(&*db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    for (username, password) in [
+        ("eight-ascii", "12345678"),
+        ("eight-unicode", "😀😀😀😀😀😀😀😀"),
+    ] {
+        let response = admin_json(
+            &app,
+            "POST",
+            "/api/admin/users",
+            json!({"username":username,"password":password}),
+            &admin,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(
+            login(
+                &app,
+                "/api/viewer/login",
+                json!({"username":username,"password":password})
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+}
+
+// Catches rejected password changes mutating a version or revoking sessions before validation.
+#[tokio::test]
+async fn admin_viewer_password_change_requires_at_least_eight_characters() {
+    let (db, app, admin) = setup().await;
+    let user = create(&app, &admin, "Summer").await;
+    let path = format!("/api/admin/users/{}/password", user["id"].as_str().unwrap());
+    let before = viewer_user::Entity::find()
+        .one(&*db)
+        .await
+        .unwrap()
+        .unwrap();
+    let logged_in = login(
+        &app,
+        "/api/viewer/login",
+        json!({"username":"Summer","password":"viewer-password"}),
+    )
+    .await;
+    assert_eq!(logged_in.status(), StatusCode::OK);
+    for password in ["1234567", "😀😀😀😀😀😀😀"] {
+        let response = admin_json(
+            &app,
+            "PUT",
+            &path,
+            json!({"version":1,"new_password":password}),
+            &admin,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"密码至少需要 8 个字符。"})
+        );
+        let unchanged = viewer_user::Entity::find_by_id(before.id)
+            .one(&*db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.password_hash, before.password_hash);
+        assert_eq!(unchanged.version, before.version);
+        assert_eq!(
+            viewer_session::Entity::find()
+                .all(&*db)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    for (version, password) in [(1, "12345678"), (2, "😀😀😀😀😀😀😀😀")] {
+        let response = admin_json(
+            &app,
+            "PUT",
+            &path,
+            json!({"version":version,"new_password":password}),
+            &admin,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(body(response).await["version"], version + 1);
+        assert!(
+            viewer_session::Entity::find()
+                .all(&*db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            login(
+                &app,
+                "/api/viewer/login",
+                json!({"username":"Summer","password":password})
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+    }
+}
+
 // Catches missing normalization, mixing administrator names with viewer uniqueness, and exposing hashes.
 #[tokio::test]
 async fn creation_normalizes_viewer_names_without_affecting_admin_and_rejects_renaming() {
@@ -433,7 +564,7 @@ async fn management_requires_admin_csrf_and_valid_requests() {
             &app,
             "PUT",
             &format!("{missing}/password"),
-            json!({"version":1,"new_password":"new"}),
+            json!({"version":1,"new_password":"new-password"}),
             &admin
         )
         .await

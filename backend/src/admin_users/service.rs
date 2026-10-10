@@ -4,6 +4,7 @@ use super::dto::{
 use crate::{
     auth::{AuthState, password},
     entities::{viewer_session, viewer_user},
+    viewer_auth::password_policy,
 };
 use axum::{
     Json,
@@ -21,6 +22,7 @@ use uuid::Uuid;
 #[derive(Debug)]
 pub enum ViewerUserError {
     Invalid,
+    InvalidPassword,
     NotFound,
     Conflict,
     Database,
@@ -46,6 +48,7 @@ impl IntoResponse for ViewerUserError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::Invalid => (StatusCode::BAD_REQUEST, "用户管理请求无效"),
+            Self::InvalidPassword => return password_policy::InvalidPassword.into_response(),
             Self::NotFound => (StatusCode::NOT_FOUND, "用户不存在"),
             Self::Conflict => (
                 StatusCode::CONFLICT,
@@ -137,9 +140,10 @@ pub async fn create(
     password: String,
 ) -> Result<ViewerUserSummary, ViewerUserError> {
     let username = username.trim().to_owned();
-    if username.is_empty() || password.trim().is_empty() {
+    if username.is_empty() {
         return Err(ViewerUserError::Invalid);
     }
+    password_policy::validate(&password).map_err(|_| ViewerUserError::InvalidPassword)?;
     let hash = password::hash_limited(&state.password_work, password).await?;
     let tx = state.db.begin().await?;
     // 普通用户唯一索引作为并发创建的最终裁决；管理员用户名不参与此约束。
@@ -178,9 +182,10 @@ pub async fn change_password(
     version: i64,
     password: String,
 ) -> Result<ViewerUserSummary, ViewerUserError> {
-    if version <= 0 || password.trim().is_empty() {
+    if version <= 0 {
         return Err(ViewerUserError::Invalid);
     }
+    password_policy::validate(&password).map_err(|_| ViewerUserError::InvalidPassword)?;
     // CPU 密集计算在锁外执行；真正写入前必须在用户锁内重新校验并发版本。
     let hash = password::hash_limited(&state.password_work, password).await?;
     let tx = state.db.begin().await?;

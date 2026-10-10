@@ -998,6 +998,29 @@ fn assert_cleared_admin_cookies(response: &Response) {
     }
 }
 
+// Catches applying ordinary-user restrictions to the existing independent administrator policy.
+#[tokio::test]
+async fn viewer_password_minimum_does_not_change_administrator_password_rules() {
+    let db = support::TestDatabase::migrated("admin_password_policy").await;
+    let app = app::build(db.connection(), &config()).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let response = request(
+        &app,
+        "POST",
+        "/api/admin/password",
+        json!({"current_password":"initial-password","new_password":"1234567"}),
+        Some(&cookie),
+        Some(&csrf),
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        login(&app, "Admin", "1234567").await.status(),
+        StatusCode::OK
+    );
+}
+
 // Catches accepting an empty replacement password and revoking valid sessions on rejected input.
 #[tokio::test]
 async fn empty_replacement_password_is_rejected_without_mutating_authentication() {

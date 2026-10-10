@@ -1,6 +1,6 @@
 use super::{
     model::{AuthError, LoginRequest, PasswordRequest, SessionResponse},
-    session,
+    password_policy, session,
 };
 use crate::{
     auth::{AuthState, csrf, password},
@@ -171,8 +171,8 @@ async fn change_password(
     headers: HeaderMap,
     Json(input): Json<PasswordRequest>,
 ) -> Result<Response, AuthError> {
-    if input.new_password.trim().is_empty() {
-        return Err(AuthError(StatusCode::BAD_REQUEST));
+    if let Err(error) = password_policy::validate(&input.new_password) {
+        return Ok(error.into_response());
     }
     let viewer = viewer_user::Entity::find_by_id(current.viewer.id)
         .one(&state.db)

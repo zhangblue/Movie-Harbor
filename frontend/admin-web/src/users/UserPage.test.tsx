@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 import { clearCsrfToken, setCsrfToken, type ViewerUserPage, type ViewerUserSummary } from "@movie-harbor/api-client";
@@ -76,6 +76,42 @@ it("creates a user then refreshes the list and global overview", async () => {
   expect(mutation.body).toEqual({ username: "hanmei", password: "new-password" });
   expect(mutation.headers.get("X-CSRF-Token")).toBe("session-csrf");
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+});
+
+// Catches a UTF-16 code-unit check accepting fewer than eight ordinary-user password characters.
+it.each(["create", "password"])("rejects seven-character %s passwords and accepts exactly eight", async (mode) => {
+  const requests = setup((request) => request.method === "POST" || request.method === "PUT" ? response({ ...summer, version: 4 }) : undefined);
+  const user = userEvent.setup();
+  render(<UserPage onExpired={() => {}} />);
+  const row = await screen.findByRole("row", { name: /Summer/ });
+  await user.click(mode === "create" ? screen.getByRole("button", { name: /添加用户/ }) : within(row).getByRole("button", { name: "修改密码" }));
+  if (mode === "create") await user.type(screen.getByLabelText("用户名"), "new-user");
+  const input = screen.getByLabelText(mode === "create" ? "初始密码" : "新密码");
+  const form = input.closest("form")!;
+  for (const password of ["1234567", "😀😀😀😀😀😀😀"]) {
+    fireEvent.change(input, { target: { value: password } });
+    fireEvent.submit(form);
+    expect(screen.queryByRole("alert")).toHaveTextContent("密码至少需要 8 个字符。");
+    expect(requests.some((request) => request.method === "POST" || request.method === "PUT")).toBe(false);
+  }
+  fireEvent.change(input, { target: { value: "12345678" } });
+  fireEvent.submit(form);
+  await screen.findByText(mode === "create" ? "用户已添加。" : "密码已修改，该用户现有的登录会话已失效。");
+  expect(requests.find((request) => request.method === (mode === "create" ? "POST" : "PUT"))?.body).toEqual(mode === "create" ? { username: "new-user", password: "12345678" } : { version: 3, new_password: "12345678" });
+});
+
+// Catches validation errors being misreported as network failures rather than the backend's localized feedback.
+it.each(["create", "password"])("preserves the localized backend password error for %s", async (mode) => {
+  setup((request) => request.method === "POST" || request.method === "PUT" ? response({ error: "密码至少需要 8 个字符。" }, 400) : undefined);
+  const user = userEvent.setup();
+  render(<UserPage onExpired={() => {}} />);
+  const row = await screen.findByRole("row", { name: /Summer/ });
+  await user.click(mode === "create" ? screen.getByRole("button", { name: /添加用户/ }) : within(row).getByRole("button", { name: "修改密码" }));
+  if (mode === "create") await user.type(screen.getByLabelText("用户名"), "new-user");
+  await user.type(screen.getByLabelText(mode === "create" ? "初始密码" : "新密码"), "12345678");
+  await user.click(screen.getByRole("button", { name: mode === "create" ? "创建用户" : "保存新密码" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("密码至少需要 8 个字符。");
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
 
 // The authoritative duplicate error must explain case-insensitive uniqueness without closing the form.

@@ -332,6 +332,62 @@ async fn viewer_cookie_logout_revokes_current_session_and_expiry_rejects_reuse()
     }
 }
 
+// Catches short self-service passwords mutating the hash/version or revoking a valid session.
+#[tokio::test]
+async fn viewer_self_password_change_requires_at_least_eight_characters() {
+    let (db, app, user) = setup().await;
+    let (cookie, csrf) = credentials(&app).await;
+    for password in ["1234567", "😀😀😀😀😀😀😀"] {
+        let response = request(
+            &app,
+            "PATCH",
+            "/api/viewer/password",
+            json!({"current_password":"viewer-password","new_password":password}),
+            (Some(&cookie), Some(&csrf), Some("https://harbor.test")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body(response).await,
+            json!({"error":"密码至少需要 8 个字符。"})
+        );
+        let unchanged = viewer_user::Entity::find_by_id(user.id)
+            .one(&*db)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.password_hash, user.password_hash);
+        assert_eq!(unchanged.version, user.version);
+        assert_eq!(read(&app, Some(&cookie)).await.status(), StatusCode::OK);
+    }
+    let mut current = "viewer-password";
+    let mut cookie = cookie;
+    let mut csrf = csrf;
+    for password in ["12345678", "😀😀😀😀😀😀😀😀"] {
+        let response = request(
+            &app,
+            "PATCH",
+            "/api/viewer/password",
+            json!({"current_password":current,"new_password":password}),
+            (Some(&cookie), Some(&csrf), Some("https://harbor.test")),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            read(&app, Some(&cookie)).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+        let logged_in = login(&app, "Summer", password).await;
+        assert_eq!(logged_in.status(), StatusCode::OK);
+        cookie = response_cookie(&logged_in);
+        csrf = body(read(&app, Some(&cookie)).await).await["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        current = password;
+    }
+}
+
 // Catches missing CSRF, wrong current-password checks, incomplete revocation or password/version update.
 #[tokio::test]
 async fn viewer_cookie_password_change_verifies_origin_csrf_and_revokes_all_devices() {
