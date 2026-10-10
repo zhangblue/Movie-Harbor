@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const readmePath = path.join(projectRoot, "README.md");
+const agentsPath = path.join(projectRoot, "AGENTS.md");
+const deploymentSkillPath = path.join(
+  projectRoot,
+  ".agents/skills/deploy-movie-harbor-ubuntu/SKILL.md",
+);
 
 function localMarkdownTargets(file) {
   const content = readFileSync(file, "utf8");
@@ -39,5 +44,14 @@ test("README guide navigation and guide links resolve", () => {
     for (const target of targets) {
       assert.ok(existsSync(target), `${name} has a broken link to ${target}`);
     }
+  }
+});
+
+test("project deployment skill has resolvable local references", () => {
+  assert.ok(existsSync(deploymentSkillPath), "deployment skill is missing");
+  const targets = localMarkdownTargets(deploymentSkillPath);
+  assert.ok(targets.length > 0, "deployment skill must link its runbook");
+  for (const target of targets) {
+    assert.ok(existsSync(target), `deployment skill has a broken link to ${target}`);
   }
 });

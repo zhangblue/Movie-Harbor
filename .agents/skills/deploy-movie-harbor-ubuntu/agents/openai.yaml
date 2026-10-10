@@ -1,0 +1,4 @@
+interface:
+  display_name: "部署 Movie Harbor 到 Ubuntu"
+  short_description: "安全执行 Movie Harbor 的 Ubuntu 半离线升级"
+  default_prompt: "Use $deploy-movie-harbor-ubuntu to deploy the selected Movie Harbor offline package to the configured Ubuntu host."
