@@ -18,10 +18,15 @@ export function actionsForStatus(status) {
   return actions[status] ? [...actions[status]] : [];
 }
 
+export function privacyAction(isPrivate) {
+  return isPrivate ? '设为公开' : '设为私密';
+}
+
 export function createSeriesDraft() {
   return {
     kind: 'series',
     status: 'draft',
+    isPrivate: false,
     seasons: [
       {
         number: 1,

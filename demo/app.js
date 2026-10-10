@@ -1,21 +1,31 @@
-import { actionsForStatus, createSeriesDraft, filterCatalog } from './catalog.mjs';
+import { actionsForStatus, createSeriesDraft, filterCatalog, privacyAction } from './catalog.mjs?v=privacy-demo';
+import { actionsForUser, filterUsers, validateUsername } from './user-management.mjs?v=privacy-demo';
 
 const posterRoot = 'http://127.0.0.1:8000/movie_resources/posters/';
 const items = [
-  { id: 1, title: '沉默的羔羊', kind: 'movie', year: 1991, genres: ['剧情', '惊悚', '犯罪'], status: 'published', poster: `${posterRoot}沉默的羔羊.webp`, summary: '一名年轻探员向一位极具洞察力的囚犯寻求帮助，以追踪另一名危险罪犯。' },
-  { id: 2, title: '阿凡达：火与烬', kind: 'movie', year: 2025, genres: ['科幻', '动作', '冒险'], status: 'draft', poster: `${posterRoot}阿凡达-火与烬.webp`, summary: '潘多拉星球上的新部族与新的冲突，让熟悉的世界显露另一面。' },
-  { id: 3, title: '碟中谍 7：致命清算', kind: 'movie', year: 2023, genres: ['动作', '惊悚'], status: 'published', poster: `${posterRoot}碟中谍7-致命清算.webp`, summary: '一场围绕失控技术展开的全球追逐，迫使小队重新审视信任与选择。' },
-  { id: 4, title: '碟中谍 8：最终清算', kind: 'movie', year: 2025, genres: ['动作', '冒险', '惊悚'], status: 'archived', poster: `${posterRoot}碟中谍8-最终清算.webp`, summary: '未竟的任务抵达终点，每一个决定都要付出代价。' },
-  { id: 5, title: '哈利·波特与魔法石', kind: 'movie', year: 2001, genres: ['奇幻', '冒险', '家庭'], status: 'published', poster: `${posterRoot}哈利波特与魔法石.webp`, summary: '一个男孩在十一岁生日时发现自己的魔法身世，并踏入一所非凡的学校。' },
-  { id: 6, title: '霍格沃茨纪事', kind: 'series', year: 2026, genres: ['奇幻', '剧情'], status: 'published', poster: `${posterRoot}哈利波特与密室.webp`, summary: '古老学院的新一代学生，在秘密与友谊之间寻找自己的道路。' },
-  { id: 7, title: '凤凰社档案', kind: 'series', year: 2024, genres: ['悬疑', '奇幻', '剧情', '冒险'], status: 'draft', poster: `${posterRoot}哈利波特与凤凰社.webp`, summary: '一组尘封档案揭开魔法世界不为人知的往事。' },
-  { id: 8, title: '混血王子的笔记', kind: 'series', year: 2022, genres: ['奇幻', '悬疑'], status: 'archived', poster: `${posterRoot}哈利波特与混血王子.webp`, summary: '一本写满批注的旧课本，将现在与过去意外连接。' },
+  { id: 1, title: '沉默的羔羊', kind: 'movie', year: 1991, genres: ['剧情', '惊悚', '犯罪'], status: 'published', isPrivate: false, poster: `${posterRoot}沉默的羔羊.webp`, summary: '一名年轻探员向一位极具洞察力的囚犯寻求帮助，以追踪另一名危险罪犯。' },
+  { id: 2, title: '阿凡达：火与烬', kind: 'movie', year: 2025, genres: ['科幻', '动作', '冒险'], status: 'draft', isPrivate: true, poster: `${posterRoot}阿凡达-火与烬.webp`, summary: '潘多拉星球上的新部族与新的冲突，让熟悉的世界显露另一面。' },
+  { id: 3, title: '碟中谍 7：致命清算', kind: 'movie', year: 2023, genres: ['动作', '惊悚'], status: 'published', isPrivate: true, poster: `${posterRoot}碟中谍7-致命清算.webp`, summary: '一场围绕失控技术展开的全球追逐，迫使小队重新审视信任与选择。' },
+  { id: 4, title: '碟中谍 8：最终清算', kind: 'movie', year: 2025, genres: ['动作', '冒险', '惊悚'], status: 'archived', isPrivate: false, poster: `${posterRoot}碟中谍8-最终清算.webp`, summary: '未竟的任务抵达终点，每一个决定都要付出代价。' },
+  { id: 5, title: '哈利·波特与魔法石', kind: 'movie', year: 2001, genres: ['奇幻', '冒险', '家庭'], status: 'published', isPrivate: false, poster: `${posterRoot}哈利波特与魔法石.webp`, summary: '一个男孩在十一岁生日时发现自己的魔法身世，并踏入一所非凡的学校。' },
+  { id: 6, title: '霍格沃茨纪事', kind: 'series', year: 2026, genres: ['奇幻', '剧情'], status: 'published', isPrivate: true, poster: `${posterRoot}哈利波特与密室.webp`, summary: '古老学院的新一代学生，在秘密与友谊之间寻找自己的道路。' },
+  { id: 7, title: '凤凰社档案', kind: 'series', year: 2024, genres: ['悬疑', '奇幻', '剧情', '冒险'], status: 'draft', isPrivate: false, poster: `${posterRoot}哈利波特与凤凰社.webp`, summary: '一组尘封档案揭开魔法世界不为人知的往事。' },
+  { id: 8, title: '混血王子的笔记', kind: 'series', year: 2022, genres: ['奇幻', '悬疑'], status: 'archived', isPrivate: true, poster: `${posterRoot}哈利波特与混血王子.webp`, summary: '一本写满批注的旧课本，将现在与过去意外连接。' },
+];
+const demoUsers = [
+  { id: 1, username: 'linhai', createdAt: '2026-09-18', lastLogin: '今天 09:42', online: true },
+  { id: 2, username: 'Summer', createdAt: '2026-09-25', lastLogin: '昨天 21:16', online: true },
+  { id: 3, username: 'zhouyu', createdAt: '2026-10-02', lastLogin: '5 天前', online: false },
+  { id: 4, username: 'hanmei', createdAt: '2026-10-08', lastLogin: '今天 08:05', online: true },
 ];
 
 const kindNames = { movie: '电影', series: '剧集' };
 const statusNames = { draft: '草稿', published: '已发布', archived: '已归档' };
 let selectedKind = 'all';
 let toastTimer;
+let userDialogMode = 'create';
+let selectedUserId;
+let deleteUserId;
 const seriesDraft = createSeriesDraft();
 
 const $ = (selector) => document.querySelector(selector);
@@ -39,7 +49,7 @@ function safePoster(url, alt, className = '') {
 
 function renderCatalog() {
   const query = $('#public-search').value;
-  const visible = filterCatalog(items.filter((item) => item.status === 'published'), selectedKind, query);
+  const visible = filterCatalog(items.filter((item) => item.status === 'published' && !item.isPrivate), selectedKind, query);
   $('#catalog-title').textContent = selectedKind === 'movie' ? '电影' : selectedKind === 'series' ? '剧集' : '全部影片';
   $('#catalog-count').textContent = `${visible.length} 部内容`;
   $('#catalog-empty').hidden = visible.length > 0;
@@ -57,8 +67,14 @@ function renderCatalog() {
 function renderAdminRows() {
   const kind = $('#admin-kind').value;
   const status = $('#admin-status').value;
+  const privacy = $('#admin-privacy').value;
   const query = $('#admin-query').value.trim().toLocaleLowerCase();
-  const visible = items.filter((item) => (kind === 'all' || item.kind === kind) && (status === 'all' || item.status === status) && item.title.toLocaleLowerCase().includes(query));
+  const visible = items.filter((item) => (
+    (kind === 'all' || item.kind === kind)
+    && (status === 'all' || item.status === status)
+    && (privacy === 'all' || (privacy === 'private') === item.isPrivate)
+    && item.title.toLocaleLowerCase().includes(query)
+  ));
 
   $('#admin-rows').innerHTML = visible.map((item) => `
     <div class="content-table table-row" role="row">
@@ -66,8 +82,34 @@ function renderAdminRows() {
       <span class="table-title">${escaped(item.title)}</span>
       <span>${kindNames[item.kind]}</span>
       <span class="status ${item.status}">${statusNames[item.status]}</span>
-      <div class="row-actions">${actionsForStatus(item.status).map((action) => `<button class="action-button ${action === '删除' ? 'danger' : ''}" type="button" data-row-action="${action}" data-item-id="${item.id}">${action}</button>`).join('')}</div>
+      <span class="privacy-badge ${item.isPrivate ? 'private' : ''}">${item.isPrivate ? '私密' : '公开'}</span>
+      <div class="row-actions">
+        <button class="action-button privacy-action" type="button" data-row-action="privacy" data-item-id="${item.id}">${privacyAction(item.isPrivate)}</button>
+        ${actionsForStatus(item.status).map((action) => `<button class="action-button ${action === '删除' ? 'danger' : ''}" type="button" data-row-action="${action}" data-item-id="${item.id}">${action}</button>`).join('')}
+      </div>
     </div>`).join('') || '<div class="empty-state">没有匹配的内容</div>';
+}
+
+function renderUsers() {
+  const visible = filterUsers(demoUsers, $('#user-query').value);
+  $('#user-total').textContent = String(demoUsers.length);
+  $('#session-total').textContent = String(demoUsers.filter((user) => user.online).length);
+  $('#user-side-count').textContent = String(demoUsers.length);
+  $('#user-result-count').textContent = `共 ${visible.length} 位用户`;
+  $('#user-empty').hidden = visible.length > 0;
+
+  const latest = demoUsers.at(-1);
+  $('#latest-user').textContent = latest?.username || '—';
+  $('#latest-user-created').textContent = latest ? `${latest.createdAt} 创建` : '暂无用户';
+  $('#user-rows').innerHTML = visible.map((user) => `
+    <div class="user-table user-row" role="row">
+      <span class="user-identity"><i class="user-avatar">${escaped(user.username.slice(0, 1))}</i><strong>${escaped(user.username)}</strong></span>
+      <span class="user-meta">${escaped(user.createdAt)}</span>
+      <span class="session-state ${user.online ? '' : 'offline'}">${escaped(user.lastLogin)}</span>
+      <span class="user-actions">${actionsForUser().map((action) => `
+        <button class="action-button ${action === '删除' ? 'danger' : ''}" type="button" data-user-action="${action === '删除' ? 'delete' : 'password'}" data-user-id="${user.id}">${action}</button>`).join('')}
+      </span>
+    </div>`).join('');
 }
 
 function renderSeriesBuilder() {
@@ -99,15 +141,32 @@ function showToast(message) {
   toastTimer = setTimeout(() => $('#toast').classList.remove('is-visible'), 2300);
 }
 
+function setAdminSection(section) {
+  const normalized = ['content', 'users', 'genres', 'settings'].includes(section) ? section : 'content';
+  $$('[data-admin-section]').forEach((button) => button.classList.toggle('is-active', button.dataset.adminSection === normalized));
+  $('#content-panel').hidden = normalized !== 'content';
+  $('#users-panel').hidden = normalized !== 'users';
+  $('#editor-panel').hidden = true;
+  $('#placeholder-panel').hidden = !['genres', 'settings'].includes(normalized);
+
+  if (normalized === 'users') renderUsers();
+  if (normalized === 'genres') $('#placeholder-title').textContent = '题材配置';
+  if (normalized === 'settings') $('#placeholder-title').textContent = '系统设置';
+}
+
 function setView(view, updateUrl = true) {
-  const normalized = ['admin', 'series-editor'].includes(view) ? view : 'home';
+  const normalized = ['admin', 'users', 'series-editor'].includes(view) ? view : 'home';
   $('#public-view').hidden = normalized !== 'home';
-  $('#admin-view').hidden = normalized !== 'admin';
+  $('#admin-view').hidden = !['admin', 'users'].includes(normalized);
   $('#series-editor-view').hidden = normalized !== 'series-editor';
   $$('[data-demo-view]').forEach((link) => link.classList.toggle('is-active', link.dataset.demoView === normalized));
   if (updateUrl) history.pushState({ view: normalized }, '', `?view=${normalized}`);
   if (normalized === 'home') renderCatalog();
-  if (normalized === 'admin') renderAdminRows();
+  if (normalized === 'admin') {
+    setAdminSection('content');
+    renderAdminRows();
+  }
+  if (normalized === 'users') setAdminSection('users');
   if (normalized === 'series-editor') renderSeriesBuilder();
 }
 
@@ -129,6 +188,7 @@ function openDetails(item) {
 
 function showEditor(item) {
   $('#content-panel').hidden = true;
+  $('#users-panel').hidden = true;
   $('#placeholder-panel').hidden = true;
   $('#editor-panel').hidden = false;
   $('#editor-title').textContent = item ? `编辑草稿 · ${item.title}` : '新建电影草稿';
@@ -142,6 +202,35 @@ function showEditor(item) {
     preview.style.display = 'none';
     $('.poster-placeholder').hidden = false;
   }
+  $('#draft-kind').value = item?.kind || 'movie';
+  const privacyValue = item?.isPrivate ? 'private' : 'public';
+  $(`input[name="draft-privacy"][value="${privacyValue}"]`).checked = true;
+}
+
+function openUserDialog(mode, user) {
+  userDialogMode = mode;
+  selectedUserId = user?.id;
+  const isPasswordChange = mode === 'password';
+  const copy = {
+    create: ['NEW USER', '添加用户', '创建普通用户，并为其设置初始登录密码。', '创建用户'],
+    password: ['CHANGE PASSWORD', '修改密码', '设置新密码后，该用户现有的登录会话会立即失效。', '保存新密码'],
+  }[mode];
+
+  $('#user-dialog-eyebrow').textContent = copy[0];
+  $('#user-dialog-title').textContent = copy[1];
+  $('#user-dialog-description').textContent = copy[2];
+  $('#user-submit').textContent = copy[3];
+  $('#password-label').textContent = isPasswordChange ? '新密码' : '初始密码';
+  $('#username-field').hidden = false;
+  $('#password-field').hidden = false;
+  $('#user-username').disabled = isPasswordChange;
+  $('#user-username').required = !isPasswordChange;
+  $('#user-password').required = true;
+  $('#user-username').value = user?.username || '';
+  $('#user-password').value = '';
+  $('#user-form-error').hidden = true;
+  $('#user-dialog').showModal();
+  (isPasswordChange ? $('#user-password') : $('#user-username')).focus();
 }
 
 $$('[data-demo-view]').forEach((link) => link.addEventListener('click', (event) => {
@@ -183,7 +272,11 @@ $('#admin-rows').addEventListener('click', (event) => {
   const action = event.target.closest('[data-row-action]');
   if (!action) return;
   const item = items.find((candidate) => candidate.id === Number(action.dataset.itemId));
-  if (action.dataset.rowAction === '编辑') showEditor(item);
+  if (action.dataset.rowAction === 'privacy') {
+    item.isPrivate = !item.isPrivate;
+    renderAdminRows();
+    showToast(`${item.title} 已设为${item.isPrivate ? '私密' : '公开'}（Demo）`);
+  } else if (action.dataset.rowAction === '编辑') showEditor(item);
   else showToast(`${item.title}：${action.dataset.rowAction}（Demo）`);
 });
 $('#create-content').addEventListener('click', () => showEditor());
@@ -193,17 +286,71 @@ $('#back-to-list').addEventListener('click', () => {
 });
 
 $$('[data-admin-section]').forEach((button) => button.addEventListener('click', () => {
-  $$('[data-admin-section]').forEach((candidate) => candidate.classList.toggle('is-active', candidate === button));
-  $('#editor-panel').hidden = true;
-  if (button.dataset.adminSection === 'content') {
-    $('#content-panel').hidden = false;
-    $('#placeholder-panel').hidden = true;
-  } else {
-    $('#content-panel').hidden = true;
-    $('#placeholder-panel').hidden = false;
-    $('#placeholder-title').textContent = button.dataset.adminSection === 'genres' ? '题材配置' : '系统设置';
+  const section = button.dataset.adminSection;
+  setAdminSection(section);
+  if (section === 'content' || section === 'users') {
+    const view = section === 'users' ? 'users' : 'admin';
+    history.pushState({ view }, '', `?view=${view}`);
+    $$('[data-demo-view]').forEach((link) => link.classList.toggle('is-active', link.dataset.demoView === view));
   }
 }));
+
+$('#user-query').addEventListener('input', renderUsers);
+$('#create-user').addEventListener('click', () => openUserDialog('create'));
+$('#user-rows').addEventListener('click', (event) => {
+  const action = event.target.closest('[data-user-action]');
+  if (!action) return;
+  const user = demoUsers.find((candidate) => candidate.id === Number(action.dataset.userId));
+  if (!user) return;
+  if (action.dataset.userAction === 'password') openUserDialog('password', user);
+  if (action.dataset.userAction === 'delete') {
+    deleteUserId = user.id;
+    $('#delete-user-name').textContent = user.username;
+    $('#delete-user-dialog').showModal();
+  }
+});
+
+$$('[data-close-user-dialog]').forEach((button) => button.addEventListener('click', () => $('#user-dialog').close()));
+$$('[data-close-delete-dialog]').forEach((button) => button.addEventListener('click', () => $('#delete-user-dialog').close()));
+
+$('#user-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const user = demoUsers.find((candidate) => candidate.id === selectedUserId);
+  const username = $('#user-username').value.trim();
+  const password = $('#user-password').value;
+  const usernameError = userDialogMode === 'password' ? '' : validateUsername(demoUsers, username);
+  const passwordError = password.length >= 8 ? '' : '密码至少需要 8 个字符';
+  const error = usernameError || passwordError;
+
+  if (error) {
+    $('#user-form-error').textContent = error;
+    $('#user-form-error').hidden = false;
+    return;
+  }
+
+  if (userDialogMode === 'create') {
+    const nextId = Math.max(0, ...demoUsers.map((candidate) => candidate.id)) + 1;
+    demoUsers.push({ id: nextId, username, createdAt: '刚刚', lastLogin: '尚未登录', online: false });
+    showToast(`用户 ${username} 已创建（Demo）`);
+  }
+  if (userDialogMode === 'password' && user) {
+    user.online = false;
+    user.lastLogin = '会话已撤销';
+    showToast(`${user.username} 的密码已修改（Demo）`);
+  }
+
+  $('#user-dialog').close();
+  renderUsers();
+});
+
+$('#confirm-delete-user').addEventListener('click', () => {
+  const index = demoUsers.findIndex((user) => user.id === deleteUserId);
+  if (index < 0) return;
+  const [{ username }] = demoUsers.splice(index, 1);
+  $('#delete-user-dialog').close();
+  renderUsers();
+  showToast(`用户 ${username} 已删除（Demo）`);
+});
 
 $('#poster-button').addEventListener('click', () => $('#poster-input').click());
 $('#poster-input').addEventListener('change', () => {
@@ -221,7 +368,8 @@ $('#poster-input').addEventListener('change', () => {
 
 $('#draft-form').addEventListener('submit', (event) => {
   event.preventDefault();
-  showToast('发布校验通过（Demo）');
+  const privacy = $('input[name="draft-privacy"]:checked').value === 'private' ? '私密' : '公开';
+  showToast(`将以${privacy}内容发布（Demo）`);
 });
 
 $('#series-poster-button').addEventListener('click', () => $('#series-poster-input').click());
@@ -300,7 +448,8 @@ $('#season-builder').addEventListener('input', (event) => {
 $('#series-form').addEventListener('submit', (event) => {
   event.preventDefault();
   const hasUnnamedEpisode = seriesDraft.seasons.some((season) => season.episodes.some((episode) => !episode.name.trim()));
-  showToast(hasUnnamedEpisode ? '请先填写每一集的名称' : '剧集发布校验通过（Demo）');
+  const privacy = $('input[name="series-privacy"]:checked').value === 'private' ? '私密' : '公开';
+  showToast(hasUnnamedEpisode ? '请先填写每一集的名称' : `将以${privacy}剧集发布（Demo）`);
 });
 document.addEventListener('click', (event) => {
   const trigger = event.target.closest('[data-toast]');
