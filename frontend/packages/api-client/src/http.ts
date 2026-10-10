@@ -195,7 +195,7 @@ async function performApiFetch<JsonBody extends object>(path: string, init: ApiR
   const headers = new Headers(requestInit.headers);
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (json !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-  if (csrfToken && isUnsafeAdminRequest(url, method) && !headers.has("X-CSRF-Token")) {
+  if (csrfToken && isUnsafeSessionRequest(url, method) && !headers.has("X-CSRF-Token")) {
     headers.set("X-CSRF-Token", csrfToken);
   }
   const requestBody = json === undefined ? body : JSON.stringify(json);
@@ -291,8 +291,8 @@ function downloadFilename(contentDisposition: string | null): string {
     : "movie-harbor-content-export.json";
 }
 
-function isUnsafeAdminRequest(url: string, method: string): boolean {
-  return url.startsWith("/api/admin/") && !["GET", "HEAD", "OPTIONS"].includes(method);
+function isUnsafeSessionRequest(url: string, method: string): boolean {
+  return (url.startsWith("/api/admin/") || url.startsWith("/api/viewer/")) && !["GET", "HEAD", "OPTIONS"].includes(method);
 }
 
 function errorMessage(parsed: JsonValue | undefined, rawText: string, statusText: string): string {

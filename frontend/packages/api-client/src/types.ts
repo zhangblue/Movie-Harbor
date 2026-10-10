@@ -4,11 +4,13 @@ export type ContentStatus = "draft" | "published" | "archived";
 
 export interface PublicGenre { id: string; name: string }
 export interface CatalogCard {
+  is_private: boolean;
   id: string; kind: ContentKind; name: string; year: number | null; poster_url: string | null;
   published_at: string; genres: PublicGenre[]; genre_count: number;
 }
 export interface CatalogPage { page: number; size: number; total: number; items: CatalogCard[] }
 export interface AdminContentListItem {
+  is_private: boolean;
   id: string;
   kind: ContentKind;
   name: string;
@@ -24,12 +26,14 @@ export interface AdminContentPage {
   items: AdminContentListItem[];
 }
 export interface AdminContentListQuery {
+  privacy?: "public" | "private";
   kind?: CatalogKind;
   status?: ContentStatus;
   name?: string;
   page?: number;
 }
 export interface MovieDetail {
+  is_private: boolean;
   id: string; kind: "movie"; name: string; synopsis: string; year: number | null;
   duration_seconds: number | null; poster_url: string | null; video_url: string | null; genres: PublicGenre[];
 }
@@ -38,6 +42,7 @@ export interface PublicEpisode {
 }
 export interface PublicSeason { id: string; number: number; episodes: PublicEpisode[] }
 export interface SeriesDetail {
+  is_private: boolean;
   id: string; kind: "series"; name: string; synopsis: string; year: number | null;
   poster_url: string | null; genres: PublicGenre[]; seasons: PublicSeason[];
 }
@@ -46,6 +51,22 @@ export interface LoginRequest { name: string; password: string }
 export interface LoginResponse { name: string }
 export interface SessionResponse { name: string; csrf_token: string }
 export interface ChangePasswordRequest { current_password: string; new_password: string }
+export interface ViewerLoginRequest { username: string; password: string }
+export interface ViewerLoginResponse { username: string }
+export interface ViewerSessionResponse { username: string; csrf_token: string }
+export interface ViewerUserSummary {
+  id: string; username: string; version: number; created_at: string;
+  last_login_at: string | null; has_active_session: boolean;
+}
+export interface ViewerUserOverview {
+  total_users: number; active_users: number; latest_user: ViewerUserSummary | null;
+}
+export interface ViewerUserPage {
+  page: number; size: number; total: number; items: ViewerUserSummary[]; summary: ViewerUserOverview;
+}
+export interface ViewerUserListQuery { q?: string; page?: number; size?: 20 }
+export interface CreateViewerUserRequest { username: string; password: string }
+export interface ChangeViewerUserPasswordRequest { version: number; new_password: string }
 export interface CreateGenreRequest { name: string }
 export interface UpdateGenreRequest { name: string }
 export interface GenreResponse { id: string; name: string; sort_order: number; enabled: boolean }
@@ -56,13 +77,15 @@ export interface MediaSummary {
   id: string; url: string; local_path: string; original_name: string; mime_type: string; byte_size: number;
 }
 export interface MovieResponse {
+  is_private: boolean;
   id: string; name: string; synopsis: string; year: number | null; duration_seconds: number | null;
   status: ContentStatus; version: number; published_at: string | null; archived_at: string | null;
   created_at: string; updated_at: string; genres: GenreSummary[]; poster: MediaSummary | null; video: MediaSummary | null;
 }
-export interface CreateMovieRequest { name: string }
+export interface CreateMovieRequest { name: string; is_private: boolean }
 export interface MovieListQuery { status?: ContentStatus; name?: string }
 export interface VersionRequest { version: number }
+export interface PrivacyRequest { version: number; is_private: boolean }
 export interface UpdateMovieRequest {
   version: number; name?: string | null; synopsis?: string | null; year?: number | null;
   duration_seconds?: number | null; genre_ids?: string[] | null;
@@ -74,11 +97,12 @@ export interface EpisodeResponse {
 }
 export interface SeasonResponse { id: string; number: number; episodes: EpisodeResponse[] }
 export interface SeriesResponse {
+  is_private: boolean;
   id: string; name: string; synopsis: string; year: number | null; status: ContentStatus; version: number;
   published_at: string | null; archived_at: string | null; created_at: string; updated_at: string;
   genres: GenreSummary[]; poster: MediaSummary | null; seasons: SeasonResponse[];
 }
-export interface CreateSeriesRequest { name: string }
+export interface CreateSeriesRequest { name: string; is_private: boolean }
 export interface SeriesListQuery { status?: ContentStatus; name?: string }
 export interface CreateSeasonRequest { version: number; number: number }
 export interface UpdateSeasonRequest { version: number; number: number }

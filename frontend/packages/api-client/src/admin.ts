@@ -4,6 +4,8 @@ import type {
   AdminContentListQuery, AdminContentPage, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
+  ChangeViewerUserPasswordRequest, CreateMovieRequest, CreateSeriesRequest, CreateViewerUserRequest,
+  PrivacyRequest, ViewerUserListQuery, ViewerUserPage, ViewerUserSummary,
 } from "./types";
 
 type ListQuery = { status?: ContentStatus; name?: string };
@@ -33,11 +35,26 @@ export async function changePassword(input: ChangePasswordRequest): Promise<void
   clearCsrfToken();
 }
 
+export async function listViewerUsers(query: ViewerUserListQuery = {}): Promise<ViewerUserPage> {
+  return requiredResponse(await apiRequest<ViewerUserPage>("/api/admin/users", {
+    query: { q: query.q, page: query.page, size: query.size },
+  }));
+}
+export async function createViewerUser(input: CreateViewerUserRequest): Promise<ViewerUserSummary> {
+  return requiredResponse(await apiRequest<ViewerUserSummary, CreateViewerUserRequest>("/api/admin/users", { method: "POST", json: input }));
+}
+export async function changeViewerUserPassword(id: string, input: ChangeViewerUserPasswordRequest): Promise<ViewerUserSummary> {
+  return requiredResponse(await apiRequest<ViewerUserSummary, ChangeViewerUserPasswordRequest>(apiPath("admin", "users", id, "password"), { method: "PUT", json: input }));
+}
+export async function deleteViewerUser(id: string, version: number): Promise<void> {
+  await apiRequest(apiPath("admin", "users", id), { method: "DELETE", json: { version } });
+}
+
 export async function listGenres(): Promise<GenreResponse[]> {
   return requiredResponse(await apiRequest<GenreResponse[]>("/api/admin/genres"));
 }
 export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
-  const params = { kind: query.kind, status: query.status, name: query.name, page: query.page };
+  const params = { kind: query.kind, status: query.status, privacy: query.privacy, name: query.name, page: query.page };
   return requiredResponse(await apiRequest<AdminContentPage>("/api/admin/contents", { query: params }));
 }
 export function downloadAdminContentExport(): Promise<ApiDownload> {
@@ -62,8 +79,11 @@ export async function deleteGenre(id: string): Promise<void> {
 export async function listMovies(query: ListQuery = {}): Promise<MovieResponse[]> {
   return requiredResponse(await apiRequest<MovieResponse[]>("/api/admin/movies", { query }));
 }
-export async function createMovie(name: string): Promise<MovieResponse> {
-  return requiredResponse(await apiRequest<MovieResponse, { name: string }>("/api/admin/movies", { method: "POST", json: { name } }));
+export async function createMovie(name: string, isPrivate: boolean): Promise<MovieResponse> {
+  return requiredResponse(await apiRequest<MovieResponse, CreateMovieRequest>("/api/admin/movies", { method: "POST", json: { name, is_private: isPrivate } }));
+}
+export async function setMoviePrivacy(id: string, version: number, isPrivate: boolean): Promise<MovieResponse> {
+  return requiredResponse(await apiRequest<MovieResponse, PrivacyRequest>(apiPath("admin", "movies", id, "privacy"), { method: "PUT", json: { version, is_private: isPrivate } }));
 }
 export async function getMovie(id: string): Promise<MovieResponse> {
   return requiredResponse(await apiRequest<MovieResponse>(apiPath("admin", "movies", id)));
@@ -84,8 +104,11 @@ export async function deleteMovie(id: string, version: number): Promise<DeleteRe
 export async function listSeries(query: ListQuery = {}): Promise<SeriesResponse[]> {
   return requiredResponse(await apiRequest<SeriesResponse[]>("/api/admin/series", { query }));
 }
-export async function createSeries(name: string): Promise<SeriesResponse> {
-  return requiredResponse(await apiRequest<SeriesResponse, { name: string }>("/api/admin/series", { method: "POST", json: { name } }));
+export async function createSeries(name: string, isPrivate: boolean): Promise<SeriesResponse> {
+  return requiredResponse(await apiRequest<SeriesResponse, CreateSeriesRequest>("/api/admin/series", { method: "POST", json: { name, is_private: isPrivate } }));
+}
+export async function setSeriesPrivacy(id: string, version: number, isPrivate: boolean): Promise<SeriesResponse> {
+  return requiredResponse(await apiRequest<SeriesResponse, PrivacyRequest>(apiPath("admin", "series", id, "privacy"), { method: "PUT", json: { version, is_private: isPrivate } }));
 }
 export async function getSeries(id: string): Promise<SeriesResponse> {
   return requiredResponse(await apiRequest<SeriesResponse>(apiPath("admin", "series", id)));

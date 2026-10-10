@@ -200,6 +200,26 @@ describe("apiRequest", () => {
     await expect(apiRequest("/api/admin/logout", { method: "POST" })).resolves.toBeUndefined();
   });
 
+  it("adds CSRF to viewer writes, preserves explicit headers, and excludes safe and unrelated paths", async () => {
+    setCsrfToken("viewer-csrf");
+    const headers: Headers[] = [];
+    vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
+      headers.push(new Headers(init?.headers));
+      return respond(null, { status: 204 });
+    });
+
+    await apiRequest("/api/viewer/session");
+    await apiRequest("/api/viewer/session", { method: "HEAD" });
+    await apiRequest("/api/viewer/session", { method: "OPTIONS" });
+    await apiRequest("/api/viewer/password", { method: "patch" });
+    await apiRequest("/api/viewer/logout", { method: "POST", headers: { "X-CSRF-Token": "explicit" } });
+    await apiRequest("/api/viewer-other/logout", { method: "POST" });
+    await apiRequest("/api/catalog", { method: "POST" });
+
+    expect(headers.map((value) => value.get("x-csrf-token")))
+      .toEqual([null, null, null, "viewer-csrf", "explicit", null, null]);
+  });
+
   it("parses JSON and plain-text successful responses", async () => {
     const responses = [
       respond('{"name":"admin"}', { headers: { "content-type": "application/json; charset=utf-8" } }),
