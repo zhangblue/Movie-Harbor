@@ -8,6 +8,16 @@ import { deferred, json, server, session } from "../test/server";
 
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+it("opens viewer management from navigation and returns to login when its session expires", async () => {
+  server((request) => request.url.startsWith("/api/admin/users") ? json({ error: "authentication failed" }, 401) : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "用户管理" }));
+  await screen.findByRole("heading", { name: "管理员登录" });
+  expect(screen.getByRole("status")).toHaveTextContent(/会话.*重新登录/);
+  expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
+});
+
 // Catches entering the admin shell before a verified session and losing the session request after login.
 it("requires a session, exposes failed login, then acquires CSRF before entering the shell", async () => {
   let loggedIn = false;

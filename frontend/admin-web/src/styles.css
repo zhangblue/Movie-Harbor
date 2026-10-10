@@ -37,6 +37,55 @@ p { color: var(--mh-color-text-muted); }
 .genre-create .mh-field { flex: 1; }
 .genre-create input { width: 100%; }
 .genre-table { min-width: 420px; }
+.users-title-row { align-items: center; }
+.title-description { margin: 8px 0 0; font-size: 13px; }
+.user-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+.user-summary article { min-width: 0; min-height: 122px; padding: 17px 18px; border: 1px solid var(--mh-color-border); border-radius: 12px; background: linear-gradient(145deg, #19202c, #141923); }
+.user-summary span { display: block; color: var(--mh-color-text-muted); font-size: 12px; font-weight: 700; }
+.user-summary strong { display: block; margin: 8px 0 6px; overflow: hidden; font-size: 26px; letter-spacing: -.04em; text-overflow: ellipsis; white-space: nowrap; }
+.user-summary small { color: #7f8ba1; font-size: 11px; }
+.user-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 12px; }
+.user-toolbar > span { color: var(--mh-color-text-muted); font-size: 12px; }
+.user-search-controls { display: flex; gap: 8px; min-width: 0; width: min(390px, 100%); }
+.user-search-controls > .mh-button { flex-shrink: 0; white-space: nowrap; }
+.user-search { display: flex; align-items: center; gap: 9px; width: min(310px, 100%); height: 40px; padding: 0 12px; border: 1px solid var(--mh-color-border-strong); border-radius: 9px; background: #121720; }
+.user-search:focus-within { border-color: #7485ad; box-shadow: var(--mh-focus-ring); }
+.user-search svg { width: 18px; flex-shrink: 0; fill: none; stroke: var(--mh-color-text-muted); stroke-width: 1.8; stroke-linecap: round; }
+.user-search input { min-width: 0; width: 100%; border: 0; outline: 0; background: transparent; color: var(--mh-color-text); }
+.content-table.user-table { min-width: 700px; }
+.content-table.user-table .action-cell { min-width: 190px; }
+.user-identity { display: flex; align-items: center; gap: 11px; min-width: 0; }
+.user-avatar { display: grid; place-items: center; width: 38px; height: 38px; flex-shrink: 0; border: 1px solid #46516a; border-radius: 10px; background: #293247; color: #eef1f8; font-size: 13px; font-weight: 800; text-transform: uppercase; }
+.user-identity strong { display: block; overflow-wrap: anywhere; font-size: 14px; }
+.user-meta { color: #aeb7c6; font-size: 12px; white-space: nowrap; }
+.user-session { display: inline-flex; align-items: center; gap: 7px; color: #b9c2d2; font-size: 11px; font-weight: 400; }
+.user-session::before { content: ""; width: 7px; height: 7px; flex-shrink: 0; border-radius: 50%; background: #71d29c; box-shadow: 0 0 0 3px #71d29c17; }
+.user-session.offline::before { background: #687386; box-shadow: none; }
+.user-dialog { max-width: 470px; }
+.user-dialog form { display: grid; gap: 14px; }
+.user-password-hint { color: var(--mh-color-text-muted); }
+.user-delete-dialog { border-color: #70434a; }
+@media (max-width: 900px) {
+  .sidebar { overflow-x: auto; }
+  .sidebar .side-link { flex: 0 0 auto; width: auto; white-space: nowrap; }
+}
+@media (max-width: 700px) {
+  .user-table .user-time { display: none; }
+  .content-table.user-table { min-width: 0; table-layout: fixed; }
+  .content-table.user-table .action-cell { width: 162px; min-width: 0; padding-right: 14px; }
+  .user-table .row-actions { flex-wrap: nowrap; }
+}
+@media (max-width: 560px) {
+  .users-title-row { align-items: stretch; flex-direction: column; }
+  .users-title-row > .mh-button { width: 100%; }
+  .user-summary { grid-template-columns: 1fr; }
+  .user-toolbar { align-items: stretch; flex-direction: column; }
+  .user-search { flex: 1; }
+  .user-table :is(td, th) { padding: 12px 9px; }
+  .content-table.user-table th[scope="row"] { min-width: 0; }
+  .user-avatar { display: none; }
+  .user-table .mh-button--compact { padding-inline: 8px; white-space: nowrap; }
+}
 .table-card { overflow-x: auto; border: 1px solid var(--mh-color-border); border-radius: 12px; background: var(--mh-color-surface); }
 .content-table { width: 100%; min-width: 870px; border-collapse: collapse; text-align: left; }
 .content-table :is(td, th) { padding: 11px 14px; border-bottom: 1px solid var(--mh-color-border); }

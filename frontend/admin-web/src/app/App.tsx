@@ -8,6 +8,7 @@ import { ContentPage, initialContentListState } from "../content/ContentPage";
 import { MovieEditor } from "../movies/MovieEditor";
 import { SeriesEditor } from "../series/SeriesEditor";
 import { GenrePage } from "../genres/GenrePage";
+import { UserPage } from "../users/UserPage";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
@@ -92,7 +93,7 @@ export function App() {
         <AccountMenu name={auth.name} onPassword={() => setPasswordOpen(true)} onLogout={() => { void signOut(); }} disabled={busy} />
       </header>
       <div className="admin-layout"><nav className="sidebar" aria-label="后台导航"><p className="eyebrow">工作台</p>
-        {["内容管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
+        {["内容管理", "用户管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
       </nav><main className="admin-content">
         {error && <p role="alert" className="error-message">{error}</p>}
         {deletionNotice && <p role={deletionNotice.warning ? "alert" : "status"} className={deletionNotice.warning ? "error-message" : undefined}>{deletionNotice.message}</p>}
@@ -105,7 +106,7 @@ export function App() {
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });
           else setSeriesPage({ id: row.id, deleting: action === "delete" });
-        }} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
+        }} /> : section === "用户管理" ? <UserPage onExpired={onExpired} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
       </main></div>
     </div>
     {busy && <p className="session-state" role="status">正在退出登录…</p>}
