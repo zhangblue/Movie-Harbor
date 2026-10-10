@@ -68,6 +68,8 @@ docker compose -p movie-harbor up -d --build --wait
 
 管理员 Cookie `mh_session` 和普通用户 Cookie `mh_viewer_session` 都使用 `Path=/`、`HttpOnly`、`SameSite=Lax`，`Secure` 由 `COOKIE_SECURE` 控制。管理员 Cookie 扩大路径是为了后台海报与视频预览；公共目录只识别普通用户会话。升级后的管理员登录、退出及改密流程会清除旧 `/api/admin` 路径 Cookie，避免同名 Cookie 共存。修改普通用户密码会在同一事务中撤销该用户全部会话，包括当前设备；用户自助改密须验证当前密码。删除用户也会级联撤销全部会话。
 
+普通用户退出和自助改密通过服务端撤销会话生效，响应不清除浏览器 Cookie，避免旧请求的迟到响应误删其他标签页新登录的 Cookie。残留的旧令牌已经失去权限，下次登录会覆盖它。当前密码错误返回可重试的 `400`，有效会话保留；无效会话和登录凭据错误仍返回 `401`。管理员 Cookie 清理兼容行为不变。
+
 媒体授权接口 `/api/media/authorize` 仅供受信 Caddy 内部调用，外部请求返回 `404`；不得绕过 Caddy 直接暴露媒体挂载目录。现有的来源校验、代理秘密和 HTTPS 要求同样适用于普通用户登录及写操作。
 
 ## 上传格式与容量

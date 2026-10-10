@@ -15,13 +15,13 @@ export async function getViewerSession(acceptSession: (session: ViewerSessionRes
   if (acceptSession(session)) setCsrfToken(session.csrf_token);
   return session;
 }
-export async function viewerLogout(): Promise<void> {
+export async function viewerLogout(isCurrent: () => boolean = () => true): Promise<void> {
   try { await apiRequest("/api/viewer/logout", { method: "POST" }); }
-  finally { clearCsrfToken(); }
+  finally { if (isCurrent()) clearCsrfToken(); }
 }
-export async function changeViewerPassword(input: ChangePasswordRequest): Promise<void> {
+export async function changeViewerPassword(input: ChangePasswordRequest, isCurrent: () => boolean = () => true): Promise<void> {
   await apiRequest("/api/viewer/password", { method: "PATCH", json: input });
-  clearCsrfToken();
+  if (isCurrent()) clearCsrfToken();
 }
 
 export async function listCatalog(query: CatalogQuery = {}): Promise<CatalogPage> {

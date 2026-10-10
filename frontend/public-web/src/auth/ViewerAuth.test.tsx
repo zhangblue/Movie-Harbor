@@ -15,7 +15,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearC
 function server(initial = false) {
   const state = { authenticated: initial, username: "Summer", csrfToken: "viewer-csrf", sessionNetworkError: false, loginStatus: 200, passwordStatus: 204, logoutStatus: 204,
     requests: [] as Array<{ url: URL; init?: RequestInit }>, catalogResponse: undefined as Promise<Response> | undefined,
-    sessionResponse: undefined as Promise<Response> | undefined };
+    sessionResponse: undefined as Promise<Response> | undefined, writeResponse: undefined as Promise<Response> | undefined };
   vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
     const url = new URL(input, "http://localhost");
     state.requests.push({ url, init });
@@ -31,11 +31,13 @@ function server(initial = false) {
       return json({ username: state.username });
     }
     if (url.pathname === "/api/viewer/logout") {
+      if (state.writeResponse) return state.writeResponse;
       if (new Headers(init?.headers).get("x-csrf-token") !== state.csrfToken) return json({}, 403);
       if (state.logoutStatus !== 204) return json({}, state.logoutStatus);
       state.authenticated = false; return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/viewer/password") {
+      if (state.writeResponse) return state.writeResponse;
       if (new Headers(init?.headers).get("x-csrf-token") !== state.csrfToken) return json({}, 403);
       if (state.passwordStatus !== 204) return json({ error: "当前密码不正确" }, state.passwordStatus);
       state.authenticated = false;
@@ -69,6 +71,51 @@ it("keeps the anonymous catalog usable when the initial session returns 401", as
   expect(state.requests.some(({ url }) => url.pathname === "/api/viewer/session")).toBe(true);
   expect(screen.queryByText("私密")).not.toBeInTheDocument();
 });
+
+it("discards a pre-discovery private catalog after the initial session returns 401", async () => {
+  const state = server();
+  const session = deferred<Response>(); const old = deferred<Response>();
+  state.sessionResponse = session.promise; state.catalogResponse = old.promise;
+  render(<App />);
+  await waitFor(() => expect(state.requests.some(({ url }) => url.pathname === "/api/catalog")).toBe(true));
+  state.catalogResponse = undefined;
+  await act(async () => session.resolve(json({}, 401)));
+  await act(async () => old.resolve(json({ items: [{ ...seriesCard, is_private: true }], total: 41, page: 3, size: 20 })));
+  expect(await screen.findByText("1 部影片")).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
+  expect(screen.queryByRole("navigation", { name: "目录分页" })).not.toBeInTheDocument();
+  expect(screen.queryByText("41 部影片")).not.toBeInTheDocument();
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog")).toHaveLength(2);
+});
+
+it.each([ ["logout", 204], ["logout", 401], ["password", 204], ["password", 401] ] as const)(
+  "ignores old %s status %s after another tab switches to Winter", async (operation, status) => {
+    const state = server(true); const user = userEvent.setup(); render(<App />);
+    await screen.findByText("Summer"); await screen.findByText("私密");
+    const old = deferred<Response>(); state.writeResponse = old.promise;
+    if (operation === "logout") await user.click(screen.getByRole("button", { name: "退出登录" }));
+    else {
+      await user.click(screen.getByRole("button", { name: "修改密码" }));
+      await user.type(screen.getByLabelText("当前密码"), "old-password");
+      await user.type(screen.getByLabelText("新密码"), "new-password");
+      await user.click(screen.getByRole("button", { name: "保存新密码" }));
+    }
+    await waitFor(() => expect(state.requests.some(({ url }) => url.pathname === `/api/viewer/${operation}`)).toBe(true));
+    state.username = "Winter"; state.csrfToken = "winter-csrf";
+    act(() => window.dispatchEvent(new Event("focus")));
+    await screen.findByText("Winter");
+    await act(async () => old.resolve(status === 204 ? new Response(null, { status }) : json({}, status)));
+    expect(screen.getByText("Winter")).toBeInTheDocument();
+    state.writeResponse = undefined;
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    await user.type(screen.getByLabelText("当前密码"), "old-password");
+    await user.type(screen.getByLabelText("新密码"), "new-password");
+    await user.click(screen.getByRole("button", { name: "保存新密码" }));
+    const lastWrite = state.requests.filter(({ url }) => url.pathname === "/api/viewer/password").at(-1)!;
+    expect(new Headers(lastWrite.init?.headers).get("x-csrf-token")).toBe("winter-csrf");
+    expect(await screen.findByText("密码已修改，请重新登录")).toBeInTheDocument();
+  },
+);
 
 it("keeps anonymous browsing available when session discovery has a network error", async () => {
   const state = server(); state.sessionNetworkError = true; render(<App />);

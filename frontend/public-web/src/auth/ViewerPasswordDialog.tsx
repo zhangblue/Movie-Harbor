@@ -3,7 +3,7 @@ import { ApiError, changeViewerPassword } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useViewer } from "./ViewerContext";
 
-export function ViewerPasswordDialog({ onClose, onChanged }: { onClose: () => void; onChanged: () => void }) {
+export function ViewerPasswordDialog({ onClose, onChanged, isCurrent }: { onClose: () => void; onChanged: () => void; isCurrent: () => boolean }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [pending, setPending] = useState(false);
@@ -14,11 +14,15 @@ export function ViewerPasswordDialog({ onClose, onChanged }: { onClose: () => vo
     if (pending) return;
     if (Array.from(newPassword).length < 8) { setError("新密码至少需要 8 个字符"); return; }
     setPending(true); setError("");
-    try { await changeViewerPassword({ current_password: currentPassword, new_password: newPassword }); onChanged(); }
+    try {
+      await changeViewerPassword({ current_password: currentPassword, new_password: newPassword }, isCurrent);
+      if (isCurrent()) onChanged();
+    }
     catch (cause) {
+      if (!isCurrent()) return;
       if (cause instanceof ApiError && cause.status === 401) expire();
       else setError(cause instanceof ApiError && cause.status === 400 ? cause.message : "密码修改失败，请稍后重试。");
-    } finally { setPending(false); }
+    } finally { if (isCurrent()) setPending(false); }
   }
   return <Dialog open title="修改密码" className="viewer-dialog" onClose={() => { if (!pending) onClose(); }}>
     <p className="viewer-dialog-description">修改成功后，所有设备都会退出登录，请使用新密码重新登录。</p>

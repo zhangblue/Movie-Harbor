@@ -58,15 +58,15 @@ export function App() {
   }, []);
   const transitionViewer = useCallback((next: ViewerState, notice = "") => {
     const wasAuthenticated = viewerRef.current.status === "authenticated";
-    const refreshContent = wasAuthenticated || next.status === "authenticated";
     const closePrivateContent = wasAuthenticated && privateContent.current;
     identity.current += 1;
     validation.current = undefined;
     clearCsrfToken();
     viewerRef.current = next;
     setViewer(viewerRef.current);
+    setLoggingOut(false);
     setDialog(undefined); setMessage(notice);
-    if (refreshContent) setRevision((value) => value + 1);
+    setRevision((value) => value + 1);
     if (closePrivateContent) navigate("/", true);
     if (closePrivateContent || next.status !== "authenticated") privateContent.current = false;
   }, [navigate]);
@@ -118,15 +118,19 @@ export function App() {
     {authenticated ? <><span className="viewer-username">{viewer.username}</span>
       <button className="pill" type="button" disabled={loggingOut} onClick={() => setDialog("password")}>修改密码</button>
       <button className="pill" type="button" disabled={loggingOut} onClick={async () => {
+        const startedAt = identity.current;
+        const isCurrent = () => startedAt === identity.current;
         setLoggingOut(true);
         try {
-          if (!(await validate())) return;
-          await viewerLogout(); becomeAnonymous();
+          if (!(await validate()) || !isCurrent()) return;
+          await viewerLogout(isCurrent);
+          if (isCurrent()) becomeAnonymous();
         }
         catch (cause) {
+          if (!isCurrent()) return;
           if (cause instanceof ApiError && cause.status === 401) expire();
           else setMessage("退出登录失败，请稍后重试。");
-        } finally { setLoggingOut(false); }
+        } finally { if (isCurrent()) setLoggingOut(false); }
       }}>{loggingOut ? "正在退出…" : "退出登录"}</button></>
       : <button className="pill" type="button" disabled={viewer.status === "loading"} onClick={() => setDialog("login")}>登录</button>}
   </div>;
@@ -159,7 +163,7 @@ export function App() {
       )}
     </main>
     {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
-    {dialog === "password" && <ViewerPasswordDialog onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}
+    {dialog === "password" && <ViewerPasswordDialog isCurrent={() => loginGeneration === identity.current} onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}
     </ViewerContext.Provider>
   );
 }

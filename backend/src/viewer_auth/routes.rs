@@ -158,11 +158,9 @@ async fn logout(
     viewer_session::Entity::delete_by_id(current.session.id)
         .exec(&state.db)
         .await?;
-    Ok((
-        StatusCode::NO_CONTENT,
-        [("set-cookie", session::cookie("", state.cookie_secure, true))],
-    )
-        .into_response())
+    // A delayed response must not clear a newer login's cookie from another tab.
+    // The revoked token has no authority; the next login replaces the stale cookie.
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 async fn change_password(
@@ -186,7 +184,11 @@ async fn change_password(
     )
     .await?
     {
-        return Err(AuthError(StatusCode::UNAUTHORIZED));
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"当前密码不正确"})),
+        )
+            .into_response());
     }
     let hash = password::hash_limited(&state.password_work, input.new_password).await?;
     let tx = state.db.begin().await?;
@@ -211,9 +213,6 @@ async fn change_password(
         .exec(&tx)
         .await?;
     tx.commit().await?;
-    Ok((
-        StatusCode::NO_CONTENT,
-        [("set-cookie", session::cookie("", state.cookie_secure, true))],
-    )
-        .into_response())
+    // Session revocation is authoritative; do not overwrite a concurrent login cookie.
+    Ok(StatusCode::NO_CONTENT.into_response())
 }

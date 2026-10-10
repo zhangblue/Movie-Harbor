@@ -306,7 +306,7 @@ it("does not overwrite current CSRF when a viewer session is rejected by its ide
 it("preserves viewer CSRF when a self password change is rejected", async () => {
   const requests = recordRequests([
     jsonResponse({ username: "Summer", csrf_token: "still-valid" }),
-    jsonResponse({ error: "用户名或密码错误" }, 401),
+    jsonResponse({ error: "当前密码不正确" }, 400),
     new Response(null, { status: 204 }),
   ]);
   await client.getViewerSession();
@@ -314,6 +314,15 @@ it("preserves viewer CSRF when a self password change is rejected", async () => 
     .rejects.toBeInstanceOf(ApiError);
   await client.viewerLogout();
   expect(requests[2]?.csrf).toBe("still-valid");
+});
+
+it.each(["logout", "password"])("keeps current CSRF when the identity owner rejects an old %s completion", async (operation) => {
+  setCsrfToken("winter-csrf");
+  const requests = recordRequests([new Response(null, { status: 204 }), new Response(null, { status: 204 })]);
+  if (operation === "logout") await client.viewerLogout(() => false);
+  else await client.changeViewerPassword({ current_password: "old-password", new_password: "new-password" }, () => false);
+  await apiRequest("/api/viewer/password", { method: "PATCH" });
+  expect(requests[1]?.csrf).toBe("winter-csrf");
 });
 
 it.each([204, 500])("clears viewer CSRF after logout responds with %s", async (status) => {

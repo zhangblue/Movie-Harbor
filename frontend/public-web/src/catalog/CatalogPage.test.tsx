@@ -182,7 +182,7 @@ it("replaces an out-of-range page with the last page without flashing an empty r
   observer.disconnect();
   expect(location.pathname + location.search).toBe("/?page=2");
   expect(replaceState).toHaveBeenCalledWith(null, "", "/?page=2");
-  expect(requestedPages).toEqual(["99", "2"]);
+  expect(requestedPages).toEqual(["99", "99", "2"]);
   expect(renderedText.some((text) => text.includes("没有找到匹配内容"))).toBe(false);
 });
 
@@ -199,13 +199,13 @@ it("replaces an out-of-range empty catalog URL with the first-page URL", async (
   render(<App />);
   await waitFor(() => expect(location.pathname + location.search).toBe("/"));
   expect(replaceState).toHaveBeenCalledWith(null, "", "/");
-  expect(requestedPages).toEqual(["99", "1"]);
+  expect(requestedPages).toEqual(["99", "99", "1"]);
   expect(await screen.findByText("没有找到匹配内容")).toBeInTheDocument();
 });
 
 it("reserves the full desktop pagination height while the catalog is loading", async () => {
   const response = deferred<Response>();
-  serve(() => response.promise);
+  serve(() => response.promise.then((value) => value.clone()));
   render(<App />);
 
   const slot = document.querySelector<HTMLElement>(".pagination-slot");

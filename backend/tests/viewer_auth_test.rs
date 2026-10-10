@@ -306,12 +306,7 @@ async fn viewer_cookie_logout_revokes_current_session_and_expiry_rejects_reuse()
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(
-        response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .contains("Max-Age=0")
-    );
+    assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(
         read(&app, Some(&cookie)).await.status(),
         StatusCode::UNAUTHORIZED
@@ -373,6 +368,7 @@ async fn viewer_self_password_change_requires_at_least_eight_characters() {
         )
         .await;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(!response.headers().contains_key("set-cookie"));
         assert_eq!(
             read(&app, Some(&cookie)).await.status(),
             StatusCode::UNAUTHORIZED
@@ -386,6 +382,28 @@ async fn viewer_self_password_change_requires_at_least_eight_characters() {
             .to_owned();
         current = password;
     }
+}
+
+#[tokio::test]
+async fn wrong_current_password_is_retryable_without_revoking_the_session() {
+    let (_db, app, _) = setup().await;
+    let (cookie, csrf) = credentials(&app).await;
+    let response = request(
+        &app,
+        "PATCH",
+        "/api/viewer/password",
+        json!({"current_password":"wrong","new_password":"replacement-password"}),
+        (Some(&cookie), Some(&csrf), Some("https://harbor.test")),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert!(!response.headers().contains_key("set-cookie"));
+    assert_eq!(body(response).await, json!({"error":"当前密码不正确"}));
+    assert_eq!(read(&app, Some(&cookie)).await.status(), StatusCode::OK);
+    assert_eq!(
+        login(&app, "Summer", "wrong").await.status(),
+        StatusCode::UNAUTHORIZED
+    );
 }
 
 // Catches missing CSRF, wrong current-password checks, incomplete revocation or password/version update.
@@ -421,7 +439,7 @@ async fn viewer_cookie_password_change_verifies_origin_csrf_and_revokes_all_devi
         }
     }
     for (current, new, status) in [
-        ("wrong", "replacement", StatusCode::UNAUTHORIZED),
+        ("wrong", "replacement", StatusCode::BAD_REQUEST),
         ("viewer-password", "  ", StatusCode::BAD_REQUEST),
     ] {
         assert_eq!(
@@ -454,12 +472,7 @@ async fn viewer_cookie_password_change_verifies_origin_csrf_and_revokes_all_devi
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
-    assert!(
-        response.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .contains("mh_viewer_session=; Path=/;")
-    );
+    assert!(!response.headers().contains_key("set-cookie"));
     assert_eq!(
         viewer_session::Entity::find()
             .all(&*db)

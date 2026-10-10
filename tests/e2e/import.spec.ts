@@ -99,20 +99,26 @@ test("export and CLI import preserve public and private movies and whole series"
   test.setTimeout(180_000);
   const api = await AdminApi.login(playwright);
   const prefix = `Scope roundtrip ${randomUUID()}`;
+  const privacy = new Map<string, boolean>();
   try {
     for (const isPrivate of [false, true]) {
       const movie = await createMovieDraftWithMedia(api, `${prefix} Movie ${isPrivate}`, { synopsis: "scope", durationSeconds: 1 });
       const series = await createSeriesDraftWithMedia(api, `${prefix} Series ${isPrivate}`, { synopsis: "scope", seasonNumber: 1, episodeNumber: 1, episodeName: "Inherited", durationSeconds: 1 });
       await api.setPrivacy("movies", movie, isPrivate);
       await api.setPrivacy("series", series, isPrivate);
+      privacy.set(`movies:${movie.name}`, isPrivate);
+      privacy.set(`series:${series.name}`, isPrivate);
     }
     const exported = await (await api.request.get("/api/admin/contents/export")).json();
     type ExportItem = { name: string; is_private: boolean; episodes?: JsonValue[] };
     for (const kind of ["movies", "series"] as const) {
       exported[kind] = exported[kind].filter((item: ExportItem) => item.name.startsWith(prefix));
       expect(exported[kind]).toHaveLength(2);
-      expect(exported[kind].map((item: ExportItem) => item.is_private).sort()).toEqual([false, true]);
-      for (const item of exported[kind] as ExportItem[]) item.name += " Imported";
+      for (const item of exported[kind] as ExportItem[]) {
+        expect(privacy.has(`${kind}:${item.name}`)).toBe(true);
+        expect(item.is_private).toBe(privacy.get(`${kind}:${item.name}`));
+        item.name += " Imported";
+      }
     }
     for (const item of exported.series as ExportItem[]) for (const episode of item.episodes!) expect(episode).not.toHaveProperty("is_private");
     const source = resolve(process.env.E2E_RUN_DIR!, `scope-${randomUUID()}.json`);
@@ -123,7 +129,9 @@ test("export and CLI import preserve public and private movies and whole series"
     const checkpoint = JSON.parse(await readFile(`${source}.movie-harbor-import-progress.json`, "utf8")) as Checkpoint;
     for (const kind of ["movies", "series"] as const) for (const item of exported[kind] as ExportItem[]) {
       const detail = await api.get<Movie | Series>(`/api/admin/${kind}/${checkpoint[kind][item.name].id}`);
-      expect(detail).toMatchObject({ name: item.name, is_private: item.is_private, status: "draft" });
+      const originalName = item.name.slice(0, -" Imported".length);
+      expect(privacy.has(`${kind}:${originalName}`)).toBe(true);
+      expect(detail).toMatchObject({ name: item.name, is_private: privacy.get(`${kind}:${originalName}`), status: "draft" });
       if ("seasons" in detail) for (const season of detail.seasons) {
         expect(season).not.toHaveProperty("is_private");
         for (const episode of season.episodes) expect(episode).not.toHaveProperty("is_private");

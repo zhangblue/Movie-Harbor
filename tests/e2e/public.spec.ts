@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { AdminApi, ViewerApi, createPublishableMovie } from "./helpers";
+import { AdminApi, ViewerApi, baseURL, createPublishableMovie } from "./helpers";
 
 test("published content is searchable and has public details", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
@@ -53,6 +53,11 @@ test("public login and self password change refresh private content and revoke b
     await expect(page.getByText("私密", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "修改密码", exact: true }).click();
     const change = page.getByRole("dialog");
+    await change.getByLabel("当前密码").fill("wrong-password");
+    await change.getByLabel("新密码", { exact: true }).fill("viewer-updated-password");
+    await change.getByRole("button", { name: "保存新密码" }).click();
+    await expect(change.getByRole("alert")).toHaveText("当前密码不正确");
+    await expect(page.getByText(user.username, { exact: true })).toBeVisible();
     await change.getByLabel("当前密码").fill("viewer-initial-password");
     await change.getByLabel("新密码", { exact: true }).fill("viewer-updated-password");
     await change.getByRole("button", { name: "保存新密码" }).click();
@@ -67,3 +72,63 @@ test("public login and self password change refresh private content and revoke b
     await fresh.dispose();
   } finally { await other.dispose(); await api.dispose(); }
 });
+
+for (const operation of ["logout", "password"] as const) {
+  test(`late ${operation} response preserves a newer viewer cookie and UI`, async ({ page, context, playwright }) => {
+    const api = await AdminApi.login(playwright);
+    const summer = await api.createUser(`summer-${operation}-${Date.now()}`);
+    const winter = await api.createUser(`winter-${operation}-${Date.now()}`);
+    const summerLogin = await context.request.post("/api/viewer/login", {
+      data: { username: summer.username, password: "viewer-initial-password" }, headers: { Origin: baseURL },
+    });
+    expect(summerLogin.status()).toBe(200);
+    const oldCookie = (await context.cookies()).find((cookie) => cookie.name === "mh_viewer_session")!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let received!: () => void;
+    const responseReceived = new Promise<void>((resolve) => { received = resolve; });
+    let headers: Record<string, string> = {};
+    await page.route(`**/api/viewer/${operation}`, async (route) => {
+      const response = await route.fetch();
+      headers = response.headers();
+      expect(response.status()).toBe(204);
+      received();
+      await gate;
+      await route.fulfill({ response });
+    });
+    try {
+      await page.goto("/");
+      await expect(page.getByText(summer.username, { exact: true })).toBeVisible();
+      if (operation === "logout") await page.getByRole("button", { name: "退出登录" }).click();
+      else {
+        await page.getByRole("button", { name: "修改密码" }).click();
+        await page.getByLabel("当前密码").fill("viewer-initial-password");
+        await page.getByLabel("新密码", { exact: true }).fill("viewer-updated-password");
+        await page.getByRole("button", { name: "保存新密码" }).click();
+      }
+      await responseReceived;
+      const newerLogin = await context.request.post("/api/viewer/login", {
+        data: { username: winter.username, password: "viewer-initial-password" }, headers: { Origin: baseURL },
+      });
+      expect(newerLogin.status()).toBe(200);
+      const newCookie = (await context.cookies()).find((cookie) => cookie.name === "mh_viewer_session")!;
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await expect(page.getByText(winter.username, { exact: true })).toBeVisible();
+      const completed = page.waitForResponse((response) => response.url().endsWith(`/api/viewer/${operation}`));
+      release(); await completed;
+      await expect(page.getByText(winter.username, { exact: true })).toBeVisible();
+      expect(headers).not.toHaveProperty("set-cookie");
+      expect((await context.cookies()).find((cookie) => cookie.name === "mh_viewer_session")?.value).toBe(newCookie.value);
+      expect((await (await context.request.get("/api/viewer/session")).json()).username).toBe(winter.username);
+      const stale = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Cookie: `${oldCookie.name}=${oldCookie.value}` } });
+      try { expect((await stale.get("/api/viewer/session")).status()).toBe(401); }
+      finally { await stale.dispose(); }
+      await page.unroute(`**/api/viewer/${operation}`);
+      await page.getByRole("button", { name: "修改密码" }).click();
+      await page.getByLabel("当前密码").fill("viewer-initial-password");
+      await page.getByLabel("新密码", { exact: true }).fill("winter-updated-password");
+      await page.getByRole("button", { name: "保存新密码" }).click();
+      await expect(page.getByText("密码已修改，请重新登录", { exact: true })).toBeVisible();
+    } finally { release(); await api.dispose(); }
+  });
+}
