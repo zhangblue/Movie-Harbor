@@ -48,8 +48,8 @@ test("JSON export includes every state and page with exact media paths and secon
       otherSeriesNames.push(other.name);
     }
     const emptyNames = Array.from({ length: 21 }, (_, index) => `${prefix} Empty ${String(index).padStart(2, "0")}`);
-    for (const name of emptyNames) await api.write("post", "/api/admin/movies", { name });
-    const emptySeries = await api.write<Series>("post", "/api/admin/series", { name: `${prefix} Empty Series` });
+    for (const name of emptyNames) await api.write("post", "/api/admin/movies", { name, is_private: false });
+    const emptySeries = await api.write<Series>("post", "/api/admin/series", { name: `${prefix} Empty Series`, is_private: false });
 
     await page.goto("/admin/");
     await page.getByLabel("管理员名称").fill(adminName);

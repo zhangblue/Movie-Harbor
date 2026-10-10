@@ -86,7 +86,7 @@ export class AdminApi {
 export async function createMovieDraftWithMedia(api: AdminApi, name: string, options: {
   synopsis: string; durationSeconds: number; includePoster?: boolean; year?: number | null; genreIds?: string[];
 }) {
-  let movie = await api.write<Movie>("post", "/api/admin/movies", { name });
+  let movie = await api.write<Movie>("post", "/api/admin/movies", { name, is_private: false });
   movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
     version: movie.version, name, synopsis: options.synopsis, year: options.year === undefined ? 2026 : options.year,
     duration_seconds: options.durationSeconds, genre_ids: options.genreIds ?? [],
@@ -116,7 +116,7 @@ export async function createSeriesDraftWithMedia(api: AdminApi, name: string, op
   synopsis: string; seasonNumber: number; episodeNumber: number; episodeName: string; durationSeconds: number;
   year?: number | null; genreIds?: string[];
 }) {
-  let series = await api.write<Series>("post", "/api/admin/series", { name });
+  let series = await api.write<Series>("post", "/api/admin/series", { name, is_private: false });
   series = await api.write<Series>("patch", `/api/admin/series/${series.id}`, {
     version: series.version, synopsis: options.synopsis, year: options.year ?? null, genre_ids: options.genreIds ?? [],
   });

@@ -18,7 +18,7 @@
 	@public_media path_regexp media ^/media/(poster/[0-9a-f]{2}/[0-9a-f]{32}\.(jpg|png|webp)|video/[0-9a-f]{2}/[0-9a-f]{32}\.(mp4|webm|ogv))$
 	handle @public_media {
 		header X-Content-Type-Options nosniff
-		header Cache-Control "private, no-store"
+		header >Cache-Control "private, no-store"
 		forward_auth api:3000 {
 			uri /api/media/authorize
 			header_up X-Forwarded-Uri {uri}
