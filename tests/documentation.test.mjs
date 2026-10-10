@@ -104,3 +104,20 @@ test("AGENTS distinguishes disaster recovery from deployment safety backup", () 
   assert.match(agents, /仅升级应用且保证媒体目录不变[\s\S]*只创建数据库和部署文件安全备份/);
   assert.match(agents, /迁移前置条件要求媒体一致备份[\s\S]*取得媒体备份明确授权/);
 });
+
+test("deployment skill separates standard authorization from data recovery approval", () => {
+  const skill = readFileSync(deploymentSkillPath, "utf8");
+  const runbookPath = path.join(
+    projectRoot,
+    ".agents/skills/deploy-movie-harbor-ubuntu/references/runbook.md",
+  );
+  const runbook = readFileSync(runbookPath, "utf8");
+
+  assert.match(skill, /明确要求将指定发布包部署或升级[\s\S]*不再请求部署总确认/);
+  assert.match(skill, /停止向前升级[\s\S]*应用级回滚/);
+  assert.match(skill, /数据库恢复与媒体备份[\s\S]*当次明确授权/);
+  assert.match(runbook, /标准部署授权[\s\S]*既定 SSH 主机上传/);
+  assert.match(runbook, /恢复字节一致且哈希匹配的原 `.env` 备份/);
+  assert.match(runbook, /不得编辑、猜测、补写或重建/);
+  assert.match(runbook, /数据库恢复[\s\S]*媒体备份[\s\S]*重新取得明确授权/);
+});
