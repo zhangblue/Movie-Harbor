@@ -24,13 +24,13 @@ pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
     )
 }
 
+pub fn clear_legacy_cookie(secure: bool) -> String {
+    cookie("", secure, true).replacen("Path=/;", "Path=/api/admin;", 1)
+}
+
 pub fn clear_cookies(secure: bool) -> axum::http::HeaderMap {
     let mut headers = axum::http::HeaderMap::new();
-    let root = cookie("", secure, true);
-    for value in [
-        root.clone(),
-        root.replacen("Path=/;", "Path=/api/admin;", 1),
-    ] {
+    for value in [cookie("", secure, true), clear_legacy_cookie(secure)] {
         // 同名不同路径 Cookie 必须使用两条 Set-Cookie，不能以 insert 覆盖第一条。
         headers.append(axum::http::header::SET_COOKIE, value.parse().unwrap());
     }

@@ -126,7 +126,7 @@ async fn login(
     let raw = session::create(&tx, &admin).await?;
     tx.commit().await?;
     admission.success().await;
-    Ok((
+    let mut response = (
         [
             (
                 "set-cookie",
@@ -136,7 +136,15 @@ async fn login(
         ],
         Json(serde_json::json!({"name":admin.name})),
     )
-        .into_response())
+        .into_response();
+    // 清除升级前的同名旧路径 Cookie，避免其遮蔽刚创建的根路径会话。
+    response.headers_mut().append(
+        axum::http::header::SET_COOKIE,
+        session::clear_legacy_cookie(state.cookie_secure)
+            .parse()
+            .unwrap(),
+    );
+    Ok(response)
 }
 
 async fn read_session(

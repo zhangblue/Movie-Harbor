@@ -597,6 +597,71 @@ async fn initialization_is_required_once_and_never_overwrites_the_admin() {
     );
 }
 
+// Catches a new root-path session being shadowed by an expired legacy-path Cookie after login.
+#[tokio::test]
+async fn admin_login_cookie_migrates_expired_legacy_path_session() {
+    let db = database().await;
+    let app = app::build(db.clone(), &config()).await.unwrap();
+    let (legacy_cookie, _) = credentials(&app).await;
+    db.execute_unprepared(
+        "UPDATE admin_session SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'",
+    )
+    .await
+    .unwrap();
+
+    let response = request(
+        &app,
+        "POST",
+        "/api/admin/login",
+        json!({"name":"Admin","password":"initial-password"}),
+        Some(&legacy_cookie),
+        None,
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        cookies.len(),
+        2,
+        "login must also remove the legacy path Cookie"
+    );
+    let root = cookies
+        .iter()
+        .find(|cookie| cookie.contains("Path=/;"))
+        .unwrap();
+    assert!(root.starts_with("mh_session="));
+    assert!(root.contains("Max-Age=86400"));
+    let legacy = cookies
+        .iter()
+        .find(|cookie| cookie.contains("Path=/api/admin;"))
+        .unwrap();
+    assert_eq!(
+        *legacy,
+        "mh_session=; Path=/api/admin; HttpOnly; SameSite=Lax; Max-Age=0; Secure"
+    );
+    let new_cookie = root.split(';').next().unwrap();
+    assert_ne!(new_cookie, legacy_cookie);
+    let session = request(
+        &app,
+        "GET",
+        "/api/admin/session",
+        json!(null),
+        Some(new_cookie),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(session.status(), StatusCode::OK);
+    assert_eq!(body(session).await["name"], "Admin");
+}
+
 // Catches leaked plaintext session/CSRF storage, weak cookies, and nonrecoverable session tokens on restart.
 #[tokio::test]
 async fn login_cookie_issues_secure_opaque_session_and_recovers_csrf_after_restart() {
