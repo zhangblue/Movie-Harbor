@@ -1,3 +1,4 @@
+mod authorization;
 pub(crate) mod path;
 pub mod removal;
 pub mod routes;

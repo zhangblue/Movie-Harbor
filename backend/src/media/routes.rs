@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     middleware,
-    routing::post,
+    routing::{get, post},
 };
 use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
@@ -51,6 +51,12 @@ impl MediaAssetResponse {
 
 const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
 const MAX_FILE_NAME_BYTES: usize = 255;
+
+pub fn authorization_router(state: AuthState) -> Router {
+    Router::new()
+        .route("/api/media/authorize", get(super::authorization::authorize))
+        .with_state(state)
+}
 
 pub fn router(
     auth_state: AuthState,

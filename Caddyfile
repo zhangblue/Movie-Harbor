@@ -1,25 +1,38 @@
 :80 {
 	encode zstd gzip
 
+	handle /api/media/authorize {
+		header Cache-Control "private, no-store"
+		respond 404
+	}
+
 	@api path /api /api/*
 	handle @api {
 		reverse_proxy api:3000 {
+			header_up -X-Forwarded-Uri
 			header_up X-Forwarded-For {remote_host}
 			header_up X-Movie-Harbor-Proxy-Token {$TRUST_PROXY_SECRET}
 		}
 	}
 
-    @public_media path /media/poster/* /media/video/*
-    handle @public_media {
-        header X-Content-Type-Options nosniff
-        root * /srv
-        file_server
-    }
+	@public_media path_regexp media ^/media/(poster/[0-9a-f]{2}/[0-9a-f]{32}\.(jpg|png|webp)|video/[0-9a-f]{2}/[0-9a-f]{32}\.(mp4|webm|ogv))$
+	handle @public_media {
+		header X-Content-Type-Options nosniff
+		header Cache-Control "private, no-store"
+		forward_auth api:3000 {
+			uri /api/media/authorize
+			header_up X-Forwarded-Uri {uri}
+			header_up X-Movie-Harbor-Proxy-Token {$TRUST_PROXY_SECRET}
+		}
+		root * /srv
+		file_server
+	}
 
-    @other_media path /media /media/*
-    handle @other_media {
-        respond 404
-    }
+	@other_media path /media /media/*
+	handle @other_media {
+		header Cache-Control "private, no-store"
+		respond 404
+	}
 
 	handle /admin {
 		redir /admin/ 308

@@ -49,6 +49,7 @@ pub async fn build(
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))
         .merge(crate::viewer_auth::routes::router(state.clone()))
+        .merge(crate::media::routes::authorization_router(state.clone()))
         .merge(crate::admin_content::routes::router(state.clone()))
         .merge(crate::admin_export::routes::router(state.clone()))
         .merge(crate::admin_users::routes::router(state.clone()))
