@@ -46,7 +46,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
     ]));
     if (url === "/api/admin/movies") return json([]);
     if (url === "/api/admin/series" && r.method === "GET") return json([current]);
-    if (url === "/api/admin/series" && r.method === "POST") { current = detail({ name: requestJson<{ name: string }>(r).name, version: 1, seasons: [], poster: null }); return json(current, 201); }
+    if (url === "/api/admin/series" && r.method === "POST") { const body = requestJson<{ name: string; is_private: boolean }>(r); current = detail({ name: body.name, is_private: body.is_private, version: 1, seasons: [], poster: null }); return json(current, 201); }
     if (url === base && r.method === "GET") return json(current);
     if (url === `${base}/delete-impact`) return json({ name: current.name, version: current.version, season_count: current.seasons.length, episode_count: current.seasons.flatMap((s) => s.episodes).length, media_count: Number(!!current.poster) + current.seasons.flatMap((s) => s.episodes).filter((ep) => ep.video).length });
     if (url.endsWith("/delete-impact") && url.includes("/episodes/")) { const ep = current.seasons.flatMap((s) => s.episodes).find((value) => url.includes(`/${value.id}/`))!; return json({ display_name: ep.name, version: ep.version, season_count: 0, episode_count: 1, media_count: ep.video ? 1 : 0 }); }
@@ -102,6 +102,48 @@ beforeEach(() => {
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
+
+// Catches ignoring the initial scope or adding independent privacy controls to children.
+it.each([false, true])("creates a whole series with selected privacy %s and keeps privacy out of its seasons", async (isPrivate) => {
+  const requests = fixture();
+  const user = userEvent.setup();
+  editor(null);
+  const selector = await screen.findByRole("group", { name: "访问范围" });
+  expect(within(selector).getByRole("radio", { name: /^公开/ })).toBeChecked();
+  expect(screen.getByText("整个剧集及所有季、单集仅登录后可见")).toBeInTheDocument();
+  if (isPrivate) await user.click(within(selector).getByRole("radio", { name: /^私密/ }));
+  await user.type(screen.getByLabelText("剧集名称"), "新建剧集");
+  await user.click(screen.getByRole("button", { name: "创建草稿" }));
+  await screen.findByRole("button", { name: "保存剧集草稿" });
+  expect(requests.find((request) => request.url === "/api/admin/series" && request.method === "POST")!.body)
+    .toEqual({ name: "新建剧集", is_private: isPrivate });
+  expect(screen.getAllByRole("group", { name: "访问范围" })).toHaveLength(1);
+  expect(screen.getByRole("radio", { name: isPrivate ? /^私密/ : /^公开/ })).toBeChecked();
+  expect(screen.getByRole("radio", { name: /^私密/ })).toBeDisabled();
+  const structure = screen.getByRole("region", { name: "季与单集" });
+  expect(within(structure).queryByRole("radio")).not.toBeInTheDocument();
+  expect(within(structure).queryByRole("group", { name: "访问范围" })).not.toBeInTheDocument();
+  expect(requests.find((request) => request.url.endsWith("/seasons"))!.body).not.toHaveProperty("is_private");
+});
+
+it.each(["draft", "published", "archived"] as const)("shows existing %s series scope only in basic information and never in child editors", async (status) => {
+  const requests = fixture(detail({ status, is_private: true }));
+  const user = userEvent.setup();
+  editor();
+  await expandFirst(user);
+  expect(screen.getAllByRole("group", { name: "访问范围" })).toHaveLength(1);
+  const basic = screen.getByRole("region", { name: "基本信息" });
+  expect(within(basic).getByRole("radio", { name: /^私密/ })).toBeChecked();
+  within(basic).getAllByRole("radio").forEach((radio) => expect(radio).toBeDisabled());
+  const structure = screen.getByRole("region", { name: "季与单集" });
+  expect(within(structure).queryByRole("radio")).not.toBeInTheDocument();
+  expect(within(structure).queryByText("访问范围")).not.toBeInTheDocument();
+  if (status === "draft") {
+    await user.click(screen.getByRole("button", { name: "保存剧集草稿" }));
+    expect(requests.find((request) => request.method === "PATCH")!.body).not.toHaveProperty("is_private");
+  }
+  expect(requests.some((request) => request.url.endsWith("/privacy"))).toBe(false);
+});
 
 it("shows each persisted episode video path and no path for an episode without a video", async () => {
   fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [

@@ -43,7 +43,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
     ]));
     if (url === "/api/admin/series") return json([]);
     if (url === "/api/admin/movies" && r.method === "GET") return json([current]);
-    if (url === "/api/admin/movies" && r.method === "POST") { current = movie({ name: requestJson<{ name: string }>(r).name, poster: null, version: 1 }); return json(current, 201); }
+    if (url === "/api/admin/movies" && r.method === "POST") { const body = requestJson<{ name: string; is_private: boolean }>(r); current = movie({ name: body.name, is_private: body.is_private, poster: null, version: 1 }); return json(current, 201); }
     if (url === "/api/admin/movies/movie-1" && r.method === "GET") return json(current);
     if (url === "/api/admin/movies/movie-1/delete-impact") return json({ name: current.name, version: current.version, season_count: 0, episode_count: 0, media_count: Number(!!current.poster) + Number(!!current.video) });
     if (r.method === "PATCH") {
@@ -78,6 +78,37 @@ afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 function editor(id: string | null = "movie-1") {
   return render(<><style>{styles}</style><MovieEditor movieId={id} onBack={() => {}} onExpired={() => {}} /></>);
 }
+
+// Catches a private default, ignoring the chosen scope, or resetting it after creation.
+it.each([false, true])("creates a movie with selected privacy %s and shows the saved scope read-only", async (isPrivate) => {
+  const requests = fixture();
+  const user = userEvent.setup();
+  editor(null);
+  const selector = await screen.findByRole("group", { name: "访问范围" });
+  expect(within(selector).getByRole("radio", { name: /^公开/ })).toBeChecked();
+  expect(within(selector).getByRole("radio", { name: /^私密/ })).not.toBeChecked();
+  expect(screen.getByText("仅登录后的普通用户可查看")).toBeInTheDocument();
+  if (isPrivate) await user.click(within(selector).getByRole("radio", { name: /^私密/ }));
+  await user.type(screen.getByLabelText("名称"), "新建电影");
+  await user.click(screen.getByRole("button", { name: "创建草稿" }));
+  await screen.findByRole("button", { name: "保存草稿" });
+  expect(requests.find((request) => request.url === "/api/admin/movies" && request.method === "POST")!.body)
+    .toEqual({ name: "新建电影", is_private: isPrivate });
+  expect(screen.getByRole("radio", { name: isPrivate ? /^私密/ : /^公开/ })).toBeChecked();
+  expect(screen.getByRole("radio", { name: /^私密/ })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  const patch = requests.find((request) => request.method === "PATCH")!;
+  expect(patch.body).not.toHaveProperty("is_private");
+  expect(requests.some((request) => request.url.endsWith("/privacy"))).toBe(false);
+});
+
+it.each(["draft", "published", "archived"] as const)("shows existing %s movie privacy without enabling an editor write", async (status) => {
+  fixture(movie({ status, is_private: true }));
+  editor();
+  const selector = await screen.findByRole("group", { name: "访问范围" });
+  expect(within(selector).getByRole("radio", { name: /^私密/ })).toBeChecked();
+  within(selector).getAllByRole("radio").forEach((radio) => expect(radio).toBeDisabled());
+});
 
 // Catches absent/oversized fields, lossy duration conversion, and selecting inactive new genres.
 it("loads bounded draft fields and retains existing inactive genres", async () => {

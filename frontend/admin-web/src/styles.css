@@ -60,6 +60,12 @@ p { color: var(--mh-color-text-muted); }
 .status--draft { color: #e9c178; }
 .status--published { color: #71d29c; }
 .status--archived { color: #a9afbb; }
+.privacy-badge { display: inline-flex; align-items: center; width: max-content; gap: 6px; padding: 4px 8px; border: 1px solid #46516a; border-radius: 999px; color: #c8d0df; font-size: 12px; font-weight: 700; }
+.privacy-badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #8290aa; }
+.privacy-badge.private { border-color: #665173; background: #2d2537; color: #e3c8ed; }
+.privacy-badge.private::before { background: #d594ea; box-shadow: 0 0 0 3px #d594ea17; }
+.mh-button.privacy-action { border-color: #665173; background: #2d2537; color: #e3c8ed; }
+.mh-button.privacy-action:hover:not(:disabled) { background: #3a2c47; }
 .login-page, .session-state { display: grid; min-height: 60vh; padding: 32px 16px; place-content: center; }
 .login-card { width: min(380px, calc(100vw - 32px)); padding: 30px; border: 1px solid var(--mh-color-border); border-radius: 14px; background: var(--mh-color-surface); }
 .login-card h1 { margin-top: 24px; font-size: 24px; }
@@ -74,6 +80,18 @@ p { color: var(--mh-color-text-muted); }
 .movie-field-medium { width: 290px; max-width: 100%; }
 .movie-field-short { width: 145px; max-width: 100%; }
 .movie-field-wide { width: 500px; max-width: 100%; }
+.privacy-selector { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.privacy-selector legend { margin-bottom: 7px; color: var(--mh-color-text-muted); font-size: 12px; font-weight: 700; }
+.privacy-selector label { position: relative; display: block; cursor: pointer; }
+.privacy-selector input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.privacy-selector label > span { min-height: 64px; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 10px 12px; border: 1px solid var(--mh-color-border-strong); border-radius: 9px; background: #141a24; }
+.privacy-selector input:not(:disabled) + span:hover { background: #1d2533; }
+.privacy-selector input:checked + span { border-color: #8291b5; background: #293247; box-shadow: 0 0 0 2px #8291b51c; }
+.privacy-selector input:focus-visible + span { outline: 2px solid #9cb4ec; outline-offset: 3px; }
+.privacy-selector:disabled label { cursor: default; }
+.privacy-selector strong { color: #edf1f8; font-size: 13px; }
+.privacy-selector small { color: var(--mh-color-text-muted); font-size: 11px; font-weight: 500; line-height: 1.4; }
+.series-privacy-selector { margin-top: 2px; }
 .media-local-path { overflow-wrap: anywhere; }
 .movie-inline-fields { display: flex; gap: 12px; max-width: 100%; }
 .movie-form textarea { resize: vertical; }

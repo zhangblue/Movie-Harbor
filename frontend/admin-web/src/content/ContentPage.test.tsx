@@ -11,6 +11,8 @@ import {
   json,
   jsonDownload,
   movie,
+  requestJson,
+  series,
   server,
   session,
 } from "../test/server";
@@ -152,6 +154,105 @@ it("loads the unified list and submits compact name and dropdown filters to the 
   expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=series&status=archived&name=%E9%95%BF%E5%A4%9C&page=1");
 });
 
+// Catches omitting privacy from server filtering or losing it when returning to all content.
+it.each(["public", "private"] as const)("queries %s access scope and clears it for all content", async (privacy) => {
+  const requests = server();
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  expect(screen.getByRole("columnheader", { name: "访问范围" })).toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText("访问范围"), privacy);
+  await user.click(screen.getByRole("button", { name: "查询" }));
+  await screen.findByText("潮汐尽头");
+  expect(requests.at(-1)!.url).toBe(`/api/admin/contents?kind=all&privacy=${privacy}&page=1`);
+  await user.selectOptions(screen.getByLabelText("访问范围"), "all");
+  await user.click(screen.getByRole("button", { name: "查询" }));
+  await screen.findByText("潮汐尽头");
+  expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=all&page=1");
+});
+
+// Catches coupling privacy to lifecycle, using the wrong endpoint/version, or retaining stale scope.
+it.each([
+  { kind: "movie", status: "draft", isPrivate: false },
+  { kind: "movie", status: "published", isPrivate: true },
+  { kind: "movie", status: "archived", isPrivate: false },
+  { kind: "series", status: "draft", isPrivate: true },
+  { kind: "series", status: "published", isPrivate: false },
+  { kind: "series", status: "archived", isPrivate: true },
+] as const)("switches $kind $status privacy using the displayed version and refreshes", async ({ kind, status, isPrivate }) => {
+  let currentPrivacy = isPrivate;
+  let currentVersion = 4;
+  const requests = server((request) => {
+    if (request.url.endsWith("/privacy")) {
+      currentPrivacy = requestJson<{ is_private: boolean }>(request).is_private;
+      currentVersion++;
+      return json((kind === "movie" ? movie : series)({ id: "movie-1", status, is_private: currentPrivacy, version: currentVersion }));
+    }
+    if (request.url.startsWith("/api/admin/contents")) return json(adminContentPage([
+      adminContentItem({ kind, status, is_private: currentPrivacy, version: currentVersion }),
+    ]));
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  const row = await screen.findByRole("row", { name: /潮汐尽头/ });
+  expect(within(row).getByText(isPrivate ? "私密" : "公开", { exact: true })).toBeInTheDocument();
+  await user.click(within(row).getByRole("button", { name: isPrivate ? "设为公开" : "设为私密" }));
+  await screen.findByRole("button", { name: isPrivate ? "设为私密" : "设为公开" });
+  expect(requests.find((request) => request.url.endsWith("/privacy"))).toMatchObject({
+    url: `/api/admin/${kind === "movie" ? "movies" : "series"}/movie-1/privacy`,
+    method: "PUT", body: { version: 4, is_private: !isPrivate },
+  });
+  expect(requests.find((request) => request.url.endsWith("/privacy"))!.headers.get("X-CSRF-Token")).toBe("session-csrf");
+  expect(requests.filter((request) => request.url.startsWith("/api/admin/contents"))).toHaveLength(2);
+  await user.click(screen.getByRole("button", { name: isPrivate ? "设为私密" : "设为公开" }));
+  expect(requests.filter((request) => request.url.endsWith("/privacy")).at(-1)!.body).toEqual({ version: 5, is_private: isPrivate });
+});
+
+it("disables list writes and suppresses duplicate privacy requests while switching", async () => {
+  const pending = deferred<Response>();
+  const requests = server((request) => request.url.endsWith("/privacy") ? pending.promise : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  const row = screen.getByRole("row", { name: /潮汐尽头/ });
+  const button = within(row).getByRole("button", { name: "设为私密" });
+  await act(async () => { fireEvent.click(button); fireEvent.click(button); });
+  expect(button).toBeDisabled();
+  expect(screen.getByRole("button", { name: "＋ 新建内容" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "归档" })).toBeDisabled();
+  expect(screen.getByLabelText("访问范围")).toBeDisabled();
+  expect(requests.filter((request) => request.url.endsWith("/privacy"))).toHaveLength(1);
+  await act(async () => { pending.resolve(json(movie({ is_private: true }))); });
+  await user.click(screen.getByRole("button", { name: "查询" }));
+});
+
+it("locks privacy writes after a conflict until the displayed version is reloaded", async () => {
+  let changed = false;
+  const requests = server((request) => {
+    if (request.url.endsWith("/privacy")) { changed = true; return json({ error: "version conflict" }, 409); }
+    if (request.url.startsWith("/api/admin/contents")) return json(adminContentPage([
+      adminContentItem({ is_private: changed, version: changed ? 5 : 4 }),
+    ]));
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole("button", { name: "设为私密" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(/刷新/);
+  expect(screen.getByRole("button", { name: "设为私密" })).toBeDisabled();
+  await user.click(screen.getByRole("button", { name: "重新加载" }));
+  await user.click(await screen.findByRole("button", { name: "设为公开" }));
+  expect(requests.filter((request) => request.url.endsWith("/privacy")).at(-1)!.body).toEqual({ version: 5, is_private: false });
+});
+
+it("returns to administrator login when a privacy write reports 401", async () => {
+  server((request) => request.url.endsWith("/privacy") ? json({ error: "authentication failed" }, 401) : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  const row = await screen.findByRole("row", { name: /潮汐尽头/ });
+  await user.click(within(row).getByRole("button", { name: "设为私密" }));
+  await screen.findByRole("heading", { name: "管理员登录" });
+});
+
 // Catches sequence numbers restarting at one or pagination controls omitting the current page semantics.
 it("paginates 21 results and continues the sequence number on page two", async () => {
   const requests = server((request) => {
@@ -178,11 +279,11 @@ it("renders actions from the four supported or unknown statuses only", async () 
   ])) : undefined);
   render(<App />);
   expect(within(await screen.findByRole("row", { name: /潮汐尽头/ })).getAllByRole("button").map((button) => button.textContent))
-    .toEqual(["编辑", "发布", "永久删除"]);
+    .toEqual(["设为私密", "编辑", "发布", "永久删除"]);
   expect(within(screen.getByRole("row", { name: /已发布电影/ })).getAllByRole("button").map((button) => button.textContent))
-    .toEqual(["查看", "归档"]);
+    .toEqual(["设为私密", "查看", "归档"]);
   expect(within(screen.getByRole("row", { name: /归档电影/ })).getAllByRole("button").map((button) => button.textContent))
-    .toEqual(["查看", "原样发布", "转为草稿", "永久删除"]);
+    .toEqual(["设为私密", "查看", "原样发布", "转为草稿", "永久删除"]);
   expect(within(screen.getByRole("row", { name: /未知状态/ })).queryByRole("button")).not.toBeInTheDocument();
 });
 

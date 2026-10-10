@@ -4,6 +4,7 @@ import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
 import { classifyEditorWriteError, mergeGenreChoices } from "../content/editorSupport";
+import { PrivacySelector } from "../content/PrivacySelector";
 import { PosterPicker } from "./PosterPicker";
 import { VideoPicker } from "./VideoPicker";
 import { PublishErrors } from "./PublishErrors";
@@ -18,6 +19,7 @@ function fieldsOf(movie: MovieResponse): Fields {
 export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () => {}, onDeleteFinalization = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteSuccess?: () => void; onDeleteFinalization?: () => void; initialDelete?: boolean }) {
   const [movie, setMovie] = useState<MovieResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
   const [poster, setPoster] = useState<File | null>(null);
   const [video, setVideo] = useState<File | null>(null);
@@ -168,11 +170,12 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {notice && <p role="status">{notice}</p>}
       {warning && <p role="alert" className="error-message">{warning}</p>}
       {loading ? <p role="status">正在加载电影…</p> : !movie ? <form className="movie-form" onSubmit={(event) => {
-        event.preventDefault(); void run(async () => { const created = await createMovie(fields.name, false); if (mounted.current) accept(created); });
-      }}><Field label="名称" className="movie-field-medium"><input required value={fields.name} disabled={locked} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><Button variant="primary" type="submit" disabled={locked}>创建草稿</Button></form> : <div className="movie-editor-card">
+        event.preventDefault(); void run(async () => { const created = await createMovie(fields.name, isPrivate); if (mounted.current) accept(created); });
+      }}><Field label="名称" className="movie-field-medium"><input required value={fields.name} disabled={locked} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><PrivacySelector value={isPrivate} onChange={setIsPrivate} disabled={locked} /><Button variant="primary" type="submit" disabled={locked}>创建草稿</Button></form> : <div className="movie-editor-card">
         <PosterPicker current={movie.poster} file={poster} onSelect={setPoster} readOnly={readOnly} disabled={locked} />
         <form className="movie-form" onSubmit={(event) => { event.preventDefault(); const submitter = (event.nativeEvent as SubmitEvent).submitter; void save(submitter?.getAttribute("value") === "publish"); }}>
           <Field label="名称" className="movie-field-medium"><input required disabled={readOnly || locked} value={fields.name} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field>
+          <PrivacySelector value={movie.is_private} onChange={setIsPrivate} disabled />
           <div className="movie-inline-fields">
             <Field label="年份" className="movie-field-short"><input type="number" min="1" max="9999" disabled={readOnly || locked} value={fields.year} onChange={(e) => setFields({ ...fields, year: e.target.value })} /></Field>
             <Field label="时长（分钟）" className="movie-field-short"><input type="number" min="0" step="any" disabled={readOnly || locked} value={fields.minutes} onChange={(e) => setFields({ ...fields, minutes: e.target.value })} /></Field>

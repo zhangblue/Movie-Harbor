@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ApiError, normalizeError, type CaughtValue, downloadAdminContentExport, listAdminContent, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
+import { ApiError, normalizeError, type CaughtValue, downloadAdminContentExport, listAdminContent, setMoviePrivacy, setSeriesPrivacy, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -35,6 +35,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     void listAdminContent({
       kind: state.filters.kind,
       status: state.filters.status === "all" ? undefined : state.filters.status,
+      privacy: state.filters.privacy === "all" ? undefined : state.filters.privacy,
       name: state.filters.name || undefined,
       page: state.page,
     }).then((result) => {
@@ -62,7 +63,8 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     setMutating(true);
     setError("");
     try {
-      await (row.kind === "movie" ? transitionMovie : transitionSeries)(row.id, action, row.version);
+      if (action === "privacy") await (row.kind === "movie" ? setMoviePrivacy : setSeriesPrivacy)(row.id, row.version, !row.is_private);
+      else await (row.kind === "movie" ? transitionMovie : transitionSeries)(row.id, action, row.version);
       if (mounted.current) setState((value) => ({ ...value, revision: value.revision + 1 }));
     } catch (cause) {
       const error = normalizeError(cause as CaughtValue);

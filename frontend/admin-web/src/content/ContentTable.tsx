@@ -14,10 +14,11 @@ export function ContentTable({ rows, startIndex, disabled, onAction }: {
   const statuses: Record<string, string> = { draft: "草稿", published: "已发布", archived: "已归档" };
   return <div className="table-card" role="region" aria-label="内容列表" tabIndex={0}>
     <table className="content-table">
-      <thead><tr><th scope="col" className="sequence-cell">序号</th><th scope="col">海报</th><th scope="col">名称</th><th scope="col">形态</th><th scope="col">状态</th><th scope="col" className="action-cell">可用操作</th></tr></thead>
+      <thead><tr><th scope="col" className="sequence-cell">序号</th><th scope="col">海报</th><th scope="col">名称</th><th scope="col">形态</th><th scope="col">状态</th><th scope="col">访问范围</th><th scope="col" className="action-cell">可用操作</th></tr></thead>
       <tbody>{rows.map((row, index) => <tr key={`${row.kind}:${row.id}`}>
         <td className="sequence-cell">{startIndex + index + 1}</td><td><Poster row={row} /></td><th scope="row">{row.name}</th><td>{row.kind === "movie" ? "电影" : "剧集"}</td>
         <td><span className={`status status--${row.status}`}>{statuses[row.status] ?? "未知状态"}</span></td>
+        <td><span className={`privacy-badge${row.is_private ? " private" : ""}`}>{row.is_private ? "私密" : "公开"}</span></td>
         <td className="action-cell"><ActionButtons row={row} disabled={disabled} onAction={onAction} /></td>
       </tr>)}</tbody>
     </table>

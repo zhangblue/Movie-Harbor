@@ -4,6 +4,7 @@ import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
 import { classifyEditorWriteError, mergeGenreChoices } from "../content/editorSupport";
+import { PrivacySelector } from "../content/PrivacySelector";
 import { PosterPicker } from "../movies/PosterPicker";
 import { SeasonCard } from "./SeasonCard";
 import { SeriesPublishErrors } from "./SeriesPublishErrors";
@@ -24,6 +25,7 @@ function deletionAllowed(target: Pick<Deletion, "series" | "season" | "episode">
 export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}, onDeleteSuccess = () => {}, onDeleteFinalization = () => {}, initialDelete = false, resumeCreation = false }: { seriesId: string | null; onBack: () => void; onExpired: () => void; onCreated?: (id: string) => void; onDeleteSuccess?: () => void; onDeleteFinalization?: () => void; initialDelete?: boolean; resumeCreation?: boolean }) {
   const [series, setSeries] = useState<SeriesResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
+  const [isPrivate, setIsPrivate] = useState(false);
   const [genres, setGenres] = useState<GenreResponse[]>([]);
   const [poster, setPoster] = useState<File | null>(null);
   const [loading, setLoading] = useState(true);
@@ -212,13 +214,13 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
       {loading ? <p role="status">正在加载剧集…</p> : !series ? <form className="movie-form" onSubmit={(event) => {
         event.preventDefault(); if (!fields.name.trim()) return;
         void run(async () => {
-          const created = await createSeries(fields.name, false); if (!mounted.current) return;
+          const created = await createSeries(fields.name, isPrivate); if (!mounted.current) return;
           accept(created, true); onCreated(created.id);
           const saved = await createSeason(created.id, 1, created.version); if (!mounted.current) return;
           const seasonIds = saved.seasons.map((season) => season.id);
           setNewSeasons(seasonIds); setExpandedSeasons(new Set(seasonIds)); accept(saved);
         });
-      }}><Field label="剧集名称" className="movie-field-medium"><input required disabled={locked} value={fields.name} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><Button type="submit" disabled={locked} variant="primary">创建草稿</Button></form> : <>
+      }}><Field label="剧集名称" className="movie-field-medium"><input required disabled={locked} value={fields.name} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><PrivacySelector value={isPrivate} onChange={setIsPrivate} disabled={locked} series /><Button type="submit" disabled={locked} variant="primary">创建草稿</Button></form> : <>
         <section className="series-section" aria-labelledby="series-basic-title"><h2 id="series-basic-title">基本信息</h2>
           <div className="movie-editor-card"><PosterPicker current={series.poster} file={poster} onSelect={setPoster} readOnly={readOnly} disabled={locked} />
             <form className="movie-form" onSubmit={(event) => {
@@ -233,6 +235,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
                 const retained = fields.genreIds.filter((id) => choices.some((g) => g.id === id && !g.enabled));
                 setFields({ ...fields, genreIds: [...new Set([...retained, ...Array.from(e.target.selectedOptions).map((o) => o.value)])] });
               }}>{choices.filter((g) => g.enabled || fields.genreIds.includes(g.id)).map((g) => <option key={g.id} value={g.id} disabled={!g.enabled}>{g.name}{g.enabled ? "" : "（已停用）"}</option>)}</select></Field>
+              <PrivacySelector value={series.is_private} onChange={setIsPrivate} disabled series />
               <div className="movie-form-actions">
                 {canAct(series, "edit") && <Button type="submit" disabled={locked}>保存剧集草稿</Button>}
                 {canAct(series, "publish") && series.status === "draft" && <Button type="submit" value="publish" disabled={locked} variant="primary">发布剧集</Button>}

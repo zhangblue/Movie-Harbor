@@ -2,8 +2,8 @@ import { useState } from "react";
 import type { CatalogKind, ContentStatus } from "@movie-harbor/api-client";
 import { Button, Field } from "@movie-harbor/ui";
 
-export type Filters = { kind: CatalogKind; status: ContentStatus | "all"; name: string };
-export const initialFilters: Filters = { kind: "all", status: "all", name: "" };
+export type Filters = { kind: CatalogKind; status: ContentStatus | "all"; privacy: "all" | "public" | "private"; name: string };
+export const initialFilters: Filters = { kind: "all", status: "all", privacy: "all", name: "" };
 
 export function ContentFilters({ initialValue, onQuery, disabled }: { initialValue: Filters; onQuery: (filters: Filters) => void; disabled: boolean }) {
   const [filters, setFilters] = useState(initialValue);
@@ -16,6 +16,9 @@ export function ContentFilters({ initialValue, onQuery, disabled }: { initialVal
     </select></Field>
     <Field label="状态"><select disabled={disabled} value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value as Filters["status"] })}>
       <option value="all">全部</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option>
+    </select></Field>
+    <Field label="访问范围"><select disabled={disabled} value={filters.privacy} onChange={(e) => setFilters({ ...filters, privacy: e.target.value as Filters["privacy"] })}>
+      <option value="all">全部</option><option value="public">公开</option><option value="private">私密</option>
     </select></Field>
     <Field label="名称" className="compact-query"><input type="search" placeholder="名称查询" disabled={disabled} value={filters.name} onChange={(e) => setFilters({ ...filters, name: e.target.value })} /></Field>
     <Button type="submit" disabled={disabled}>查询</Button>
