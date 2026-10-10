@@ -86,4 +86,3 @@ git diff --check
 git add AGENTS.md docs/superpowers/plans/2026-10-10-ubuntu-offline-deployment-runbook.md
 git commit -m "docs: record ubuntu deployment workflow"
 ```
-
