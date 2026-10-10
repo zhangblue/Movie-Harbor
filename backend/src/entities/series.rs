@@ -10,6 +10,7 @@ pub struct Model {
     pub year: Option<i32>,
     pub poster_asset_id: Option<Uuid>,
     pub status: String,
+    pub is_private: bool,
     pub version: i64,
     pub published_at: Option<DateTimeWithTimeZone>,
     pub archived_at: Option<DateTimeWithTimeZone>,

@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 mod support;
 
-const TABLES: [&str; 11] = [
+const TABLES: [&str; 13] = [
     "admin_user",
     "admin_session",
     "genre",
@@ -18,7 +18,127 @@ const TABLES: [&str; 11] = [
     "movie_genre",
     "series_genre",
     "media_asset_ownership",
+    "viewer_user",
+    "viewer_session",
 ];
+
+#[tokio::test]
+async fn private_content_upgrade_preserves_public_defaults_and_is_reversible() {
+    let db = support::TestDatabase::at_migration("private_upgrade", Some(5)).await;
+    db.execute_unprepared("INSERT INTO movie (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Existing'); INSERT INTO series (id, name) VALUES ('20000000-0000-0000-0000-000000000001', 'Existing')").await.unwrap();
+    migration::Migrator::up(&*db, None).await.unwrap();
+    for table in ["movie", "series"] {
+        let row = db
+            .query_one(Statement::from_string(
+                DbBackend::Postgres,
+                format!("SELECT is_private FROM {table} WHERE name = 'Existing'"),
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!row.try_get::<bool>("", "is_private").unwrap());
+    }
+    let row = db.query_one(Statement::from_string(DbBackend::Postgres,
+        "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema=current_schema() AND table_name IN ('season', 'episode') AND column_name='is_private'")).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+    for index in [
+        "viewer_session_user_idx",
+        "viewer_session_expiry_idx",
+        "movie_public_catalog_idx",
+        "series_public_catalog_idx",
+    ] {
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT to_regclass($1)::text AS relation",
+                [index.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            row.try_get::<Option<String>>("", "relation")
+                .unwrap()
+                .is_some()
+        );
+    }
+    migration::Migrator::down(&*db, Some(1)).await.unwrap();
+    let row = db.query_one(Statement::from_string(DbBackend::Postgres,
+        "SELECT count(*) AS count FROM information_schema.columns WHERE table_schema=current_schema() AND table_name IN ('movie', 'series') AND column_name='is_private'")).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+    for table in ["viewer_user", "viewer_session"] {
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT to_regclass($1)::text AS relation",
+                [table.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get::<Option<String>>("", "relation").unwrap(), None);
+    }
+    migration::Migrator::up(&*db, None).await.unwrap();
+}
+
+#[tokio::test]
+async fn private_viewer_schema_enforces_uniqueness_checks_and_session_cascade() {
+    use movie_harbor_api::entities::{viewer_session, viewer_user};
+    use sea_orm::{EntityTrait, ModelTrait};
+
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, None).await.unwrap();
+    sql(&db, "INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES ('30000000-0000-0000-0000-000000000001', 'Summer', 'summer', 'password-hash')").await;
+    for username in ["summer", " Summer "] {
+        rejects(&db, &format!("INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES (gen_random_uuid(), '{username}', 'summer', 'password-hash')"), "23505").await;
+    }
+    for (username, normalized) in [("   ", "blank"), ("Valid", "")] {
+        rejects(&db, &format!("INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES (gen_random_uuid(), '{username}', '{normalized}', 'password-hash')"), "23514").await;
+    }
+    rejects(&db, "UPDATE viewer_user SET version=0", "23514").await;
+    sql(&db, "INSERT INTO viewer_session (id, viewer_user_id, token_hash, csrf_token_hash, expires_at) VALUES ('40000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001', 'token-hash', 'csrf-hash', CURRENT_TIMESTAMP + INTERVAL '1 hour')").await;
+    let user = viewer_user::Entity::find().one(&db).await.unwrap().unwrap();
+    assert_eq!(user.username, "Summer");
+    assert_eq!(user.normalized_username, "summer");
+    assert_eq!(user.version, 1);
+    assert!(user.last_login_at.is_none());
+    let session = user
+        .find_related(viewer_session::Entity)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(session.token_hash, "token-hash");
+    assert_eq!(session.csrf_token_hash, "csrf-hash");
+    assert!(session.expires_at > session.created_at);
+    assert_eq!(
+        session
+            .find_related(viewer_user::Entity)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .id,
+        user.id
+    );
+    rejects(&db, "INSERT INTO viewer_session (id, viewer_user_id, token_hash, csrf_token_hash, expires_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000001', 'token-hash', 'other-csrf-hash', CURRENT_TIMESTAMP)", "23505").await;
+    rejects(&db, "INSERT INTO viewer_session (id, viewer_user_id, token_hash, csrf_token_hash, expires_at) VALUES (gen_random_uuid(), gen_random_uuid(), 'other-token', 'csrf-hash', CURRENT_TIMESTAMP)", "23503").await;
+    for table in ["movie", "series"] {
+        rejects(&db, &format!("INSERT INTO {table} (id, name, is_private) VALUES (gen_random_uuid(), 'Invalid', NULL)"), "23502").await;
+    }
+    sql(&db, "DELETE FROM viewer_user").await;
+    let row = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT count(*) AS count FROM viewer_session",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+    sql(&db, "INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES (gen_random_uuid(), 'summer', 'summer', 'new-password-hash')").await;
+    db.rollback().await.unwrap();
+}
 
 async fn isolated_database() -> DatabaseTransaction {
     let url = std::env::var("TEST_DATABASE_URL").expect(
@@ -90,7 +210,7 @@ async fn episode_synopsis_migration_is_reversible() {
     .await;
     sql(&db, "INSERT INTO season (id, series_id, number) VALUES ('00000000-0000-0000-0000-000000000011', '00000000-0000-0000-0000-000000000001', 1)").await;
     sql(&db, "INSERT INTO episode (id, season_id, number, name, synopsis) VALUES ('00000000-0000-0000-0000-000000000021', '00000000-0000-0000-0000-000000000011', 1, 'Pilot', 'remove me')").await;
-    migration::Migrator::up(&db, None).await.unwrap();
+    migration::Migrator::up(&db, Some(1)).await.unwrap();
     let row = db.query_one(Statement::from_string(DbBackend::Postgres,
         "SELECT count(*)::bigint AS count FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='episode' AND column_name='synopsis'")).await.unwrap().unwrap();
     assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
@@ -138,7 +258,7 @@ async fn media_ownership_migration_enforces_exclusive_assets_and_is_reversible()
     let db = isolated_database().await;
     migration::Migrator::up(&db, Some(4)).await.unwrap();
     sql(&db, "INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000003', 'poster/10/10000000000000000000000000000003.png', 'poster.png', 'image/png', 32, 'poster')").await;
-    migration::Migrator::up(&db, None).await.unwrap();
+    migration::Migrator::up(&db, Some(1)).await.unwrap();
     let cleanup = db
         .query_one(Statement::from_string(
             DbBackend::Postgres,

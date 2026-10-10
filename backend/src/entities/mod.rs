@@ -8,3 +8,5 @@ pub mod movie_genre;
 pub mod season;
 pub mod series;
 pub mod series_genre;
+pub mod viewer_session;
+pub mod viewer_user;

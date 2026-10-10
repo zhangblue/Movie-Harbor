@@ -12,6 +12,7 @@ pub struct Model {
     pub poster_asset_id: Option<Uuid>,
     pub video_asset_id: Option<Uuid>,
     pub status: String,
+    pub is_private: bool,
     pub version: i64,
     pub published_at: Option<DateTimeWithTimeZone>,
     pub archived_at: Option<DateTimeWithTimeZone>,
