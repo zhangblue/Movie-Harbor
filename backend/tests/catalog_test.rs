@@ -733,7 +733,7 @@ SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMEST
     .await;
 
     migration::Migrator::up(&db, None).await.unwrap();
-    migration::Migrator::down(&db, Some(3)).await.unwrap();
+    rollback_catalog_index_migration(&db).await;
     migration::Migrator::up(&db, None).await.unwrap();
 }
 
@@ -880,7 +880,7 @@ WHERE name ~ '^Series [0-9]+$'
         "{production_search_plan}"
     );
 
-    migration::Migrator::down(&db, Some(3)).await.unwrap();
+    rollback_catalog_index_migration(&db).await;
     let remaining = db
         .query_one(Statement::from_string(
             DatabaseBackend::Postgres,
@@ -892,6 +892,20 @@ WHERE name ~ '^Series [0-9]+$'
         .unwrap()
         .unwrap();
     assert_eq!(remaining.try_get::<i64>("", "count").unwrap(), 0);
+}
+
+async fn rollback_catalog_index_migration(db: &DatabaseConnection) {
+    let applied = migration::Migrator::get_applied_migrations(db)
+        .await
+        .unwrap();
+    let catalog_index_migration = applied
+        .iter()
+        .position(|migration| migration.name() == "m20260911_000003_public_catalog_indexes")
+        .expect("catalog index migration must be applied");
+    let rollback_steps = u32::try_from(applied.len() - catalog_index_migration).unwrap();
+    migration::Migrator::down(db, Some(rollback_steps))
+        .await
+        .unwrap();
 }
 
 async fn explain(db: &DatabaseConnection, query: &str) -> String {
