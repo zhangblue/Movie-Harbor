@@ -6,16 +6,18 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use movie_harbor_api::{
-    app,
+    app, auth,
     catalog::{
         dto::{CatalogFilter, CatalogKind},
         query::{self, CATALOG_ITEMS_SQL, CATALOG_SEARCH_ITEMS_SQL},
     },
     config::Config,
+    entities::{admin_user, viewer_user},
+    viewer_auth,
 };
 use sea_orm::{
-    ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, Statement,
-    TransactionTrait,
+    ConnectOptions, ConnectionTrait, Database, DatabaseBackend, DatabaseConnection, EntityTrait,
+    Statement, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::Value;
@@ -120,10 +122,275 @@ async fn sql(db: &DatabaseConnection, statement: &str) {
 }
 
 async fn get(app: &Router, uri: &str) -> Response {
+    get_with_cookie(app, uri, None).await
+}
+
+async fn get_with_cookie(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
+    let mut request = Request::builder().uri(uri);
+    if let Some(cookie) = cookie {
+        request = request.header("cookie", cookie);
+    }
     app.clone()
-        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .oneshot(request.body(Body::empty()).unwrap())
         .await
         .unwrap()
+}
+
+async fn private_fixture(label: &str) -> (DatabaseConnection, TempRoot, Router, String, String) {
+    let db = database(label).await;
+    sql(&db, r#"
+INSERT INTO movie (id, name, synopsis, is_private, status, published_at) VALUES
+('69000000-0000-0000-0000-000000000001', 'Public movie', 'Public synopsis', false, 'published', '2026-01-01T00:00:00Z'),
+('69000000-0000-0000-0000-000000000002', 'Private movie', 'Private synopsis', true, 'published', '2026-01-02T00:00:00Z'),
+('69000000-0000-0000-0000-000000000003', 'Private draft movie', 'Private synopsis', true, 'draft', NULL),
+('69000000-0000-0000-0000-000000000004', 'Private archived movie', 'Private synopsis', true, 'archived', '2026-01-03T00:00:00Z'),
+('69000000-0000-0000-0000-000000000005', 'Private invalid movie', 'Private synopsis', true, 'published', NULL);
+INSERT INTO series (id, name, synopsis, is_private, status, published_at) VALUES
+('69100000-0000-0000-0000-000000000001', 'Public series', 'Public synopsis', false, 'published', '2026-01-01T00:00:00Z'),
+('69100000-0000-0000-0000-000000000002', 'Private series', 'Private synopsis', true, 'published', '2026-01-02T00:00:00Z'),
+('69100000-0000-0000-0000-000000000003', 'Private draft series', 'Private synopsis', true, 'draft', NULL),
+('69100000-0000-0000-0000-000000000004', 'Private archived series', 'Private synopsis', true, 'archived', '2026-01-03T00:00:00Z'),
+('69100000-0000-0000-0000-000000000005', 'Private invalid series', 'Private synopsis', true, 'published', NULL);
+INSERT INTO season (id, series_id, number) VALUES
+('69200000-0000-0000-0000-000000000001', '69100000-0000-0000-0000-000000000002', 1);
+INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
+('69300000-0000-0000-0000-000000000001', '69200000-0000-0000-0000-000000000001', 1, 'Published episode', 'published', '2026-01-01T00:00:00Z'),
+('69300000-0000-0000-0000-000000000002', '69200000-0000-0000-0000-000000000001', 2, 'Draft episode', 'draft', NULL),
+('69300000-0000-0000-0000-000000000003', '69200000-0000-0000-0000-000000000001', 3, 'Archived episode', 'archived', '2026-01-01T00:00:00Z');
+INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES
+('69400000-0000-0000-0000-000000000001', 'Viewer', 'viewer', 'unused');
+INSERT INTO genre (id, name, sort_order) VALUES
+('69500000-0000-0000-0000-000000000001', 'Public genre', 100),
+('69500000-0000-0000-0000-000000000002', 'Private genre', 101);
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('69000000-0000-0000-0000-000000000001', '69500000-0000-0000-0000-000000000001'),
+('69000000-0000-0000-0000-000000000002', '69500000-0000-0000-0000-000000000002');
+INSERT INTO series_genre (series_id, genre_id) VALUES
+('69100000-0000-0000-0000-000000000001', '69500000-0000-0000-0000-000000000001'),
+('69100000-0000-0000-0000-000000000002', '69500000-0000-0000-0000-000000000002');
+"#).await;
+    let root = TempRoot::new();
+    let app = built_app(db.clone(), &root).await;
+    let viewer = viewer_user::Entity::find().one(&db).await.unwrap().unwrap();
+    let viewer_token = viewer_auth::session::create(&db, &viewer)
+        .await
+        .map_err(|error| error.0)
+        .unwrap();
+    let admin = admin_user::Entity::find().one(&db).await.unwrap().unwrap();
+    let admin_token = auth::session::create(&db, &admin)
+        .await
+        .map_err(|error| error.0)
+        .unwrap();
+    (
+        db,
+        root,
+        app,
+        format!("mh_viewer_session={viewer_token}"),
+        format!("mh_session={admin_token}"),
+    )
+}
+
+fn assert_private_cache(response: &Response) {
+    assert_eq!(
+        response
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok()),
+        Some("private, no-store")
+    );
+    assert_eq!(
+        response.headers().get("vary").and_then(|v| v.to_str().ok()),
+        Some("Cookie")
+    );
+}
+
+#[tokio::test]
+async fn private_catalog_filters_before_count_search_and_pagination() {
+    // Removing visibility from any count/items SQL branch exposes private names or wrong totals/pages.
+    let (_db, _root, app, viewer, admin) = private_fixture("private_list").await;
+    for (cookie, expected_total) in [
+        (None, 2),
+        (Some(admin.as_str()), 2),
+        (Some(viewer.as_str()), 4),
+    ] {
+        for (suffix, total) in [
+            ("", expected_total),
+            ("&q=Private", if expected_total == 4 { 2 } else { 0 }),
+            ("&q=synopsis", expected_total),
+        ] {
+            for kind in ["all", "movie", "series"] {
+                let total = if kind == "all" { total } else { total / 2 };
+                let uri = format!("/api/catalog?kind={kind}&size=1{suffix}");
+                let payload = json_body(get_with_cookie(&app, &uri, cookie).await).await;
+                assert_eq!(
+                    payload["total"],
+                    total,
+                    "{uri}, viewer={}",
+                    cookie == Some(viewer.as_str())
+                );
+                assert_eq!(
+                    payload["items"].as_array().unwrap().len(),
+                    usize::from(total > 0)
+                );
+                if total > 0 {
+                    let expected_private = expected_total == 4;
+                    assert_eq!(payload["items"][0]["is_private"], expected_private);
+                    assert_eq!(
+                        payload["items"][0]["genres"][0]["name"],
+                        if expected_private {
+                            "Private genre"
+                        } else {
+                            "Public genre"
+                        }
+                    );
+                }
+                let beyond = json_body(
+                    get_with_cookie(&app, &format!("{uri}&page={}", total + 1), cookie).await,
+                )
+                .await;
+                assert_eq!(beyond["total"], total);
+                assert!(beyond["items"].as_array().unwrap().is_empty());
+                assert_public_payload(&payload);
+            }
+        }
+    }
+    let injected =
+        json_body(get(&app, "/api/catalog?include_private=true&is_private=true").await).await;
+    assert_eq!(injected["total"], 2);
+}
+
+#[tokio::test]
+async fn private_details_require_viewer_and_keep_publication_rules() {
+    // Omitting either parent visibility or publication checks reveals private/nonpublished details.
+    let (_db, _root, app, viewer, admin) = private_fixture("private_details").await;
+    for (kind, prefix) in [("movies", "69000000"), ("series", "69100000")] {
+        for (cookie, can_view) in [
+            (None, false),
+            (Some(admin.as_str()), false),
+            (Some(viewer.as_str()), true),
+        ] {
+            let public = json_body(
+                get_with_cookie(
+                    &app,
+                    &format!("/api/catalog/{kind}/{prefix}-0000-0000-0000-000000000001"),
+                    cookie,
+                )
+                .await,
+            )
+            .await;
+            let response = get_with_cookie(
+                &app,
+                &format!("/api/catalog/{kind}/{prefix}-0000-0000-0000-000000000002"),
+                cookie,
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                if can_view {
+                    StatusCode::OK
+                } else {
+                    StatusCode::NOT_FOUND
+                }
+            );
+            assert_eq!(public["is_private"], false);
+            let detail = json_body(response).await;
+            if can_view {
+                assert_eq!(detail["is_private"], true);
+                if kind == "series" {
+                    assert_eq!(
+                        detail["seasons"][0]["episodes"].as_array().unwrap().len(),
+                        1
+                    );
+                    assert_eq!(
+                        detail["seasons"][0]["episodes"][0]["name"],
+                        "Published episode"
+                    );
+                }
+                assert_public_payload(&detail);
+            } else {
+                assert_eq!(detail, serde_json::json!({"error": "content not found"}));
+            }
+            for suffix in [3, 4, 5] {
+                assert_eq!(
+                    get_with_cookie(
+                        &app,
+                        &format!("/api/catalog/{kind}/{prefix}-0000-0000-0000-{suffix:012}"),
+                        cookie
+                    )
+                    .await
+                    .status(),
+                    StatusCode::NOT_FOUND
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_catalog_invalid_expired_and_admin_tokens_stay_anonymous() {
+    // Authenticating an admin token, expired viewer, or duplicate token would expose private content.
+    let (db, _root, app, viewer, admin) = private_fixture("private_cookies").await;
+    let expired_cookie = viewer.clone();
+    sql(
+        &db,
+        "UPDATE viewer_session SET expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second'",
+    )
+    .await;
+    let viewer_user = viewer_user::Entity::find().one(&db).await.unwrap().unwrap();
+    let active = viewer_auth::session::create(&db, &viewer_user)
+        .await
+        .map_err(|error| error.0)
+        .unwrap();
+    let spoofed_viewer = format!("mh_viewer_session={}", admin.split_once('=').unwrap().1);
+    let cookies = [
+        "mh_viewer_session=invalid".to_string(),
+        format!("mh_viewer_session={}", "0".repeat(64)),
+        expired_cookie,
+        admin,
+        spoofed_viewer,
+        format!("mh_viewer_session={active}; mh_viewer_session={active}"),
+    ];
+    for cookie in cookies {
+        for uri in [
+            "/api/catalog",
+            "/api/catalog?q=Private",
+            "/api/catalog/movies/69000000-0000-0000-0000-000000000002",
+            "/api/catalog/series/69100000-0000-0000-0000-000000000002",
+        ] {
+            let response = get_with_cookie(&app, uri, Some(&cookie)).await;
+            if uri.contains("/movies/") || uri.contains("/series/") {
+                assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            } else {
+                let payload = json_body(response).await;
+                assert_eq!(payload["total"], if uri.contains('?') { 0 } else { 2 });
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn private_catalog_cache_headers_cover_success_and_error_responses() {
+    // Missing response middleware allows successful or rejected identity-dependent responses to cache.
+    let (_db, _root, app, viewer, admin) = private_fixture("private_cache").await;
+    for cookie in [
+        None,
+        Some(viewer.as_str()),
+        Some(admin.as_str()),
+        Some("mh_viewer_session=invalid"),
+    ] {
+        for uri in [
+            "/api/catalog",
+            "/api/catalog?q=Private",
+            "/api/catalog?page=0",
+            "/api/catalog?page=bad",
+            "/api/catalog/movies/not-a-uuid",
+            "/api/catalog/series/not-a-uuid",
+            "/api/catalog/movies/69000000-0000-0000-0000-000000000001",
+            "/api/catalog/series/69100000-0000-0000-0000-000000000002",
+        ] {
+            assert_private_cache(&get_with_cookie(&app, uri, cookie).await);
+        }
+    }
 }
 
 async fn json_body(response: Response) -> Value {
@@ -524,6 +791,7 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
         query::series_detail(
             &read_db,
             Uuid::parse_str("65000000-0000-0000-0000-000000000001").unwrap(),
+            false,
         )
         .await
         .unwrap()
@@ -586,6 +854,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
         query::movie_detail(
             &read_db,
             Uuid::parse_str("65500000-0000-0000-0000-000000000001").unwrap(),
+            false,
         )
         .await
         .unwrap()
@@ -652,6 +921,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
                 offset: 0,
                 window: 20,
             },
+            false,
         )
         .await
         .unwrap()
@@ -846,18 +1116,46 @@ WHERE name ~ '^Series [0-9]+$'
     let production_home_plan = explain_json_statement(
         &db,
         CATALOG_ITEMS_SQL,
-        vec!["all".into(), 20_i64.into(), 0_i64.into(), 20_i64.into()],
+        vec![
+            "all".into(),
+            20_i64.into(),
+            0_i64.into(),
+            20_i64.into(),
+            false.into(),
+        ],
     )
     .await;
-    assert!(plan_uses_index(
-        &production_home_plan,
-        "movie_public_published_idx"
-    ));
-    assert!(plan_uses_index(
-        &production_home_plan,
-        "series_public_published_idx"
-    ));
+    assert!(
+        plan_uses_index(&production_home_plan, "movie_public_catalog_idx"),
+        "{production_home_plan:#}"
+    );
+    assert!(
+        plan_uses_index(&production_home_plan, "series_public_catalog_idx"),
+        "{production_home_plan:#}"
+    );
     assert_media_reads_are_bounded(&production_home_plan, 20);
+
+    let viewer_home_plan = explain_json_statement(
+        &db,
+        CATALOG_ITEMS_SQL,
+        vec![
+            "all".into(),
+            20_i64.into(),
+            0_i64.into(),
+            20_i64.into(),
+            true.into(),
+        ],
+    )
+    .await;
+    assert!(
+        plan_uses_index(&viewer_home_plan, "movie_public_published_idx"),
+        "{viewer_home_plan:#}"
+    );
+    assert!(
+        plan_uses_index(&viewer_home_plan, "series_public_published_idx"),
+        "{viewer_home_plan:#}"
+    );
+    assert_media_reads_are_bounded(&viewer_home_plan, 20);
 
     let production_search_plan = explain_statement(
         &db,
@@ -868,6 +1166,7 @@ WHERE name ~ '^Series [0-9]+$'
             20_i64.into(),
             0_i64.into(),
             20_i64.into(),
+            false.into(),
         ],
     )
     .await;

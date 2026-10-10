@@ -19,12 +19,14 @@ FROM (
     WHERE $1::text IN ('all', 'movie')
       AND movie.status = 'published'
       AND movie.published_at IS NOT NULL
+      AND ($2::boolean OR movie.is_private = false)
     UNION ALL
     SELECT series.id
     FROM series
     WHERE $1::text IN ('all', 'series')
       AND series.status = 'published'
       AND series.published_at IS NOT NULL
+      AND ($2::boolean OR series.is_private = false)
 ) candidates
 "#;
 
@@ -37,6 +39,7 @@ FROM (
       AND movie.status = 'published'
       AND movie.published_at IS NOT NULL
       AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
+      AND ($3::boolean OR movie.is_private = false)
     UNION ALL
     SELECT movie.id
     FROM movie
@@ -45,6 +48,7 @@ FROM (
       AND movie.published_at IS NOT NULL
       AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
       AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
+      AND ($3::boolean OR movie.is_private = false)
     UNION ALL
     SELECT series.id
     FROM series
@@ -52,6 +56,7 @@ FROM (
       AND series.status = 'published'
       AND series.published_at IS NOT NULL
       AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
+      AND ($3::boolean OR series.is_private = false)
     UNION ALL
     SELECT series.id
     FROM series
@@ -60,6 +65,7 @@ FROM (
       AND series.published_at IS NOT NULL
       AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
       AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
+      AND ($3::boolean OR series.is_private = false)
 ) candidates
 "#;
 
@@ -67,23 +73,25 @@ FROM (
 pub const CATALOG_ITEMS_SQL: &str = r#"
 WITH candidates AS (
     SELECT * FROM (
-        SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year,
+        SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
                movie.poster_asset_id, movie.published_at
         FROM movie
         WHERE $1::text IN ('all', 'movie')
           AND movie.status = 'published'
           AND movie.published_at IS NOT NULL
+          AND ($5::boolean OR movie.is_private = false)
         ORDER BY published_at DESC, id
         LIMIT $4
     ) movie_candidates
     UNION ALL
     SELECT * FROM (
-        SELECT series.id, 'series'::text AS kind, series.name, series.year,
+        SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
                series.poster_asset_id, series.published_at
         FROM series
         WHERE $1::text IN ('all', 'series')
           AND series.status = 'published'
           AND series.published_at IS NOT NULL
+          AND ($5::boolean OR series.is_private = false)
         ORDER BY published_at DESC, id
         LIMIT $4
     ) series_candidates
@@ -92,7 +100,7 @@ WITH candidates AS (
     ORDER BY published_at DESC, kind, id
     LIMIT $2 OFFSET $3
 )
-SELECT page.id, page.kind, page.name, page.year, page.published_at,
+SELECT page.id, page.kind, page.name, page.year, page.is_private, page.published_at,
        poster.storage_key AS poster_storage_key
 FROM page
 LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
@@ -104,20 +112,22 @@ pub const CATALOG_SEARCH_ITEMS_SQL: &str = r#"
 WITH candidates AS (
     SELECT * FROM (
         SELECT * FROM (
-            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year,
+            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
                    movie.poster_asset_id, movie.published_at
             FROM movie
             WHERE $1::text IN ('all', 'movie')
               AND movie.status = 'published'
               AND movie.published_at IS NOT NULL
+              AND ($6::boolean OR movie.is_private = false)
               AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
             UNION ALL
-            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year,
+            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
                    movie.poster_asset_id, movie.published_at
             FROM movie
             WHERE $1::text IN ('all', 'movie')
               AND movie.status = 'published'
               AND movie.published_at IS NOT NULL
+              AND ($6::boolean OR movie.is_private = false)
               AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
               AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
         ) movie_matches
@@ -127,20 +137,22 @@ WITH candidates AS (
     UNION ALL
     SELECT * FROM (
         SELECT * FROM (
-            SELECT series.id, 'series'::text AS kind, series.name, series.year,
+            SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
                    series.poster_asset_id, series.published_at
             FROM series
             WHERE $1::text IN ('all', 'series')
               AND series.status = 'published'
               AND series.published_at IS NOT NULL
+              AND ($6::boolean OR series.is_private = false)
               AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
             UNION ALL
-            SELECT series.id, 'series'::text AS kind, series.name, series.year,
+            SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
                    series.poster_asset_id, series.published_at
             FROM series
             WHERE $1::text IN ('all', 'series')
               AND series.status = 'published'
               AND series.published_at IS NOT NULL
+              AND ($6::boolean OR series.is_private = false)
               AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
               AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
         ) series_matches
@@ -152,7 +164,7 @@ WITH candidates AS (
     ORDER BY published_at DESC, kind, id
     LIMIT $3 OFFSET $4
 )
-SELECT page.id, page.kind, page.name, page.year, page.published_at,
+SELECT page.id, page.kind, page.name, page.year, page.is_private, page.published_at,
        poster.storage_key AS poster_storage_key
 FROM page
 LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
@@ -160,7 +172,7 @@ ORDER BY page.published_at DESC, page.kind, page.id
 "#;
 
 const MOVIE_DETAIL_SQL: &str = r#"
-SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.duration_seconds,
+SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.is_private, movie.duration_seconds,
        poster.storage_key AS poster_storage_key,
        video.storage_key AS video_storage_key
 FROM movie
@@ -169,16 +181,18 @@ LEFT JOIN media_asset video ON video.id = movie.video_asset_id
 WHERE movie.id = $1
   AND movie.status = 'published'
   AND movie.published_at IS NOT NULL
+  AND ($2::boolean OR movie.is_private = false)
 "#;
 
 const SERIES_DETAIL_SQL: &str = r#"
-SELECT series.id, series.name, series.synopsis, series.year,
+SELECT series.id, series.name, series.synopsis, series.year, series.is_private,
        poster.storage_key AS poster_storage_key
 FROM series
 LEFT JOIN media_asset poster ON poster.id = series.poster_asset_id
 WHERE series.id = $1
   AND series.status = 'published'
   AND series.published_at IS NOT NULL
+  AND ($2::boolean OR series.is_private = false)
 "#;
 
 // 单集公开可见时，剧集父级和单集自身都必须处于有效发布状态。
@@ -201,6 +215,7 @@ ORDER BY season.number, season.id, episode.number, episode.id
 #[derive(Debug, FromQueryResult)]
 struct CatalogRow {
     id: Uuid,
+    is_private: bool,
     kind: String,
     name: String,
     year: Option<i32>,
@@ -211,6 +226,7 @@ struct CatalogRow {
 #[derive(Debug, FromQueryResult)]
 struct MovieRow {
     id: Uuid,
+    is_private: bool,
     name: String,
     synopsis: String,
     year: Option<i32>,
@@ -222,6 +238,7 @@ struct MovieRow {
 #[derive(Debug, FromQueryResult)]
 struct SeriesRow {
     id: Uuid,
+    is_private: bool,
     name: String,
     synopsis: String,
     year: Option<i32>,
@@ -257,7 +274,11 @@ impl GenreRow {
     }
 }
 
-pub async fn list(db: &DatabaseConnection, filter: CatalogFilter) -> Result<CatalogPage, DbErr> {
+pub async fn list(
+    db: &DatabaseConnection,
+    filter: CatalogFilter,
+    include_private: bool,
+) -> Result<CatalogPage, DbErr> {
     // 计数、目录条目与题材必须共享快照，避免页面内的总数、卡片和标签彼此不一致。
     let transaction = db
         .begin_with_config(
@@ -265,19 +286,26 @@ pub async fn list(db: &DatabaseConnection, filter: CatalogFilter) -> Result<Cata
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    let page = list_on(&transaction, filter).await?;
+    let page = list_on(&transaction, filter, include_private).await?;
     transaction.commit().await?;
     Ok(page)
 }
 
-async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<CatalogPage, DbErr> {
+async fn list_on<C: ConnectionTrait>(
+    db: &C,
+    filter: CatalogFilter,
+    include_private: bool,
+) -> Result<CatalogPage, DbErr> {
     let kind_value = || filter.kind.as_str().into();
     let (count_sql, count_values) = match &filter.search_pattern {
         Some(pattern) => (
             CATALOG_SEARCH_COUNT_SQL,
-            vec![kind_value(), pattern.clone().into()],
+            vec![kind_value(), pattern.clone().into(), include_private.into()],
         ),
-        None => (CATALOG_COUNT_SQL, vec![kind_value()]),
+        None => (
+            CATALOG_COUNT_SQL,
+            vec![kind_value(), include_private.into()],
+        ),
     };
     let total_row = db
         .query_one(Statement::from_sql_and_values(
@@ -299,6 +327,7 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
                 i64::try_from(filter.size).unwrap().into(),
                 i64::try_from(filter.offset).unwrap().into(),
                 i64::try_from(filter.window).unwrap().into(),
+                include_private.into(),
             ],
         ),
         None => (
@@ -308,6 +337,7 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
                 i64::try_from(filter.size).unwrap().into(),
                 i64::try_from(filter.offset).unwrap().into(),
                 i64::try_from(filter.window).unwrap().into(),
+                include_private.into(),
             ],
         ),
     };
@@ -326,6 +356,7 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
             let genre_count = all_genres.len();
             CatalogCard {
                 id: row.id.to_string(),
+                is_private: row.is_private,
                 kind: row.kind,
                 name: row.name,
                 year: row.year,
@@ -344,7 +375,11 @@ async fn list_on<C: ConnectionTrait>(db: &C, filter: CatalogFilter) -> Result<Ca
     })
 }
 
-pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<MovieDetail>, DbErr> {
+pub async fn movie_detail(
+    db: &DatabaseConnection,
+    id: Uuid,
+    include_private: bool,
+) -> Result<Option<MovieDetail>, DbErr> {
     // 详情主体、媒体 URL 与题材需在同一快照中读取，防止并发归档后返回半旧数据。
     let transaction = db
         .begin_with_config(
@@ -352,7 +387,7 @@ pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<Mo
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    let detail = movie_detail_on(&transaction, id).await?;
+    let detail = movie_detail_on(&transaction, id, include_private).await?;
     transaction.commit().await?;
     Ok(detail)
 }
@@ -360,13 +395,21 @@ pub async fn movie_detail(db: &DatabaseConnection, id: Uuid) -> Result<Option<Mo
 async fn movie_detail_on<C: ConnectionTrait>(
     db: &C,
     id: Uuid,
+    include_private: bool,
 ) -> Result<Option<MovieDetail>, DbErr> {
-    let Some(row) = query_model::<MovieRow>(db, MOVIE_DETAIL_SQL, vec![id.into()]).await? else {
+    let Some(row) = query_model::<MovieRow>(
+        db,
+        MOVIE_DETAIL_SQL,
+        vec![id.into(), include_private.into()],
+    )
+    .await?
+    else {
         return Ok(None);
     };
     let mut genres = genres_for(db, &[("movie", id)]).await?;
     Ok(Some(MovieDetail {
         id: row.id.to_string(),
+        is_private: row.is_private,
         kind: "movie",
         name: row.name,
         synopsis: row.synopsis,
@@ -381,6 +424,7 @@ async fn movie_detail_on<C: ConnectionTrait>(
 pub async fn series_detail(
     db: &DatabaseConnection,
     id: Uuid,
+    include_private: bool,
 ) -> Result<Option<SeriesDetail>, DbErr> {
     // 剧集详情、题材和可见单集必须共享快照，保证季集树与父级可见性一致。
     let transaction = db
@@ -389,7 +433,7 @@ pub async fn series_detail(
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    let detail = series_detail_on(&transaction, id).await?;
+    let detail = series_detail_on(&transaction, id, include_private).await?;
     transaction.commit().await?;
     Ok(detail)
 }
@@ -397,8 +441,15 @@ pub async fn series_detail(
 async fn series_detail_on<C: ConnectionTrait>(
     db: &C,
     id: Uuid,
+    include_private: bool,
 ) -> Result<Option<SeriesDetail>, DbErr> {
-    let Some(row) = query_model::<SeriesRow>(db, SERIES_DETAIL_SQL, vec![id.into()]).await? else {
+    let Some(row) = query_model::<SeriesRow>(
+        db,
+        SERIES_DETAIL_SQL,
+        vec![id.into(), include_private.into()],
+    )
+    .await?
+    else {
         return Ok(None);
     };
     let mut genres = genres_for(db, &[("series", id)]).await?;
@@ -425,6 +476,7 @@ async fn series_detail_on<C: ConnectionTrait>(
     }
     Ok(Some(SeriesDetail {
         id: row.id.to_string(),
+        is_private: row.is_private,
         kind: "series",
         name: row.name,
         synopsis: row.synopsis,

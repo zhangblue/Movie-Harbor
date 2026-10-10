@@ -103,6 +103,7 @@ pub struct PublicGenre {
 #[derive(Clone, Debug, Serialize)]
 pub struct CatalogCard {
     pub id: String,
+    pub is_private: bool,
     pub kind: String,
     pub name: String,
     pub year: Option<i32>,
@@ -123,6 +124,7 @@ pub struct CatalogPage {
 #[derive(Debug, Serialize)]
 pub struct MovieDetail {
     pub id: String,
+    pub is_private: bool,
     pub kind: &'static str,
     pub name: String,
     pub synopsis: String,
@@ -136,6 +138,7 @@ pub struct MovieDetail {
 #[derive(Debug, Serialize)]
 pub struct SeriesDetail {
     pub id: String,
+    pub is_private: bool,
     pub kind: &'static str,
     pub name: String,
     pub synopsis: String,
