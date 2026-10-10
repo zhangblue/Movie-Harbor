@@ -19,6 +19,39 @@ mod support;
 
 type Credentials = (String, String);
 
+// Catches DTO timestamps depending on Chrono's dev-only unified serde feature.
+#[test]
+fn viewer_summary_timestamps_are_explicit_rfc3339_strings() {
+    let created_at =
+        chrono::DateTime::parse_from_rfc3339("2026-10-10T14:03:02.123456+08:00").unwrap();
+    let last_login_at = chrono::DateTime::parse_from_rfc3339("2026-10-10T15:04:03+08:00").unwrap();
+    let user = viewer_user::Model {
+        id: uuid::Uuid::from_u128(1),
+        username: "Summer".into(),
+        normalized_username: "summer".into(),
+        password_hash: "internal-only".into(),
+        version: 1,
+        created_at,
+        updated_at: created_at,
+        last_login_at: Some(last_login_at),
+    };
+    let summary: movie_harbor_api::admin_users::dto::ViewerUserSummary = user.clone().into();
+    let created: &str = &summary.created_at;
+    let login: Option<&str> = summary.last_login_at.as_deref();
+    assert_eq!(created, "2026-10-10T14:03:02.123456+08:00");
+    assert_eq!(login, Some("2026-10-10T15:04:03+08:00"));
+    let json = serde_json::to_value(summary).unwrap();
+    assert_eq!(json["created_at"], created_at.to_rfc3339());
+    assert_eq!(json["last_login_at"], "2026-10-10T15:04:03+08:00");
+    assert_safe(&json);
+    let summary: movie_harbor_api::admin_users::dto::ViewerUserSummary = viewer_user::Model {
+        last_login_at: None,
+        ..user
+    }
+    .into();
+    assert!(serde_json::to_value(summary).unwrap()["last_login_at"].is_null());
+}
+
 async fn setup() -> (support::TestDatabase, Router, Credentials) {
     let db = support::TestDatabase::migrated("admin_users").await;
     let cfg = Config {

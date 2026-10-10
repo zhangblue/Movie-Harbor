@@ -1,6 +1,4 @@
 use crate::entities::viewer_user;
-use chrono::{DateTime, FixedOffset};
-use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -67,13 +65,13 @@ pub struct DeleteViewerRequest {
     pub version: i64,
 }
 
-#[derive(Serialize, FromQueryResult)]
+#[derive(Serialize)]
 pub struct ViewerUserSummary {
     pub id: Uuid,
     pub username: String,
     pub version: i64,
-    pub created_at: DateTime<FixedOffset>,
-    pub last_login_at: Option<DateTime<FixedOffset>>,
+    pub created_at: String,
+    pub last_login_at: Option<String>,
     pub has_active_session: bool,
 }
 
@@ -83,8 +81,8 @@ impl From<viewer_user::Model> for ViewerUserSummary {
             id: user.id,
             username: user.username,
             version: user.version,
-            created_at: user.created_at,
-            last_login_at: user.last_login_at,
+            created_at: user.created_at.to_rfc3339(),
+            last_login_at: user.last_login_at.map(|value| value.to_rfc3339()),
             has_active_session: false,
         }
     }

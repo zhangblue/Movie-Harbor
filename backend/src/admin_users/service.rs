@@ -10,6 +10,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use chrono::{DateTime, FixedOffset};
 use sea_orm::{
     AccessMode, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend,
     DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait, FromQueryResult, IsolationLevel,
@@ -59,6 +60,30 @@ impl IntoResponse for ViewerUserError {
 const USER_COLUMNS: &str = "u.id, u.username, u.version, u.created_at, u.last_login_at,
     EXISTS (SELECT 1 FROM viewer_session s WHERE s.viewer_user_id = u.id AND s.expires_at > CURRENT_TIMESTAMP) AS has_active_session";
 
+// 数据库时间类型停留在查询边界，响应使用项目统一的 RFC 3339 字符串格式。
+#[derive(FromQueryResult)]
+struct ViewerUserRow {
+    id: Uuid,
+    username: String,
+    version: i64,
+    created_at: DateTime<FixedOffset>,
+    last_login_at: Option<DateTime<FixedOffset>>,
+    has_active_session: bool,
+}
+
+impl From<ViewerUserRow> for ViewerUserSummary {
+    fn from(row: ViewerUserRow) -> Self {
+        Self {
+            id: row.id,
+            username: row.username,
+            version: row.version,
+            created_at: row.created_at.to_rfc3339(),
+            last_login_at: row.last_login_at.map(|value| value.to_rfc3339()),
+            has_active_session: row.has_active_session,
+        }
+    }
+}
+
 pub async fn list(
     db: &DatabaseConnection,
     filter: ViewerUserFilter,
@@ -87,11 +112,11 @@ pub async fn list(
         [filter.pattern.into(), (PAGE_SIZE as i64).into(), (filter.offset as i64).into()])).await?;
     let items = rows
         .iter()
-        .map(|row| ViewerUserSummary::from_query_result(row, ""))
+        .map(|row| ViewerUserRow::from_query_result(row, "").map(Into::into))
         .collect::<Result<Vec<_>, _>>()?;
     let latest_user = tx.query_one(Statement::from_string(DatabaseBackend::Postgres,
         format!("SELECT {USER_COLUMNS} FROM viewer_user u ORDER BY u.created_at DESC, u.id ASC LIMIT 1"))).await?
-        .as_ref().map(|row| ViewerUserSummary::from_query_result(row, "")).transpose()?;
+        .as_ref().map(|row| ViewerUserRow::from_query_result(row, "").map(Into::into)).transpose()?;
     tx.commit().await?;
     Ok(ViewerUserPage {
         page: filter.page,
