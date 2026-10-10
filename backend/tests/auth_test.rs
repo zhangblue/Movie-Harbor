@@ -599,13 +599,13 @@ async fn initialization_is_required_once_and_never_overwrites_the_admin() {
 
 // Catches leaked plaintext session/CSRF storage, weak cookies, and nonrecoverable session tokens on restart.
 #[tokio::test]
-async fn login_issues_secure_opaque_session_and_recovers_csrf_after_restart() {
+async fn login_cookie_issues_secure_opaque_session_and_recovers_csrf_after_restart() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
     let response = login(&app, "Admin", "initial-password").await;
     assert_eq!(response.status(), StatusCode::OK);
     let header = response.headers()["set-cookie"].to_str().unwrap();
-    for flag in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/api/admin"] {
+    for flag in ["HttpOnly", "Secure", "SameSite=Lax", "Path=/;"] {
         assert!(header.contains(flag), "missing {flag}");
     }
     let (cookie, csrf) = credentials(&app).await;
@@ -776,7 +776,7 @@ async fn protected_writes_require_session_csrf_and_same_origin() {
 
 // Catches password changes without checking the current password or without revoking other devices.
 #[tokio::test]
-async fn password_change_checks_current_password_and_revokes_all_sessions() {
+async fn password_change_cookie_checks_current_password_and_revokes_all_sessions() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
     let (cookie, csrf) = credentials(&app).await;
@@ -813,6 +813,7 @@ async fn password_change_checks_current_password_and_revokes_all_sessions() {
     )
     .await;
     assert_eq!(changed.status(), StatusCode::NO_CONTENT);
+    assert_cleared_admin_cookies(&changed);
     assert_eq!(
         admin_session::Entity::find().all(&db).await.unwrap().len(),
         0
@@ -855,7 +856,7 @@ async fn password_change_checks_current_password_and_revokes_all_sessions() {
 
 // Catches expired cookies remaining usable and logout not removing server-side state.
 #[tokio::test]
-async fn logout_and_expiry_reject_reuse() {
+async fn logout_cookie_and_expiry_reject_reuse() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
     let (cookie, csrf) = credentials(&app).await;
@@ -870,6 +871,7 @@ async fn logout_and_expiry_reject_reuse() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    assert_cleared_admin_cookies(&response);
     assert!(
         response.headers()["set-cookie"]
             .to_str()
@@ -910,6 +912,25 @@ async fn logout_and_expiry_reject_reuse() {
         .status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+fn assert_cleared_admin_cookies(response: &Response) {
+    let cookies: Vec<_> = response
+        .headers()
+        .get_all("set-cookie")
+        .iter()
+        .map(|value| value.to_str().unwrap())
+        .collect();
+    assert_eq!(cookies.len(), 2);
+    for path in ["Path=/;", "Path=/api/admin;"] {
+        assert!(
+            cookies
+                .iter()
+                .any(|cookie| cookie.starts_with("mh_session=;")
+                    && cookie.contains(path)
+                    && cookie.contains("Max-Age=0"))
+        );
+    }
 }
 
 // Catches accepting an empty replacement password and revoking valid sessions on rejected input.

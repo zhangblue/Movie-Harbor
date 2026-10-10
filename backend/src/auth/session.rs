@@ -16,12 +16,25 @@ pub struct CurrentSession {
 }
 
 pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
-    // Cookie 仅发送给管理 API、禁止脚本读取，并以 SameSite=Lax 降低跨站自动携带的风险。
+    // 管理 API 与媒体预览都使用此 Cookie；公开目录仍必须只读取普通用户 Cookie。
     format!(
-        "{COOKIE_NAME}={token}; Path=/api/admin; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
         if clear { 0 } else { SESSION_SECONDS },
         if secure { "; Secure" } else { "" }
     )
+}
+
+pub fn clear_cookies(secure: bool) -> axum::http::HeaderMap {
+    let mut headers = axum::http::HeaderMap::new();
+    let root = cookie("", secure, true);
+    for value in [
+        root.clone(),
+        root.replacen("Path=/;", "Path=/api/admin;", 1),
+    ] {
+        // 同名不同路径 Cookie 必须使用两条 Set-Cookie，不能以 insert 覆盖第一条。
+        headers.append(axum::http::header::SET_COOKIE, value.parse().unwrap());
+    }
+    headers
 }
 
 pub async fn create<C: ConnectionTrait>(

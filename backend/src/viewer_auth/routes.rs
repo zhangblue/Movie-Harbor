@@ -1,16 +1,18 @@
 use super::{
-    AuthState, csrf,
     model::{AuthError, LoginRequest, PasswordRequest, SessionResponse},
-    password, session,
+    session,
 };
-use crate::entities::{admin_session, admin_user};
+use crate::{
+    auth::{AuthState, csrf, password},
+    entities::{viewer_session, viewer_user},
+};
 use axum::{
     Extension, Json, Router,
     extract::{ConnectInfo, Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QuerySelect, Set, TransactionTrait,
@@ -18,43 +20,41 @@ use sea_orm::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 
+// 固定、有效且与默认 Argon2id 参数等成本的摘要。未知账号也必须执行密码计算。
+const UNKNOWN_USER_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$bW92aWUtaGFyYm9yLWR1bW15$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 pub fn router(state: AuthState) -> Router {
     let protected = Router::new()
-        .route("/api/admin/session", get(read_session))
-        .route("/api/admin/logout", post(logout))
-        .route("/api/admin/password", post(change_password))
+        .route("/api/viewer/session", get(read_session))
+        .route("/api/viewer/logout", post(logout))
+        .route("/api/viewer/password", patch(change_password))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_session,
         ));
     Router::new()
-        .route("/api/admin/login", post(login))
+        .route("/api/viewer/login", post(login))
         .merge(protected)
         .with_state(state)
 }
 
-/// 此中间件适用于所有需要认证的管理路由，包括未来新增的领域写操作。
 pub async fn require_session(
     State(state): State<AuthState>,
     mut request: Request,
     next: Next,
 ) -> Result<Response, AuthError> {
-    // 所有管理请求先验证 Host；即使携带有效 Cookie，也不能从禁止的来源读取数据。
     if !state.origin_policy.host_allowed(request.headers()) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
-    // 先从 Cookie 查找未过期会话；认证失败时不会把请求交给受保护的业务处理器。
     let current = session::authenticate(&state.db, request.headers()).await?;
     if !matches!(
         *request.method(),
         Method::GET | Method::HEAD | Method::OPTIONS
     ) {
-        // 读请求不要求 CSRF；其余方法必须同时通过 Cookie、CSRF 令牌和同源校验。
         session::authorize_write(&current, request.headers(), &state.origin_policy)?;
     }
     request.extensions_mut().insert(current);
     let mut response = next.run(request).await;
-    // 认证相关响应不得被浏览器或中间缓存复用，以免暴露会话状态。
     response
         .headers_mut()
         .insert("cache-control", "no-store".parse().unwrap());
@@ -67,7 +67,6 @@ async fn login(
     headers: HeaderMap,
     Json(input): Json<LoginRequest>,
 ) -> Result<Response, AuthError> {
-    // 登录也要求严格同源，避免第三方站点诱导浏览器携带请求创建会话。
     if !state.origin_policy.same_origin(&headers) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
@@ -78,7 +77,6 @@ async fn login(
             .zip(state.trusted_proxy_secret_digest.as_deref())
             .is_some_and(|(provided, expected)| csrf::digest(provided) == expected);
     let client_ip = if proxy_authenticated {
-        // 仅在反向代理令牌可信且 X-Forwarded-For 是单个地址时采信该头，其他情况使用直连地址。
         headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
@@ -88,22 +86,25 @@ async fn login(
     } else {
         address.ip()
     };
-    // 限流入场会在数据库查询和 Argon2 前预扣预算，并对同 IP 与同账号同时限速。
-    let window = state.limits.for_login(client_ip, &input.name);
+    let normalized_username = input.username.trim().to_lowercase();
+    let window = state.limits.for_login(client_ip, &normalized_username);
     let admission = window
         .admit(Instant::now())
         .await
         .ok_or(AuthError(StatusCode::TOO_MANY_REQUESTS))?;
-    let admin = admin_user::Entity::find()
+    let viewer = viewer_user::Entity::find()
+        .filter(viewer_user::Column::NormalizedUsername.eq(&normalized_username))
         .one(&state.db)
-        .await?
-        .ok_or(AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
-    // 未知账号同样执行一次 Argon2 校验，使失败路径不因账号是否存在而出现明显时差。
-    let verified_hash = admin.password_hash.clone();
+        .await?;
+    let verified_hash = viewer
+        .as_ref()
+        .map(|viewer| viewer.password_hash.as_str())
+        .unwrap_or(UNKNOWN_USER_HASH)
+        .to_owned();
     let password_ok =
         password::verify_limited(&state.password_work, input.password, verified_hash.clone())
             .await?;
-    if !password_ok || input.name != admin.name {
+    if !password_ok || viewer.is_none() {
         let limited = admission.failure(Instant::now()).await;
         return Err(AuthError(if limited {
             StatusCode::TOO_MANY_REQUESTS
@@ -111,19 +112,22 @@ async fn login(
             StatusCode::UNAUTHORIZED
         }));
     }
+    let viewer = viewer.unwrap();
     let tx = state.db.begin().await?;
-    // Argon2 后锁行重读管理员记录，并比较哈希以检测校验期间发生的并发改密。
-    let admin = admin_user::Entity::find_by_id(admin.id)
+    // 密码计算完成后再加锁并重读，避免重置密码或删除用户期间创建旧快照会话。
+    let viewer = viewer_user::Entity::find_by_id(viewer.id)
         .lock_exclusive()
         .one(&tx)
         .await?
-        .ok_or(AuthError(StatusCode::INTERNAL_SERVER_ERROR))?;
-    if admin.password_hash != verified_hash || input.name != admin.name {
-        // 哈希或名称变化即拒绝本次旧快照验证，不能用已失效密码创建新会话。
+        .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
+    if viewer.password_hash != verified_hash || viewer.normalized_username != normalized_username {
         admission.failure(Instant::now()).await;
         return Err(AuthError(StatusCode::UNAUTHORIZED));
     }
-    let raw = session::create(&tx, &admin).await?;
+    let mut model: viewer_user::ActiveModel = viewer.into();
+    model.last_login_at = Set(Some(chrono::Utc::now().fixed_offset()));
+    let viewer = model.update(&tx).await?;
+    let raw = session::create(&tx, &viewer).await?;
     tx.commit().await?;
     admission.success().await;
     Ok((
@@ -134,35 +138,29 @@ async fn login(
             ),
             ("cache-control", "no-store".into()),
         ],
-        Json(serde_json::json!({"name":admin.name})),
+        Json(serde_json::json!({"username":viewer.username})),
     )
         .into_response())
 }
 
-async fn read_session(
-    Extension(current): Extension<session::CurrentSession>,
-) -> Result<Response, AuthError> {
-    Ok((
-        [("cache-control", "no-store")],
-        Json(SessionResponse {
-            name: current.admin.name,
-            csrf_token: current.csrf_token,
-        }),
-    )
-        .into_response())
+async fn read_session(Extension(current): Extension<session::CurrentSession>) -> Response {
+    Json(SessionResponse {
+        username: current.viewer.username,
+        csrf_token: current.csrf_token,
+    })
+    .into_response()
 }
 
 async fn logout(
     State(state): State<AuthState>,
     Extension(current): Extension<session::CurrentSession>,
 ) -> Result<Response, AuthError> {
-    // 登出只删除当前会话记录，并立刻清空浏览器 Cookie；其他设备会话保持不变。
-    admin_session::Entity::delete_by_id(current.session.id)
+    viewer_session::Entity::delete_by_id(current.session.id)
         .exec(&state.db)
         .await?;
     Ok((
         StatusCode::NO_CONTENT,
-        session::clear_cookies(state.cookie_secure),
+        [("set-cookie", session::cookie("", state.cookie_secure, true))],
     )
         .into_response())
 }
@@ -173,16 +171,14 @@ async fn change_password(
     headers: HeaderMap,
     Json(input): Json<PasswordRequest>,
 ) -> Result<Response, AuthError> {
-    // 空白新密码没有有效安全语义，先拒绝以避免计算昂贵的无效哈希。
     if input.new_password.trim().is_empty() {
         return Err(AuthError(StatusCode::BAD_REQUEST));
     }
-    let admin = admin_user::Entity::find_by_id(current.admin.id)
+    let viewer = viewer_user::Entity::find_by_id(current.viewer.id)
         .one(&state.db)
         .await?
         .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
-    let verified_hash = admin.password_hash.clone();
-    // 先用当前数据库哈希验证旧密码，避免仅凭已认证会话即可直接改密。
+    let verified_hash = viewer.password_hash.clone();
     if !password::verify_limited(
         &state.password_work,
         input.current_password,
@@ -193,31 +189,31 @@ async fn change_password(
         return Err(AuthError(StatusCode::UNAUTHORIZED));
     }
     let hash = password::hash_limited(&state.password_work, input.new_password).await?;
-    // 哈希计算放在事务外，缩短行锁持有时间；随后必须在事务内重新确认会话和密码版本。
     let tx = state.db.begin().await?;
-    let admin = admin_user::Entity::find_by_id(current.admin.id)
+    let viewer = viewer_user::Entity::find_by_id(current.viewer.id)
         .lock_exclusive()
         .one(&tx)
         .await?
         .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
-    // 事务外计算期间，较早的改密可能已撤销当前会话；这里在锁内再次认证。
-    session::authenticate(&tx, &headers).await?;
-    if admin.password_hash != verified_hash {
+    // 前一次改密可能已撤销会话；在用户锁内重新验证会话和已校验的密码摘要。
+    let locked_current = session::authenticate(&tx, &headers).await?;
+    if locked_current.session.id != current.session.id || viewer.password_hash != verified_hash {
         return Err(AuthError(StatusCode::UNAUTHORIZED));
     }
-    let mut model: admin_user::ActiveModel = admin.into();
+    let next_version = viewer.version + 1;
+    let mut model: viewer_user::ActiveModel = viewer.into();
     model.password_hash = Set(hash);
+    model.version = Set(next_version);
     model.updated_at = Set(chrono::Utc::now().fixed_offset());
     model.update(&tx).await?;
-    // 密码提交时在同一事务撤销该管理员所有会话，避免旧 Cookie 在并发窗口继续有效。
-    admin_session::Entity::delete_many()
-        .filter(admin_session::Column::AdminUserId.eq(current.admin.id))
+    viewer_session::Entity::delete_many()
+        .filter(viewer_session::Column::ViewerUserId.eq(current.viewer.id))
         .exec(&tx)
         .await?;
     tx.commit().await?;
     Ok((
         StatusCode::NO_CONTENT,
-        session::clear_cookies(state.cookie_secure),
+        [("set-cookie", session::cookie("", state.cookie_secure, true))],
     )
         .into_response())
 }
