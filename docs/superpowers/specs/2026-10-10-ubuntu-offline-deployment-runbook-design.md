@@ -39,7 +39,7 @@
 
 ## 验收标准
 
-- 所有服务均为 `healthy`，健康接口返回 `{"status":"ok"}`。
+- 五个常驻服务 `postgres`、`api`、`public-web`、`admin-web`、`caddy` 均为 `healthy`；一次性 `media-init` 成功退出且退出码为 `0`。健康接口返回 `{"status":"ok"}`。
 - 自研服务使用目标版本的 `linux-amd64` 镜像。
 - `.env` 升级前后 SHA-256 完全一致。
 - PostgreSQL 和 API 仍挂载原数据库与媒体目录。
