@@ -34,6 +34,8 @@
 - `docs/superpowers/plans/2026-09-12-host-data-bind-mounts-implementation.md`
 - `docs/superpowers/specs/2026-09-12-offline-application-image-bundle-design.md`
 - `docs/superpowers/plans/2026-09-12-offline-application-image-bundle.md`
+- `docs/superpowers/specs/2026-10-10-ubuntu-offline-deployment-runbook-design.md`
+- `docs/superpowers/plans/2026-10-10-ubuntu-offline-deployment-runbook.md`
 - `docs/superpowers/specs/2026-09-13-default-local-config-design.md`
 - `docs/superpowers/plans/2026-09-13-default-local-config.md`
 - `docs/superpowers/specs/2026-09-14-hevc-mp4-upload-and-localized-error-design.md`
@@ -124,6 +126,30 @@
 - 目标机仍须从 Docker Hub 获取固定版本 `postgres:17-alpine`、`caddy:2.10-alpine` 和 `alpine:3.22`。
 - 包不包含源码、真实 `.env`、凭据、数据库或媒体数据。
 - 输出固定在被 Git 忽略的 `dist/offline/`，构建工具拒绝覆盖同名产物。
+
+## Ubuntu 半离线部署流程
+
+- 使用 SSH 主机别名 `ubuntu`，部署目录固定为 `/home/zhangdi/works/movie_harbor/serve`。
+- AMD64 包位于本地 `dist/offline/movie-harbor-offline-linux-amd64-VERSION.tar.gz`；`VERSION` 和备份时间戳必须按本次部署确定。
+- 任何部署前先读取本节引用的规格、部署指南、半离线发布指南和媒体备份指南，并按 Context7 约定核对 Docker Compose CLI：
+  - `docs/superpowers/specs/2026-10-10-ubuntu-offline-deployment-runbook-design.md`
+  - `docs/guides/deployment.md`
+  - `docs/guides/offline-package.md`
+  - `docs/guides/media-and-backup.md`
+
+按以下顺序升级：
+
+1. 只读预检本地发布包和服务器。确认本地包对应本次目标版本；通过 SSH 主机别名 `ubuntu` 检查服务器为 `x86_64`/`linux/amd64`、已安装 Docker Engine 与 Docker Compose v2，并读取 Docker/Compose 版本、可用磁盘空间、现有容器和镜像、部署目录及数据挂载。检查 `.env` 时只记录其 SHA-256 和配置项名称；只读取 `DATABASE_HOST_DIR`、`MEDIA_HOST_DIR` 的路径用于确认现有数据位置，不显示任何值中包含秘密的配置项。
+2. 在本地计算离线包 SHA-256；将包上传到部署目录的上级目录，并在服务器重新计算 SHA-256，确认与本地完全一致后继续。
+3. 使用按本次部署时间戳命名的唯一备份目录，创建时设为 `0700`。在替换部署文件前，备份当前部署文件和原 `.env`，并记录原 `.env` 的 SHA-256。任何时候都不得显示或覆盖 `.env` 内容。
+4. 停止 API 以冻结写入，再使用 PostgreSQL 自带工具生成自定义格式数据库备份；验证备份目录清单可读取。备份验证失败时不得替换正式部署文件。用户未明确要求时不备份媒体，也不复制、移动、删除或改写媒体目录；如果用户另行明确要求媒体备份，且中止该备份，须停止本次临时容器并删除不完整归档。
+5. 在唯一临时目录解压已校验的发布包，运行包内 `load-images.sh` 校验并导入三个自研镜像。若包校验失败，不得替换正式部署文件。
+6. 使用原 `.env` 对新版 Compose 文件运行 `docker compose --env-file .env -f compose.yml config -q` 配置校验，并核对三个自研镜像标签及目标平台。配置验证失败时不得替换正式部署文件。校验通过后只替换发布文件，明确排除 `.env`；替换后再次确认 `.env` 的 SHA-256 与原值一致。
+7. 在原部署目录执行 `docker compose --env-file .env -f compose.yml up -d --no-build --wait --wait-timeout 180`。Compose `--wait` 等待服务达到 `running` 或 `healthy`，超时或任一服务未健康时停止后续清理并保留日志和容器现场。API 启动时会自动执行数据库迁移。
+8. 完成最终验收：确认所有容器健康、健康接口返回 `{"status":"ok"}`、公开站和管理后台 HTTP 响应正常、三个自研服务使用本次目标版本的 `linux/amd64` 镜像、预期迁移结构存在、升级前内容数量未减少、数据库与 API 仍挂载原数据库和媒体目录、API 日志无启动或迁移错误，并确认 `.env` SHA-256 与升级前一致。
+9. 将包含数据库或 `.env` 的备份文件权限设为 `0600`；验收成功后清理本次临时解压目录和不完整临时文件。保留外层发布包、数据库备份和旧部署备份。
+
+不要执行 `docker compose down -v`，不得删除或改写数据库目录、媒体目录。包、配置或备份验证失败时不替换正式文件。正式文件替换或新服务启动失败时保留日志和容器现场；使用本次旧部署备份恢复发布文件，保持原 `.env` 原样并再次核对 SHA-256，再用原镜像标签启动，不得修改数据库或媒体目录来规避启动错误。数据库迁移已提交后不自动执行向下迁移；数据库恢复必须重新获得用户明确授权，并从升级前数据库备份恢复。
 
 ## 开发工作流
 
