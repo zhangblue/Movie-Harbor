@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
@@ -153,7 +153,7 @@ it("deep-links to the recent episode, keeps episode keys isolated, and navigates
   render(<App />);
 
   expect(await screen.findByRole("heading", { name: "第 3 集 · 灯塔" })).toBeInTheDocument();
-  expect(window.location.pathname).toBe("/series/series-1/play/ep-2");
+  await waitFor(() => expect(window.location.pathname).toBe("/series/series-1/play/ep-2"));
   expect(screen.getByRole("button", { name: "下一集：第 1 集 · 归途" })).toBeEnabled();
   await user.click(screen.getByRole("button", { name: "上一集：第 1 集 · 启程" }));
   expect(window.location.pathname).toBe("/series/series-1/play/ep-1");
