@@ -3530,3 +3530,202 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
         .unwrap();
     assert_eq!(movie.video_asset_id, None);
 }
+
+// Catches registering media outside the callback transaction or swallowing registration failures.
+#[tokio::test]
+async fn new_asset_registration_callback_failure_rolls_back_asset_and_file() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(&root.0).await.unwrap();
+    let result = movie_harbor_api::media::upload::store_new_asset_with_registration(
+        &db,
+        &storage,
+        MediaKind::Poster,
+        "poster.png",
+        "image/png",
+        &policy(1024),
+        Chunks::new([PNG]).0,
+        |tx, asset| {
+            Box::pin(async move {
+                movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    token_hash: Set("registration-hash".into()),
+                    principal_hash: Set("principal".into()),
+                    asset_id: Set(asset.id),
+                    created_at: Set(chrono::Utc::now().fixed_offset()),
+                    expires_at: Set(
+                        (chrono::Utc::now() + chrono::Duration::minutes(30)).fixed_offset()
+                    ),
+                }
+                .insert(tx)
+                .await?;
+                Err(MediaError::Multipart("registration rejected".into()))
+            })
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(MediaError::Multipart(_))));
+    assert!(
+        media_asset::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        movie_harbor_api::entities::mcp_staged_poster::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        std::fs::read_dir(root.0.join(".incoming"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(
+        std::fs::read_dir(root.0.join("poster"))
+            .unwrap()
+            .all(|entry| std::fs::read_dir(entry.unwrap().path())
+                .unwrap()
+                .next()
+                .is_none())
+    );
+}
+
+struct FailRegisteredCommit;
+impl StorageHooks for FailRegisteredCommit {
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::DatabaseCommitted(_)) {
+            return Err(std::io::Error::other("injected post-commit failure"));
+        }
+        Ok(())
+    }
+}
+// Catches dropping a committed registration's file or removing an uncommitted registration's recovery evidence.
+#[tokio::test]
+async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_registration() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage =
+        LocalMediaStorage::initialize_with_hooks(root.as_ref(), Arc::new(FailRegisteredCommit))
+            .await
+            .unwrap();
+    let result = movie_harbor_api::media::upload::store_new_asset_with_registration(
+        &db,
+        &storage,
+        MediaKind::Poster,
+        "poster.png",
+        "image/png",
+        &policy(1024),
+        Chunks::new([PNG]).0,
+        |tx, asset| {
+            Box::pin(async move {
+                movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+                    id: Set(Uuid::new_v4()),
+                    token_hash: Set("committed-token".into()),
+                    principal_hash: Set("principal".into()),
+                    asset_id: Set(asset.id),
+                    created_at: Set(chrono::Utc::now().fixed_offset()),
+                    expires_at: Set(
+                        (chrono::Utc::now() + chrono::Duration::minutes(30)).fixed_offset()
+                    ),
+                }
+                .insert(tx)
+                .await?;
+                Ok(())
+            })
+        },
+    )
+    .await;
+    assert!(matches!(result, Err(MediaError::Io(_))));
+    let asset = media_asset::Entity::find().one(&db).await.unwrap().unwrap();
+    let row = movie_harbor_api::entities::mcp_staged_poster::Entity::find()
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.asset_id, asset.id);
+    assert!(root.as_ref().join(&asset.storage_key).is_file());
+    assert!(std::fs::read_dir(root.as_ref().join(".incoming")).unwrap().any(|entry|entry.unwrap().path().extension()==Some(std::ffi::OsStr::new("pending"))));
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(root.as_ref().join(&asset.storage_key).is_file());
+    assert!(
+        std::fs::read_dir(root.as_ref().join(".incoming"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+
+    let root2 = TempRoot::new();
+    let storage2 = LocalMediaStorage::initialize(root2.as_ref()).await.unwrap();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let task_db = db.clone();
+    let task_storage = storage2.clone();
+    let task = tokio::spawn(async move {
+        movie_harbor_api::media::upload::store_new_asset_with_registration(
+            &task_db,
+            &task_storage,
+            MediaKind::Poster,
+            "cancelled.png",
+            "image/png",
+            &policy(1024),
+            Chunks::new([PNG]).0,
+            move |tx, asset| {
+                Box::pin(async move {
+                    movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+                        id: Set(Uuid::new_v4()),
+                        token_hash: Set("cancelled-token".into()),
+                        principal_hash: Set("principal".into()),
+                        asset_id: Set(asset.id),
+                        created_at: Set(chrono::Utc::now().fixed_offset()),
+                        expires_at: Set(
+                            (chrono::Utc::now() + chrono::Duration::minutes(30)).fixed_offset()
+                        ),
+                    }
+                    .insert(tx)
+                    .await?;
+                    signal.notify_one();
+                    std::future::pending::<Result<(), MediaError>>().await
+                })
+            },
+        )
+        .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), entered.notified())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage2, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read_dir(root2.as_ref().join(".incoming"))
+            .unwrap()
+            .next()
+            .is_none()
+    );
+    assert!(
+        std::fs::read_dir(root2.as_ref().join("poster"))
+            .unwrap()
+            .all(|entry| std::fs::read_dir(entry.unwrap().path())
+                .unwrap()
+                .next()
+                .is_none())
+    );
+    assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 1);
+    assert_eq!(
+        movie_harbor_api::entities::mcp_staged_poster::Entity::find()
+            .all(&db)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}

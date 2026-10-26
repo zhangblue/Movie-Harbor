@@ -785,3 +785,56 @@ async fn recover_rejects_a_referenced_staged_symlink_without_publishing_it() {
     assert!(operation.join("00000000.data").is_symlink());
     let _ = std::fs::remove_file(outside);
 }
+
+// Catches treating an unconsumed staged poster as an unreferenced file during interrupted cleanup.
+#[tokio::test]
+async fn recover_restores_staged_poster_reference_after_cleanup_rollback() {
+    let database = support::TestDatabase::migrated("removal_staged_poster").await;
+    let db = database.connection();
+    let (storage, root) = storage_fixture().await;
+    let file = registered_file(
+        root.as_ref(),
+        "poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+        b"staged-poster",
+    )
+    .await;
+    media_asset::ActiveModel {
+        id: Set(file.asset_id),
+        storage_key: Set(file.storage_key.clone()),
+        original_name: Set("poster.png".into()),
+        mime_type: Set("image/png".into()),
+        byte_size: Set(13),
+        purpose: Set("poster".into()),
+        ..Default::default()
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        token_hash: Set("staged-token-hash".into()),
+        principal_hash: Set("principal".into()),
+        asset_id: Set(file.asset_id),
+        created_at: Set(chrono::Utc::now().fixed_offset()),
+        expires_at: Set(chrono::Utc::now().fixed_offset()),
+    }
+    .insert(&db)
+    .await
+    .unwrap();
+    drop(
+        removal::stage(
+            &storage,
+            "expired-staged-poster",
+            std::slice::from_ref(&file),
+        )
+        .await
+        .unwrap(),
+    );
+    assert!(!root.as_ref().join(&file.storage_key).exists());
+    removal::recover(&db, &storage).await.unwrap();
+    assert_eq!(
+        std::fs::read(root.as_ref().join(&file.storage_key)).unwrap(),
+        b"staged-poster"
+    );
+    assert!(operation_directories(root.as_ref()).await.is_empty());
+}

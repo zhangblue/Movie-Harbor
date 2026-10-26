@@ -2,6 +2,7 @@ pub mod admin_session;
 pub mod admin_user;
 pub mod episode;
 pub mod genre;
+pub mod mcp_staged_poster;
 pub mod media_asset;
 pub mod movie;
 pub mod movie_genre;

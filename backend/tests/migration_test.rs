@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 mod support;
 
-const TABLES: [&str; 13] = [
+const TABLES: [&str; 14] = [
     "admin_user",
     "admin_session",
     "genre",
@@ -20,13 +20,14 @@ const TABLES: [&str; 13] = [
     "media_asset_ownership",
     "viewer_user",
     "viewer_session",
+    "mcp_staged_poster",
 ];
 
 #[tokio::test]
 async fn private_content_upgrade_preserves_public_defaults_and_is_reversible() {
     let db = support::TestDatabase::at_migration("private_upgrade", Some(5)).await;
     db.execute_unprepared("INSERT INTO movie (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Existing'); INSERT INTO series (id, name) VALUES ('20000000-0000-0000-0000-000000000001', 'Existing')").await.unwrap();
-    migration::Migrator::up(&*db, None).await.unwrap();
+    migration::Migrator::up(&*db, Some(1)).await.unwrap();
     for table in ["movie", "series"] {
         let row = db
             .query_one(Statement::from_string(

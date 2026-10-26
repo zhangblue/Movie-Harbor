@@ -2,6 +2,7 @@ mod authorization;
 pub(crate) mod path;
 pub mod removal;
 pub mod routes;
+pub mod staged_poster;
 pub mod storage;
 pub mod upload;
 pub mod validation;

@@ -208,6 +208,7 @@ async fn is_referenced(
                     SELECT 1 FROM movie WHERE poster_asset_id = a.id OR video_asset_id = a.id
                     UNION ALL SELECT 1 FROM series WHERE poster_asset_id = a.id
                     UNION ALL SELECT 1 FROM episode WHERE video_asset_id = a.id
+                    UNION ALL SELECT 1 FROM mcp_staged_poster WHERE asset_id = a.id
                 )
             ) AS referenced"#,
             [asset_id.into(), storage_key.into()],

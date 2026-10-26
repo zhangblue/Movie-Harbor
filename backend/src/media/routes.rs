@@ -5,7 +5,7 @@ use crate::{
     route_params::parse_uuid,
 };
 use axum::{
-    Json, Router,
+    Extension, Json, Router,
     extract::{DefaultBodyLimit, Multipart, Path, Query, State},
     middleware,
     routing::{get, post},
@@ -74,6 +74,7 @@ pub fn router(
         policy,
     };
     Ok(Router::new()
+        .route("/api/admin/media/posters/stage", post(stage_poster))
         .route("/api/admin/media/movies/{id}/poster", post(movie_poster))
         .route("/api/admin/media/movies/{id}/video", post(movie_video))
         .route("/api/admin/media/series/{id}/poster", post(series_poster))
@@ -214,4 +215,66 @@ fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> Media
     } else {
         MediaError::Multipart(error.to_string())
     }
+}
+
+async fn stage_poster(
+    State(state): State<MediaState>,
+    Extension(principal): Extension<auth::mcp::ManagementPrincipal>,
+    mut multipart: Multipart,
+) -> Result<axum::response::Response, super::staged_poster::StagedPosterError> {
+    use axum::response::IntoResponse;
+    let auth::mcp::ManagementPrincipal::Mcp { key_digest } = principal else {
+        return Ok(axum::http::StatusCode::FORBIDDEN.into_response());
+    };
+    let field = multipart
+        .next_field()
+        .await
+        .map_err(map_multipart_error)?
+        .ok_or(MediaError::InvalidFileName)?;
+    if field.name() != Some("file") {
+        return Err(MediaError::InvalidFileName.into());
+    }
+    let original_name = field
+        .file_name()
+        .ok_or(MediaError::InvalidFileName)?
+        .to_owned();
+    if original_name.len() > MAX_FILE_NAME_BYTES {
+        return Err(MediaError::InvalidFileName.into());
+    }
+    let declared_mime = field
+        .content_type()
+        .ok_or_else(|| MediaError::Multipart("file content-type is required".into()))?
+        .to_owned();
+    super::staged_poster::cleanup_expired(
+        &state.db,
+        &state.storage,
+        chrono::Utc::now().fixed_offset(),
+        super::staged_poster::STAGE_CLEANUP_LIMIT,
+    )
+    .await?;
+    let pending = super::upload::prepare_new_asset(
+        &state.storage,
+        super::MediaKind::Poster,
+        &original_name,
+        &declared_mime,
+        &state.policy,
+        field,
+    )
+    .await?;
+    // Dropping the prepared file on malformed or additional fields uses existing identity-bound cleanup.
+    if multipart
+        .next_field()
+        .await
+        .map_err(map_multipart_error)?
+        .is_some()
+    {
+        return Err(MediaError::Multipart("exactly one file field is required".into()).into());
+    }
+    let response = super::staged_poster::stage_prepared(&state.db, &key_digest, pending).await?;
+    Ok((
+        axum::http::StatusCode::CREATED,
+        [("cache-control", "no-store")],
+        Json(response),
+    )
+        .into_response())
 }

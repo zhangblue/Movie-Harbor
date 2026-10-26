@@ -45,6 +45,13 @@ pub async fn build(
     )?;
     crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
     crate::media::removal::recover(&db, &storage).await?;
+    crate::media::staged_poster::cleanup_expired(
+        &db,
+        &storage,
+        chrono::Utc::now().fixed_offset(),
+        crate::media::staged_poster::STARTUP_CLEANUP_LIMIT,
+    )
+    .await?;
     // 所有媒体路由复用同一受控存储实例，确保文件恢复、上传和删除遵循同一所有权边界。
     Ok(router()
         .merge(crate::catalog::routes::router(db))

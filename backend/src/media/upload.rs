@@ -67,22 +67,116 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
     policy: &UploadPolicy,
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
+    store_new_asset_with_registration(
+        db,
+        storage,
+        kind,
+        original_name,
+        declared_mime,
+        policy,
+        source,
+        |_, _| Box::pin(async { Ok(()) }),
+    )
+    .await
+}
+
+/// Registers the asset and its caller-owned persistent reference atomically.
+#[allow(clippy::too_many_arguments)]
+pub async fn store_new_asset_with_registration<S, F>(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    kind: MediaKind,
+    original_name: &str,
+    declared_mime: &str,
+    policy: &UploadPolicy,
+    source: S,
+    register: F,
+) -> Result<media_asset::Model, MediaError>
+where
+    S: ChunkSource + Send,
+    F: for<'a> FnOnce(
+            &'a DatabaseTransaction,
+            &'a media_asset::Model,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), MediaError>> + Send + 'a>,
+        > + Send,
+{
+    let pending =
+        prepare_new_asset(storage, kind, original_name, declared_mime, policy, source).await?;
+    register_new_asset(db, pending, register).await
+}
+
+pub(crate) struct PreparedNewAsset {
+    id: Uuid,
+    kind: MediaKind,
+    original_name: String,
+    stored: StoredFile,
+}
+
+pub(crate) async fn prepare_new_asset<S: ChunkSource + Send>(
+    storage: &LocalMediaStorage,
+    kind: MediaKind,
+    original_name: &str,
+    declared_mime: &str,
+    policy: &UploadPolicy,
+    source: S,
+) -> Result<PreparedNewAsset, MediaError> {
     let id = Uuid::new_v4();
-    let mut stored = storage
+    let stored = storage
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
-    // 先持久化恢复标记再进入数据库写阶段，使“文件已提升但引用尚未提交”的中断可在启动时收敛。
+    Ok(PreparedNewAsset {
+        id,
+        kind,
+        original_name: original_name.to_owned(),
+        stored,
+    })
+}
+
+pub(crate) async fn register_new_asset<F>(
+    db: &DatabaseConnection,
+    pending: PreparedNewAsset,
+    register: F,
+) -> Result<media_asset::Model, MediaError>
+where
+    F: for<'a> FnOnce(
+            &'a DatabaseTransaction,
+            &'a media_asset::Model,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<(), MediaError>> + Send + 'a>,
+        > + Send,
+{
+    let PreparedNewAsset {
+        id,
+        kind,
+        original_name,
+        mut stored,
+    } = pending;
+    let tx = db.begin().await?;
+    // Cancellation or an uncertain database result must retain the existing recovery marker.
     stored.begin_database_write();
-    let asset = match insert_asset(db, id, kind, original_name, &stored).await {
+    let result: Result<media_asset::Model, MediaError> = async {
+        let asset = insert_asset(&tx, id, kind, &original_name, &stored).await?;
+        register(&tx, &asset).await?;
+        Ok(asset)
+    }
+    .await;
+    let asset = match result {
         Ok(asset) => asset,
         Err(error) => {
-            if media_asset::Entity::find_by_id(id).one(db).await?.is_none() {
+            if tx.rollback().await.is_ok() {
                 stored.database_failure_is_known();
             }
             return Err(error);
         }
     };
-    // 数据库记录提交后才移除恢复标记并注册文件，避免崩溃窗口遗留无法判定的已提升文件。
+    if let Err(error) = tx.commit().await {
+        // A connection failure can hide a successful commit: prove absence before unlinking.
+        if matches!(media_asset::Entity::find_by_id(id).one(db).await, Ok(None)) {
+            stored.database_failure_is_known();
+        }
+        return Err(error.into());
+    }
     stored.notify_database_committed()?;
     tokio::task::yield_now().await;
     stored.mark_registered()?;

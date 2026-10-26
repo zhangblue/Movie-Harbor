@@ -7,6 +7,8 @@ mod m20260912_000004_drop_episode_synopsis;
 mod m20260912_000005_media_ownership;
 mod m20261010_000006_private_content_and_viewers;
 
+mod m20261026_000007_mcp_staged_poster;
+
 pub struct Migrator;
 
 #[async_trait::async_trait]
@@ -19,6 +21,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260912_000004_drop_episode_synopsis::Migration),
             Box::new(m20260912_000005_media_ownership::Migration),
             Box::new(m20261010_000006_private_content_and_viewers::Migration),
+            Box::new(m20261026_000007_mcp_staged_poster::Migration),
         ]
     }
 }
