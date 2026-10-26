@@ -1,8 +1,8 @@
 import { expect, test } from "@playwright/test";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve } from "node:path";
 import { AdminApi, ViewerApi, baseURL } from "./helpers";
 
 type JsonPrimitive = string | number | boolean | null;
@@ -15,16 +15,36 @@ const rawKey = process.env.E2E_MCP_RAW_KEY;
 if (!runDir || !configPath || !rawKey) throw new Error("MCP E2E requires isolated runner configuration");
 
 const workspaceRoot = process.cwd();
+const canonicalRunDir = realpathSync(runDir);
 const entry = resolve(workspaceRoot, "mcp/dist/server.js");
 const posterPath = resolve(runDir, "mcp-poster.png");
 const compatibleVideoPath = resolve(runDir, "sample.mp4");
 const incompatibleVideoPath = resolve(runDir, "mcp-incompatible.mkv");
+const isolatedDirectories = {
+  HOME: resolve(runDir, "mcp-home"),
+  TMPDIR: resolve(runDir, "mcp-tmp"),
+  CODEX_HOME: resolve(runDir, "mcp-codex-home"),
+  XDG_CONFIG_HOME: resolve(runDir, "mcp-xdg-config"),
+  XDG_CACHE_HOME: resolve(runDir, "mcp-xdg-cache"),
+  XDG_DATA_HOME: resolve(runDir, "mcp-xdg-data"),
+  XDG_STATE_HOME: resolve(runDir, "mcp-xdg-state"),
+} as const;
+for (const directory of Object.values(isolatedDirectories)) mkdirSync(directory, { recursive: true, mode: 0o700 });
 const childEnvironment: Record<string, string> = {
   PATH: process.env.PATH ?? "",
-  HOME: process.env.HOME ?? runDir,
-  TMPDIR: process.env.TMPDIR ?? runDir,
+  ...isolatedDirectories,
   MOVIE_HARBOR_MCP_CONFIG: configPath,
 };
+const isolatedEnvironmentVariables = ["HOME", "TMPDIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] as const;
+const mediaFixtureRepresentations = [compatibleVideoPath, incompatibleVideoPath].flatMap(path => {
+  const bytes = readFileSync(path);
+  return [bytes.toString("base64"), bytes.toString("hex"), JSON.stringify(bytes), JSON.stringify([...bytes])];
+});
+
+function isInsideRunDir(path: string): boolean {
+  const pathFromRun = relative(canonicalRunDir, realpathSync(path));
+  return pathFromRun !== "" && !pathFromRun.startsWith("..") && !isAbsolute(pathFromRun);
+}
 
 test.describe.configure({ mode: "serial" });
 test.setTimeout(180_000);
@@ -33,14 +53,21 @@ let client: Client;
 let transport: StdioClientTransport;
 const observedResults: Array<Awaited<ReturnType<Client["callTool"]>>> = [];
 
+function assertSafeResult(value: object, requireBoundedResult = true): void {
+  const encoded = JSON.stringify(value);
+  expect(encoded.includes("local_path"), "MCP result exposed local_path").toBe(false);
+  expect(encoded.includes(rawKey), "MCP result exposed the raw key").toBe(false);
+  for (const representation of mediaFixtureRepresentations) {
+    expect(encoded.includes(representation), "MCP result exposed a complete media fixture representation").toBe(false);
+  }
+  if (requireBoundedResult) expect(encoded.length).toBeLessThan(32 * 1024);
+}
+
 async function call(name: string, args: Record<string, JsonValue>): Promise<Structured> {
   const result = await client.callTool({ name, arguments: args });
   expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
   observedResults.push(result);
-  const encoded = JSON.stringify(result);
-  expect(encoded).not.toContain("local_path");
-  expect(encoded).not.toContain(rawKey);
-  expect(encoded.length).toBeLessThan(32 * 1024);
+  assertSafeResult(result);
   return result.structuredContent as Structured;
 }
 
@@ -48,12 +75,18 @@ async function callError(name: string, args: Record<string, JsonValue>) {
   const result = await client.callTool({ name, arguments: args });
   expect(result.isError).toBe(true);
   observedResults.push(result);
-  expect(JSON.stringify(result)).not.toContain(rawKey);
+  assertSafeResult(result);
   return result;
 }
 
 test.beforeAll(async () => {
   expect(existsSync(entry)).toBe(true);
+  expect(Object.keys(childEnvironment).sort()).toEqual([...isolatedEnvironmentVariables, "MOVIE_HARBOR_MCP_CONFIG", "PATH"].sort());
+  expect(isInsideRunDir(configPath), "MCP config must be isolated inside E2E_RUN_DIR").toBe(true);
+  for (const variable of isolatedEnvironmentVariables) {
+    expect(isInsideRunDir(childEnvironment[variable] ?? ""), `${variable} must be isolated inside E2E_RUN_DIR`).toBe(true);
+    expect(existsSync(childEnvironment[variable] ?? ""), `${variable} directory must exist before MCP startup`).toBe(true);
+  }
   client = new Client({ name: "movie-harbor-e2e", version: "1.0.0" });
   transport = new StdioClientTransport({
     command: process.execPath,
@@ -67,8 +100,7 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await client?.close();
-  expect(JSON.stringify(observedResults)).not.toContain(rawKey);
-  expect(JSON.stringify(observedResults)).not.toContain("local_path");
+  assertSafeResult(observedResults, false);
 });
 
 test("MCP creates, uploads and independently publishes private movie and series", async ({ request, playwright }) => {
@@ -125,6 +157,8 @@ test("MCP creates, uploads and independently publishes private movie and series"
   try {
     const draftSeries = await admin.get<any>(`/api/admin/series/${series.id}`);
     expect(draftSeries).toMatchObject({ status: "draft", is_private: true, year: 2025 });
+    expect(draftSeries.poster).not.toBeNull();
+    expect(draftSeries.genres).toEqual(expect.arrayContaining([expect.objectContaining({ id: genreId })]));
     const draftEpisode = draftSeries.seasons[0].episodes[0];
     expect(draftEpisode).toMatchObject({ name: "Pilot", duration_seconds: duration, status: "draft" });
 
