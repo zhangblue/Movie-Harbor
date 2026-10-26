@@ -164,7 +164,7 @@ test('movie creation requires synopsis and confirmation, defaults public, and se
 });
 
 test('movie tools expose integer minutes and convert updates back to API seconds', async () => {
-  const f = clientFixture([[{ ...movie, duration_seconds: 10176 }], movie]);
+  const f = clientFixture([[{ ...movie, duration_seconds: 10176 }], { ...movie, duration_seconds: 10200 }]);
   const t = await tools(f.client);
   const found = await t.call('search_movies', { name: 'Alien' });
   assert.equal(found.matches[0].duration_minutes, 170);
@@ -172,6 +172,19 @@ test('movie tools expose integer minutes and convert updates back to API seconds
   await t.call('update_movie_metadata', { movie_id: movieId, version: 3, duration_minutes: 170 });
   assert.deepEqual(f.calls[1]!.body, { version: 3, duration_seconds: 10200 });
 });
+
+for (const duration_seconds of [7000, null]) {
+  test(`movie duration update rejects API duration ${duration_seconds} as invalid_response without retrying`, async () => {
+    const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
+    const f = clientFixture([{ ...movie, duration_seconds }]);
+    await assert.rejects((await tools(f.client)).call('update_movie_metadata', {
+      movie_id: movieId, version: 3, duration_minutes: 170,
+    }), error => error instanceof MovieHarborClientError && error.code === 'invalid_response');
+    assert.deepEqual(f.calls, [{
+      method: 'PATCH', path: `/api/admin/movies/${movieId}`, body: { version: 3, duration_seconds: 10200 },
+    }]);
+  });
+}
 
 test('movie minute helpers round probe seconds, preserve null and reject overflow before HTTP', async () => {
   const common = await import('../src/schemas/common.js');

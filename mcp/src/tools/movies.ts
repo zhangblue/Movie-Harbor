@@ -31,10 +31,13 @@ export async function createMovie(input: unknown, client: MovieHarborClient) {
 }
 export async function updateMovieMetadata(input: unknown, client: MovieHarborClient) {
   const { movie_id, duration_minutes, ...patch } = updateMovieInput.parse(input);
+  const duration_seconds = duration_minutes === undefined ? undefined : durationSecondsFromMinutes(duration_minutes);
   const movie = parseApi(apiMovie, await client.json('PATCH', `/api/admin/movies/${movie_id}`, {
-    ...patch, ...(duration_minutes === undefined ? {} : { duration_seconds: durationSecondsFromMinutes(duration_minutes) }),
+    ...patch, ...(duration_seconds === undefined ? {} : { duration_seconds }),
   }));
-  if (movie.id !== movie_id) throw new MovieHarborClientError('invalid_response');
+  if (movie.id !== movie_id || (duration_seconds !== undefined && movie.duration_seconds !== duration_seconds)) {
+    throw new MovieHarborClientError('invalid_response');
+  }
   return toolResult(contentResult, { id: movie.id, version: movie.version, status: movie.status,
     next_actions: movie.video ? ['replace_movie_video', 'publish_movie'] : ['upload_movie_video'] }, '已更新电影元数据。');
 }
