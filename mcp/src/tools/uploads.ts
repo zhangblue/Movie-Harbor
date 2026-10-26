@@ -59,14 +59,17 @@ async function cleanupAfterUpload(path: string, generated: boolean, dependencies
   }
 }
 
-async function uploadFile<T>(path: string, endpoint: string, dependencies: UploadDependencies, parser: (value: unknown) => T) {
+async function uploadFile<T>(path: string, endpoint: string, dependencies: UploadDependencies,
+  parser: (value: unknown, checked: Awaited<ReturnType<typeof checkedVideo>>) => T) {
   const checked = await checkedVideo(path, dependencies);
-  let response: T;
-  try { response = parser(await dependencies.client.upload(endpoint, checked.file, checked.mimeType)); }
+  let raw: unknown;
+  try { raw = await dependencies.client.upload(endpoint, checked.file, checked.mimeType); }
   catch (error) {
     if (checked.generated) throw new Error(`视频上传失败或结果未知；生成文件已保留，请重新查询目标后重试：${checked.file.realPath}`);
     throw error;
   }
+  // Parse and cross-check before cleanup: a structurally valid but impossible response is commit-unknown.
+  const response = parser(raw, checked);
   return { response, ...(await cleanupAfterUpload(checked.file.realPath, checked.generated, dependencies)) };
 }
 
@@ -79,7 +82,12 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
   if (!replace && movie.video) throw new Error('目标已有视频，请改用 replace_movie_video 并明确确认替换');
   if (replace && !movie.video) throw new Error('目标没有视频，请改用 upload_movie_video');
   const result = await uploadFile(parsed.path, `/api/admin/media/movies/${parsed.movie_id}/video?version=${parsed.version}`,
-    dependencies, value => parseApi(apiMovieUpload, value));
+    dependencies, (value, checked) => {
+      const response = parseApi(apiMovieUpload, value);
+      if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
+        || response.version !== parsed.version + 1) throw new MovieHarborClientError('invalid_response');
+      return response;
+    });
   return toolResult(movieUploadOutput, { id: parsed.movie_id, version: result.response.version, media_id: result.response.id,
     mime_type: result.response.mime_type, byte_size: result.response.byte_size, generated_file_deleted: result.generated_file_deleted,
     retained_generated_path: result.retained_generated_path, next_actions: ['publish_movie'] },
@@ -99,7 +107,14 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   if (!replace && episode.video) throw new Error('目标已有视频，请改用 replace_episode_video 并明确确认替换');
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');
   const result = await uploadFile(parsed.path, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
-    dependencies, value => parseApi(apiEpisodeUpload, value));
+    dependencies, (value, checked) => {
+      const response = parseApi(apiEpisodeUpload, value);
+      if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
+        || response.version !== parsed.version + 1 || response.series_version !== envelope.series_version + 1) {
+        throw new MovieHarborClientError('invalid_response');
+      }
+      return response;
+    });
   return toolResult(episodeUploadOutput, { id: parsed.episode_id, version: result.response.version,
     series_version: result.response.series_version, media_id: result.response.id, mime_type: result.response.mime_type,
     byte_size: result.response.byte_size, generated_file_deleted: result.generated_file_deleted,

@@ -19,7 +19,7 @@ const episode = { id: episodeId, season_id: seasonId, number: 1, name: 'Pilot', 
 const series = { id: seriesId, name: 'Alien', year: 1979, status: 'draft', version: 8, is_private: true,
   poster: media, seasons: [{ id: seasonId, number: 1, episodes: [episode] }] };
 const episodeEnvelope = { series_version: 8, episode };
-const uploadResponse = { id: mediaId, original_name: 'video.mp4', mime_type: 'video/mp4', byte_size: 6, version: 5 };
+const uploadResponse = { id: mediaId, original_name: 'video.mp4', mime_type: 'video/mp4', byte_size: 6, version: 4 };
 
 async function fixture(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'mh-upload-tools-')));
@@ -89,7 +89,7 @@ test('ordinary movie upload refuses an occupied slot and never uploads or publis
 test('movie upload validates compatible media, streams once, filters output and does not publish', async t => {
   const f = await fixture(t); const c = fakeClient([movie, uploadResponse]); const tools = await registeredTools(c.client, f);
   const out = await tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path });
-  assert.deepEqual(out, { id:movieId,version:5,media_id:mediaId,mime_type:'video/mp4',byte_size:6,
+  assert.deepEqual(out, { id:movieId,version:4,media_id:mediaId,mime_type:'video/mp4',byte_size:6,
     generated_file_deleted:false,retained_generated_path:null,next_actions:['publish_movie'] });
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path,call.mimeType]), [
     ['json','GET',`/api/admin/movies/${movieId}`,undefined],
@@ -125,6 +125,52 @@ test('episode upload validates hierarchy and returns episode and parent versions
   const wrong = fakeClient([{series_version:8,episode:{...episode,id:movieId}}]);
   await assert.rejects((await registeredTools(wrong.client,f)).call('upload_episode_video',input), /数据格式无效/);
   assert.equal(wrong.calls.length,1);
+});
+
+test('upload rejects semantically impossible movie responses before cleanup', async t => {
+  const f = await fixture(t);
+  for (const [index,response] of [
+    { ...uploadResponse, mime_type:'video/webm' },
+    { ...uploadResponse, byte_size:999 },
+    { ...uploadResponse, version:5 },
+  ].entries()) {
+    const ordinary = fakeClient([movie,response]);
+    await assert.rejects((await registeredTools(ordinary.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:f.path}),/数据格式无效/);
+    assert.equal(await stat(f.path).then(()=>true),true);
+    assert.equal(ordinary.calls.length,2);
+
+    await prepareGeneratedRoot(f.config);
+    const source = await inspectAllowedFile(f.path,f.config.allowedRoots);
+    const generated = join(f.config.generatedRoot,`bad-${index}.mp4`);
+    await writeFile(generated,'made');
+    await recordGeneratedFile(generated,source,f.config,f.credentials);
+    const generatedClient = fakeClient([movie,{...response,byte_size:response.byte_size===999?999:4}]);
+    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated}),/数据格式无效/);
+    assert.equal(await stat(generated).then(()=>true),true,'invalid response must retain generated file');
+    assert.equal(generatedClient.calls.length,2);
+  }
+});
+
+test('episode upload rejects target or parent version jumps before cleanup', async t => {
+  const f = await fixture(t); const input={series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path};
+  for(const [index,response] of [
+    {...uploadResponse,version:6,series_version:9},
+    {...uploadResponse,version:5,series_version:10},
+  ].entries()){
+    const c=fakeClient([episodeEnvelope,response]);
+    await assert.rejects((await registeredTools(c.client,f)).call('upload_episode_video',input),/数据格式无效/);
+    assert.equal(c.calls.length,2);
+
+    await prepareGeneratedRoot(f.config);
+    const source=await inspectAllowedFile(f.path,f.config.allowedRoots);
+    const generated=join(f.config.generatedRoot,`bad-episode-${index}.mp4`);
+    await writeFile(generated,'made');
+    await recordGeneratedFile(generated,source,f.config,f.credentials);
+    const generatedClient=fakeClient([episodeEnvelope,{...response,byte_size:4}]);
+    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_episode_video',{...input,path:generated}),/数据格式无效/);
+    assert.equal(await stat(generated).then(()=>true),true,'invalid episode response must retain generated file');
+    assert.equal(generatedClient.calls.length,2);
+  }
 });
 
 test('successful generated upload deletes only registered conversion output and failures retain it', async t => {
@@ -174,6 +220,33 @@ test('movie, episode and parent series publish only through separate confirmed c
     [`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}/publish`,{version:4}],
     [`/api/admin/series/${seriesId}/publish`,{version:9}],
   ]);
+});
+
+test('publishing rejects impossible version transitions without later calls', async t => {
+  const f=await fixture(t);
+  for(const response of [{...movie,status:'published',version:3},{...movie,status:'published',version:5}]){
+    const c=fakeClient([movie,response]);
+    await assert.rejects((await registeredTools(c.client,f)).call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),/数据格式无效/);
+    assert.equal(c.calls.length,2);
+  }
+  for(const response of [{...series,status:'published',version:8},{...series,status:'published',version:10}]){
+    const c=fakeClient([series,response]);
+    await assert.rejects((await registeredTools(c.client,f)).call('publish_series',{series_id:seriesId,version:8,confirmed:true}),/数据格式无效/);
+    assert.equal(c.calls.length,2);
+  }
+  const mismatchedDetail=fakeClient([series,{...episodeEnvelope,series_version:7}]);
+  await assert.rejects((await registeredTools(mismatchedDetail.client,f)).call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/数据格式无效/);
+  assert.equal(mismatchedDetail.calls.length,2,'detail mismatch must stop before publish POST');
+  for(const response of [
+    {series_version:9,episode:{...episode,status:'published',version:4}},
+    {series_version:9,episode:{...episode,status:'published',version:6}},
+    {series_version:8,episode:{...episode,status:'published',version:5}},
+    {series_version:10,episode:{...episode,status:'published',version:5}},
+  ]){
+    const c=fakeClient([series,episodeEnvelope,response]);
+    await assert.rejects((await registeredTools(c.client,f)).call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/数据格式无效/);
+    assert.equal(c.calls.length,3);
+  }
 });
 
 test('episode publishing stops before transition when its parent is archived', async t => {

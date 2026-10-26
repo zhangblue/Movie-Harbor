@@ -26,7 +26,7 @@ export async function publishMovie(input: unknown, client: MovieHarborClient) {
   assertPublishable(current.status,current.version,parsed.version,'电影');
   if(current.status==='published') return toolResult(contentResult,{id:current.id,version:current.version,status:current.status,next_actions:[]},'电影已经发布，无需重复操作。');
   const published=parseApi(apiMovie,await client.json('POST',`${path}/publish`,{version:parsed.version}));
-  if(published.id!==parsed.movie_id||published.status!=='published') throw new MovieHarborClientError('invalid_response');
+  if(published.id!==parsed.movie_id||published.status!=='published'||published.version!==parsed.version+1) throw new MovieHarborClientError('invalid_response');
   return toolResult(contentResult,{id:published.id,version:published.version,status:published.status,next_actions:[]},'电影已发布。');
 }
 
@@ -37,7 +37,7 @@ export async function publishSeries(input: unknown, client: MovieHarborClient) {
   assertPublishable(current.status,current.version,parsed.version,'父剧集');
   if(current.status==='published') return toolResult(contentResult,{id:current.id,version:current.version,status:current.status,next_actions:[]},'父剧集已经发布，无需重复操作。');
   const published=parseApi(apiSeries,await client.json('POST',`${path}/publish`,{version:parsed.version}));
-  if(published.id!==parsed.series_id||published.status!=='published') throw new MovieHarborClientError('invalid_response');
+  if(published.id!==parsed.series_id||published.status!=='published'||published.version!==parsed.version+1) throw new MovieHarborClientError('invalid_response');
   return toolResult(contentResult,{id:published.id,version:published.version,status:published.status,next_actions:[]},'父剧集已发布。');
 }
 
@@ -51,12 +51,14 @@ export async function publishEpisode(input: unknown, client: MovieHarborClient) 
   if(episode.id!==parsed.episode_id||episode.season_id!==parsed.season_id
     ||(current.series_id!==undefined&&current.series_id!==parsed.series_id)
     ||(episode.series_id!==undefined&&episode.series_id!==parsed.series_id)) throw new MovieHarborClientError('invalid_response');
+  if(current.series_version!==parent.version) throw new MovieHarborClientError('invalid_response');
   assertPublishable(episode.status,episode.version,parsed.version,'单集');
   const next=parent.status==='draft'?['publish_series']:[];
   if(episode.status==='published') return toolResult(episodeOutput,{id:episode.id,version:episode.version,status:episode.status,
     series_version:current.series_version,next_actions:next},parent.status==='draft'?'单集已经发布；父剧集仍需单独确认发布。':'单集已经发布，无需重复操作。');
   const response=parseApi(apiEpisodeEnvelope,await client.json('POST',`${path}/publish`,{version:parsed.version})); const published=response.episode;
   if(published.id!==parsed.episode_id||published.season_id!==parsed.season_id||published.status!=='published'
+    ||published.version!==parsed.version+1||response.series_version!==parent.version+1
     ||(response.series_id!==undefined&&response.series_id!==parsed.series_id)
     ||(published.series_id!==undefined&&published.series_id!==parsed.series_id)) throw new MovieHarborClientError('invalid_response');
   return toolResult(episodeOutput,{id:published.id,version:published.version,status:published.status,

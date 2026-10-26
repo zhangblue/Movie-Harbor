@@ -4,6 +4,7 @@ import { chmod, mkdtemp, mkdir, realpath, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
 
@@ -38,6 +39,14 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
 });
 
 test('stdio entry emits only protocol JSON on stdout and keeps startup diagnostics off stdout', async t => {
+  const mcpRoot=fileURLToPath(new URL('../',import.meta.url));
+  const build=await mkdtemp(join(mcpRoot,'.server-build-'));
+  t.after(()=>rm(build,{recursive:true,force:true}));
+  const compiler=spawn(process.execPath,[join(mcpRoot,'node_modules/typescript/bin/tsc'),'--project',join(mcpRoot,'tsconfig.json'),'--outDir',build],{cwd:mcpRoot,stdio:['ignore','pipe','pipe']});
+  let compilerError=''; compiler.stderr.setEncoding('utf8'); compiler.stderr.on('data',chunk=>compilerError+=chunk);
+  const compilerExit=await new Promise<number|null>((resolve,reject)=>{compiler.once('exit',resolve);compiler.once('error',reject);});
+  assert.equal(compilerExit,0,compilerError);
+  const entry=join(build,'server.js');
   const directory = await realpath(await mkdtemp(join(tmpdir(),'mh-server-')));
   t.after(()=>rm(directory,{recursive:true,force:true}));
   const allowed=join(directory,'allowed'); await mkdir(allowed);
@@ -50,7 +59,7 @@ test('stdio entry emits only protocol JSON on stdout and keeps startup diagnosti
     `MOVIE_HARBOR_MCP_GENERATED_ROOT=${join(directory,'generated')}`,
     'MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS=1000','',
   ].join('\n'));
-  const child=spawn(process.execPath,['--import','tsx','src/server.ts'],{cwd:new URL('../',import.meta.url),env:{...process.env,MOVIE_HARBOR_MCP_CONFIG:config},stdio:['pipe','pipe','pipe']});
+  const child=spawn(process.execPath,[entry],{cwd:mcpRoot,env:{...process.env,MOVIE_HARBOR_MCP_CONFIG:config},stdio:['pipe','pipe','pipe']});
   const stdout:string[]=[]; const stderr:string[]=[];
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data',chunk=>stdout.push(chunk)); child.stderr.on('data',chunk=>stderr.push(chunk));
@@ -64,7 +73,7 @@ test('stdio entry emits only protocol JSON on stdout and keeps startup diagnosti
   assert.equal(messages[0].id,1); assert.equal(messages[0].result.serverInfo.name,'movie-harbor');
 
   const {MOVIE_HARBOR_MCP_CONFIG: _removed,...withoutConfig}=process.env;
-  const failed=spawn(process.execPath,['--import','tsx','src/server.ts'],{cwd:new URL('../',import.meta.url),env:withoutConfig,stdio:['ignore','pipe','pipe']});
+  const failed=spawn(process.execPath,[entry],{cwd:mcpRoot,env:withoutConfig,stdio:['ignore','pipe','pipe']});
   let failedOut=''; let failedErr=''; failed.stdout.setEncoding('utf8'); failed.stderr.setEncoding('utf8');
   failed.stdout.on('data',chunk=>failedOut+=chunk); failed.stderr.on('data',chunk=>failedErr+=chunk);
   const failedExit=await new Promise<number|null>((resolve,reject)=>{failed.once('exit',resolve);failed.once('error',reject);});
