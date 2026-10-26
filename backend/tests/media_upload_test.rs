@@ -3729,3 +3729,93 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
         1
     );
 }
+
+// A real deferred PostgreSQL failure exercises COMMIT Err; recovery is then tested with both final DB states.
+#[tokio::test]
+async fn registration_commit_unknown_retains_pending_file_until_database_state_recovery() {
+    for final_asset_exists in [false, true] {
+        let db = database().await;
+        let root = TempRoot::new();
+        let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+        db.execute_unprepared("CREATE FUNCTION reject_registration_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$; CREATE CONSTRAINT TRIGGER reject_registration_commit AFTER INSERT ON mcp_staged_poster DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_registration_commit()").await.unwrap();
+        let observed = Arc::new(Mutex::new(None::<media_asset::Model>));
+        let capture = observed.clone();
+        let result = movie_harbor_api::media::upload::store_new_asset_with_registration(
+            &db,
+            &storage,
+            MediaKind::Poster,
+            "poster.png",
+            "image/png",
+            &policy(1024),
+            Chunks::new([PNG]).0,
+            move |tx, asset| {
+                Box::pin(async move {
+                    *capture.lock().unwrap() = Some(asset.clone());
+                    movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+                        id: Set(Uuid::new_v4()),
+                        token_hash: Set("unknown-commit-token".into()),
+                        principal_hash: Set("principal".into()),
+                        asset_id: Set(asset.id),
+                        created_at: Set(chrono::Utc::now().fixed_offset()),
+                        expires_at: Set(
+                            (chrono::Utc::now() + chrono::Duration::minutes(30)).fixed_offset()
+                        ),
+                    }
+                    .insert(tx)
+                    .await?;
+                    Ok(())
+                })
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(MediaError::Database(_))));
+        let asset = observed.lock().unwrap().take().unwrap();
+        assert!(
+            root.as_ref().join(&asset.storage_key).is_file(),
+            "COMMIT Err must retain the uploaded file even if a fresh SELECT finds no asset"
+        );
+        assert!(
+            std::fs::read_dir(root.as_ref().join(".incoming"))
+                .unwrap()
+                .any(|entry| entry.unwrap().path().extension()
+                    == Some(std::ffi::OsStr::new("pending")))
+        );
+        assert!(
+            media_asset::Entity::find_by_id(asset.id)
+                .one(&db)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.execute_unprepared("DROP TRIGGER reject_registration_commit ON mcp_staged_poster")
+            .await
+            .unwrap();
+        if final_asset_exists {
+            // Model a commit that ultimately succeeded after the client had observed an error.
+            asset.clone().into_active_model().insert(&db).await.unwrap();
+            movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
+                id:Set(Uuid::new_v4()), token_hash:Set("unknown-commit-token".into()), principal_hash:Set("principal".into()), asset_id:Set(asset.id),
+                created_at:Set(chrono::Utc::now().fixed_offset()), expires_at:Set((chrono::Utc::now()+chrono::Duration::minutes(30)).fixed_offset()),
+            }.insert(&db).await.unwrap();
+        }
+        movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(
+            root.as_ref().join(&asset.storage_key).is_file(),
+            final_asset_exists
+        );
+        assert!(
+            std::fs::read_dir(root.as_ref().join(".incoming"))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        if final_asset_exists {
+            assert_eq!(
+                std::fs::read(root.as_ref().join(&asset.storage_key)).unwrap(),
+                PNG
+            );
+        }
+    }
+}

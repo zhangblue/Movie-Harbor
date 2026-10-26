@@ -540,7 +540,7 @@ async fn concurrent_consumption_has_one_winner() {
 }
 // Catches committing staged-row deletion before media deletion or failing to restore isolated files.
 #[tokio::test]
-async fn cleanup_database_operation_and_commit_failures_restore_rows_and_files() {
+async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() {
     let db = support::TestDatabase::migrated("staged_cleanup_failure").await;
     let root =
         std::env::temp_dir().join(format!("staged_cleanup_failure_{}", uuid::Uuid::new_v4()));
@@ -567,10 +567,30 @@ async fn cleanup_database_operation_and_commit_failures_restore_rows_and_files()
             .await
             .unwrap()
             .unwrap();
+        if trigger.starts_with("CREATE CONSTRAINT") {
+            assert!(
+                !root
+                    .join(row.try_get::<String>("", "storage_key").unwrap())
+                    .exists()
+            );
+            let operations: Vec<_> = std::fs::read_dir(root.join(".operations"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            assert_eq!(operations.len(), 1);
+            assert!(operations[0].join("manifest.json").is_file());
+            media::removal::recover(&db, &storage).await.unwrap();
+        }
         assert!(
             storage
                 .is_accessible_regular_file(&row.try_get::<String>("", "storage_key").unwrap())
                 .unwrap()
+        );
+        assert!(
+            std::fs::read_dir(root.join(".operations"))
+                .unwrap()
+                .next()
+                .is_none()
         );
         db.execute_unprepared("DROP TRIGGER reject_staged_delete ON media_asset")
             .await

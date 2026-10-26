@@ -132,7 +132,7 @@ pub async fn finish_delete_transaction<E>(
     deleted_media_count: usize,
     database_result: Result<(), E>,
 ) -> Result<u64, FinishDeleteError<E>> {
-    // 事务回滚或提交失败时恢复可见文件；只有提交成功后才同步清理隔离副本，并单独报告 finalize 失败。
+    // 明确的提交前操作失败才回滚并恢复；提交结果未知时保留隔离副本和清单，交启动恢复判断。
     if let Err(error) = database_result {
         let _ = tx.rollback().await;
         staged
@@ -142,10 +142,7 @@ pub async fn finish_delete_transaction<E>(
         return Err(FinishDeleteError::Operation(error));
     }
     if tx.commit().await.is_err() {
-        staged
-            .restore()
-            .await
-            .map_err(|_| FinishDeleteError::Restore)?;
+        // Drop only releases the mutation lock; durable evidence must survive an uncertain COMMIT.
         return Err(FinishDeleteError::Commit);
     }
     staged

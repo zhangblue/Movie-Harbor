@@ -838,3 +838,91 @@ async fn recover_restores_staged_poster_reference_after_cleanup_rollback() {
     );
     assert!(operation_directories(root.as_ref()).await.is_empty());
 }
+
+// COMMIT Err must leave durable evidence; a later recovery chooses restore or finish from final DB references.
+#[tokio::test]
+async fn common_delete_commit_unknown_retains_manifest_until_database_state_recovery() {
+    use sea_orm::ConnectionTrait;
+    for final_reference_exists in [true, false] {
+        let database = support::TestDatabase::migrated("removal_commit_unknown").await;
+        let db = database.connection();
+        let (storage, root) = storage_fixture().await;
+        let file = registered_file(
+            root.as_ref(),
+            "poster/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png",
+            b"poster-evidence",
+        )
+        .await;
+        media_asset::ActiveModel {
+            id: Set(file.asset_id),
+            storage_key: Set(file.storage_key.clone()),
+            original_name: Set("poster.png".into()),
+            mime_type: Set("image/png".into()),
+            byte_size: Set(15),
+            purpose: Set("poster".into()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        let content = movie::ActiveModel {
+            id: Set(Uuid::new_v4()),
+            name: Set("Commit uncertainty".into()),
+            poster_asset_id: Set(Some(file.asset_id)),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+        db.execute_unprepared("CREATE FUNCTION reject_delete_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$; CREATE CONSTRAINT TRIGGER reject_delete_commit AFTER DELETE ON movie DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_delete_commit()").await.unwrap();
+        let staged = removal::stage(&storage, "commit-unknown", std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        let tx = db.begin().await.unwrap();
+        movie::Entity::delete_by_id(content.id)
+            .exec(&tx)
+            .await
+            .unwrap();
+        media_asset::Entity::delete_by_id(file.asset_id)
+            .exec(&tx)
+            .await
+            .unwrap();
+        let result =
+            removal::finish_delete_transaction::<sea_orm::DbErr>(tx, staged, 1, Ok(())).await;
+        assert!(matches!(result, Err(removal::FinishDeleteError::Commit)));
+        assert!(
+            !root.as_ref().join(&file.storage_key).exists(),
+            "COMMIT Err must retain quarantine instead of restoring without knowing the final DB outcome"
+        );
+        let operations = operation_directories(root.as_ref()).await;
+        assert_eq!(operations.len(), 1);
+        assert!(operations[0].join("manifest.json").is_file());
+        assert!(operations[0].join("00000000.data").is_file());
+        db.execute_unprepared("DROP TRIGGER reject_delete_commit ON movie")
+            .await
+            .unwrap();
+        if !final_reference_exists {
+            // Model a delete that ultimately committed after the client had observed an error.
+            movie::Entity::delete_by_id(content.id)
+                .exec(&db)
+                .await
+                .unwrap();
+            media_asset::Entity::delete_by_id(file.asset_id)
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        removal::recover(&db, &storage).await.unwrap();
+        assert_eq!(
+            root.as_ref().join(&file.storage_key).is_file(),
+            final_reference_exists
+        );
+        assert!(operation_directories(root.as_ref()).await.is_empty());
+        if final_reference_exists {
+            assert_eq!(
+                std::fs::read(root.as_ref().join(&file.storage_key)).unwrap(),
+                b"poster-evidence"
+            );
+        }
+    }
+}

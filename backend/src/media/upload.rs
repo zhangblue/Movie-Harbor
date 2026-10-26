@@ -171,10 +171,8 @@ where
         }
     };
     if let Err(error) = tx.commit().await {
-        // A connection failure can hide a successful commit: prove absence before unlinking.
-        if matches!(media_asset::Entity::find_by_id(id).one(db).await, Ok(None)) {
-            stored.database_failure_is_known();
-        }
+        // COMMIT may still succeed server-side: retain the file and pending marker for recovery.
+        // A fresh SELECT returning no row cannot prove that an in-flight commit has failed.
         return Err(error.into());
     }
     stored.notify_database_committed()?;
