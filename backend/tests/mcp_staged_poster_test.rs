@@ -757,10 +757,78 @@ async fn complete_draft(db: &support::TestDatabase, app: &Router) -> (Value, Str
         .try_get("", "asset_id")
         .unwrap();
     (
-        serde_json::json!({"name":"示例电影", "is_private":true, "year":2024,
+        serde_json::json!({"name":"示例电影", "synopsis":"一段完整简介。", "is_private":true, "year":2024,
         "duration_seconds":7200,"genre_ids":[genre],"staged_poster_token":token}),
         asset.to_string(),
     )
+}
+
+// Catches MCP creation accepting synopsis in JSON but discarding it before persistence.
+#[tokio::test]
+async fn mcp_private_movie_and_series_persist_synopsis() {
+    let (db, app, root) = setup().await;
+    for (path, table) in [
+        ("/api/admin/movies", "movie"),
+        ("/api/admin/series", "series"),
+    ] {
+        let (payload, _) = complete_draft(&db, &app).await;
+        let response = mcp_post(&app, path, payload).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let result = body(response).await;
+        assert_eq!(result["synopsis"], "一段完整简介。");
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!("SELECT synopsis,is_private FROM {table} WHERE id=$1"),
+                [uuid::Uuid::parse_str(result["id"].as_str().unwrap())
+                    .unwrap()
+                    .into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.try_get::<String>("", "synopsis").unwrap(),
+            "一段完整简介。"
+        );
+        assert!(row.try_get::<bool>("", "is_private").unwrap());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// Catches MCP creation rejecting public drafts or silently forcing them private.
+#[tokio::test]
+async fn mcp_public_movie_and_series_persist_requested_visibility() {
+    let (db, app, root) = setup().await;
+    for (path, table) in [
+        ("/api/admin/movies", "movie"),
+        ("/api/admin/series", "series"),
+    ] {
+        let (mut payload, _) = complete_draft(&db, &app).await;
+        payload["is_private"] = serde_json::json!(false);
+        let response = mcp_post(&app, path, payload).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let result = body(response).await;
+        assert_eq!(result["is_private"], false);
+        assert_eq!(result["synopsis"], "一段完整简介。");
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                format!("SELECT synopsis,is_private FROM {table} WHERE id=$1"),
+                [uuid::Uuid::parse_str(result["id"].as_str().unwrap())
+                    .unwrap()
+                    .into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            row.try_get::<String>("", "synopsis").unwrap(),
+            "一段完整简介。"
+        );
+        assert!(!row.try_get::<bool>("", "is_private").unwrap());
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 // Catches partial drafts, discarded metadata, missing ownership, and reusable tokens.
 #[tokio::test]
@@ -776,6 +844,7 @@ async fn mcp_complete_movie_and_series_atomically_consume_posters() {
         let result = body(response).await;
         assert_eq!(result["poster"]["id"], asset);
         assert_eq!(result["year"], 2024);
+        assert_eq!(result["synopsis"], "一段完整简介。");
         assert_eq!(result["genres"][0]["id"], payload["genre_ids"][0]);
         assert_eq!(result["is_private"], true);
         assert_eq!(result["status"], "draft");
@@ -820,6 +889,7 @@ async fn mcp_invalid_complete_drafts_leave_no_content_and_preserve_tokens() {
     let (valid, _) = complete_draft(&db, &app).await;
     for path in ["/api/admin/movies", "/api/admin/series"] {
         for (field, expected) in [
+            ("synopsis", "synopsis"),
             ("year", "year"),
             ("genre_ids", "genres"),
             ("staged_poster_token", "poster"),
@@ -839,7 +909,7 @@ async fn mcp_invalid_complete_drafts_leave_no_content_and_preserve_tokens() {
         }
         let mut cases = vec![
             ("name", serde_json::json!("  "), "name"),
-            ("is_private", serde_json::json!(false), "is_private"),
+            ("synopsis", serde_json::json!("  "), "synopsis"),
             ("year", serde_json::json!(0), "year"),
             ("year", serde_json::json!(-1), "year"),
             ("year", serde_json::json!(10000), "year"),

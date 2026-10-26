@@ -156,9 +156,12 @@ pub async fn create_mcp(
     principal_hash: &str,
 ) -> Result<MovieResponse, MovieError> {
     let name = normalize_required(input.name).map_err(|_| MovieError::Validation(vec!["name"]))?;
-    if !input.is_private {
-        return Err(MovieError::Validation(vec!["is_private"]));
-    }
+    let synopsis = normalize_required(
+        input
+            .synopsis
+            .ok_or(MovieError::Validation(vec!["synopsis"]))?,
+    )
+    .map_err(|_| MovieError::Validation(vec!["synopsis"]))?;
     let year = input
         .year
         .filter(|year| (1..=9999).contains(year))
@@ -192,8 +195,8 @@ pub async fn create_mcp(
     let model = movie::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name),
-        is_private: Set(true),
-        synopsis: Set(String::new()),
+        is_private: Set(input.is_private),
+        synopsis: Set(synopsis),
         year: Set(Some(year)),
         duration_seconds: Set(Some(duration)),
         poster_asset_id: Set(Some(poster.asset.id)),

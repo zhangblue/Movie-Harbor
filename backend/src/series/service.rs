@@ -210,9 +210,12 @@ pub async fn create_mcp(
     principal_hash: &str,
 ) -> Result<SeriesResponse, SeriesError> {
     let name = normalize_required(input.name).map_err(|_| SeriesError::Validation(vec!["name"]))?;
-    if !input.is_private {
-        return Err(SeriesError::Validation(vec!["is_private"]));
-    }
+    let synopsis = normalize_required(
+        input
+            .synopsis
+            .ok_or(SeriesError::Validation(vec!["synopsis"]))?,
+    )
+    .map_err(|_| SeriesError::Validation(vec!["synopsis"]))?;
     let year = input
         .year
         .filter(|year| (1..=9999).contains(year))
@@ -242,8 +245,8 @@ pub async fn create_mcp(
     let model = series::ActiveModel {
         id: Set(Uuid::new_v4()),
         name: Set(name),
-        is_private: Set(true),
-        synopsis: Set(String::new()),
+        is_private: Set(input.is_private),
+        synopsis: Set(synopsis),
         year: Set(Some(year)),
         poster_asset_id: Set(Some(poster.asset.id)),
         status: Set("draft".into()),

@@ -11,6 +11,8 @@ pub struct CreateMovieRequest {
     pub name: String,
     pub is_private: bool,
     #[serde(default)]
+    pub synopsis: Option<String>,
+    #[serde(default)]
     pub year: Option<i32>,
     #[serde(default)]
     pub duration_seconds: Option<i32>,

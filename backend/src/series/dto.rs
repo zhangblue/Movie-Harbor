@@ -11,6 +11,8 @@ pub struct CreateSeriesRequest {
     pub name: String,
     pub is_private: bool,
     #[serde(default)]
+    pub synopsis: Option<String>,
+    #[serde(default)]
     pub year: Option<i32>,
     #[serde(default)]
     pub genre_ids: Option<Vec<String>>,
