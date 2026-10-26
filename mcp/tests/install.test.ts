@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { chmod, copyFile, lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -52,6 +52,7 @@ import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 const args=process.argv.slice(2); appendFileSync(process.env.FAKE_CALLS,JSON.stringify(['codex',...args])+'\\n');
 if(process.env.FAKE_CODEX_MALFORMED==='1'&&args[0]==='mcp'&&args[1]==='list'){process.stdout.write('{bad');process.exit(0);}
 if(process.env.FAKE_CODEX_LIST_FAIL==='1'&&args[0]==='mcp'&&args[1]==='list'){process.stdout.write('[]');process.exit(17);}
+if(process.env.FAKE_CODEX_GET_FAIL==='1'&&args[0]==='mcp'&&args[1]==='get'){process.stdout.write('{}');process.exit(19);}
 let state=JSON.parse(readFileSync(process.env.FAKE_CODEX_STATE,'utf8'));
 if(args[0]!=='mcp') process.exit(2);
 if(args[1]==='list'){process.stdout.write(JSON.stringify(state));process.exit(0);}
@@ -95,6 +96,22 @@ async function calls(f: Awaited<ReturnType<typeof fixture>>) {
 
 async function state(f: Awaited<ReturnType<typeof fixture>>): Promise<Server[]> {
   return JSON.parse(await readFile(f.statePath, 'utf8'));
+}
+
+function installedPaths(f: Awaited<ReturnType<typeof fixture>>) {
+  const directory = join(f.home, 'Config Root', 'movie-harbor-mcp');
+  return { directory, config: join(directory, 'config.env'), credentials: join(directory, 'credentials.env') };
+}
+
+async function writeExistingConfig(f: Awaited<ReturnType<typeof fixture>>, configText = 'ORIGINAL_CONFIG=keep\n') {
+  const paths = installedPaths(f);
+  await mkdir(paths.directory, { recursive: true, mode: 0o700 });
+  await chmod(paths.directory, 0o700);
+  await writeFile(paths.credentials, 'MOVIE_HARBOR_MCP_API_KEY=mhmcp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n', { mode: 0o600 });
+  await chmod(paths.credentials, 0o600);
+  await writeFile(paths.config, configText, { mode: 0o600 });
+  await chmod(paths.config, 0o600);
+  return paths;
 }
 
 test('first and repeated install keep one owned global server and private reusable credentials', async t => {
@@ -156,6 +173,9 @@ test('build failure leaves an existing owned registration untouched and precedes
 
 test('refuses a same-name server owned by another project without removing it', async t => {
   const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const beforeConfig = await readFile(paths.config, 'utf8');
+  const beforeCredentials = await readFile(paths.credentials, 'utf8');
   const foreign: Server = { name: 'movie-harbor', transport: { type: 'stdio', command: 'node', args: ['/other/project/server.js'], env: { MOVIE_HARBOR_MCP_CONFIG: '/other/config.env' } } };
   await writeFile(f.statePath, JSON.stringify([foreign]));
   const result = await runInstall(f);
@@ -163,6 +183,10 @@ test('refuses a same-name server owned by another project without removing it', 
   assert.match(result.stderr, /其他|不属于|拒绝/);
   assert.deepEqual(await state(f), [foreign]);
   assert.equal((await calls(f)).some(call => call[1] === 'mcp' && call[2] === 'remove'), false);
+  assert.equal(await readFile(paths.config, 'utf8'), beforeConfig);
+  assert.equal(await readFile(paths.credentials, 'utf8'), beforeCredentials);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+  assert.equal((await lstat(paths.credentials)).mode & 0o777, 0o600);
 });
 
 test('fails closed on malformed codex JSON without registration mutation', async t => {
@@ -171,6 +195,7 @@ test('fails closed on malformed codex JSON without registration mutation', async
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), []);
   assert.equal((await calls(f)).some(call => ['remove', 'add'].includes(call[2] ?? '')), false);
+  await assert.rejects(lstat(installedPaths(f).directory), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
 });
 
 test('fails closed when codex returns valid JSON with a failing exit status', async t => {
@@ -179,6 +204,64 @@ test('fails closed when codex returns valid JSON with a failing exit status', as
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), []);
   assert.equal((await calls(f)).some(call => ['remove', 'add'].includes(call[2] ?? '')), false);
+});
+
+test('get failure leaves existing configuration bytes and modes unchanged', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const owned: Server = { name: 'movie-harbor', transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  await writeFile(f.statePath, JSON.stringify([owned]));
+  const beforeConfig = await readFile(paths.config, 'utf8');
+  const beforeCredentials = await readFile(paths.credentials, 'utf8');
+  const result = await runInstall(f, { FAKE_CODEX_GET_FAIL: '1' });
+  assert.notEqual(result.code, 0);
+  assert.equal(await readFile(paths.config, 'utf8'), beforeConfig);
+  assert.equal(await readFile(paths.credentials, 'utf8'), beforeCredentials);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+  assert.equal((await lstat(paths.credentials)).mode & 0o777, 0o600);
+  assert.deepEqual(await state(f), [owned]);
+});
+
+test('atomic config rewrite failure preserves the old file and registration', async t => {
+  const f = await fixture(t);
+  const first = await runInstall(f);
+  assert.equal(first.code, 0, first.stderr);
+  const paths = installedPaths(f);
+  const oldConfig = 'ORIGINAL_CONFIG=must-survive\n';
+  await writeFile(paths.config, oldConfig, { mode: 0o600 });
+  await chmod(paths.config, 0o600);
+  const hook = join(f.root, 'fail-config-rename.cjs');
+  await writeFile(hook, `const fs=require('node:fs'),path=require('node:path');const rename=fs.renameSync;fs.renameSync=(from,to)=>{const name=path.basename(String(from));if(name.startsWith('.config.env.')&&name.endsWith('.tmp'))throw Object.assign(new Error('controlled rename failure'),{code:'EIO'});return rename(from,to);};\n`);
+  const beforeState = await state(f);
+  const result = await runInstall(f, { NODE_OPTIONS: `--require=${JSON.stringify(hook)}` });
+  assert.notEqual(result.code, 0);
+  assert.equal(await readFile(paths.config, 'utf8'), oldConfig);
+  assert.deepEqual(await state(f), beforeState);
+  assert.equal((await calls(f)).filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 0);
+  assert.deepEqual((await readdir(paths.directory)).filter(name => name.startsWith('.config.env.') && name.endsWith('.tmp')), []);
+});
+
+test('custom generated root uses a canonical real parent and rejects missing or symlink parents', async t => {
+  const success = await fixture(t);
+  const parent = join(success.root, 'Generated Parent');
+  await mkdir(parent);
+  const result = await runInstall(success, { MOVIE_HARBOR_MCP_GENERATED_ROOT: join(parent, 'videos') });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(await readFile(installedPaths(success).config, 'utf8'), new RegExp(`MOVIE_HARBOR_MCP_GENERATED_ROOT=${join(parent, 'videos').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+
+  const missing = await fixture(t);
+  const missingResult = await runInstall(missing, { MOVIE_HARBOR_MCP_GENERATED_ROOT: join(missing.root, 'missing', 'videos') });
+  assert.notEqual(missingResult.code, 0);
+  assert.deepEqual(await state(missing), []);
+
+  const linked = await fixture(t);
+  const realParent = join(linked.root, 'real-generated-parent');
+  const linkedParent = join(linked.root, 'linked-generated-parent');
+  await mkdir(realParent);
+  await symlink(realParent, linkedParent);
+  const linkedResult = await runInstall(linked, { MOVIE_HARBOR_MCP_GENERATED_ROOT: join(linkedParent, 'videos') });
+  assert.notEqual(linkedResult.code, 0);
+  assert.deepEqual(await state(linked), []);
 });
 
 test('rejects symlinked credential or config files', async t => {

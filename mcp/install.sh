@@ -37,16 +37,56 @@ case "$config_base" in
   /*) ;;
   *) fail "MCP 配置目录必须是绝对路径" ;;
 esac
+base_url=${MOVIE_HARBOR_MCP_BASE_URL:-http://127.0.0.1:8080/}
+allowed_roots=${MOVIE_HARBOR_MCP_ALLOWED_ROOTS_JSON:-'["/Users/zhangdi/Downloads"]'}
+request_timeout=${MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS:-1800000}
+
+existing_count=$(node -e '
+const {spawnSync}=require("node:child_process");
+const result=spawnSync("codex",["mcp","list","--json"],{encoding:"utf8",maxBuffer:16*1024*1024});
+try{if(result.error||result.status!==0)throw new Error();const value=JSON.parse(result.stdout);if(!Array.isArray(value))throw new Error();const matches=value.filter(item=>item&&item.name==="movie-harbor");if(matches.length>1)throw new Error();process.stdout.write(String(matches.length));}catch{console.error("无法安全读取或解析 Codex MCP 列表");process.exit(1);}
+') || fail "无法安全读取 Codex MCP 列表"
+
+verified_config_file=
+case "$existing_count" in
+  0) ;;
+  1)
+    if [ -e "$config_base" ] || [ -L "$config_base" ]; then
+      [ -d "$config_base" ] && [ ! -L "$config_base" ] || fail "已有同名 MCP 的配置目录不安全"
+      verified_config_dir=$(CDPATH= cd -P "$config_base" && pwd) || fail "无法读取已有 MCP 配置目录"
+      verified_config_file="$verified_config_dir/config.env"
+    else
+      verified_config_file="$config_base/config.env"
+    fi
+    node -e '
+const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
+const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
+try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;if(item.name!=="movie-harbor"||!transport||transport.type!=="stdio"||transport.command!=="node"||!Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!env||env.MOVIE_HARBOR_MCP_CONFIG!==config)throw new Error();}catch{console.error("同名 movie-harbor MCP 不属于当前仓库，拒绝覆盖");process.exit(1);}
+' "$entry" "$verified_config_file" || fail "已有同名 MCP 无法安全更新"
+    ;;
+  *) fail "Codex MCP 列表包含异常的同名条目" ;;
+esac
+
+# Only after Codex ownership is proven may this installer touch private configuration.
 mkdir -p "$config_base" || fail "无法创建 MCP 配置目录"
 [ -d "$config_base" ] && [ ! -L "$config_base" ] || fail "MCP 配置目录不能是符号链接"
 chmod 700 "$config_base" || fail "无法保护 MCP 配置目录"
 config_dir=$(CDPATH= cd -P "$config_base" && pwd) || fail "无法读取 MCP 配置目录"
 config_file="$config_dir/config.env"
 credentials_file="$config_dir/credentials.env"
-generated_root=${MOVIE_HARBOR_MCP_GENERATED_ROOT:-$config_dir/generated}
-base_url=${MOVIE_HARBOR_MCP_BASE_URL:-http://127.0.0.1:8080/}
-allowed_roots=${MOVIE_HARBOR_MCP_ALLOWED_ROOTS_JSON:-'["/Users/zhangdi/Downloads"]'}
-request_timeout=${MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS:-1800000}
+if [ "$existing_count" = 1 ] && [ "$config_file" != "$verified_config_file" ]; then
+  fail "MCP 配置目录在归属验证后发生变化"
+fi
+
+generated_input=${MOVIE_HARBOR_MCP_GENERATED_ROOT:-$config_dir/generated}
+generated_root=$(node -e '
+const fs=require("node:fs"),path=require("node:path");const input=process.argv[1];
+try{
+  if(!path.isAbsolute(input)||/[\0\r\n]/.test(input))throw new Error();
+  try{const info=fs.lstatSync(input);if(!info.isDirectory()||info.isSymbolicLink())throw new Error();process.stdout.write(fs.realpathSync(input));}
+  catch(error){if(!error||error.code!=="ENOENT")throw error;const parent=path.dirname(input),name=path.basename(input),info=fs.lstatSync(parent);if(!name||name==="."||name===".."||!info.isDirectory()||info.isSymbolicLink())throw new Error();process.stdout.write(path.join(fs.realpathSync(parent),name));}
+}catch{console.error("生成目录必须使用真实且已存在的普通父目录");process.exit(1);}
+' "$generated_input") || fail "生成目录配置不安全"
 
 digest=$(node -e '
 const fs=require("node:fs"),crypto=require("node:crypto");
@@ -69,8 +109,8 @@ process.stdout.write(crypto.createHash("sha256").update(key).digest("hex"));
 ' "$credentials_file") || fail "无法安全创建或读取 MCP 独立凭据"
 
 node -e '
-const fs=require("node:fs"),pathModule=require("node:path");
-const [path,credentials,base,rootsText,generated,timeout]=process.argv.slice(1);
+const fs=require("node:fs"),pathModule=require("node:path"),crypto=require("node:crypto");
+const [path,credentials,base,rootsText,generated,timeout]=process.argv.slice(1),temporary=pathModule.join(pathModule.dirname(path),`.${pathModule.basename(path)}.${crypto.randomUUID()}.tmp`);
 for(const value of [path,credentials,base,rootsText,generated,timeout]) if(/[\0\r\n]/.test(value)) throw new Error("配置包含非法换行或 NUL");
 let url; try { url=new URL(base); } catch { throw new Error("Movie Harbor 地址无效"); }
 if(!["http:","https:"].includes(url.protocol)||url.username||url.password||url.pathname!=="/"||url.search||url.hash) throw new Error("Movie Harbor 地址必须是无凭据、路径、查询和片段的 HTTP(S) 根地址");
@@ -79,32 +119,23 @@ if(!Array.isArray(roots)||roots.length===0||!roots.every(root=>typeof root==="st
 for(const root of roots) if(!fs.statSync(root).isDirectory()) throw new Error("允许目录不存在或不是目录");
 if(!pathModule.isAbsolute(generated)||!/^\d+$/.test(timeout)||!Number.isSafeInteger(Number(timeout))||Number(timeout)<=0) throw new Error("生成目录或超时配置无效");
 const content=[`MOVIE_HARBOR_BASE_URL=${url.origin}/`,`MOVIE_HARBOR_MCP_CREDENTIALS=${credentials}`,`MOVIE_HARBOR_MCP_ALLOWED_ROOTS_JSON=${JSON.stringify(roots)}`,`MOVIE_HARBOR_MCP_GENERATED_ROOT=${generated}`,`MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS=${timeout}`,""].join("\n");
-let exists=false;
-try { const info=fs.lstatSync(path); exists=true; if(!info.isFile()||info.isSymbolicLink()||(info.mode&0o7777)!==0o600) throw new Error("配置文件不安全"); }
+try { const info=fs.lstatSync(path); if(!info.isFile()||info.isSymbolicLink()||(info.mode&0o7777)!==0o600) throw new Error("配置文件不安全"); }
 catch(error) { if(error&&error.code!=="ENOENT") throw error; }
-let fd;
-try { fd=fs.openSync(path,(exists?fs.constants.O_TRUNC:fs.constants.O_CREAT|fs.constants.O_EXCL)|fs.constants.O_WRONLY|fs.constants.O_NOFOLLOW,0o600); fs.writeFileSync(fd,content); fs.fsyncSync(fd); }
-finally { if(fd!==undefined) fs.closeSync(fd); }
+let fd,created=false;
+try {
+  fd=fs.openSync(temporary,fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_WRONLY|fs.constants.O_NOFOLLOW,0o600);created=true;
+  fs.writeFileSync(fd,content);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+  fs.renameSync(temporary,path);created=false;
+  const directory=fs.openSync(pathModule.dirname(path),fs.constants.O_RDONLY);try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+} finally {
+  if(fd!==undefined)fs.closeSync(fd);
+  if(created)try{fs.unlinkSync(temporary);}catch(error){if(!error||error.code!=="ENOENT")throw error;}
+}
 ' "$config_file" "$credentials_file" "$base_url" "$allowed_roots" "$generated_root" "$request_timeout" || fail "无法安全写入 MCP 配置"
 
-existing_count=$(node -e '
-const {spawnSync}=require("node:child_process");
-const result=spawnSync("codex",["mcp","list","--json"],{encoding:"utf8",maxBuffer:16*1024*1024});
-try{if(result.error||result.status!==0)throw new Error();const value=JSON.parse(result.stdout);if(!Array.isArray(value))throw new Error();const matches=value.filter(item=>item&&item.name==="movie-harbor");if(matches.length>1)throw new Error();process.stdout.write(String(matches.length));}catch{console.error("无法安全读取或解析 Codex MCP 列表");process.exit(1);}
-') || fail "无法安全读取 Codex MCP 列表"
-
-case "$existing_count" in
-  0) ;;
-  1)
-    node -e '
-const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
-const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
-try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;if(item.name!=="movie-harbor"||!transport||transport.type!=="stdio"||transport.command!=="node"||!Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!env||env.MOVIE_HARBOR_MCP_CONFIG!==config)throw new Error();}catch{console.error("同名 movie-harbor MCP 不属于当前仓库，拒绝覆盖");process.exit(1);}
-' "$entry" "$config_file" || fail "已有同名 MCP 无法安全更新"
-    codex mcp remove movie-harbor || fail "无法移除当前仓库的旧 MCP 注册"
-    ;;
-  *) fail "Codex MCP 列表包含异常的同名条目" ;;
-esac
+if [ "$existing_count" = 1 ]; then
+  codex mcp remove movie-harbor || fail "无法移除当前仓库的旧 MCP 注册"
+fi
 
 codex mcp add movie-harbor --env "MOVIE_HARBOR_MCP_CONFIG=$config_file" -- node "$entry" || fail "Codex MCP 注册失败"
 node -e '
