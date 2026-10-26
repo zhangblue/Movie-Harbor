@@ -30,9 +30,12 @@ export async function getSeriesStructure(input: unknown, client: MovieHarborClie
   const { series_id } = getSeriesStructureInput.parse(input);
   const series = parseApi(apiSeries, await client.json('GET', `/api/admin/series/${series_id}`));
   if (series.id !== series_id) throw new MovieHarborClientError('invalid_response');
+  const archived = series.status === 'archived';
   return toolResult(getSeriesStructureOutput, { series_id: series.id, version: series.version, status: series.status,
     seasons: series.seasons.map(season => ({ id: season.id, number: season.number, episodes: season.episodes.map(({ video, ...episode }) => ({ ...episode, has_video: video !== null })) })),
-    next_actions: series.seasons.length ? ['create_episode'] : ['create_season'] }, `已读取剧集结构，共 ${series.seasons.length} 季。`);
+    next_actions: archived ? [] : series.seasons.length ? ['create_episode'] : ['create_season'] }, archived
+    ? `剧集已归档，MCP 已停止创建季或单集；请由管理员处理。`
+    : `已读取剧集结构，共 ${series.seasons.length} 季。`);
 }
 export function registerCatalogTools(server: McpServer, client: MovieHarborClient) {
   server.registerTool('search_movies', { description: '按名称查询电影候选；仅 trim 与大小写用于精确标记，不自动选择或合并。', inputSchema: searchMoviesInput, outputSchema: searchMoviesOutput, annotations: readOnlyAnnotations }, input => searchMovies(input, client));

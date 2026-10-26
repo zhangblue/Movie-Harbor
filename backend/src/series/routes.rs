@@ -171,22 +171,19 @@ async fn update(
 async fn create_season(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
+    Extension(principal): Extension<ManagementPrincipal>,
     Json(input): Json<CreateSeasonRequest>,
 ) -> Result<(StatusCode, Json<SeriesResponse>), SeriesError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service::create_season(
-                &state.db,
-                CreateSeasonCommand {
-                    series_id: parse_uuid(series_id, SeriesError::Invalid)?,
-                    expected_series_version: input.version,
-                    number: input.number,
-                },
-            )
-            .await?,
-        ),
-    ))
+    let command = CreateSeasonCommand {
+        series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+        expected_series_version: input.version,
+        number: input.number,
+    };
+    let response = match principal {
+        ManagementPrincipal::Admin(_) => service::create_season(&state.db, command).await?,
+        ManagementPrincipal::Mcp { .. } => service::create_season_mcp(&state.db, command).await?,
+    };
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 async fn update_season(

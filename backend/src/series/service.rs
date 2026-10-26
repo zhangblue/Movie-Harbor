@@ -340,6 +340,21 @@ pub async fn create_season(
     db: &DatabaseConnection,
     command: CreateSeasonCommand,
 ) -> Result<SeriesResponse, SeriesError> {
+    create_season_with_policy(db, command, false).await
+}
+
+pub async fn create_season_mcp(
+    db: &DatabaseConnection,
+    command: CreateSeasonCommand,
+) -> Result<SeriesResponse, SeriesError> {
+    create_season_with_policy(db, command, true).await
+}
+
+async fn create_season_with_policy(
+    db: &DatabaseConnection,
+    command: CreateSeasonCommand,
+    reject_archived_parent: bool,
+) -> Result<SeriesResponse, SeriesError> {
     let CreateSeasonCommand {
         series_id,
         expected_series_version: expected_version,
@@ -351,6 +366,9 @@ pub async fn create_season(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, expected_version)?;
+    if reject_archived_parent && model.status == "archived" {
+        return Err(SeriesError::Conflict);
+    }
     season::ActiveModel {
         id: Set(Uuid::new_v4()),
         series_id: Set(series_id),
@@ -466,12 +484,20 @@ pub async fn create_episode_mcp(
     if !fields.is_empty() {
         return Err(SeriesError::Validation(fields));
     }
-    create_episode(db, command).await
+    create_episode_with_policy(db, command, true).await
 }
 
 pub async fn create_episode(
     db: &DatabaseConnection,
     command: CreateEpisodeCommand,
+) -> Result<SeriesResponse, SeriesError> {
+    create_episode_with_policy(db, command, false).await
+}
+
+async fn create_episode_with_policy(
+    db: &DatabaseConnection,
+    command: CreateEpisodeCommand,
+    reject_archived_parent: bool,
 ) -> Result<SeriesResponse, SeriesError> {
     let CreateEpisodeCommand {
         series_id,
@@ -488,6 +514,9 @@ pub async fn create_episode(
     let tx = db.begin().await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, input.version)?;
+    if reject_archived_parent && model.status == "archived" {
+        return Err(SeriesError::Conflict);
+    }
     repository::season_locked(&tx, series_id, season_id).await?;
     episode::ActiveModel {
         id: Set(Uuid::new_v4()),

@@ -92,6 +92,19 @@ test('series structure returns safe child metadata and next explicit action', as
   assert.equal(f.calls[0]!.path, `/api/admin/series/${seriesId}`);
 });
 
+// Returning creation actions here would make the caller continue mutating a terminal MCP target.
+test('archived series structure stops MCP child creation and points to administrator action', async () => {
+  const archived = { ...series, status: 'archived' as const };
+  const f = clientFixture([archived]); const t = await tools(f.client);
+  const result = await t.registrations.get('get_series_structure').handler({ series_id: seriesId });
+  assert.deepEqual(result.structuredContent.next_actions, []);
+  assert.equal(result.structuredContent.status, 'archived');
+  assert.match(result.content[0].text, /已归档/);
+  assert.match(result.content[0].text, /管理员/);
+  assert.doesNotMatch(result.content[0].text, /可创建|请创建/);
+  assert.equal(f.calls.length, 1);
+});
+
 // A POST for an existing genre creates accidental duplicates; disabled matches cannot be revived.
 test('genre list filters API fields and create reuses enabled exact names but rejects disabled names', async () => {
   const enabled = { id: genreId, name: '奇幻', enabled: true, sort_order: 1, secret: 'SECRET' };

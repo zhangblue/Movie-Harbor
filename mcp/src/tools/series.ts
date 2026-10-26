@@ -45,8 +45,8 @@ export async function updateEpisodeMetadata(input: unknown, client: MovieHarborC
 }
 export function registerSeriesTools(server: McpServer, client: MovieHarborClient) {
   server.registerTool('create_series', { description: '仅创建完整私密剧集草稿，不隐式创建季或单集。', inputSchema: createSeriesInput, outputSchema: createSeriesOutput, annotations: writeAnnotations }, input => createSeries(input, client));
-  server.registerTool('create_season', { description: '按剧集 ID 和版本显式创建一个季。', inputSchema: createSeasonInput, outputSchema: createSeasonOutput, annotations: writeAnnotations }, input => createSeason(input, client));
-  server.registerTool('create_episode', { description: '按剧集版本在明确季下创建一个具名且含时长的单集草稿。', inputSchema: createEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => createEpisode(input, client));
+  server.registerTool('create_season', { description: '按剧集 ID 和版本显式创建一个季；已归档剧集停止并由管理员处理。', inputSchema: createSeasonInput, outputSchema: createSeasonOutput, annotations: writeAnnotations }, input => createSeason(input, client));
+  server.registerTool('create_episode', { description: '按剧集版本在明确季下创建一个具名且含时长的单集草稿；已归档父剧集停止并由管理员处理。', inputSchema: createEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => createEpisode(input, client));
   server.registerTool('update_series_metadata', { description: '按剧集 ID 和版本仅更新提交的元数据字段。', inputSchema: updateSeriesInput, outputSchema: contentResult, annotations: writeAnnotations }, input => updateSeriesMetadata(input, client));
   server.registerTool('update_episode_metadata', { description: '按明确剧集、季、单集 ID 和单集版本仅更新元数据。', inputSchema: updateEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => updateEpisodeMetadata(input, client));
 }
