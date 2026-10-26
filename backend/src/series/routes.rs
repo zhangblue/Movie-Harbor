@@ -1,12 +1,12 @@
 use crate::{
-    auth::{self, AuthState},
+    auth::{self, AuthState, mcp::ManagementPrincipal},
     media::LocalMediaStorage,
     movies::dto::{DeleteImpactResponse, DeleteResultResponse},
     route_params::parse_uuid,
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware,
     routing::{get, patch, post, put},
@@ -112,11 +112,19 @@ async fn list(
 }
 async fn create(
     State(state): State<SeriesState>,
+    Extension(principal): Extension<ManagementPrincipal>,
     Json(input): Json<CreateSeriesRequest>,
 ) -> Result<(StatusCode, Json<SeriesResponse>), SeriesError> {
     Ok((
         StatusCode::CREATED,
-        Json(service::create(&state.db, input.name, input.is_private).await?),
+        Json(match principal {
+            ManagementPrincipal::Admin(_) => {
+                service::create(&state.db, input.name, input.is_private).await?
+            }
+            ManagementPrincipal::Mcp { key_digest } => {
+                service::create_mcp(&state.db, input, &key_digest).await?
+            }
+        }),
     ))
 }
 
@@ -236,22 +244,19 @@ async fn season_delete_impact(
 async fn create_episode(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
+    Extension(principal): Extension<ManagementPrincipal>,
     Json(input): Json<CreateEpisodeRequest>,
 ) -> Result<(StatusCode, Json<SeriesResponse>), SeriesError> {
-    Ok((
-        StatusCode::CREATED,
-        Json(
-            service::create_episode(
-                &state.db,
-                CreateEpisodeCommand {
-                    series_id: parse_uuid(series_id, SeriesError::Invalid)?,
-                    season_id: parse_uuid(season_id, SeriesError::Invalid)?,
-                    input,
-                },
-            )
-            .await?,
-        ),
-    ))
+    let command = CreateEpisodeCommand {
+        series_id: parse_uuid(series_id, SeriesError::Invalid)?,
+        season_id: parse_uuid(season_id, SeriesError::Invalid)?,
+        input,
+    };
+    let response = match principal {
+        ManagementPrincipal::Admin(_) => service::create_episode(&state.db, command).await?,
+        ManagementPrincipal::Mcp { .. } => service::create_episode_mcp(&state.db, command).await?,
+    };
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 async fn episode_detail(

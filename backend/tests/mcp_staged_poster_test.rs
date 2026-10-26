@@ -719,3 +719,368 @@ async fn cleanup_finalization_failure_retains_manifest_for_startup_recovery() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+async fn mcp_post(app: &Router, path: &str, payload: Value) -> Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("host", "harbor.test")
+                .header("authorization", format!("Bearer {KEY}"))
+                .header("content-type", "application/json")
+                .body(Body::from(payload.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+async fn complete_draft(db: &support::TestDatabase, app: &Router) -> (Value, String) {
+    let genre = uuid::Uuid::new_v4();
+    db.execute_unprepared(&format!(
+        "INSERT INTO genre(id,name,enabled) VALUES ('{genre}','{genre}',true)"
+    ))
+    .await
+    .unwrap();
+    let staged = stage(app, "poster.png", "image/png", &png()).await;
+    assert_eq!(staged.status(), StatusCode::CREATED);
+    let token = body(staged).await["token"].as_str().unwrap().to_owned();
+    let asset: uuid::Uuid = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT asset_id FROM mcp_staged_poster WHERE token_hash=$1",
+            [csrf::digest(&token).into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "asset_id")
+        .unwrap();
+    (
+        serde_json::json!({"name":"示例电影", "is_private":true, "year":2024,
+        "duration_seconds":7200,"genre_ids":[genre],"staged_poster_token":token}),
+        asset.to_string(),
+    )
+}
+// Catches partial drafts, discarded metadata, missing ownership, and reusable tokens.
+#[tokio::test]
+async fn mcp_complete_movie_and_series_atomically_consume_posters() {
+    let (db, app, root) = setup().await;
+    for (path, table) in [
+        ("/api/admin/movies", "movie"),
+        ("/api/admin/series", "series"),
+    ] {
+        let (payload, asset) = complete_draft(&db, &app).await;
+        let response = mcp_post(&app, path, payload.clone()).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let result = body(response).await;
+        assert_eq!(result["poster"]["id"], asset);
+        assert_eq!(result["year"], 2024);
+        assert_eq!(result["genres"][0]["id"], payload["genre_ids"][0]);
+        assert_eq!(result["is_private"], true);
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["version"], 1);
+        if table == "movie" {
+            assert_eq!(result["duration_seconds"], 7200);
+        }
+        assert_eq!(count(&db, "mcp_staged_poster").await, 0);
+        assert_eq!(count(&db, table).await, 1);
+        assert_eq!(count(&db, &format!("{table}_genre")).await, 1);
+        let owner = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT owner_kind,owner_id,slot FROM media_asset_ownership WHERE asset_id=$1",
+                [uuid::Uuid::parse_str(&asset).unwrap().into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(owner.try_get::<String>("", "owner_kind").unwrap(), table);
+        assert_eq!(
+            owner
+                .try_get::<uuid::Uuid>("", "owner_id")
+                .unwrap()
+                .to_string(),
+            result["id"]
+        );
+        assert_eq!(owner.try_get::<String>("", "slot").unwrap(), "poster");
+        assert_eq!(
+            mcp_post(&app, path, payload).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(count(&db, table).await, 1);
+    }
+    assert_eq!(count(&db, "media_asset").await, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+// Catches consuming tokens before validation and accepting expired/wrong-principal tokens.
+#[tokio::test]
+async fn mcp_invalid_complete_drafts_leave_no_content_and_preserve_tokens() {
+    let (db, app, root) = setup().await;
+    let (valid, _) = complete_draft(&db, &app).await;
+    for path in ["/api/admin/movies", "/api/admin/series"] {
+        for (field, expected) in [
+            ("year", "year"),
+            ("genre_ids", "genres"),
+            ("staged_poster_token", "poster"),
+        ] {
+            let mut invalid = valid.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            let response = mcp_post(&app, path, invalid).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "missing {field}: {path}"
+            );
+            assert_eq!(
+                body(response).await["fields"],
+                serde_json::json!([expected])
+            );
+        }
+        let mut cases = vec![
+            ("name", serde_json::json!("  "), "name"),
+            ("is_private", serde_json::json!(false), "is_private"),
+            ("year", serde_json::json!(0), "year"),
+            ("year", serde_json::json!(-1), "year"),
+            ("year", serde_json::json!(10000), "year"),
+            ("genre_ids", serde_json::json!([]), "genres"),
+            (
+                "genre_ids",
+                serde_json::json!([uuid::Uuid::new_v4()]),
+                "genres",
+            ),
+            ("genre_ids", serde_json::json!(["bad-id"]), "genres"),
+            (
+                "genre_ids",
+                serde_json::json!([valid["genre_ids"][0], valid["genre_ids"][0]]),
+                "genres",
+            ),
+            (
+                "staged_poster_token",
+                serde_json::json!("invalid-token"),
+                "poster",
+            ),
+        ];
+        if path.ends_with("movies") {
+            for value in [
+                serde_json::json!(null),
+                serde_json::json!(0),
+                serde_json::json!(-1),
+            ] {
+                cases.push(("duration_seconds", value, "duration_seconds"));
+            }
+        }
+        for (field, value, expected) in cases {
+            let mut invalid = valid.clone();
+            invalid[field] = value;
+            let response = mcp_post(&app, path, invalid).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid {field}: {path}"
+            );
+            assert_eq!(
+                body(response).await["fields"],
+                serde_json::json!([expected])
+            );
+        }
+        for (sql, expected) in [
+            ("UPDATE genre SET enabled=false", "genres"),
+            (
+                "UPDATE mcp_staged_poster SET principal_hash='another-principal'",
+                "poster",
+            ),
+            (
+                "UPDATE mcp_staged_poster SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 second'",
+                "poster",
+            ),
+        ] {
+            db.execute_unprepared(sql).await.unwrap();
+            let response = mcp_post(&app, path, valid.clone()).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{sql}: {path}"
+            );
+            assert_eq!(
+                body(response).await["fields"],
+                serde_json::json!([expected])
+            );
+            db.execute_unprepared("UPDATE genre SET enabled=true")
+                .await
+                .unwrap();
+            db.execute(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "UPDATE mcp_staged_poster SET principal_hash=$1,expires_at=CURRENT_TIMESTAMP+INTERVAL '30 minutes'",
+                [csrf::digest(KEY).into()],
+            )).await.unwrap();
+        }
+        for table in [
+            "movie",
+            "series",
+            "movie_genre",
+            "series_genre",
+            "media_asset_ownership",
+        ] {
+            assert_eq!(count(&db, table).await, 0);
+        }
+        assert_eq!(count(&db, "mcp_staged_poster").await, 1);
+        assert_eq!(count(&db, "media_asset").await, 1);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+// Deferred constraint failure occurs at COMMIT after every application write has succeeded.
+#[tokio::test]
+async fn mcp_failed_commit_restores_token_and_all_content_writes() {
+    let (db, app, root) = setup().await;
+    for (path, table) in [
+        ("/api/admin/movies", "movie"),
+        ("/api/admin/series", "series"),
+    ] {
+        let (payload, asset) = complete_draft(&db, &app).await;
+        let owners = count(&db, "media_asset_ownership").await;
+        db.execute_unprepared("CREATE OR REPLACE FUNCTION reject_draft_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$").await.unwrap();
+        db.execute_unprepared(&format!("CREATE CONSTRAINT TRIGGER reject_draft_commit AFTER INSERT ON {table}_genre DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_draft_commit()")).await.unwrap();
+        assert_eq!(
+            mcp_post(&app, path, payload.clone()).await.status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(count(&db, table).await, 0);
+        assert_eq!(count(&db, &format!("{table}_genre")).await, 0);
+        assert_eq!(count(&db, "mcp_staged_poster").await, 1);
+        assert_eq!(count(&db, "media_asset_ownership").await, owners);
+        db.execute_unprepared(&format!(
+            "DROP TRIGGER reject_draft_commit ON {table}_genre"
+        ))
+        .await
+        .unwrap();
+        let response = mcp_post(&app, path, payload).await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        assert_eq!(body(response).await["poster"]["id"], asset);
+        assert_eq!(count(&db, "mcp_staged_poster").await, 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+// Competing movie/series requests must not share a staged asset across content kinds.
+#[tokio::test]
+async fn mcp_concurrent_movie_and_series_consume_poster_once() {
+    let (db, app, root) = setup().await;
+    let (payload, asset) = complete_draft(&db, &app).await;
+    let (movie, series) = tokio::join!(
+        mcp_post(&app, "/api/admin/movies", payload.clone()),
+        mcp_post(&app, "/api/admin/series", payload)
+    );
+    let statuses = [movie.status(), series.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|&&s| s == StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|&&s| s == StatusCode::UNPROCESSABLE_ENTITY)
+            .count(),
+        1
+    );
+    let winner = if movie.status() == StatusCode::CREATED {
+        movie
+    } else {
+        series
+    };
+    assert_eq!(body(winner).await["poster"]["id"], asset);
+    assert_eq!(count(&db, "movie").await + count(&db, "series").await, 1);
+    assert_eq!(
+        count(&db, "movie_genre").await + count(&db, "series_genre").await,
+        1
+    );
+    assert_eq!(count(&db, "mcp_staged_poster").await, 0);
+    assert_eq!(count(&db, "media_asset_ownership").await, 1);
+    assert_eq!(count(&db, "media_asset").await, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// Catches missing MCP duration enforcement and incorrect parent/child version updates.
+#[tokio::test]
+async fn mcp_episode_duration_is_required_and_versions_remain_atomic() {
+    let (db, app, root) = setup().await;
+    let series = uuid::Uuid::new_v4();
+    let season = uuid::Uuid::new_v4();
+    db.execute_unprepared(&format!("INSERT INTO series(id,name,is_private,status,version) VALUES ('{series}','Parent',true,'draft',1); INSERT INTO season(id,series_id,number) VALUES ('{season}','{series}',1)")).await.unwrap();
+    let path = format!("/api/admin/series/{series}/seasons/{season}/episodes");
+    for duration in [
+        None,
+        Some(serde_json::json!(null)),
+        Some(serde_json::json!(0)),
+        Some(serde_json::json!(-1)),
+    ] {
+        let mut input = serde_json::json!({"version":1,"number":1,"name":"Episode"});
+        if let Some(value) = duration {
+            input["duration_seconds"] = value;
+        }
+        let response = mcp_post(&app, &path, input).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body(response).await["fields"],
+            serde_json::json!(["duration_seconds"])
+        );
+        assert_eq!(count(&db, "episode").await, 0);
+    }
+    let payload =
+        serde_json::json!({"version":1,"number":1,"name":"Episode","duration_seconds":1800});
+    let (first, second) = tokio::join!(
+        mcp_post(&app, &path, payload.clone()),
+        mcp_post(&app, &path, payload)
+    );
+    let statuses = [first.status(), second.status()];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|&&s| s == StatusCode::CREATED)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|&&s| s == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    let result = body(if first.status() == StatusCode::CREATED {
+        first
+    } else {
+        second
+    })
+    .await;
+    assert_eq!(result["version"], 2);
+    assert_eq!(
+        result["seasons"][0]["episodes"][0]["duration_seconds"],
+        1800
+    );
+    assert_eq!(result["seasons"][0]["episodes"][0]["version"], 1);
+    assert_eq!(result["seasons"][0]["episodes"][0]["status"], "draft");
+    let duplicate = mcp_post(
+        &app,
+        &path,
+        serde_json::json!({"version":2,"number":1,"name":"Duplicate","duration_seconds":1800}),
+    )
+    .await;
+    assert_eq!(duplicate.status(), StatusCode::CONFLICT);
+    assert_eq!(count(&db, "episode").await, 1);
+    let version: i64 = db
+        .query_one(Statement::from_sql_and_values(
+            DbBackend::Postgres,
+            "SELECT version FROM series WHERE id=$1",
+            [series.into()],
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get("", "version")
+        .unwrap();
+    assert_eq!(version, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}

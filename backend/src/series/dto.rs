@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub struct CreateSeriesRequest {
     pub name: String,
     pub is_private: bool,
+    #[serde(default)]
+    pub year: Option<i32>,
+    #[serde(default)]
+    pub genre_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub staged_poster_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +68,8 @@ pub struct CreateEpisodeRequest {
     pub version: i64,
     pub number: i32,
     pub name: String,
+    #[serde(default)]
+    pub duration_seconds: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]

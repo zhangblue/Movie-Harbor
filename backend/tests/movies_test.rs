@@ -1921,3 +1921,36 @@ async fn private_movie_concurrent_switch_has_exactly_one_winner() {
     .await;
     assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
 }
+
+// Administrator creation must keep its legacy two-field semantics even with new optional fields.
+#[tokio::test]
+async fn admin_movie_create_ignores_mcp_metadata() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    for private in [false, true] {
+        let response = write(
+            &app,
+            "POST",
+            "/api/admin/movies",
+            json!({"name":"Admin legacy", "is_private":private, "year":0,
+                "duration_seconds":-1, "genre_ids":["bad-id"],
+                "staged_poster_token":"not-a-token"}),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let result = body(response).await;
+        assert_eq!(result["is_private"], private);
+        assert_eq!(result["status"], "draft");
+        assert_eq!(result["version"], 1);
+        assert!(result["poster"].is_null());
+        assert!(result["year"].is_null());
+        assert!(result["duration_seconds"].is_null());
+        assert_eq!(result["genres"], json!([]));
+    }
+}

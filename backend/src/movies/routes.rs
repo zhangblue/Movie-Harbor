@@ -1,11 +1,11 @@
 use crate::{
-    auth::{self, AuthState},
+    auth::{self, AuthState, mcp::ManagementPrincipal},
     media::LocalMediaStorage,
     route_params::parse_uuid,
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::StatusCode,
     middleware,
     routing::{get, post, put},
@@ -64,11 +64,19 @@ async fn list(
 
 async fn create(
     State(state): State<MovieState>,
+    Extension(principal): Extension<ManagementPrincipal>,
     Json(input): Json<CreateMovieRequest>,
 ) -> Result<(StatusCode, Json<MovieResponse>), MovieError> {
     Ok((
         StatusCode::CREATED,
-        Json(service::create(&state.db, input.name, input.is_private).await?),
+        Json(match principal {
+            ManagementPrincipal::Admin(_) => {
+                service::create(&state.db, input.name, input.is_private).await?
+            }
+            ManagementPrincipal::Mcp { key_digest } => {
+                service::create_mcp(&state.db, input, &key_digest).await?
+            }
+        }),
     ))
 }
 

@@ -2821,3 +2821,76 @@ async fn private_series_scope_stays_on_parent_without_child_fields_or_versions()
     );
     assert_eq!(detail["seasons"][0]["episodes"][0]["version"], 1);
 }
+
+// Catches administrator DTO regressions, discarded episode duration, and unintended parent bumps.
+#[tokio::test]
+async fn admin_series_create_ignores_mcp_metadata_and_episode_duration_is_optional() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let response = write(
+        &app,
+        "POST",
+        "/api/admin/series",
+        json!({"name":"Legacy series", "is_private":false, "year":0,
+            "genre_ids":["bad-id"], "staged_poster_token":"not-a-token"}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let result = body(response).await;
+    assert_eq!(result["is_private"], false);
+    assert!(result["poster"].is_null());
+    assert!(result["year"].is_null());
+    assert_eq!(result["genres"], json!([]));
+    let id = result["id"].as_str().unwrap();
+    let result = body(add_season(&app, &cookie, &csrf, id, 1, 1).await).await;
+    let season = result["seasons"][0]["id"].as_str().unwrap();
+    let path = format!("/api/admin/series/{id}/seasons/{season}/episodes");
+    for duration in [0, -1] {
+        assert_eq!(
+            write(
+                &app,
+                "POST",
+                &path,
+                json!({"version":2,"number":1,"name":"Invalid","duration_seconds":duration}),
+                &cookie,
+                &csrf
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    let response = write(
+        &app,
+        "POST",
+        &path,
+        json!({"version":2,"number":1,"name":"Duration","duration_seconds":60}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let result = body(response).await;
+    assert_eq!(result["version"], 3);
+    assert_eq!(result["seasons"][0]["episodes"][0]["duration_seconds"], 60);
+    assert_eq!(result["seasons"][0]["episodes"][0]["version"], 1);
+    let response = write(
+        &app,
+        "POST",
+        &path,
+        json!({"version":3,"number":2,"name":"Legacy"}),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let result = body(response).await;
+    assert_eq!(result["version"], 4);
+    assert!(result["seasons"][0]["episodes"][1]["duration_seconds"].is_null());
+}

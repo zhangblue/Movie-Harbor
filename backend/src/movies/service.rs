@@ -6,7 +6,7 @@ use crate::{
     },
     entities::movie,
     genres,
-    media::{LocalMediaStorage, is_publishable_asset, removal},
+    media::{LocalMediaStorage, is_publishable_asset, removal, staged_poster},
 };
 use axum::{
     Json,
@@ -23,8 +23,8 @@ use uuid::Uuid;
 
 use super::{
     dto::{
-        DeleteImpactResponse, DeleteResultResponse, MovieListQuery, MovieResponse,
-        UpdateMovieRequest,
+        CreateMovieRequest, DeleteImpactResponse, DeleteResultResponse, MovieListQuery,
+        MovieResponse, UpdateMovieRequest,
     },
     repository,
 };
@@ -148,6 +148,65 @@ pub async fn create(
     .insert(db)
     .await?;
     response(db, model).await
+}
+
+pub async fn create_mcp(
+    db: &DatabaseConnection,
+    input: CreateMovieRequest,
+    principal_hash: &str,
+) -> Result<MovieResponse, MovieError> {
+    let name = normalize_required(input.name).map_err(|_| MovieError::Validation(vec!["name"]))?;
+    if !input.is_private {
+        return Err(MovieError::Validation(vec!["is_private"]));
+    }
+    let year = input
+        .year
+        .filter(|year| (1..=9999).contains(year))
+        .ok_or(MovieError::Validation(vec!["year"]))?;
+    let duration = input
+        .duration_seconds
+        .filter(|duration| *duration > 0)
+        .ok_or(MovieError::Validation(vec!["duration_seconds"]))?;
+    let genre_ids = parse_unique_uuids(input.genre_ids.unwrap_or_default())
+        .map_err(|_| MovieError::Validation(vec!["genres"]))?;
+    if genre_ids.is_empty() {
+        return Err(MovieError::Validation(vec!["genres"]));
+    }
+    let token = input
+        .staged_poster_token
+        .filter(|token| !token.trim().is_empty())
+        .ok_or(MovieError::Validation(vec!["poster"]))?;
+    // 与剧集创建保持一致：先锁暂存海报，再锁题材，内容/独占归属/关系与 token 删除同事务提交。
+    let tx = db.begin().await?;
+    let poster =
+        staged_poster::lock_for_consumption(&tx, &token, principal_hash, Utc::now().fixed_offset())
+            .await
+            .map_err(|error| match error {
+                staged_poster::StagedPosterError::NotFound => {
+                    MovieError::Validation(vec!["poster"])
+                }
+                staged_poster::StagedPosterError::Media(_) => MovieError::Database,
+            })?;
+    genres::service::ensure_associable(&tx, &genre_ids).await?;
+    // 既有数据库触发器随内容 INSERT 原子建立 media_asset_ownership，禁止跨内容共享海报。
+    let model = movie::ActiveModel {
+        id: Set(Uuid::new_v4()),
+        name: Set(name),
+        is_private: Set(true),
+        synopsis: Set(String::new()),
+        year: Set(Some(year)),
+        duration_seconds: Set(Some(duration)),
+        poster_asset_id: Set(Some(poster.asset.id)),
+        status: Set("draft".into()),
+        version: Set(1),
+        ..Default::default()
+    }
+    .insert(&tx)
+    .await?;
+    repository::replace_genres(&tx, model.id, &genre_ids).await?;
+    let result = response(&tx, model).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 pub async fn detail<C: sea_orm::ConnectionTrait>(
