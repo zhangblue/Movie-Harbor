@@ -32,8 +32,21 @@ test('loads private credentials and canonical paths with defaults', async (t) =>
   assert.equal(config.baseUrl.href, 'http://127.0.0.1:8080/');
   assert.equal(config.apiKey, 'mhmcp_test$literal');
   assert.deepEqual(config.allowedRoots, [f.dir]);
+  assert.equal(config.credentialDirectory, f.dir);
   assert.equal(config.generatedRoot, join(f.dir, 'generated'));
   assert.equal(config.requestTimeoutMs, 1800000);
+});
+
+// The conversion registry must follow the private credential file, not chmod an arbitrary config directory.
+test('derives the private registry directory from the canonical credential file', async t => {
+  const f = await fixture(t);
+  const privateDirectory = join(f.dir, 'private');
+  await mkdir(privateDirectory);
+  const credentials = join(privateDirectory, 'credentials.env');
+  await writeFile(credentials, 'MOVIE_HARBOR_MCP_API_KEY=mhmcp_separate\n');
+  await chmod(credentials, 0o600);
+  await writeFile(f.configPath, `MOVIE_HARBOR_BASE_URL=http://localhost\nMOVIE_HARBOR_MCP_CREDENTIALS=${credentials}\nMOVIE_HARBOR_MCP_ALLOWED_ROOTS_JSON=${JSON.stringify([f.dir])}`);
+  assert.equal((await loadConfig(f.env)).credentialDirectory, privateDirectory);
 });
 
 test('rejects credential files with permissions other than 0600', async (t) => {

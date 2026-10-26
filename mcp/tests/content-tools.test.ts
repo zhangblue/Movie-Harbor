@@ -224,7 +224,7 @@ test('movie stage poster validates MIME and file identity before one bounded upl
   await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve));
   t.after(() => new Promise<void>((resolve,reject) => server.close(error => error ? reject(error) : resolve())));
   const address = server.address(); assert.ok(address && typeof address === 'object');
-  const client = createMovieHarborClient({ baseUrl:new URL(`http://127.0.0.1:${address.port}/`),apiKey:'mhmcp_test',allowedRoots:[allowed],generatedRoot:join(directory,'generated'),requestTimeoutMs:1000 });
+  const client = createMovieHarborClient({ baseUrl:new URL(`http://127.0.0.1:${address.port}/`),apiKey:'mhmcp_test',credentialDirectory:directory,allowedRoots:[allowed],generatedRoot:join(directory,'generated'),requestTimeoutMs:1000 });
   const toolsForFile = await tools(client,[allowed]);
   const out = await toolsForFile.call('stage_poster',{path});
   assert.deepEqual(out,{staged_poster_token:'mhposter_test',format:'png',byte_size:bytes.length,expires_at:'2026-10-26T10:30:00+00:00',next_actions:['create_movie','create_series']});

@@ -24,7 +24,7 @@ async function fixture(t: TestContext) {
   await writeFile(join(bin, 'ffprobe'), `#!${process.execPath}\nprocess.stdout.write(process.env.MEDIA_FIXTURE);\n`, { mode: 0o755 });
   await writeFile(join(bin, 'ffmpeg'), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if(args.includes('-encoders')) process.stdout.write(' V..... libx264 H264\\n A..... aac AAC\\n S..... mov_text text\\n'); else {fs.writeFileSync(args.at(-1), 'converted'); process.stdout.write('out_time_us=1000000\\nprogress=end\\n');}\n`, { mode: 0o755 });
   const env = { ...process.env, PATH: bin, MEDIA_FIXTURE: JSON.stringify(media) };
-  const config: McpConfig = { baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_never-return-this', allowedRoots: [allowed], generatedRoot: join(allowed, 'generated'), requestTimeoutMs: 1000 };
+  const config: McpConfig = { baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_never-return-this', credentialDirectory, allowedRoots: [allowed], generatedRoot: join(allowed, 'generated'), requestTimeoutMs: 1000 };
   const deps: LocalMediaDependencies = { config, credentialDirectory, verifyRequiredEncoders: (encoders) => verifyRequiredEncoders(encoders, { env }), probeMedia: (path) => probeMedia(path, { env }), executeConversion: (conversion) => executeConversion(conversion, { env }) };
   return { directory, allowed, input, bytes, media, env, config, deps, credentialDirectory };
 }

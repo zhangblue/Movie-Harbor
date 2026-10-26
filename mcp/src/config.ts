@@ -5,6 +5,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 export interface McpConfig {
   baseUrl: URL;
   apiKey: string;
+  credentialDirectory: string;
   allowedRoots: string[];
   generatedRoot: string;
   requestTimeoutMs: number;
@@ -62,6 +63,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv): Promise<McpConfig> {
     }
     const credentialPath = absolutePath(config.get('MOVIE_HARBOR_MCP_CREDENTIALS'), 'MOVIE_HARBOR_MCP_CREDENTIALS');
     const credentials = await readEnv(credentialPath, true);
+    const credentialDirectory = dirname(await realpath(credentialPath));
     const apiKey = credentials.get('MOVIE_HARBOR_MCP_API_KEY');
     if (!apiKey?.startsWith('mhmcp_') || apiKey.length <= 6) {
       throw new Error('MOVIE_HARBOR_MCP_API_KEY 必须以 mhmcp_ 开头且后缀非空');
@@ -92,7 +94,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv): Promise<McpConfig> {
     if (!/^\d+$/.test(timeout) || !Number.isSafeInteger(requestTimeoutMs) || requestTimeoutMs <= 0) {
       throw new Error('MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS 必须是正安全整数');
     }
-    return { baseUrl, apiKey, allowedRoots, generatedRoot, requestTimeoutMs };
+    return { baseUrl, apiKey, credentialDirectory, allowedRoots, generatedRoot, requestTimeoutMs };
   } catch (error) {
     // Native filesystem errors contain paths; do not expose configuration values.
     if ((error as NodeJS.ErrnoException).code) throw new Error('配置目录不存在或不可读取');

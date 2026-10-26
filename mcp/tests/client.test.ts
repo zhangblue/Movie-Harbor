@@ -20,7 +20,7 @@ async function fixture(t: TestContext, handler: (req: IncomingMessage, res: Serv
   });
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('listen failed');
-  const config: McpConfig = { baseUrl: new URL(`http://127.0.0.1:${address.port}`), apiKey: key,
+  const config: McpConfig = { baseUrl: new URL(`http://127.0.0.1:${address.port}`), apiKey: key, credentialDirectory: directory,
     allowedRoots: [directory], generatedRoot: directory, requestTimeoutMs: 300 };
   return { directory, config };
 }
