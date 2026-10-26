@@ -49,6 +49,35 @@ test('video metadata includes compatibility and a conversion plan without file b
   assert.equal((await inspectVideoTool({ path: mp4 }, f.deps)).structuredContent.duration_seconds, null);
 });
 
+// Catches accepting MP4 by extension while its selected tracks still require conversion.
+test('MP4 compatibility rejects every required track conversion and accepts the target track set', async t => {
+  const f = await fixture(t);
+  const mp4 = join(f.allowed, 'compatibility.mp4');
+  await writeFile(mp4, f.bytes);
+  const video = { index: 0, codec_type: 'video', codec_name: 'h264', pix_fmt: 'yuv420p' };
+  const audio = { index: 2, codec_type: 'audio', codec_name: 'aac' };
+  const incompatible = [
+    ['HEVC video', [{ ...video, codec_name: 'hevc' }, audio], /H\.264|视频/],
+    ['non-yuv420p H264 video', [{ ...video, pix_fmt: 'yuv444p' }, audio], /yuv420p|视频/],
+    ['non-AAC audio', [video, { ...audio, codec_name: 'dts' }], /AAC|音频/],
+    ['image subtitle', [video, audio, { index: 7, codec_type: 'subtitle', codec_name: 'hdmv_pgs_subtitle' }], /图像字幕.*7.*hdmv_pgs_subtitle/],
+  ] as const;
+
+  for (const [name, streams, reason] of incompatible) {
+    f.env.MEDIA_FIXTURE = JSON.stringify({ format: { duration: '9.1' }, streams });
+    const out = (await inspectVideoTool({ path: mp4 }, f.deps)).structuredContent;
+    assert.equal(out.compatibility.accepted, false, name);
+    assert.equal(out.compatibility.conversion_required, true, name);
+    assert.match(out.compatibility.reasons.join('\n'), reason, name);
+  }
+
+  f.env.MEDIA_FIXTURE = JSON.stringify({ format: { duration: '9.1' }, streams: [
+    video, audio, { index: 7, codec_type: 'subtitle', codec_name: 'mov_text' },
+  ] });
+  const compatible = (await inspectVideoTool({ path: mp4 }, f.deps)).structuredContent;
+  assert.deepEqual(compatible.compatibility, { accepted: true, reasons: [], conversion_required: false });
+});
+
 // Catches bypassing path checks or forwarding arbitrary external-process diagnostics.
 test('video rejects invalid paths and sanitizes probe errors', async t => {
   const f = await fixture(t);

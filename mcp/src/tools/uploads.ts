@@ -59,9 +59,10 @@ async function cleanupAfterUpload(path: string, generated: boolean, dependencies
   }
 }
 
-async function uploadFile<T>(path: string, endpoint: string, dependencies: UploadDependencies,
+type CheckedVideo = Awaited<ReturnType<typeof checkedVideo>>;
+
+async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependencies: UploadDependencies,
   parser: (value: unknown, checked: Awaited<ReturnType<typeof checkedVideo>>) => T) {
-  const checked = await checkedVideo(path, dependencies);
   let raw: unknown;
   try { raw = await dependencies.client.upload(endpoint, checked.file, checked.mimeType); }
   catch (error) {
@@ -76,12 +77,13 @@ async function uploadFile<T>(path: string, endpoint: string, dependencies: Uploa
 export async function uploadMovieVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceMovieVideoInput : uploadMovieVideoInput).parse(input);
   if (replace && 'confirmed' in parsed && parsed.confirmed !== true) throw new Error('替换已有视频需要明确确认替换');
+  const checked = await checkedVideo(parsed.path, dependencies);
   const movie = parseApi(apiMovie, await dependencies.client.json('GET', `/api/admin/movies/${parsed.movie_id}`));
   if (movie.id !== parsed.movie_id) throw new MovieHarborClientError('invalid_response');
   assertDraftTarget(movie, parsed.version);
   if (!replace && movie.video) throw new Error('目标已有视频，请改用 replace_movie_video 并明确确认替换');
   if (replace && !movie.video) throw new Error('目标没有视频，请改用 upload_movie_video');
-  const result = await uploadFile(parsed.path, `/api/admin/media/movies/${parsed.movie_id}/video?version=${parsed.version}`,
+  const result = await uploadFile(checked, `/api/admin/media/movies/${parsed.movie_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
       const response = parseApi(apiMovieUpload, value);
       if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
@@ -97,6 +99,7 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
 export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceEpisodeVideoInput : uploadEpisodeVideoInput).parse(input);
   if (replace && 'confirmed' in parsed && parsed.confirmed !== true) throw new Error('替换已有视频需要明确确认替换');
+  const checked = await checkedVideo(parsed.path, dependencies);
   const detailPath = `/api/admin/series/${parsed.series_id}/seasons/${parsed.season_id}/episodes/${parsed.episode_id}`;
   const envelope = parseApi(apiEpisodeEnvelope, await dependencies.client.json('GET', detailPath));
   const episode = envelope.episode;
@@ -106,7 +109,7 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   assertDraftTarget(episode, parsed.version);
   if (!replace && episode.video) throw new Error('目标已有视频，请改用 replace_episode_video 并明确确认替换');
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');
-  const result = await uploadFile(parsed.path, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
+  const result = await uploadFile(checked, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
       const response = parseApi(apiEpisodeUpload, value);
       if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size

@@ -29,14 +29,26 @@ export async function inspectVideo(path: string, roots: string[], probe = probeM
   const media = await probeCheckedFile(file, roots, probe);
   const extension = extname(file.realPath).toLowerCase().slice(1);
   const container = extension === 'mp4' || extension === 'webm' || extension === 'mkv' ? extension : 'unknown';
-  const accepted = container === 'mp4' || container === 'webm';
   let plan: VideoConversion.Plan | null = null;
-  const reasons = accepted ? [] : ['视频容器需要转换为网站支持的 MP4'];
+  const reasons: string[] = [];
   try { plan = planBuilder(media); }
   catch (error) {
     if (!/不支持图像字幕/.test(String(error))) throw new Error('无法生成视频转换计划');
-    reasons.push('不支持图像字幕，请先处理字幕后重试');
+    reasons.push(error instanceof Error ? error.message : String(error));
   }
+  if (container !== 'mp4' && container !== 'webm') reasons.push('视频容器需要转换为网站支持的 MP4');
+  if (container === 'mp4' && plan) {
+    if (plan.video.mode === 'transcode') {
+      reasons.push(`视频轨道 ${media.video.index} 需要转换为 H.264/yuv420p（当前 ${media.video.codec ?? '未知编码'}/${media.video.pixelFormat ?? '未知像素格式'}）`);
+    }
+    for (const track of plan.audio.filter(track => track.mode === 'transcode')) {
+      reasons.push(`音频轨道 ${track.index} 需要转换为 AAC（当前 ${track.codec ?? '未知编码'}）`);
+    }
+    for (const track of media.subtitles.filter(track => track.codec !== 'mov_text')) {
+      reasons.push(`字幕轨道 ${track.index} 需要转换为 mov_text（当前 ${track.codec ?? '未知编码'}）`);
+    }
+  }
+  const accepted = reasons.length === 0;
   const track = (item: VideoConversion.Track) => ({ index: item.index, codec: item.codec,
     language: typeof item.tags?.language === 'string' ? item.tags.language : null,
     title: typeof item.tags?.title === 'string' ? item.tags.title : null });

@@ -98,6 +98,30 @@ test('movie upload validates compatible media, streams once, filters output and 
   assert.equal(c.calls.some(call => String(call.path).includes('publish')), false);
 });
 
+// Catches consulting or uploading to the remote service before incompatible local MP4 tracks are rejected.
+test('movie upload rejects incompatible MP4 tracks before every HTTP call and points to convert_video', async t => {
+  const f = await fixture(t);
+  const video = { index: 0, codec: 'h264', pixelFormat: 'yuv420p' };
+  const cases = [
+    ['HEVC video', { ...video, codec: 'hevc' }, [], []],
+    ['non-yuv420p H264 video', { ...video, pixelFormat: 'yuv444p' }, [], []],
+    ['non-AAC audio', video, [{ index: 2, codec: 'dts' }], []],
+    ['image subtitle', video, [], [{ index: 7, codec: 'hdmv_pgs_subtitle' }]],
+  ] as const;
+
+  for (const [name, selectedVideo, audio, subtitles] of cases) {
+    const c = fakeClient([]);
+    const dependencies = { ...f, probeMedia: async () => ({ durationSeconds: 1, video: selectedVideo, audio, subtitles }) };
+    const tools = await registeredTools(c.client, dependencies);
+    await assert.rejects(
+      tools.call('upload_movie_video', { movie_id: movieId, version: 3, path: f.path }),
+      error => /convert_video/.test(String(error)),
+      name,
+    );
+    assert.deepEqual(c.calls, [], name);
+  }
+});
+
 test('replace requires an occupied target and explicit confirmation while upload rejects incompatible files', async t => {
   const f = await fixture(t); const webm = join(f.allowed,'video.webm'); const mkv = join(f.allowed,'video.mkv');
   await Promise.all([writeFile(webm,'webm'),writeFile(mkv,'mkv')]);
