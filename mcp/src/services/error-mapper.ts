@@ -34,7 +34,7 @@ export function mapHttpError(status: number, payload: unknown, apiKey: string): 
   };
   const value = payload && typeof payload === 'object' ? (payload as { fields?: unknown }).fields : undefined;
   const fields = Array.isArray(value) && value.length <= 32 && value.every(field =>
-    typeof field === 'string' && field.length <= 64 && !field.includes(apiKey)
+    typeof field === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(field) && !field.includes(apiKey)
       && !/authorization|bearer|[\r\n\0]/i.test(field)) ? value as string[] : [];
   return new MovieHarborClientError(codes[status] ?? (status >= 500 && status <= 599 ? 'server_error' : 'http_error'), status, fields);
 }

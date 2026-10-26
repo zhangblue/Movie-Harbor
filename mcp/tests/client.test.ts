@@ -90,6 +90,43 @@ test('client maps HTTP errors to safe Chinese messages and bounded string fields
   }
 });
 
+// Catches reflecting local paths or terminal control sequences through backend field names.
+test('client accepts only safe remote field names and drops the entire invalid array', async t => {
+  const { createMovieHarborClient, MovieHarborClientError } = await import('../src/services/movie-harbor-client.js');
+  let fields: unknown;
+  const { config } = await fixture(t, (req, res) => {
+    req.resume(); res.writeHead(422, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'invalid input', fields }));
+  });
+  const client = createMovieHarborClient(config);
+  const valid = ['duration_seconds', 'genre_ids', 'metadata.name', 'content-name', 'A' + 'x'.repeat(63)];
+  const cases: Array<{ label: string; input: unknown; expected: string[] }> = [
+    { label: 'snake dotted hyphen and 64-character names', input: valid, expected: valid },
+    { label: 'Unix absolute path', input: ['name', '/Users/private/movie.mp4'], expected: [] },
+    { label: 'Windows absolute path', input: ['name', 'C:\\private\\movie.mp4'], expected: [] },
+    { label: 'TAB control', input: ['name', 'duration\tseconds'], expected: [] },
+    { label: 'ESC control', input: ['name', '\u001b[31m'], expected: [] },
+    { label: 'final newline', input: ['name', 'duration_seconds\n'], expected: [] },
+    { label: 'relative slash path', input: ['name', 'media/video'], expected: [] },
+    { label: 'colon', input: ['name', 'field:value'], expected: [] },
+    { label: 'space', input: ['name', 'genre ids'], expected: [] },
+    { label: 'nonletter start', input: ['name', '_private'], expected: [] },
+    { label: 'empty field', input: ['name', ''], expected: [] },
+    { label: 'nonstring field', input: ['name', 1], expected: [] },
+  ];
+  for (const { label, input, expected } of cases) {
+    await t.test(label, async () => {
+      fields = input;
+      await assert.rejects(client.json('GET', '/api/admin/movies'), error => {
+        assert.ok(error instanceof MovieHarborClientError);
+        assert.equal(error.code, 'validation_error');
+        assert.deepEqual(error.fields, expected);
+        return true;
+      });
+    });
+  }
+});
+
 // Catches unbounded buffering, accepting non-JSON responses, or following redirects.
 test('client bounds success and error response bodies and validates JSON', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
