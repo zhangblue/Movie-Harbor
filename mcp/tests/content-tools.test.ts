@@ -163,6 +163,59 @@ test('movie creation requires synopsis and confirmation, defaults public, and se
   ]);
 });
 
+test('series creation requires synopsis and confirmation and defaults public', async () => {
+  const f = clientFixture([{ ...series, is_private: false }, { ...series, is_private: true }]);
+  const t = await tools(f.client);
+  const common = {
+    name: 'Alien', synopsis: '围绕未知生命展开的系列故事。', year: 1979,
+    genre_ids: [genreId], staged_poster_token: 'poster-token', confirmed: true,
+  };
+  await t.call('create_series', common);
+  await t.call('create_series', { ...common, visibility: 'private' });
+  assert.deepEqual(f.calls.map(call => call.body), [
+    { name: 'Alien', synopsis: '围绕未知生命展开的系列故事。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', is_private: false },
+    { name: 'Alien', synopsis: '围绕未知生命展开的系列故事。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', is_private: true },
+  ]);
+});
+
+test('season and named episode require confirmation without forwarding it', async () => {
+  const f = clientFixture([series, series]);
+  const t = await tools(f.client);
+  await t.call('create_season', { series_id: seriesId, version: 2, number: 1, confirmed: true });
+  await t.call('create_episode', {
+    series_id: seriesId, season_id: seasonId, version: 2, number: 1,
+    name: 'Pilot', duration_seconds: 500, confirmed: true,
+  });
+  assert.deepEqual(f.calls[0]!.body, { version: 2, number: 1 });
+  assert.deepEqual(f.calls[1]!.body, { version: 2, number: 1, name: 'Pilot', duration_seconds: 500 });
+});
+
+test('series creation rejects mismatched API visibility as invalid_response without retrying', async () => {
+  const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
+  for (const [visibility, is_private] of [['public', true], ['private', false]] as const) {
+    const f = clientFixture([{ ...series, is_private }]);
+    await assert.rejects((await tools(f.client)).call('create_series', {
+      name: 'Alien', synopsis: '围绕未知生命展开的系列故事。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', visibility, confirmed: true,
+    }), error => error instanceof MovieHarborClientError && error.code === 'invalid_response');
+    assert.equal(f.calls.length, 1);
+  }
+});
+
+test('series creation summaries identify the selected draft visibility', async () => {
+  const f = clientFixture([{ ...series, is_private: false }, { ...series, is_private: true }]);
+  const t = await tools(f.client);
+  for (const [visibility, label] of [['public', '公开'], ['private', '私密']] as const) {
+    const result = await t.registrations.get('create_series').handler({
+      name: 'Alien', synopsis: '围绕未知生命展开的系列故事。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', visibility, confirmed: true,
+    });
+    assert.match(result.content[0].text, new RegExp(`${label}.*草稿`));
+  }
+});
+
 test('movie tools expose integer minutes and convert updates back to API seconds', async () => {
   const f = clientFixture([[{ ...movie, duration_seconds: 10176 }], { ...movie, duration_seconds: 10200 }]);
   const t = await tools(f.client);
@@ -221,18 +274,22 @@ test('movie creation rejects mismatched API visibility or duration as invalid_re
 test('movie series episode schemas reject missing required fields and invalid mutations before HTTP', async () => {
   const f = clientFixture([]); const t = await tools(f.client);
   const movieInput = { name:'Alien',synopsis:'太空货船遭遇未知生命。',year:1979,duration_minutes:117,genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true };
-  const seriesInput = { name:'Alien',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token' };
-  const episodeInput = { series_id:seriesId,season_id:seasonId,version:3,number:1,name:'Pilot',duration_seconds:500 };
-  for (const [tool,input,keys] of [['create_movie',movieInput,['name','synopsis','year','duration_minutes','genre_ids','staged_poster_token','confirmed']],['create_series',seriesInput,['year','genre_ids','staged_poster_token']],['create_episode',episodeInput,['name','duration_seconds','version']]] as const) {
+  const seriesInput = { name:'Alien',synopsis:'围绕未知生命展开的系列故事。',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true };
+  const seasonInput = { series_id:seriesId,version:3,number:1,confirmed:true };
+  const episodeInput = { series_id:seriesId,season_id:seasonId,version:3,number:1,name:'Pilot',duration_seconds:500,confirmed:true };
+  for (const [tool,input,keys] of [['create_movie',movieInput,['name','synopsis','year','duration_minutes','genre_ids','staged_poster_token','confirmed']],['create_series',seriesInput,['name','synopsis','year','genre_ids','staged_poster_token','confirmed']],['create_season',seasonInput,['confirmed']],['create_episode',episodeInput,['name','duration_seconds','version','confirmed']]] as const) {
     for (const key of keys) { const invalid: any = {...input}; delete invalid[key]; await assert.rejects(t.call(tool,invalid)); }
   }
   for (const invalid of [{...movieInput,genre_ids:[]},{...movieInput,genre_ids:[genreId,genreId]},{...movieInput,year:10000},{...movieInput,name:' '},{...movieInput,synopsis:' '},{...movieInput,synopsis:''},{...movieInput,duration_minutes:0},{...movieInput,duration_minutes:1.5},{...movieInput,duration_minutes:35_791_395},{...movieInput,duration_seconds:7020},{...movieInput,is_private:false},{...movieInput,visibility:'friends'},{...movieInput,confirmed:false}]) await assert.rejects(t.call('create_movie',invalid));
+  for (const invalid of [{...seriesInput,synopsis:' '},{...seriesInput,synopsis:''},{...seriesInput,confirmed:false},{...seriesInput,visibility:'friends'},{...seriesInput,is_private:false}]) await assert.rejects(t.call('create_series',invalid));
+  for (const invalid of [{...seasonInput,confirmed:false},{...seasonInput,visibility:'private'},{...seasonInput,is_private:true}]) await assert.rejects(t.call('create_season',invalid));
+  for (const invalid of [{...episodeInput,confirmed:false},{...episodeInput,name:' '},{...episodeInput,visibility:'private'},{...episodeInput,is_private:true}]) await assert.rejects(t.call('create_episode',invalid));
   for (const patch of [{duration_seconds:7020},{duration_minutes:35_791_395},{duration_minutes:0},{duration_minutes:1.5}]) {
     await assert.rejects(t.call('update_movie_metadata',{movie_id:movieId,version:3,...patch}));
   }
-  await assert.rejects(t.call('create_season',{series_id:'bad',version:1,number:1}));
+  await assert.rejects(t.call('create_season',{series_id:'bad',version:1,number:1,confirmed:true}));
   for (const series_id of ['../admin/users','11111111-1111-1111-1111-11111111111/','%2fapi%2fadmin','11111111111141118111111111111111']) {
-    await assert.rejects(t.call('create_season',{series_id,version:1,number:1}));
+    await assert.rejects(t.call('create_season',{series_id,version:1,number:1,confirmed:true}));
   }
   await assert.rejects(t.call('create_episode',{...episodeInput,number:0}));
   for (const [name,ids] of [['update_movie_metadata',{movie_id:movieId}],['update_series_metadata',{series_id:seriesId}],['update_episode_metadata',{series_id:seriesId,season_id:seasonId,episode_id:episodeId}]] as const) {
@@ -247,14 +304,14 @@ test('movie and series creation use one API and respect each creation contract',
   const f = clientFixture([{...movie,duration_seconds:7020},series]); const t = await tools(f.client);
   const common = {name:' Alien ',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token'};
   assert.deepEqual(await t.call('create_movie',{...common,synopsis:'太空货船遭遇未知生命。',duration_minutes:117,visibility:'private',confirmed:true}),{id:movieId,version:3,status:'draft',next_actions:['upload_movie_video']});
-  assert.deepEqual(await t.call('create_series',common),{id:seriesId,version:3,status:'draft',next_actions:['create_season']});
-  assert.deepEqual(f.calls,[{method:'POST',path:'/api/admin/movies',body:{...common,name:'Alien',synopsis:'太空货船遭遇未知生命。',duration_seconds:7020,is_private:true}},{method:'POST',path:'/api/admin/series',body:{...common,name:'Alien',is_private:true}}]);
+  assert.deepEqual(await t.call('create_series',{...common,synopsis:'围绕未知生命展开的系列故事。',visibility:'private',confirmed:true}),{id:seriesId,version:3,status:'draft',next_actions:['create_season']});
+  assert.deepEqual(f.calls,[{method:'POST',path:'/api/admin/movies',body:{...common,name:'Alien',synopsis:'太空货船遭遇未知生命。',duration_seconds:7020,is_private:true}},{method:'POST',path:'/api/admin/series',body:{...common,name:'Alien',synopsis:'围绕未知生命展开的系列故事。',is_private:true}}]);
 });
 
 test('series season create extracts its unique child and returns parent version without follow-up HTTP', async () => {
   const f = clientFixture([series,{...series,seasons:[]},{...series,seasons:[...series.seasons,...series.seasons]}]); const t = await tools(f.client);
-  assert.deepEqual(await t.call('create_season',{series_id:seriesId,version:2,number:1}),{series_id:seriesId,series_version:3,season_id:seasonId,next_actions:['create_episode']});
-  for(let i=0;i<2;i++) await assert.rejects(t.call('create_season',{series_id:seriesId,version:2,number:1}), /数据格式无效/);
+  assert.deepEqual(await t.call('create_season',{series_id:seriesId,version:2,number:1,confirmed:true}),{series_id:seriesId,series_version:3,season_id:seasonId,next_actions:['create_episode']});
+  for(let i=0;i<2;i++) await assert.rejects(t.call('create_season',{series_id:seriesId,version:2,number:1,confirmed:true}), /数据格式无效/);
   assert.deepEqual(f.calls[0],{method:'POST',path:`/api/admin/series/${seriesId}/seasons`,body:{version:2,number:1}});
 });
 
@@ -285,7 +342,7 @@ test('episode create extracts its own version and parent version and rejects mis
     { ...series, seasons: [{ ...series.seasons[0], episodes: [] }] },
     { ...series, seasons: [{ ...series.seasons[0], episodes: [episode, episode] }] }];
   const f = clientFixture(variants); const t = await tools(f.client);
-  const input = { series_id: seriesId, season_id: seasonId, version: 2, number: 1, name: ' Pilot ', duration_seconds: 500 };
+  const input = { series_id: seriesId, season_id: seasonId, version: 2, number: 1, name: ' Pilot ', duration_seconds: 500, confirmed: true };
   assert.deepEqual(await t.call('create_episode', input), { id: episodeId, version: 1, status: 'draft', series_version: 3, next_actions: ['upload_episode_video'] });
   for (let i = 0; i < 4; i++) await assert.rejects(t.call('create_episode',input), /数据格式无效/);
   assert.deepEqual(f.calls[0], { method:'POST', path:`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes`, body:{ version:2, number:1, name:'Pilot', duration_seconds:500 } });

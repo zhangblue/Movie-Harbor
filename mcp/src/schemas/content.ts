@@ -13,9 +13,9 @@ export const createGenreInput = z.strictObject({ name });
 export const stagePosterInput = z.strictObject({ path: localPath });
 const createFields = { name, year, genre_ids: genreIds, staged_poster_token: token };
 export const createMovieInput = z.strictObject({ ...createFields, synopsis, duration_minutes: durationMinutes, visibility, confirmed });
-export const createSeriesInput = z.strictObject(createFields);
-export const createSeasonInput = z.strictObject({ series_id: id, version, number: positiveInt.max(2_147_483_647) });
-export const createEpisodeInput = z.strictObject({ series_id: id, season_id: id, version, number: positiveInt.max(2_147_483_647), name, duration_seconds: duration });
+export const createSeriesInput = z.strictObject({ ...createFields, synopsis, visibility, confirmed });
+export const createSeasonInput = z.strictObject({ series_id: id, version, number: positiveInt.max(2_147_483_647), confirmed });
+export const createEpisodeInput = z.strictObject({ series_id: id, season_id: id, version, number: positiveInt.max(2_147_483_647), name, duration_seconds: duration, confirmed });
 const metadata = { name: name.optional(), synopsis: z.string().optional(), year: year.optional(), genre_ids: genreIds.optional() };
 export const updateMovieInput = z.strictObject({ movie_id: id, version, ...metadata, duration_minutes: durationMinutes.optional() })
   .refine(value => [value.name, value.synopsis, value.year, value.genre_ids, value.duration_minutes].some(v => v !== undefined), '至少提供一个修改字段');
