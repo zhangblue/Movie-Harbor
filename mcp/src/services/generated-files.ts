@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { chmod, lstat, mkdir, open, realpath, rename, unlink } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { z } from 'zod';
 import type { McpConfig } from '../config.js';
 import { fileIdentity, type FileIdentity } from '../schemas/media.js';
@@ -19,15 +19,11 @@ async function serialized<T>(directory: string, operation: () => Promise<T>): Pr
   try { return await next; }
   finally { if (queues.get(directory) === next) queues.delete(directory); }
 }
-function inside(path: string, root: string): boolean {
-  const suffix = relative(root, path);
-  return !isAbsolute(suffix) && suffix.split(sep)[0] !== '..';
-}
 export async function prepareGeneratedRoot(config: McpConfig): Promise<string> {
   const parent = await realpath(dirname(config.generatedRoot));
   const expected = join(parent, basename(config.generatedRoot));
-  const roots = await Promise.all(config.allowedRoots.map(root => realpath(root)));
-  if (!roots.some(root => inside(expected, root))) throw new Error('生成目录不在允许目录内');
+  // Config already canonicalizes this independent output root; reject later parent retargeting.
+  if (expected !== config.generatedRoot) throw new Error('生成目录已经变化，请重新检查配置');
   try { await mkdir(expected, { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   const info = await lstat(expected);

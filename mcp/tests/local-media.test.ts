@@ -192,3 +192,60 @@ test('convert rejects source identity changes during execution before registerin
   await assert.rejects(convertVideoTool({ path: f.input, confirmed: true }, changing), /文件已经变化|登记失败/);
   await assert.rejects(stat(join(f.credentialDirectory, 'generated-files.json')), { code: 'ENOENT' });
 });
+
+// Catches requiring the private output root to be part of the media input allowlist.
+test('convert accepts an independent private generated root without expanding input access', async t => {
+  const f = await fixture(t);
+  f.config.generatedRoot = join(f.credentialDirectory, 'generated');
+  const converted = await convertVideoTool({ path: f.input, confirmed: true }, f.deps);
+  const output = converted.structuredContent.output_path;
+  assert.equal(dirname(output), f.config.generatedRoot);
+  assert.equal(await readFile(output, 'utf8'), 'converted');
+  const registry = JSON.parse(await readFile(join(f.credentialDirectory, 'generated-files.json'), 'utf8'));
+  assert.equal(registry.files[0].path, output);
+  assert.deepEqual(registry.files[0].identity, converted.structuredContent.identity);
+  await assert.rejects(convertVideoTool({ path: output, confirmed: true }, f.deps), /允许目录/);
+  await deleteGeneratedVideoTool({ path: output }, f.deps);
+  await assert.rejects(stat(output), { code: 'ENOENT' });
+  assert.equal(await readFile(f.input, 'utf8'), f.bytes.toString());
+});
+
+// Catches relaxing generated-directory and output-child checks when roots are separate.
+test('independent generated roots still reject directory replacement and escaped outputs', async t => {
+  const f = await fixture(t);
+  f.config.generatedRoot = join(f.credentialDirectory, 'generated');
+  const output = (await convertVideoTool({ path: f.input, confirmed: true }, f.deps)).structuredContent.output_path;
+  const moved = join(f.directory, 'moved-private-generated');
+  await rename(f.config.generatedRoot, moved);
+  await symlink(moved, f.config.generatedRoot);
+  await assert.rejects(deleteGeneratedVideoTool({ path: output }, f.deps), /生成目录|身份/);
+  assert.equal(await readFile(join(moved, output.split('/').at(-1)!), 'utf8'), 'converted');
+
+  const g = await fixture(t);
+  g.config.generatedRoot = join(g.credentialDirectory, 'generated');
+  const external = join(g.directory, 'external-output.mp4');
+  await writeFile(external, 'external file');
+  const escaping = { ...g.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+    await symlink(external, conversion.outputPath);
+    return conversion.outputPath;
+  } };
+  await assert.rejects(convertVideoTool({ path: g.input, confirmed: true }, escaping), /登记失败/);
+  await assert.rejects(stat(join(g.credentialDirectory, 'generated-files.json')), { code: 'ENOENT' });
+  assert.equal(await readFile(external, 'utf8'), 'external file');
+});
+
+// Catches following a configured output parent that is retargeted during conversion.
+test('independent generated root rejects parent path retargeting during conversion', async t => {
+  const f = await fixture(t);
+  const parent = join(f.directory, 'private-output');
+  await mkdir(parent, { mode: 0o700 });
+  f.config.generatedRoot = join(parent, 'generated');
+  const moved = join(f.directory, 'retargeted-output');
+  const retargeting = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+    await rename(parent, moved);
+    await symlink(moved, parent);
+    return f.deps.executeConversion!(conversion);
+  } };
+  await assert.rejects(convertVideoTool({ path: f.input, confirmed: true }, retargeting), /登记失败/);
+  await assert.rejects(stat(join(f.credentialDirectory, 'generated-files.json')), { code: 'ENOENT' });
+});
