@@ -28,6 +28,7 @@ async fn setup() -> (support::TestDatabase, Router, String, String) {
         allow_insecure_lan_http: false,
         trust_proxy_headers: true,
         trusted_proxy_secret: Some(SECRET.into()),
+        mcp_api_key_digest: None,
         max_upload_bytes: 1024,
         allowed_video_mime_types: vec!["video/mp4".into()],
         admin_name: Some("Admin".into()),
@@ -271,6 +272,7 @@ async fn authorization_requires_enabled_proxy_trust_and_a_configured_secret() {
             ),
             trust_proxy_headers: enabled,
             trusted_proxy_secret_digest: digest,
+            mcp_api_key_digest: None,
             limits: Default::default(),
             password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
         };

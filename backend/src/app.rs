@@ -34,6 +34,7 @@ pub async fn build(
             .trusted_proxy_secret
             .as_deref()
             .map(crate::auth::csrf::digest),
+        mcp_api_key_digest: config.mcp_api_key_digest.clone(),
         limits: Default::default(),
         password_work: std::sync::Arc::new(tokio::sync::Semaphore::new(2)),
     };

@@ -1,4 +1,5 @@
 pub mod csrf;
+pub mod mcp;
 pub mod model;
 pub mod password;
 pub mod rate_limit;
@@ -21,6 +22,7 @@ pub struct AuthState {
     pub origin_policy: csrf::OriginPolicy,
     pub trust_proxy_headers: bool,
     pub trusted_proxy_secret_digest: Option<String>,
+    pub mcp_api_key_digest: Option<String>,
     pub limits: Arc<rate_limit::RateLimiter>,
     pub password_work: Arc<tokio::sync::Semaphore>,
 }

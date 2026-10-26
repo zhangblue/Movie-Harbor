@@ -532,6 +532,7 @@ fn config(root: &Path) -> Config {
         allow_insecure_lan_http: false,
         trust_proxy_headers: false,
         trusted_proxy_secret: None,
+        mcp_api_key_digest: None,
         max_upload_bytes: 4096,
         allowed_video_mime_types: vec!["video/mp4".into(), "video/webm".into()],
         admin_name: Some("Admin".into()),

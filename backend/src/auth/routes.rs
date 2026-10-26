@@ -1,5 +1,5 @@
 use super::{
-    AuthState, csrf,
+    AuthState, csrf, mcp,
     model::{AuthError, LoginRequest, PasswordRequest, SessionResponse},
     password, session,
 };
@@ -43,6 +43,17 @@ pub async fn require_session(
     if !state.origin_policy.host_allowed(request.headers()) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
+    if mcp::route_allowed(request.method(), request.uri().path())
+        && let Some(principal) =
+            mcp::authenticate(request.headers(), state.mcp_api_key_digest.as_deref())
+    {
+        request.extensions_mut().insert(principal);
+        let mut response = next.run(request).await;
+        response
+            .headers_mut()
+            .insert("cache-control", "no-store".parse().unwrap());
+        return Ok(response);
+    }
     // 先从 Cookie 查找未过期会话；认证失败时不会把请求交给受保护的业务处理器。
     let current = session::authenticate(&state.db, request.headers()).await?;
     if !matches!(
@@ -52,6 +63,9 @@ pub async fn require_session(
         // 读请求不要求 CSRF；其余方法必须同时通过 Cookie、CSRF 令牌和同源校验。
         session::authorize_write(&current, request.headers(), &state.origin_policy)?;
     }
+    request
+        .extensions_mut()
+        .insert(mcp::ManagementPrincipal::Admin(current.clone()));
     request.extensions_mut().insert(current);
     let mut response = next.run(request).await;
     // 认证相关响应不得被浏览器或中间缓存复用，以免暴露会话状态。

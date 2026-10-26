@@ -17,6 +17,7 @@ pub struct Config {
     pub allow_insecure_lan_http: bool,
     pub trust_proxy_headers: bool,
     pub trusted_proxy_secret: Option<String>,
+    pub mcp_api_key_digest: Option<String>,
     pub max_upload_bytes: u64,
     pub allowed_video_mime_types: Vec<String>,
     pub admin_name: Option<String>,
@@ -97,6 +98,16 @@ impl Config {
         {
             return Err(ConfigError::Invalid("TRUST_PROXY_SECRET"));
         }
+        let mcp_api_key_digest =
+            lookup("MCP_API_KEY_SHA256").filter(|value| !value.trim().is_empty());
+        if mcp_api_key_digest.as_ref().is_some_and(|value| {
+            value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(ConfigError::Invalid("MCP_API_KEY_SHA256"));
+        }
         let mut config = Self {
             listen_addr,
             database_url,
@@ -106,6 +117,7 @@ impl Config {
             allow_insecure_lan_http,
             trust_proxy_headers,
             trusted_proxy_secret,
+            mcp_api_key_digest,
             max_upload_bytes,
             allowed_video_mime_types,
             admin_name: lookup("ADMIN_NAME"),
@@ -256,6 +268,64 @@ mod tests {
             ("VIDEO_MIME_ALLOWLIST", "video/mp4,video/webm"),
             ("ADMIN_NAME", "admin"),
         ])
+    }
+
+    #[test]
+    fn mcp_digest_is_optional_and_accepts_only_lowercase_sha256() {
+        let mut values = required_values();
+        for value in ["", "  "] {
+            values.insert("MCP_API_KEY_SHA256", value);
+            assert!(
+                Config::from_lookup(|name| values.get(name).map(ToString::to_string))
+                    .unwrap()
+                    .mcp_api_key_digest
+                    .is_none()
+            );
+        }
+        values.remove("MCP_API_KEY_SHA256");
+        assert!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string))
+                .unwrap()
+                .mcp_api_key_digest
+                .is_none()
+        );
+        let digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        values.insert("MCP_API_KEY_SHA256", digest);
+        assert_eq!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string))
+                .unwrap()
+                .mcp_api_key_digest
+                .as_deref(),
+            Some(digest)
+        );
+        values.insert(
+            "MCP_API_KEY_SHA256",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        );
+        assert!(matches!(
+            Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+            Err(ConfigError::Invalid("MCP_API_KEY_SHA256"))
+        ));
+    }
+
+    // Catches accepting plaintext or malformed MCP credentials at startup.
+    #[test]
+    fn malformed_mcp_digest_is_rejected_at_startup() {
+        let mut values = required_values();
+        for invalid in [
+            "plaintext-secret",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaag",
+        ] {
+            values.insert("MCP_API_KEY_SHA256", invalid);
+            assert!(
+                matches!(
+                    Config::from_lookup(|name| values.get(name).map(ToString::to_string)),
+                    Err(ConfigError::Invalid("MCP_API_KEY_SHA256"))
+                ),
+                "accepted malformed digest {invalid:?}"
+            );
+        }
     }
 
     #[test]
