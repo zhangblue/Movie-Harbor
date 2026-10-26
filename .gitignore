@@ -11,6 +11,7 @@ frontend/admin-web/dist/
 /data/
 /media/
 /dist/offline/
+/mcp/dist/
 tests/e2e/.generated/
 test-results/
 playwright-report/
