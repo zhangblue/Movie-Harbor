@@ -75,7 +75,13 @@ if(args[1]==='get'){
  if(process.env.FAKE_CODEX_RESTORE_VERIFY_CWD==='1'&&getCount===4){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,cwd:'/unexpected/cwd'}})));process.exit(0);}
  writeFileSync(1,JSON.stringify(rendered(item)));process.exit(0);
 }
-if(args[1]==='remove'){state=state.filter(x=>x.name!==args[2]);writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));process.exit(0);}
+if(args[1]==='remove'){
+ const removeCount=readFileSync(process.env.FAKE_CALLS,'utf8').trim().split('\\n').filter(line=>JSON.parse(line)[1]==='mcp'&&JSON.parse(line)[2]==='remove').length;
+ if((process.env.FAKE_CODEX_FAIL_REMOVE_AT??'').split(',').includes(String(removeCount)))process.exit(27);
+ state=state.filter(x=>x.name!==args[2]);writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));
+ if((process.env.FAKE_CODEX_FAIL_REMOVE_AFTER_AT??'').split(',').includes(String(removeCount)))process.exit(28);
+ process.exit(0);
+}
 if(args[1]==='add'){
  const separator=args.indexOf('--'); const env={};
  for(let index=0;index<separator;index++)if(args[index]==='--env'){const envValue=args[index+1]??'',equal=envValue.indexOf('=');if(equal>0)env[envValue.slice(0,equal)]=envValue.slice(equal+1);}
@@ -262,6 +268,26 @@ test('atomic config rewrite failure preserves the old file and registration', as
   assert.deepEqual((await readdir(paths.directory)).filter(name => name.startsWith('.config.env.') && name.endsWith('.tmp')), []);
 });
 
+test('directory fsync failure after config rename restores old bytes mode and registration', async t => {
+  const f = await fixture(t);
+  const first = await runInstall(f);
+  assert.equal(first.code, 0, first.stderr);
+  const paths = installedPaths(f);
+  const oldConfig = 'OLD_CONFIG=after-rename\n';
+  await writeFile(paths.config, oldConfig, { mode: 0o600 });
+  await chmod(paths.config, 0o600);
+  const marker = join(f.root, 'directory-fsync-failed-once');
+  const hook = join(f.root, 'fail-directory-fsync-after-rename.cjs');
+  await writeFile(hook, `const fs=require('node:fs'),path=require('node:path');const rename=fs.renameSync,open=fs.openSync,fsync=fs.fsyncSync;let renamed=false,directoryFd;fs.renameSync=(from,to)=>{const result=rename(from,to);if(path.basename(String(to))==='config.env')renamed=true;return result;};fs.openSync=(target,flags,...rest)=>{const fd=open(target,flags,...rest);if(renamed&&String(target)===${JSON.stringify(paths.directory)})directoryFd=fd;return fd;};fs.fsyncSync=fd=>{if(fd===directoryFd&&!fs.existsSync(${JSON.stringify(marker)})){fs.writeFileSync(${JSON.stringify(marker)},'failed');throw Object.assign(new Error('controlled directory fsync failure'),{code:'EIO'});}return fsync(fd);};\n`);
+  const beforeState = await state(f);
+  const result = await runInstall(f, { NODE_OPTIONS: `--require=${JSON.stringify(hook)}`, MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
+  assert.notEqual(result.code, 0);
+  assert.equal(await readFile(paths.config, 'utf8'), oldConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+  assert.deepEqual(await state(f), beforeState);
+  assert.deepEqual((await readdir(paths.directory)).filter(name => name.endsWith('.restore.tmp')), []);
+});
+
 test('custom generated root uses a canonical real parent and rejects missing or symlink parents', async t => {
   const success = await fixture(t);
   const parent = join(success.root, 'Generated Parent');
@@ -308,8 +334,9 @@ test('remove success followed by add failure removes the partial entry and resto
     transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
   };
   await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
 
-  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
 
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), [original]);
@@ -318,6 +345,8 @@ test('remove success followed by add failure removes the partial entry and resto
   const recorded = await calls(f);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'add').length, 2);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
 test('successful add with failed verification removes the new entry and restores the exact owned registration', async t => {
@@ -329,8 +358,9 @@ test('successful add with failed verification removes the new entry and restores
     transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
   };
   await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
 
-  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1' });
+  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
 
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), [original]);
@@ -340,6 +370,8 @@ test('successful add with failed verification removes the new entry and restores
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'add').length, 2);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'get').length, 4);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
 test('rollback failure is reported as a serious error and never claims installation success', async t => {
@@ -351,24 +383,60 @@ test('rollback failure is reported as a serious error and never claims installat
     transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
   };
   await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
 
-  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1', FAKE_CODEX_FAIL_ADD_AT: '2' });
+  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1', FAKE_CODEX_FAIL_ADD_AT: '2', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
 
   assert.notEqual(result.code, 0);
   assert.match(result.stderr, /严重.*回滚失败|回滚失败.*严重/);
   assert.doesNotMatch(result.stdout, /已全局注册/);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+});
+
+test('remove failure restores the old config before leaving the owned registration untouched', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f, 'OLD_CONFIG=A\n');
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_REMOVE_AT: '1', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+});
+
+test('remove that deletes state before failing restores both old config and registration', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f, 'OLD_CONFIG=remove-after\n');
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_REMOVE_AFTER_AT: '1', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
 test('failed first install removes a partially-created registration', async t => {
   const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const credentialsBefore = await readFile(paths.credentials);
+  await rm(paths.config);
 
-  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
 
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), []);
   assert.match(result.stderr, /注册失败/);
   assert.doesNotMatch(result.stdout, /已全局注册/);
   assert.equal((await calls(f)).filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 1);
+  await assert.rejects(lstat(paths.config), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
+  assert.deepEqual(await readFile(paths.credentials), credentialsBefore);
 });
 
 test('fails closed before removal when an owned registration has fields add cannot restore', async t => {
@@ -403,7 +471,7 @@ test('fails closed before removal when an owned registration has fields add cann
   }
 });
 
-test('add failure restores every old literal env value without leaking secrets to diagnostics', async t => {
+test('extra literal env fails closed before files or registration are changed and never leaks its value', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
   const oldSecret = 'old_mcp_secret_must_not_leak';
@@ -419,26 +487,15 @@ test('add failure restores every old literal env value without leaking secrets t
   };
   await writeFile(f.statePath, JSON.stringify([original]));
 
-  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+  const beforeConfig = await readFile(paths.config);
+  const result = await runInstall(f, { MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
 
   assert.notEqual(result.code, 0);
   assert.deepEqual(await state(f), [original]);
   assert.doesNotMatch(result.stdout + result.stderr + JSON.stringify(await calls(f)), new RegExp(oldSecret));
-});
-
-test('rollback transports a large multi-env snapshot without a single oversized argument', async t => {
-  const f = await fixture(t);
-  const paths = await writeExistingConfig(f);
-  const env: Record<string, string> = { MOVIE_HARBOR_MCP_CONFIG: paths.config };
-  for (let index = 0; index < 4; index++) env[`LARGE_${index}`] = String(index).repeat(40_000);
-  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env } };
-  await writeFile(f.statePath, JSON.stringify([original]));
-
-  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
-
-  assert.notEqual(result.code, 0);
-  assert.deepEqual(await state(f), [original]);
-  assert.match(result.stderr, /恢复|回滚/);
+  assert.equal((await calls(f)).some(call => call[1] === 'mcp' && ['remove', 'add'].includes(call[2] ?? '')), false);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
 test('rollback verification rejects non-default fields and reports a serious failure', async t => {

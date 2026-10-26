@@ -67,7 +67,6 @@ try{
   const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;
   const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
   const clean=value=>typeof value==="string"&&!/[\0\r\n]/.test(value);
-  const validEnv=value=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.entries(value).every(([key,item])=>key.length>0&&!/[=\0\r\n]/.test(key)&&typeof item==="string"&&!/\0/.test(item));
   if(!exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])||
      item.name!=="movie-harbor"||item.enabled!==true||
      (item.disabled_reason!==undefined&&item.disabled_reason!==null)||
@@ -78,7 +77,7 @@ try{
      !exactKeys(transport,["type","command","args","env","env_vars","cwd"])||
      transport.type!=="stdio"||transport.command!=="node"||!clean(transport.command)||
      !Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!clean(transport.args[0])||
-     !validEnv(env)||env.MOVIE_HARBOR_MCP_CONFIG!==config||!clean(env.MOVIE_HARBOR_MCP_CONFIG)||
+     !exactKeys(env,["MOVIE_HARBOR_MCP_CONFIG"])||env.MOVIE_HARBOR_MCP_CONFIG!==config||!clean(env.MOVIE_HARBOR_MCP_CONFIG)||
      (transport.env_vars!==undefined&&(!Array.isArray(transport.env_vars)||transport.env_vars.length!==0))||
      (transport.cwd!==undefined&&transport.cwd!==null))throw new Error();
   process.stdout.write(Buffer.from(JSON.stringify({command:transport.command,args:transport.args,env}),"utf8").toString("base64"));
@@ -100,6 +99,43 @@ credentials_file="$config_dir/credentials.env"
 if [ "$existing_count" = 1 ] && [ "$config_file" != "$verified_config_file" ]; then
   fail "MCP 配置目录在归属验证后发生变化"
 fi
+
+config_snapshot=$(node -e '
+const fs=require("node:fs"),path=process.argv[1];
+try{
+  const info=fs.lstatSync(path);
+  if(!info.isFile()||info.isSymbolicLink()||(info.mode&0o7777)!==0o600)throw new Error();
+  process.stdout.write(Buffer.from(JSON.stringify({exists:true,mode:info.mode&0o7777,content:fs.readFileSync(path).toString("base64")}),"utf8").toString("base64"));
+}catch(error){
+  if(!error||error.code!=="ENOENT")process.exit(1);
+  process.stdout.write(Buffer.from(JSON.stringify({exists:false}),"utf8").toString("base64"));
+}
+' "$config_file") || fail "无法安全保存原 MCP 配置"
+
+restore_config() {
+  printf '%s' "$config_snapshot" | node -e '
+const fs=require("node:fs"),pathModule=require("node:path"),crypto=require("node:crypto");
+const path=process.argv[1],snapshot=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8")),directoryPath=pathModule.dirname(path),temporary=pathModule.join(directoryPath,`.${pathModule.basename(path)}.${crypto.randomUUID()}.restore.tmp`);
+let fd,created=false;
+try{
+  let current;
+  try{current=fs.lstatSync(path);}catch(error){if(!error||error.code!=="ENOENT")throw error;}
+  if(!snapshot.exists){
+    if(current){if(!current.isFile()||current.isSymbolicLink()||(current.mode&0o7777)!==0o600)throw new Error("当前配置文件不安全");fs.unlinkSync(path);const directory=fs.openSync(directoryPath,fs.constants.O_RDONLY);try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}}
+  }else{
+    if(!current||!current.isFile()||current.isSymbolicLink()||(current.mode&0o7777)!==0o600)throw new Error("当前配置文件不安全");
+    if(snapshot.mode!==0o600||typeof snapshot.content!=="string")throw new Error("原配置快照无效");
+    fd=fs.openSync(temporary,fs.constants.O_CREAT|fs.constants.O_EXCL|fs.constants.O_WRONLY|fs.constants.O_NOFOLLOW,0o600);created=true;
+    fs.writeFileSync(fd,Buffer.from(snapshot.content,"base64"));fs.fchmodSync(fd,snapshot.mode);fs.fsyncSync(fd);fs.closeSync(fd);fd=undefined;
+    fs.renameSync(temporary,path);created=false;
+    const directory=fs.openSync(directoryPath,fs.constants.O_RDONLY);try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+  }
+}finally{
+  if(fd!==undefined)fs.closeSync(fd);
+  if(created)try{fs.unlinkSync(temporary);}catch(error){if(!error||error.code!=="ENOENT")throw error;}
+}
+' "$config_file"
+}
 
 generated_input=${MOVIE_HARBOR_MCP_GENERATED_ROOT:-$config_dir/generated}
 generated_root=$(node -e '
@@ -131,7 +167,7 @@ try {
 process.stdout.write(crypto.createHash("sha256").update(key).digest("hex"));
 ' "$credentials_file") || fail "无法安全创建或读取 MCP 独立凭据"
 
-node -e '
+if ! node -e '
 const fs=require("node:fs"),pathModule=require("node:path"),crypto=require("node:crypto");
 const [path,credentials,base,rootsText,generated,timeout]=process.argv.slice(1),temporary=pathModule.join(pathModule.dirname(path),`.${pathModule.basename(path)}.${crypto.randomUUID()}.tmp`);
 for(const value of [path,credentials,base,rootsText,generated,timeout]) if(/[\0\r\n]/.test(value)) throw new Error("配置包含非法换行或 NUL");
@@ -154,7 +190,10 @@ try {
   if(fd!==undefined)fs.closeSync(fd);
   if(created)try{fs.unlinkSync(temporary);}catch(error){if(!error||error.code!=="ENOENT")throw error;}
 }
-' "$config_file" "$credentials_file" "$base_url" "$allowed_roots" "$generated_root" "$request_timeout" || fail "无法安全写入 MCP 配置"
+' "$config_file" "$credentials_file" "$base_url" "$allowed_roots" "$generated_root" "$request_timeout"; then
+  restore_config || fail "严重错误：MCP 配置写入失败，且原配置恢复失败"
+  fail "无法安全写入 MCP 配置；已恢复原配置"
+fi
 
 verify_registration() {
   node -e '
@@ -209,8 +248,16 @@ try{
 '
 }
 
+registration_absent() {
+  node -e '
+const {spawnSync}=require("node:child_process"),result=spawnSync("codex",["mcp","list","--json"],{encoding:"utf8",maxBuffer:16*1024*1024});
+try{if(result.error||result.status!==0)throw new Error();const items=JSON.parse(result.stdout);if(!Array.isArray(items)||items.some(item=>item&&item.name==="movie-harbor"))throw new Error();}catch{process.exit(1);}
+'
+}
+
 rollback_after_failure() {
   original_error=$1
+  restore_config || fail "严重错误：$original_error，且旧 MCP 配置恢复失败"
   cleanup_registration "$new_snapshot" || fail "严重错误：$original_error，且无法清理新的或残留的 MCP 注册"
   if [ "$existing_count" = 0 ]; then
     fail "$original_error；已清理未完成的 MCP 注册"
@@ -227,7 +274,16 @@ rollback_after_failure() {
 }
 
 if [ "$existing_count" = 1 ]; then
-  codex mcp remove movie-harbor || fail "无法移除当前仓库的旧 MCP 注册"
+  if ! codex mcp remove movie-harbor; then
+    restore_config || fail "严重错误：无法移除当前仓库的旧 MCP 注册，且旧 MCP 配置恢复失败"
+    if verify_restored_registration; then
+      fail "无法移除当前仓库的旧 MCP 注册；已恢复旧 MCP 配置"
+    fi
+    registration_absent || fail "严重错误：旧 MCP 配置已恢复，但注册状态异常，拒绝覆盖"
+    restore_registration || fail "严重错误：旧 MCP 配置已恢复，但删除失败后无法恢复旧 MCP 注册"
+    verify_restored_registration || fail "严重错误：删除失败后恢复的旧 MCP 注册验证失败"
+    fail "无法移除当前仓库的旧 MCP 注册；已恢复旧 MCP 配置和注册"
+  fi
 fi
 
 if ! codex mcp add movie-harbor --env "MOVIE_HARBOR_MCP_CONFIG=$config_file" -- node "$entry"; then
