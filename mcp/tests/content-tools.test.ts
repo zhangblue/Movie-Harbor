@@ -70,7 +70,7 @@ test('catalog preserves movie candidates, marks trim and case exact names and ne
   assert.equal(out.matches.length, 3); assert.deepEqual(out.matches.map((m: any) => m.exact), [true, true, false]);
   assert.equal(out.exact_match_count, 2); assert.equal(out.requires_selection, true);
   assert.deepEqual(out.next_actions, ['update_movie_metadata']);
-  assert.deepEqual(Object.keys(out.matches[0]).sort(), ['id','name','year','duration_seconds','status','version','is_private','has_poster','has_video','exact'].sort());
+  assert.deepEqual(Object.keys(out.matches[0]).sort(), ['id','name','year','duration_minutes','status','version','is_private','has_poster','has_video','exact'].sort());
 });
 
 test('catalog series counts structure and zero candidates suggest explicit creation', async () => {
@@ -141,16 +141,82 @@ test('genre create recovers a concurrent same-name conflict with one reread and 
   assert.equal((await (await tools(created.client)).call('create_genre',{name:'Fantasy'})).reused,false);
 });
 
+// Wrong unit, access scope, or leaked MCP-only fields would change the created record.
+test('movie creation requires synopsis and confirmation, defaults public, and sends minutes as seconds', async () => {
+  const f = clientFixture([
+    { ...movie, duration_seconds: 7020, is_private: false },
+    { ...movie, duration_seconds: 7020, is_private: true },
+  ]);
+  const t = await tools(f.client);
+  const common = {
+    name: ' Alien ', synopsis: ' 太空货船遭遇未知生命。 ', year: 1979,
+    genre_ids: [genreId], staged_poster_token: 'poster-token',
+    duration_minutes: 117, confirmed: true,
+  };
+  await t.call('create_movie', common);
+  await t.call('create_movie', { ...common, visibility: 'private' });
+  assert.deepEqual(f.calls.map(call => call.body), [
+    { name: 'Alien', synopsis: '太空货船遭遇未知生命。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', duration_seconds: 7020, is_private: false },
+    { name: 'Alien', synopsis: '太空货船遭遇未知生命。', year: 1979,
+      genre_ids: [genreId], staged_poster_token: 'poster-token', duration_seconds: 7020, is_private: true },
+  ]);
+});
+
+test('movie tools expose integer minutes and convert updates back to API seconds', async () => {
+  const f = clientFixture([[{ ...movie, duration_seconds: 10176 }], movie]);
+  const t = await tools(f.client);
+  const found = await t.call('search_movies', { name: 'Alien' });
+  assert.equal(found.matches[0].duration_minutes, 170);
+  assert.equal('duration_seconds' in found.matches[0], false);
+  await t.call('update_movie_metadata', { movie_id: movieId, version: 3, duration_minutes: 170 });
+  assert.deepEqual(f.calls[1]!.body, { version: 3, duration_seconds: 10200 });
+});
+
+test('movie minute helpers round probe seconds, preserve null and reject overflow before HTTP', async () => {
+  const common = await import('../src/schemas/common.js');
+  assert.equal(typeof common.durationMinutesFromSeconds, 'function');
+  assert.equal(common.durationMinutesFromSeconds(10176.1), 170);
+  assert.equal(common.durationMinutesFromSeconds(1), 1);
+  assert.equal(common.durationMinutesFromSeconds(89), 1);
+  assert.equal(common.durationMinutesFromSeconds(90), 2);
+  assert.equal(common.durationMinutesFromSeconds(null), null);
+  assert.equal(common.durationSecondsFromMinutes(170), 10200);
+  assert.equal(common.durationSecondsFromMinutes(35_791_394), 2_147_483_640);
+  for (const minutes of [0, -1, 35_791_395, Number.MAX_SAFE_INTEGER, NaN, Infinity]) {
+    assert.throws(() => common.durationSecondsFromMinutes(minutes), /电影时长超出 Movie Harbor 支持范围/);
+  }
+});
+
+test('movie creation rejects mismatched API visibility or duration as invalid_response without retrying', async () => {
+  const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
+  for (const response of [
+    {...movie,duration_seconds:7020,is_private:true},
+    {...movie,duration_seconds:7000,is_private:false},
+    {...movie,duration_seconds:null,is_private:false},
+  ]) {
+    const f = clientFixture([response]);
+    await assert.rejects((await tools(f.client)).call('create_movie', {
+      name:'Alien',synopsis:'太空货船遭遇未知生命。',year:1979,duration_minutes:117,
+      genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true,
+    }), error => error instanceof MovieHarborClientError && error.code === 'invalid_response');
+    assert.equal(f.calls.length,1);
+  }
+});
+
 // Malformed creates and mutations must fail before network calls, even on direct handler use.
 test('movie series episode schemas reject missing required fields and invalid mutations before HTTP', async () => {
   const f = clientFixture([]); const t = await tools(f.client);
-  const movieInput = { name:'Alien',year:1979,duration_seconds:7000,genre_ids:[genreId],staged_poster_token:'poster-token' };
+  const movieInput = { name:'Alien',synopsis:'太空货船遭遇未知生命。',year:1979,duration_minutes:117,genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true };
   const seriesInput = { name:'Alien',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token' };
   const episodeInput = { series_id:seriesId,season_id:seasonId,version:3,number:1,name:'Pilot',duration_seconds:500 };
-  for (const [tool,input,keys] of [['create_movie',movieInput,['name','year','duration_seconds','genre_ids','staged_poster_token']],['create_series',seriesInput,['year','genre_ids','staged_poster_token']],['create_episode',episodeInput,['name','duration_seconds','version']]] as const) {
+  for (const [tool,input,keys] of [['create_movie',movieInput,['name','synopsis','year','duration_minutes','genre_ids','staged_poster_token','confirmed']],['create_series',seriesInput,['year','genre_ids','staged_poster_token']],['create_episode',episodeInput,['name','duration_seconds','version']]] as const) {
     for (const key of keys) { const invalid: any = {...input}; delete invalid[key]; await assert.rejects(t.call(tool,invalid)); }
   }
-  for (const invalid of [{...movieInput,genre_ids:[]},{...movieInput,genre_ids:[genreId,genreId]},{...movieInput,year:10000},{...movieInput,name:' '},{...movieInput,duration_seconds:0},{...movieInput,is_private:false},{...movieInput,confirmed:true}]) await assert.rejects(t.call('create_movie',invalid));
+  for (const invalid of [{...movieInput,genre_ids:[]},{...movieInput,genre_ids:[genreId,genreId]},{...movieInput,year:10000},{...movieInput,name:' '},{...movieInput,synopsis:' '},{...movieInput,synopsis:''},{...movieInput,duration_minutes:0},{...movieInput,duration_minutes:1.5},{...movieInput,duration_minutes:35_791_395},{...movieInput,duration_seconds:7020},{...movieInput,is_private:false},{...movieInput,visibility:'friends'},{...movieInput,confirmed:false}]) await assert.rejects(t.call('create_movie',invalid));
+  for (const patch of [{duration_seconds:7020},{duration_minutes:35_791_395},{duration_minutes:0},{duration_minutes:1.5}]) {
+    await assert.rejects(t.call('update_movie_metadata',{movie_id:movieId,version:3,...patch}));
+  }
   await assert.rejects(t.call('create_season',{series_id:'bad',version:1,number:1}));
   for (const series_id of ['../admin/users','11111111-1111-1111-1111-11111111111/','%2fapi%2fadmin','11111111111141118111111111111111']) {
     await assert.rejects(t.call('create_season',{series_id,version:1,number:1}));
@@ -164,12 +230,12 @@ test('movie series episode schemas reject missing required fields and invalid mu
   assert.equal(f.calls.length,0);
 });
 
-test('movie and series creation use one API and force a complete private draft', async () => {
-  const f = clientFixture([movie,series]); const t = await tools(f.client);
+test('movie and series creation use one API and respect each creation contract', async () => {
+  const f = clientFixture([{...movie,duration_seconds:7020},series]); const t = await tools(f.client);
   const common = {name:' Alien ',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token'};
-  assert.deepEqual(await t.call('create_movie',{...common,duration_seconds:7000}),{id:movieId,version:3,status:'draft',next_actions:['upload_movie_video']});
+  assert.deepEqual(await t.call('create_movie',{...common,synopsis:'太空货船遭遇未知生命。',duration_minutes:117,visibility:'private',confirmed:true}),{id:movieId,version:3,status:'draft',next_actions:['upload_movie_video']});
   assert.deepEqual(await t.call('create_series',common),{id:seriesId,version:3,status:'draft',next_actions:['create_season']});
-  assert.deepEqual(f.calls,[{method:'POST',path:'/api/admin/movies',body:{...common,name:'Alien',duration_seconds:7000,is_private:true}},{method:'POST',path:'/api/admin/series',body:{...common,name:'Alien',is_private:true}}]);
+  assert.deepEqual(f.calls,[{method:'POST',path:'/api/admin/movies',body:{...common,name:'Alien',synopsis:'太空货船遭遇未知生命。',duration_seconds:7020,is_private:true}},{method:'POST',path:'/api/admin/series',body:{...common,name:'Alien',is_private:true}}]);
 });
 
 test('series season create extracts its unique child and returns parent version without follow-up HTTP', async () => {
@@ -218,7 +284,7 @@ test('catalog and movie invalid API payloads produce safe stable errors', async 
   for (const [name,input,response] of [
     ['search_movies',{name:'Alien'},[{...movie,version:'SECRET'}]],
     ['search_series',{name:'Alien'},[{...series,seasons:'SECRET'}]],
-    ['create_movie',{name:'Alien',year:1979,duration_seconds:7000,genre_ids:[genreId],staged_poster_token:'poster-token'},null],
+    ['create_movie',{name:'Alien',synopsis:'太空货船遭遇未知生命。',year:1979,duration_minutes:117,genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true},null],
     ['update_episode_metadata',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New'},{series_version:3,episode:'SECRET'}],
   ] as const) {
     const f = clientFixture([response]);

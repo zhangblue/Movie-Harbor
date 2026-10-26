@@ -2,14 +2,14 @@ import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 import type { MovieHarborClient } from '../services/movie-harbor-client.js';
 import { MovieHarborClientError } from '../services/error-mapper.js';
-import { normalizedName, parseApi, readOnlyAnnotations, toolResult } from '../schemas/common.js';
+import { normalizedName, parseApi, readOnlyAnnotations, toolResult, durationMinutesFromSeconds } from '../schemas/common.js';
 import { searchMoviesInput, searchSeriesInput, getSeriesStructureInput, searchMoviesOutput, searchSeriesOutput, getSeriesStructureOutput, apiMovie, apiSeries } from '../schemas/content.js';
 
 export async function searchMovies(input: unknown, client: MovieHarborClient) {
   const { name } = searchMoviesInput.parse(input);
   const candidates = parseApi(z.array(apiMovie), await client.json('GET', '/api/admin/movies'));
   const normalized_name = normalizedName(name);
-  const matches = candidates.filter(movie => normalizedName(movie.name).includes(normalized_name)).map(movie => ({ id: movie.id, name: movie.name, year: movie.year, duration_seconds: movie.duration_seconds,
+  const matches = candidates.filter(movie => normalizedName(movie.name).includes(normalized_name)).map(movie => ({ id: movie.id, name: movie.name, year: movie.year, duration_minutes: durationMinutesFromSeconds(movie.duration_seconds),
     status: movie.status, version: movie.version, is_private: movie.is_private, has_poster: movie.poster !== null, has_video: movie.video !== null, exact: normalizedName(movie.name) === normalized_name }));
   const exact_match_count = matches.filter(match => match.exact).length;
   return toolResult(searchMoviesOutput, { query: name, normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1,
