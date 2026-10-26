@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { chmod, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -87,3 +89,20 @@ test('canonicalizes symlink roots and generated parent and accepts explicit time
   await mkdir(join(f.dir, 'output'));
   assert.equal((await loadConfig(f.env)).generatedRoot, join(f.dir, 'output'));
 });
+
+// Running the loader in a child bounds the regression even if FIFO open blocks forever.
+for (const target of ['configPath', 'credentials'] as const) {
+  test(`rejects FIFO ${target} without waiting for a writer`, async (t) => {
+    const f = await fixture(t);
+    await rm(f[target]);
+    await promisify(execFile)('mkfifo', ['-m', '600', f[target]]);
+    const source = new URL('../src/config.ts', import.meta.url).href;
+    await promisify(execFile)(process.execPath, [
+      '--import', 'tsx', '--input-type=module', '--eval',
+      `import assert from 'node:assert/strict';
+       import { loadConfig } from ${JSON.stringify(source)};
+       await assert.rejects(loadConfig(JSON.parse(process.argv[1])), /普通文件/);`,
+      JSON.stringify(f.env),
+    ], { timeout: 5000, killSignal: 'SIGKILL' });
+  });
+}

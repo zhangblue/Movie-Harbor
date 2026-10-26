@@ -16,8 +16,8 @@ function absolutePath(value: string | undefined, field: string): string {
 }
 
 async function readEnv(path: string, privateFile: boolean): Promise<Map<string, string>> {
-  // O_NOFOLLOW prevents replacing the checked file with a symlink before opening it.
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => {
+  // O_NOFOLLOW rejects symlinks; O_NONBLOCK lets stat reject FIFOs without waiting for a writer.
+  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => {
     throw new Error('配置必须是可读取的普通文件，不能使用符号链接');
   });
   try {
