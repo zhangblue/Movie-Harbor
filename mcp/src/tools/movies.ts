@@ -27,6 +27,7 @@ export async function createMovie(input: unknown, client: MovieHarborClient) {
 export async function updateMovieMetadata(input: unknown, client: MovieHarborClient) {
   const { movie_id, ...patch } = updateMovieInput.parse(input);
   const movie = parseApi(apiMovie, await client.json('PATCH', `/api/admin/movies/${movie_id}`, patch));
+  if (movie.id !== movie_id) throw new MovieHarborClientError('invalid_response');
   return toolResult(contentResult, { id: movie.id, version: movie.version, status: movie.status,
     next_actions: movie.video ? ['replace_movie_video', 'publish_movie'] : ['upload_movie_video'] }, '已更新电影元数据。');
 }

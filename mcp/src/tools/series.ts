@@ -30,12 +30,16 @@ export async function createEpisode(input: unknown, client: MovieHarborClient) {
 export async function updateSeriesMetadata(input: unknown, client: MovieHarborClient) {
   const { series_id, ...patch } = updateSeriesInput.parse(input);
   const series = parseApi(apiSeries, await client.json('PATCH', `/api/admin/series/${series_id}`, patch));
+  if (series.id !== series_id) throw new MovieHarborClientError('invalid_response');
   return toolResult(contentResult, { id: series.id, version: series.version, status: series.status, next_actions: ['get_series_structure'] }, '已更新剧集元数据。');
 }
 export async function updateEpisodeMetadata(input: unknown, client: MovieHarborClient) {
   const { series_id, season_id, episode_id, ...patch } = updateEpisodeInput.parse(input);
   const response = parseApi(apiEpisodeEnvelope, await client.json('PATCH', `/api/admin/series/${series_id}/seasons/${season_id}/episodes/${episode_id}`, patch));
   const episode = response.episode;
+  if (episode.id !== episode_id || episode.season_id !== season_id
+    || (response.series_id !== undefined && response.series_id !== series_id)
+    || (episode.series_id !== undefined && episode.series_id !== series_id)) throw new MovieHarborClientError('invalid_response');
   return toolResult(episodeOutput, { id: episode.id, version: episode.version, status: episode.status, series_version: response.series_version,
     next_actions: episode.video ? ['replace_episode_video', 'publish_episode'] : ['upload_episode_video'] }, '已更新单集元数据。');
 }

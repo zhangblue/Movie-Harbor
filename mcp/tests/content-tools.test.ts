@@ -237,3 +237,41 @@ test('movie stage poster validates MIME and file identity before one bounded upl
   for (const input of [{path:mislabeled},{path:outside},{path:'relative.png'},{path,confirmed:true}]) await assert.rejects(toolsForFile.call('stage_poster',input));
   assert.equal(requests.length,1);
 });
+
+// A schema-valid response can still belong to another resource; never return or reread it.
+for (const [label, tool, input, response] of [
+  ['series structure ID', 'get_series_structure', { series_id:seriesId }, { ...series,id:movieId }],
+  ['movie update ID', 'update_movie_metadata', { movie_id:movieId,version:2,name:'New' }, { ...movie,id:seriesId }],
+  ['series update ID', 'update_series_metadata', { series_id:seriesId,version:2,name:'New' }, { ...series,id:movieId }],
+  ['episode update ID', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,episode:{ ...episode,id:movieId } }],
+  ['episode update season', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,episode:{ ...episode,season_id:movieId } }],
+  ['episode envelope series', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,series_id:movieId,episode }],
+  ['episode embedded series', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,episode:{ ...episode,series_id:movieId } }],
+] as const) {
+  test(`catalog movie series episode rejects mismatched ${label} without another HTTP call`, async () => {
+    const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
+    const f = clientFixture([response]);
+    await assert.rejects((await tools(f.client)).call(tool,input), error => error instanceof MovieHarborClientError && error.code === 'invalid_response');
+    assert.equal(f.calls.length,1);
+  });
+}
+
+test('episode update accepts matching optional series ownership and filters relation fields from output', async () => {
+  const f = clientFixture([{series_version:4,series_id:seriesId,episode:{...episode,series_id:seriesId}}]);
+  const result = await (await tools(f.client)).call('update_episode_metadata',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New'});
+  assert.deepEqual(result,{id:episodeId,version:1,status:'draft',series_version:4,next_actions:['upload_episode_video']});
+  assert.equal(f.calls.length,1);
+});
+
+for (const [tool, createAction, label] of [['search_movies','create_movie','电影'],['search_series','create_series','剧集']] as const) {
+  test(`catalog ${tool} zero candidates text suggests explicit creation consistently with next_actions`, async () => {
+    const f = clientFixture([[]]); const t = await tools(f.client);
+    const result = await t.registrations.get(tool).handler({name:'Unknown'});
+    assert.deepEqual(result.structuredContent.next_actions,[createAction]);
+    assert.deepEqual(result.structuredContent.matches,[]);
+    assert.match(result.content[0].text,/可.*创建/);
+    assert.ok(result.content[0].text.includes(label));
+    assert.doesNotMatch(result.content[0].text,/选择/);
+    assert.equal(f.calls.length,1);
+  });
+}

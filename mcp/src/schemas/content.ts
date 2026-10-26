@@ -32,7 +32,7 @@ export const apiEpisode = z.object({ id, number: positiveInt, name: z.string(), 
 export const apiSeason = z.object({ id, number: positiveInt, episodes: z.array(apiEpisode) });
 export const apiSeries = z.object({ ...base, seasons: z.array(apiSeason) });
 export const apiGenre = z.object({ id, name: z.string(), enabled: z.boolean() });
-export const apiEpisodeEnvelope = z.object({ series_version: version, episode: apiEpisode });
+export const apiEpisodeEnvelope = z.object({ series_version: version, series_id: id.optional(), episode: apiEpisode.extend({ season_id: id, series_id: id.optional() }) });
 export const apiStagedPoster = z.object({ token, format: z.enum(['jpeg','png','webp']), byte_size: z.number().int().nonnegative(), expires_at: z.iso.datetime({ offset: true }) });
 
 const movieMatch = z.object({ id, name: z.string(), year: year.nullable(), duration_seconds: duration.nullable(), status, version, is_private: z.boolean(), has_poster: z.boolean(), has_video: z.boolean(), exact: z.boolean() });
