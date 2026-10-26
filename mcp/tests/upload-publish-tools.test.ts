@@ -74,21 +74,38 @@ test('upload, replace and publish tools register independently with strict write
     assert.ok(schema.inputSchema); assert.ok(schema.outputSchema);
     assert.deepEqual(schema.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false });
   }
-  await assert.rejects(tools.call('replace_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:false }), /需要明确确认替换/);
+  await assert.rejects(tools.call('replace_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:false }));
   await assert.rejects(tools.call('publish_movie', { movie_id:movieId,version:3,confirmed:false }), /需要独立发布确认/);
   assert.equal(c.calls.length, 0);
+});
+
+// Bypassing the confirmation schema must fail before probing the remote target or uploading.
+test('every ordinary and replacement upload requires import confirmation', async t => {
+  const f = await fixture(t);
+  for (const [name, input] of [
+    ['upload_movie_video', { movie_id: movieId, version: 3, path: f.path }],
+    ['replace_movie_video', { movie_id: movieId, version: 3, path: f.path }],
+    ['upload_episode_video', { series_id: seriesId, season_id: seasonId, episode_id: episodeId, version: 4, path: f.path }],
+    ['replace_episode_video', { series_id: seriesId, season_id: seasonId, episode_id: episodeId, version: 4, path: f.path }],
+  ] as const) {
+    const c = fakeClient([]);
+    const registered = await registeredTools(c.client, f);
+    await assert.rejects(registered.call(name, input));
+    await assert.rejects(registered.call(name, { ...input, confirmed: false }));
+    assert.equal(c.calls.length, 0);
+  }
 });
 
 test('ordinary movie upload refuses an occupied slot and never uploads or publishes', async t => {
   const f = await fixture(t); const c = fakeClient([{ ...movie, video: media }]);
   const tools = await registeredTools(c.client, f);
-  await assert.rejects(tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path }), /已有视频.*replace_movie_video/);
+  await assert.rejects(tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:true }), /已有视频.*replace_movie_video/);
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path]), [['json','GET',`/api/admin/movies/${movieId}`]]);
 });
 
 test('movie upload validates compatible media, streams once, filters output and does not publish', async t => {
   const f = await fixture(t); const c = fakeClient([movie, uploadResponse]); const tools = await registeredTools(c.client, f);
-  const out = await tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path });
+  const out = await tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:true });
   assert.deepEqual(out, { id:movieId,version:4,media_id:mediaId,mime_type:'video/mp4',byte_size:6,
     generated_file_deleted:false,retained_generated_path:null,next_actions:['publish_movie'] });
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path,call.mimeType]), [
@@ -114,7 +131,7 @@ test('movie upload rejects incompatible MP4 tracks before every HTTP call and po
     const dependencies = { ...f, probeMedia: async () => ({ durationSeconds: 1, video: selectedVideo, audio, subtitles }) };
     const tools = await registeredTools(c.client, dependencies);
     await assert.rejects(
-      tools.call('upload_movie_video', { movie_id: movieId, version: 3, path: f.path }),
+      tools.call('upload_movie_video', { movie_id: movieId, version: 3, path: f.path,confirmed:true }),
       error => /convert_video/.test(String(error)),
       name,
     );
@@ -132,14 +149,14 @@ test('replace requires an occupied target and explicit confirmation while upload
   assert.equal(replaced.mime_type,'video/webm');
   assert.equal(c.calls.at(-1).mimeType,'video/webm');
   const blocked = fakeClient([movie]); const blockedTools = await registeredTools(blocked.client, f);
-  await assert.rejects(blockedTools.call('upload_movie_video',{movie_id:movieId,version:3,path:mkv}), /convert_video|转换/);
+  await assert.rejects(blockedTools.call('upload_movie_video',{movie_id:movieId,version:3,path:mkv,confirmed:true}), /convert_video|转换/);
   assert.equal(blocked.calls.filter(call => call.kind === 'upload').length, 0);
 });
 
 test('episode upload validates hierarchy and returns episode and parent versions', async t => {
   const f = await fixture(t); const response = { ...uploadResponse, version:5, series_version:9 };
   const c = fakeClient([episodeEnvelope,response]); const tools = await registeredTools(c.client, f);
-  const input = {series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path};
+  const input = {series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path,confirmed:true};
   assert.deepEqual(await tools.call('upload_episode_video',input), {id:episodeId,version:5,series_version:9,media_id:mediaId,
     mime_type:'video/mp4',byte_size:6,generated_file_deleted:false,retained_generated_path:null,next_actions:['publish_episode']});
   assert.deepEqual(c.calls.map(call => call.path), [
@@ -159,7 +176,7 @@ test('upload rejects semantically impossible movie responses before cleanup', as
     { ...uploadResponse, version:5 },
   ].entries()) {
     const ordinary = fakeClient([movie,response]);
-    await assert.rejects((await registeredTools(ordinary.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:f.path}),/数据格式无效/);
+    await assert.rejects((await registeredTools(ordinary.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:f.path,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(f.path).then(()=>true),true);
     assert.equal(ordinary.calls.length,2);
 
@@ -169,14 +186,14 @@ test('upload rejects semantically impossible movie responses before cleanup', as
     await writeFile(generated,'made');
     await recordGeneratedFile(generated,source,f.config,f.credentials);
     const generatedClient = fakeClient([movie,{...response,byte_size:response.byte_size===999?999:4}]);
-    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated}),/数据格式无效/);
+    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(generated).then(()=>true),true,'invalid response must retain generated file');
     assert.equal(generatedClient.calls.length,2);
   }
 });
 
 test('episode upload rejects target or parent version jumps before cleanup', async t => {
-  const f = await fixture(t); const input={series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path};
+  const f = await fixture(t); const input={series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path,confirmed:true};
   for(const [index,response] of [
     {...uploadResponse,version:6,series_version:9},
     {...uploadResponse,version:5,series_version:10},
@@ -191,7 +208,7 @@ test('episode upload rejects target or parent version jumps before cleanup', asy
     await writeFile(generated,'made');
     await recordGeneratedFile(generated,source,f.config,f.credentials);
     const generatedClient=fakeClient([episodeEnvelope,{...response,byte_size:4}]);
-    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_episode_video',{...input,path:generated}),/数据格式无效/);
+    await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_episode_video',{...input,path:generated,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(generated).then(()=>true),true,'invalid episode response must retain generated file');
     assert.equal(generatedClient.calls.length,2);
   }
@@ -204,14 +221,14 @@ test('successful generated upload deletes only registered conversion output and 
   await recordGeneratedFile(generated,source,f.config,f.credentials);
   const success = fakeClient([movie,{...uploadResponse,byte_size:4}]);
   const successTools = await registeredTools(success.client,f);
-  const out = await successTools.call('upload_movie_video',{movie_id:movieId,version:3,path:generated});
+  const out = await successTools.call('upload_movie_video',{movie_id:movieId,version:3,path:generated,confirmed:true});
   assert.equal(out.generated_file_deleted,true); assert.equal(out.retained_generated_path,null);
   await assert.rejects(stat(generated),{code:'ENOENT'});
 
   const generated2 = join(f.config.generatedRoot,'retry.mp4'); await writeFile(generated2,'retry');
   await recordGeneratedFile(generated2,source,f.config,f.credentials);
   const failure = fakeClient([movie,new Error('remote failed')]);
-  await assert.rejects((await registeredTools(failure.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated2}), error => /保留|retry/.test(String(error)));
+  await assert.rejects((await registeredTools(failure.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated2,confirmed:true}), error => /保留|retry/.test(String(error)));
   assert.equal(await stat(generated2).then(() => true),true);
 });
 

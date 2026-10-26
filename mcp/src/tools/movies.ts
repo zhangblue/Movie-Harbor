@@ -8,7 +8,7 @@ import { stagePosterInput, stagePosterOutput, apiStagedPoster, createMovieInput,
 
 export interface MovieToolDependencies { client: MovieHarborClient; allowedRoots: string[] }
 export async function stagePoster(input: unknown, dependencies: MovieToolDependencies) {
-  const { path } = stagePosterInput.parse(input);
+  const { path, confirmed: _confirmed } = stagePosterInput.parse(input);
   const checkedPoster = await validatePoster(path, dependencies.allowedRoots);
   const file = await inspectAllowedFile(path, dependencies.allowedRoots);
   const currentIdentity = serializeIdentity(file);
@@ -42,7 +42,7 @@ export async function updateMovieMetadata(input: unknown, client: MovieHarborCli
     next_actions: movie.video ? ['replace_movie_video', 'publish_movie'] : ['upload_movie_video'] }, '已更新电影元数据。');
 }
 export function registerMovieTools(server: McpServer, dependencies: MovieToolDependencies) {
-  server.registerTool('stage_poster', { description: '验证并暂存一个本地海报，返回有期限的创建 token。', inputSchema: stagePosterInput, outputSchema: stagePosterOutput, annotations: writeAnnotations }, input => stagePoster(input, dependencies));
+  server.registerTool('stage_poster', { description: '携带入库确认 confirmed: true 后验证并暂存一个本地海报，返回有期限的创建 token。', inputSchema: stagePosterInput, outputSchema: stagePosterOutput, annotations: writeAnnotations }, input => stagePoster(input, dependencies));
   server.registerTool('create_movie', { description: '创建完整电影草稿；必须提供非空简介、年代、整数分钟时长、题材和暂存海报 token，并携带入库确认 confirmed: true；访问范围默认公开，可显式选择私密。', inputSchema: createMovieInput, outputSchema: createMovieOutput, annotations: writeAnnotations }, input => createMovie(input, dependencies.client));
   server.registerTool('update_movie_metadata', { description: '按明确电影 ID 和版本仅更新提交的元数据字段；电影时长使用整数分钟。', inputSchema: updateMovieInput, outputSchema: contentResult, annotations: writeAnnotations }, input => updateMovieMetadata(input, dependencies.client));
 }

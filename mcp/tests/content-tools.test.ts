@@ -110,10 +110,23 @@ test('genre list filters API fields and create reuses enabled exact names but re
   const enabled = { id: genreId, name: '奇幻', enabled: true, sort_order: 1, secret: 'SECRET' };
   const f = clientFixture([[enabled], [enabled], [{ ...enabled, enabled: false }]]); const t = await tools(f.client);
   assert.deepEqual(await t.call('list_genres', {}), { genres: [{ id: genreId, name: '奇幻', enabled: true }], next_actions: [] });
-  const reused = await t.call('create_genre', { name: ' 奇幻 ' });
+  const reused = await t.call('create_genre', { name: ' 奇幻 ', confirmed: true });
   assert.equal(reused.id, genreId); assert.equal(reused.reused, true); assert.deepEqual(reused.next_actions, []);
-  await assert.rejects(t.call('create_genre', { name: '奇幻' }), /同名题材已停用/);
+  await assert.rejects(t.call('create_genre', { name: '奇幻', confirmed: true }), /同名题材已停用/);
   assert.equal(f.calls.every(c => c.method === 'GET'), true);
+});
+
+// Missing confirmation must stop even the duplicate lookup; MCP-only fields never reach the API.
+test('genre creation requires import confirmation before any request and strips it from the API body', async () => {
+  const f = clientFixture([[], { id: genreId, name: '奇幻', enabled: true }]);
+  const t = await tools(f.client);
+  await assert.rejects(t.call('create_genre', { name: '奇幻' }));
+  await assert.rejects(t.call('create_genre', { name: '奇幻', confirmed: false }));
+  assert.equal(f.calls.length, 0);
+
+  const created = await t.call('create_genre', { name: '奇幻', confirmed: true });
+  assert.equal(created.reused, false);
+  assert.deepEqual(f.calls.at(-1)!.body, { name: '奇幻' });
 });
 
 // Built-in genres use canonical UUID text whose RFC version/variant bits are zero.
@@ -129,16 +142,16 @@ test('genre create recovers a concurrent same-name conflict with one reread and 
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   const enabled = { id: genreId, name: 'FANTASY', enabled: true, sort_order: 1 };
   const f = clientFixture([[{ ...enabled, name: 'Fantasy world' }], new MovieHarborClientError('version_conflict', 409), [enabled]]);
-  const out = await (await tools(f.client)).call('create_genre', { name: ' Fantasy ' });
+  const out = await (await tools(f.client)).call('create_genre', { name: ' Fantasy ', confirmed: true });
   assert.equal(out.reused, true); assert.equal(out.id, genreId);
   assert.deepEqual(f.calls.map(c => [c.method,c.path,c.body]), [['GET','/api/admin/genres',undefined],['POST','/api/admin/genres',{ name:'Fantasy' }],['GET','/api/admin/genres',undefined]]);
   for (const response of [[{ ...enabled, enabled: false }], [], [{ ...enabled, name: 'Fantasy world' }]]) {
     const g = clientFixture([[], new MovieHarborClientError('version_conflict',409), response]);
-    await assert.rejects((await tools(g.client)).call('create_genre', { name:'Fantasy' }), response[0]?.enabled === false ? /同名题材已停用/ : /版本|冲突/);
+    await assert.rejects((await tools(g.client)).call('create_genre', { name:'Fantasy', confirmed:true }), response[0]?.enabled === false ? /同名题材已停用/ : /版本|冲突/);
     assert.equal(g.calls.length,3);
   }
   const created = clientFixture([[], enabled]);
-  assert.equal((await (await tools(created.client)).call('create_genre',{name:'Fantasy'})).reused,false);
+  assert.equal((await (await tools(created.client)).call('create_genre',{name:'Fantasy',confirmed:true})).reused,false);
 });
 
 // Wrong unit, access scope, or leaked MCP-only fields would change the created record.
@@ -387,15 +400,19 @@ test('movie stage poster validates MIME and file identity before one bounded upl
   const address = server.address(); assert.ok(address && typeof address === 'object');
   const client = createMovieHarborClient({ baseUrl:new URL(`http://127.0.0.1:${address.port}/`),apiKey:'mhmcp_test',credentialDirectory:directory,allowedRoots:[allowed],generatedRoot:join(directory,'generated'),requestTimeoutMs:1000 });
   const toolsForFile = await tools(client,[allowed]);
-  const out = await toolsForFile.call('stage_poster',{path});
+  await assert.rejects(toolsForFile.call('stage_poster',{path}));
+  await assert.rejects(toolsForFile.call('stage_poster',{path,confirmed:false}));
+  assert.equal(requests.length,0);
+  const out = await toolsForFile.call('stage_poster',{path,confirmed:true});
   assert.deepEqual(out,{staged_poster_token:'mhposter_test',format:'png',byte_size:bytes.length,expires_at:'2026-10-26T10:30:00+00:00',next_actions:['create_movie','create_series']});
   assert.equal(requests.length,1); assert.equal(requests[0]!.method,'POST'); assert.equal(requests[0]!.url,'/api/admin/media/posters/stage');
   assert.match(requests[0]!.contentType!, /^multipart\/form-data; boundary=/);
   assert.ok(requests[0]!.body.includes(Buffer.from('Content-Type: image/png'))); assert.ok(requests[0]!.body.includes(bytes));
+  assert.equal(requests[0]!.body.includes(Buffer.from('confirmed')), false);
   assert.equal(JSON.stringify(out).includes(bytes.toString('base64')), false);
   const mislabeled = join(allowed,'fake.jpg'); await writeFile(mislabeled,bytes);
   const outside = join(directory,'outside.png'); await writeFile(outside,bytes);
-  for (const input of [{path:mislabeled},{path:outside},{path:'relative.png'},{path,confirmed:true}]) await assert.rejects(toolsForFile.call('stage_poster',input));
+  for (const input of [{path:mislabeled,confirmed:true},{path:outside,confirmed:true},{path:'relative.png',confirmed:true},{path,confirmed:true,unexpected:true}]) await assert.rejects(toolsForFile.call('stage_poster',input));
   assert.equal(requests.length,1);
 });
 

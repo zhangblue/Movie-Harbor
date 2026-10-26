@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import { isAbsolute, relative, sep } from 'node:path';
 import { z } from 'zod';
-import { id, parseApi, positiveInt, toolResult, version, writeAnnotations } from '../schemas/common.js';
+import { id, confirmed, parseApi, positiveInt, toolResult, version, writeAnnotations } from '../schemas/common.js';
 import { apiEpisodeEnvelope, apiMovie } from '../schemas/content.js';
 import { deleteGeneratedFile } from '../services/generated-files.js';
 import { inspectVideo, serializeIdentity } from '../services/media-inspector.js';
@@ -10,10 +10,10 @@ import { inspectAllowedFile } from '../services/path-policy.js';
 import type { LocalMediaDependencies } from './local-media.js';
 
 const localPath = z.string().refine(path => isAbsolute(path) && !path.includes('\0'), '必须使用不含 NUL 的绝对路径');
-export const uploadMovieVideoInput = z.strictObject({ movie_id: id, version, path: localPath });
-export const replaceMovieVideoInput = uploadMovieVideoInput.extend({ confirmed: z.boolean() });
-export const uploadEpisodeVideoInput = z.strictObject({ series_id: id, season_id: id, episode_id: id, version, path: localPath });
-export const replaceEpisodeVideoInput = uploadEpisodeVideoInput.extend({ confirmed: z.boolean() });
+export const uploadMovieVideoInput = z.strictObject({ movie_id: id, version, path: localPath, confirmed });
+export const replaceMovieVideoInput = uploadMovieVideoInput;
+export const uploadEpisodeVideoInput = z.strictObject({ series_id: id, season_id: id, episode_id: id, version, path: localPath, confirmed });
+export const replaceEpisodeVideoInput = uploadEpisodeVideoInput;
 const uploadFields = { id, version, media_id: id, mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(),
   generated_file_deleted: z.boolean(), retained_generated_path: z.string().nullable(), next_actions: z.array(z.string()) };
 export const movieUploadOutput = z.object(uploadFields);
@@ -76,7 +76,6 @@ async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependenci
 
 export async function uploadMovieVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceMovieVideoInput : uploadMovieVideoInput).parse(input);
-  if (replace && 'confirmed' in parsed && parsed.confirmed !== true) throw new Error('替换已有视频需要明确确认替换');
   const checked = await checkedVideo(parsed.path, dependencies);
   const movie = parseApi(apiMovie, await dependencies.client.json('GET', `/api/admin/movies/${parsed.movie_id}`));
   if (movie.id !== parsed.movie_id) throw new MovieHarborClientError('invalid_response');
@@ -98,7 +97,6 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
 
 export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceEpisodeVideoInput : uploadEpisodeVideoInput).parse(input);
-  if (replace && 'confirmed' in parsed && parsed.confirmed !== true) throw new Error('替换已有视频需要明确确认替换');
   const checked = await checkedVideo(parsed.path, dependencies);
   const detailPath = `/api/admin/series/${parsed.series_id}/seasons/${parsed.season_id}/episodes/${parsed.episode_id}`;
   const envelope = parseApi(apiEpisodeEnvelope, await dependencies.client.json('GET', detailPath));
@@ -126,8 +124,8 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
 }
 
 export function registerUploadTools(server: McpServer, dependencies: UploadDependencies) {
-  server.registerTool('upload_movie_video', { description:'向空电影视频槽流式上传兼容文件；不会发布。',inputSchema:uploadMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies));
-  server.registerTool('replace_movie_video', { description:'经明确确认后流式替换电影视频；不会发布。',inputSchema:replaceMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies,true));
-  server.registerTool('upload_episode_video', { description:'向空单集视频槽流式上传兼容文件；不会发布。',inputSchema:uploadEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies));
-  server.registerTool('replace_episode_video', { description:'经明确确认后流式替换单集视频；不会发布。',inputSchema:replaceEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies,true));
+  server.registerTool('upload_movie_video', { description:'携带入库确认 confirmed: true 后向空电影视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies));
+  server.registerTool('replace_movie_video', { description:'携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies,true));
+  server.registerTool('upload_episode_video', { description:'携带入库确认 confirmed: true 后向空单集视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies));
+  server.registerTool('replace_episode_video', { description:'携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies,true));
 }
