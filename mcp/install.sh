@@ -208,19 +208,22 @@ new_snapshot=$(node -e 'const [entry,config]=process.argv.slice(1);process.stdou
 cleanup_registration() {
   expected_snapshot=$1
   printf '%s' "$expected_snapshot" | node -e '
-const fs=require("node:fs"),{spawnSync}=require("node:child_process"),expected=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8")),options={encoding:"utf8",maxBuffer:1024*1024};
+const fs=require("node:fs"),{spawnSync}=require("node:child_process"),expected=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8")),options={encoding:"utf8",maxBuffer:16*1024*1024};
 const run=args=>spawnSync("codex",args,options);
 const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
 const sameMap=(left,right)=>exactKeys(left,Object.keys(right))&&Object.keys(left).length===Object.keys(right).length&&Object.entries(right).every(([key,value])=>left[key]===value);
 const isOwned=item=>{const transport=item&&item.transport;return exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])&&item.name==="movie-harbor"&&item.enabled===true&&(item.disabled_reason===undefined||item.disabled_reason===null)&&(item.startup_timeout_sec===undefined||item.startup_timeout_sec===null)&&(item.tool_timeout_sec===undefined||item.tool_timeout_sec===null)&&(item.enabled_tools===undefined||item.enabled_tools===null)&&(item.disabled_tools===undefined||item.disabled_tools===null)&&exactKeys(transport,["type","command","args","env","env_vars","cwd"])&&transport.type==="stdio"&&transport.command===expected.command&&JSON.stringify(transport.args)===JSON.stringify(expected.args)&&sameMap(transport.env,expected.env)&&(transport.env_vars===undefined||(Array.isArray(transport.env_vars)&&transport.env_vars.length===0))&&(transport.cwd===undefined||transport.cwd===null);};
-try{
+const state=()=>{
   const current=run(["mcp","get","movie-harbor","--json"]);
-  if(!current.error&&current.status===0){
-    if(!isOwned(JSON.parse(current.stdout)))throw new Error();
-    const removed=run(["mcp","remove","movie-harbor"]);if(removed.error||removed.status!==0)throw new Error();
-  }
+  if(!current.error&&current.status===0)return isOwned(JSON.parse(current.stdout))?"owned":"foreign";
   const listed=run(["mcp","list","--json"]);if(listed.error||listed.status!==0)throw new Error();
-  const items=JSON.parse(listed.stdout);if(!Array.isArray(items)||items.some(item=>item&&item.name==="movie-harbor"))throw new Error();
+  const items=JSON.parse(listed.stdout);if(!Array.isArray(items))throw new Error();
+  return items.some(item=>item&&item.name==="movie-harbor")?"foreign":"absent";
+};
+try{
+  let current=state();if(current==="absent")process.exit(0);if(current!=="owned")throw new Error();
+  run(["mcp","remove","movie-harbor"]);current=state();if(current==="absent")process.exit(0);if(current!=="owned")throw new Error();
+  run(["mcp","remove","movie-harbor"]);if(state()!=="absent")throw new Error();
 }catch{process.exit(1);}
 '
 }

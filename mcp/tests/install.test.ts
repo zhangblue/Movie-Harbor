@@ -72,12 +72,13 @@ if(args[1]==='get'){
  const item=state.find(x=>x.name===args[2]);if(!item)process.exit(1);
  const getCount=readFileSync(process.env.FAKE_CALLS,'utf8').trim().split('\\n').filter(line=>JSON.parse(line)[1]==='mcp'&&JSON.parse(line)[2]==='get').length;
  if(process.env.FAKE_CODEX_VERIFY_FAIL_ONCE==='1'&&getCount===2){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,args:['/wrong/server.js']}})));process.exit(0);}
- if(process.env.FAKE_CODEX_RESTORE_VERIFY_CWD==='1'&&getCount===4){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,cwd:'/unexpected/cwd'}})));process.exit(0);}
+ if(process.env.FAKE_CODEX_RESTORE_VERIFY_CWD==='1'&&getCount===5){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,cwd:'/unexpected/cwd'}})));process.exit(0);}
  writeFileSync(1,JSON.stringify(rendered(item)));process.exit(0);
 }
 if(args[1]==='remove'){
  const removeCount=readFileSync(process.env.FAKE_CALLS,'utf8').trim().split('\\n').filter(line=>JSON.parse(line)[1]==='mcp'&&JSON.parse(line)[2]==='remove').length;
  if((process.env.FAKE_CODEX_FAIL_REMOVE_AT??'').split(',').includes(String(removeCount)))process.exit(27);
+ if((process.env.FAKE_CODEX_REMOVE_FAIL_WITH_FOREIGN_AT??'').split(',').includes(String(removeCount))){state=[{name:args[2],enabled:true,transport:{type:'stdio',command:'node',args:['/foreign/server.js'],env:{MOVIE_HARBOR_MCP_CONFIG:'/foreign/config.env'}}}];writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));process.exit(30);}
  state=state.filter(x=>x.name!==args[2]);writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));
  if((process.env.FAKE_CODEX_FAIL_REMOVE_AFTER_AT??'').split(',').includes(String(removeCount)))process.exit(28);
  process.exit(0);
@@ -349,6 +350,39 @@ test('remove success followed by add failure removes the partial entry and resto
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
+test('rollback continues when cleanup remove deletes the new entry before returning nonzero', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f, 'OLD_CONFIG=cleanup-remove\n');
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1', FAKE_CODEX_FAIL_REMOVE_AFTER_AT: '2', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
+  assert.match(result.stderr, /恢复|回滚/);
+});
+
+test('rollback cleanup fails closed without deleting a foreign replacement after remove failure', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f, 'OLD_CONFIG=foreign-cleanup\n');
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  const foreign: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: ['/foreign/server.js'], env: { MOVIE_HARBOR_MCP_CONFIG: '/foreign/config.env' } } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+  const beforeConfig = await readFile(paths.config);
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1', FAKE_CODEX_REMOVE_FAIL_WITH_FOREIGN_AT: '2', MOVIE_HARBOR_MCP_BASE_URL: 'http://new-target.example/' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [foreign]);
+  assert.deepEqual(await readFile(paths.config), beforeConfig);
+  assert.equal((await calls(f)).filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
+  assert.match(result.stderr, /严重.*无法清理/);
+});
+
 test('successful add with failed verification removes the new entry and restores the exact owned registration', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -369,7 +403,7 @@ test('successful add with failed verification removes the new entry and restores
   const recorded = await calls(f);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
   assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'add').length, 2);
-  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'get').length, 4);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'get').length, 5);
   assert.deepEqual(await readFile(paths.config), beforeConfig);
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
