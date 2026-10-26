@@ -2851,6 +2851,20 @@ async fn admin_series_create_ignores_mcp_metadata_and_episode_duration_is_option
     let result = body(add_season(&app, &cookie, &csrf, id, 1, 1).await).await;
     let season = result["seasons"][0]["id"].as_str().unwrap();
     let path = format!("/api/admin/series/{id}/seasons/{season}/episodes");
+    for (field, value) in [
+        ("version", json!(0)),
+        ("number", json!(0)),
+        ("name", json!(" ")),
+    ] {
+        let mut invalid = json!({"version":2,"number":1,"name":"Episode","duration_seconds":60});
+        invalid[field] = value;
+        assert_eq!(
+            write(&app, "POST", &path, invalid, &cookie, &csrf)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST,
+        );
+    }
     for duration in [0, -1] {
         assert_eq!(
             write(

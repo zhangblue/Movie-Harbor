@@ -1084,3 +1084,62 @@ async fn mcp_episode_duration_is_required_and_versions_remain_atomic() {
     assert_eq!(version, 2);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+// Catches falling through to administrator 400 errors or reporting only the first invalid field.
+#[tokio::test]
+async fn mcp_episode_semantic_errors_report_all_fields_without_writes() {
+    let (db, app, root) = setup().await;
+    let series = uuid::Uuid::new_v4();
+    let season = uuid::Uuid::new_v4();
+    db.execute_unprepared(&format!("INSERT INTO series(id,name,is_private,status,version) VALUES ('{series}','Parent',true,'draft',1); INSERT INTO season(id,series_id,number) VALUES ('{season}','{series}',1)")).await.unwrap();
+    let path = format!("/api/admin/series/{series}/seasons/{season}/episodes");
+    let valid =
+        serde_json::json!({"version":1,"number":1,"name":"Episode","duration_seconds":1800});
+    let mut cases = Vec::new();
+    for (field, value) in [
+        ("version", serde_json::json!(0)),
+        ("version", serde_json::json!(-1)),
+        ("number", serde_json::json!(0)),
+        ("number", serde_json::json!(-1)),
+        ("name", serde_json::json!(" \t\n ")),
+    ] {
+        let mut input = valid.clone();
+        input[field] = value;
+        cases.push((input, serde_json::json!([field])));
+    }
+    cases.push((
+        serde_json::json!({"version":0,"number":-1,"name":" "}),
+        serde_json::json!(["version", "number", "name", "duration_seconds"]),
+    ));
+    cases.push((
+        serde_json::json!({"version":-1,"number":0,"name":" ","duration_seconds":0}),
+        serde_json::json!(["version", "number", "name", "duration_seconds"]),
+    ));
+    cases.push((
+        serde_json::json!({"version":1,"number":0,"name":" ","duration_seconds":1800}),
+        serde_json::json!(["number", "name"]),
+    ));
+    let mut actual = Vec::new();
+    let mut expected = Vec::new();
+    for (input, fields) in cases {
+        let response = mcp_post(&app, &path, input).await;
+        let status = response.status();
+        actual.push((status, body(response).await["fields"].clone()));
+        expected.push((StatusCode::UNPROCESSABLE_ENTITY, fields));
+        assert_eq!(count(&db, "episode").await, 0);
+        let version: i64 = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT version FROM series WHERE id=$1",
+                [series.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+            .try_get("", "version")
+            .unwrap();
+        assert_eq!(version, 1);
+    }
+    assert_eq!(actual, expected);
+    std::fs::remove_dir_all(root).unwrap();
+}

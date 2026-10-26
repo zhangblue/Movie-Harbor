@@ -449,12 +449,22 @@ pub async fn create_episode_mcp(
     db: &DatabaseConnection,
     command: CreateEpisodeCommand,
 ) -> Result<SeriesResponse, SeriesError> {
-    if command
-        .input
-        .duration_seconds
-        .is_none_or(|duration| duration <= 0)
-    {
-        return Err(SeriesError::Validation(vec!["duration_seconds"]));
+    let input = &command.input;
+    let mut fields = Vec::new();
+    if input.version <= 0 {
+        fields.push("version");
+    }
+    if input.number <= 0 {
+        fields.push("number");
+    }
+    if input.name.trim().is_empty() {
+        fields.push("name");
+    }
+    if input.duration_seconds.is_none_or(|duration| duration <= 0) {
+        fields.push("duration_seconds");
+    }
+    if !fields.is_empty() {
+        return Err(SeriesError::Validation(fields));
     }
     create_episode(db, command).await
 }
