@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Transform } from "node:stream";
+import { Readable, Transform, Writable } from "node:stream";
 import { createAdminClient, ImportRequestError } from "../tools/content-import/client.mjs";
 
 async function fakeMovieHarbor(handler = async (_request, response) => {
@@ -460,4 +460,74 @@ test("rejects a successful JSON response larger than 16 MiB", async () => {
       return true;
     });
   });
+});
+
+
+// Catches writing ahead of the flush callback or miscounting UTF-8 multipart metadata.
+test("shared multipart streams with bounded buffering and an exact byte length", async (t) => {
+  const { createMultipartFileBody } = await import("../tools/http/stream-multipart.mjs");
+  const directory = await mkdtemp(join(tmpdir(), "mh-multipart-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const localPath = join(directory, "影片.mp4");
+  const payload = Buffer.alloc(1024 * 1024, 0x61);
+  writeFileSync(localPath, payload);
+  const chunks = [];
+  let maxBuffered = 0;
+  const sink = new Writable({ highWaterMark: 1, write(chunk, _encoding, callback) {
+    maxBuffered = Math.max(maxBuffered, this.writableLength);
+    chunks.push(chunk);
+    setTimeout(callback, 1);
+  } });
+  const multipart = createMultipartFileBody({ localPath, fileName: "影片.mp4", mimeType: "video/mp4", byteSize: payload.length });
+  await multipart.writeTo(sink);
+  const body = Buffer.concat(chunks);
+  assert.equal(multipart.headers["content-length"], String(body.length));
+  assert.ok(maxBuffered < payload.length);
+  assert.match(body.toString("utf8", 0, 200), /name="file"; filename="影片.mp4"/);
+  assert.ok(body.includes(payload));
+  assert.equal(sink.writableFinished, true);
+});
+
+// Catches accepting short/long streams and leaving source/destination alive on cancellation.
+test("shared multipart rejects changed sizes and abort destroys both streams", async () => {
+  const { createMultipartFileBody } = await import("../tools/http/stream-multipart.mjs");
+  for (const size of [0, 2]) {
+    const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+    const source = Readable.from([Buffer.from("x")]);
+    await assert.rejects(createMultipartFileBody({ localPath: "/unused", fileName: "v.mp4", mimeType: "video/mp4", byteSize: size })
+      .writeTo(sink, { createStream: () => source }), /file size changed/);
+    assert.equal(sink.destroyed, true);
+    assert.equal(source.destroyed, true);
+  }
+  const abort = new AbortController();
+  const source = new Readable({ read() {} });
+  const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  const writing = createMultipartFileBody({ localPath: "/unused", fileName: "v.mp4", mimeType: "video/mp4", byteSize: 1 })
+    .writeTo(sink, { createStream: () => source, signal: abort.signal });
+  setImmediate(() => abort.abort());
+  await assert.rejects(writing, /abort/i);
+  assert.equal(source.destroyed, true);
+  assert.equal(sink.destroyed, true);
+});
+
+// Catches header injection and overflow which can corrupt an HTTP message boundary.
+test("shared multipart validates headers and writeChunk rejects remote close", async () => {
+  const { multipartParts, writeChunk } = await import("../tools/http/stream-multipart.mjs");
+  for (const input of [
+    { fileName: 'bad\rname.mp4', mimeType: 'video/mp4', byteSize: 1 },
+    { fileName: 'v.mp4', mimeType: 'video/mp4\r\nX-Injected: yes', byteSize: 1 },
+    { fileName: 'v.mp4', mimeType: 'video/mp4', byteSize: Number.MAX_SAFE_INTEGER },
+  ]) assert.throws(() => multipartParts(input));
+  const sink = new Writable({ write() {} });
+  const writing = writeChunk(sink, Buffer.from("x"));
+  sink.destroy();
+  await assert.rejects(writing, /closed/i);
+});
+
+// Catches a shared multipart validation error escaping the CLI error contract.
+test("CLI rejects unsafe multipart lengths with its content error contract", async () => {
+  const client = createAdminClient("http://127.0.0.1:1");
+  await assert.rejects(client.upload("/api/admin/media/movies/id/video", {
+    localPath: "/unused/video.mp4", byteSize: Number.MAX_SAFE_INTEGER,
+  }), error => error instanceof ImportRequestError && error.category === "content" && !error.fatal);
 });

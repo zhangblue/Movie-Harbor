@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createMultipartFileBody } from "../http/stream-multipart.mjs";
 import { createReadStream as defaultCreateReadStream } from "node:fs";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -181,36 +181,13 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
         !fileName || /[\r\n"\\\0/]/.test(fileName) || !mimeType) {
       throw new ImportRequestError("invalid upload media", { category: "content" });
     }
-    const boundary = `movie-harbor-${randomBytes(16).toString("hex")}`;
-    const prefix = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
-    const suffix = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const contentLength = prefix.length + byteSize + suffix.length;
+    let multipart;
+    try { multipart = createMultipartFileBody({ localPath, fileName, mimeType, byteSize }); }
+    catch { throw new ImportRequestError("invalid upload media", { category: "content" }); }
     const { result } = await request("POST", path, {
-      headers: { "content-type": `multipart/form-data; boundary=${boundary}`, "content-length": String(contentLength) },
-      async writeBody(req, setFile, progress) {
-        function write(chunk) {
-          // Await actual flushing, bounding buffering and refreshing only on transmission progress.
-          return new Promise((resolve, reject) => {
-            function closed() { reject(new Error("request closed")); }
-            req.once("close", closed);
-            req.write(chunk, (error) => {
-              req.off("close", closed);
-              if (error) reject(error);
-              else { progress(); resolve(); }
-            });
-          });
-        }
-        await write(prefix);
-        const file = createReadStream(localPath);
-        setFile(file);
-        let sent = 0;
-        for await (const chunk of file) {
-          sent += chunk.length;
-          if (sent > byteSize) throw new Error("file size changed");
-          await write(chunk);
-        }
-        if (sent !== byteSize) throw new Error("file size changed");
-        req.end(suffix);
+      headers: multipart.headers,
+      writeBody(req, setFile, progress) {
+        return multipart.writeTo(req, { createStream: createReadStream, onStream: setFile, onProgress: progress });
       },
     });
     return result;
