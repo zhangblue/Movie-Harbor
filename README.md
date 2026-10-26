@@ -41,6 +41,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [内容迁移指南](docs/guides/content-transfer.md)：管理媒体路径、JSON 导出与可恢复导入。
 - [视频转换指南](docs/guides/video-conversion.md)：上传前的本机单文件转换、依赖与字幕限制。
 - [媒体与备份指南](docs/guides/media-and-backup.md)：目录权限、同步删除、迁移 v5、一致备份与恢复。
+- [Codex 视频入库 MCP 指南](docs/guides/codex-mcp.md)：全局安装、独立密钥、原子入库、转换与发布确认。
 
 ## 开发文档
 

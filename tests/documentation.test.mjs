@@ -27,6 +27,7 @@ test("README guide navigation and guide links resolve", () => {
     "content-transfer.md",
     "video-conversion.md",
     "media-and-backup.md",
+    "codex-mcp.md",
     "development.md",
     "database-schema.md",
   ];

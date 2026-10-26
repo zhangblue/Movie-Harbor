@@ -10,13 +10,14 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   use: { baseURL, trace: "retain-on-failure" },
   projects: [
+    { name: "mcp", testMatch: /mcp\.spec\.ts/ },
     { name: "public", testMatch: /public\.spec\.ts/ },
     { name: "series", testMatch: /series\.spec\.ts/, dependencies: ["public"] },
     { name: "export", testMatch: /export\.spec\.ts/, dependencies: ["series"] },
     { name: "import", testMatch: /import\.spec\.ts/, dependencies: ["export"] },
     { name: "playback", testMatch: /playback\.spec\.ts/, dependencies: ["import"] },
     { name: "pagination", testMatch: /pagination\.spec\.ts/, dependencies: ["playback"] },
-    { name: "admin", testMatch: /admin\.spec\.ts/, dependencies: ["pagination"] },
+    { name: "admin", testMatch: /admin\.spec\.ts/, dependencies: ["pagination", "mcp"] },
     { name: "persistence", testMatch: /persistence\.spec\.ts/ },
   ],
 });

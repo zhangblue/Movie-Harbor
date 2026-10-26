@@ -103,6 +103,15 @@ test('genre list filters API fields and create reuses enabled exact names but re
   assert.equal(f.calls.every(c => c.method === 'GET'), true);
 });
 
+// Built-in genres use canonical UUID text whose RFC version/variant bits are zero.
+test('genre list accepts the built-in database UUID representation', async () => {
+  const seededId = '00000000-0000-0000-0001-000000000001';
+  const f = clientFixture([[{ id: seededId, name: '剧情', enabled: true, sort_order: 1 }]]);
+  const out = await (await tools(f.client)).call('list_genres', {});
+  assert.deepEqual(out, { genres: [{ id: seededId, name: '剧情', enabled: true }], next_actions: [] });
+  assert.equal(f.calls.length, 1);
+});
+
 test('genre create recovers a concurrent same-name conflict with one reread and never fuzzy-merges', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   const enabled = { id: genreId, name: 'FANTASY', enabled: true, sort_order: 1 };
@@ -130,6 +139,9 @@ test('movie series episode schemas reject missing required fields and invalid mu
   }
   for (const invalid of [{...movieInput,genre_ids:[]},{...movieInput,genre_ids:[genreId,genreId]},{...movieInput,year:10000},{...movieInput,name:' '},{...movieInput,duration_seconds:0},{...movieInput,is_private:false},{...movieInput,confirmed:true}]) await assert.rejects(t.call('create_movie',invalid));
   await assert.rejects(t.call('create_season',{series_id:'bad',version:1,number:1}));
+  for (const series_id of ['../admin/users','11111111-1111-1111-1111-11111111111/','%2fapi%2fadmin','11111111111141118111111111111111']) {
+    await assert.rejects(t.call('create_season',{series_id,version:1,number:1}));
+  }
   await assert.rejects(t.call('create_episode',{...episodeInput,number:0}));
   for (const [name,ids] of [['update_movie_metadata',{movie_id:movieId}],['update_series_metadata',{series_id:seriesId}],['update_episode_metadata',{series_id:seriesId,season_id:seasonId,episode_id:episodeId}]] as const) {
     await assert.rejects(t.call(name,{...ids,version:1}));

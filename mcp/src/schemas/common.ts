@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { MovieHarborClientError } from '../services/error-mapper.js';
 
-export const id = z.uuid();
+// The backend and PostgreSQL accept canonical 8-4-4-4-12 UUID text even for
+// legacy seeded rows whose RFC version and variant bits are zero.
+export const id = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
 export const positiveInt = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 export const version = positiveInt;
 export const name = z.string().trim().min(1);
