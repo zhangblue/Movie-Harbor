@@ -21,7 +21,11 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
   try {
     assert.deepEqual(client.getServerVersion(),{name:'movie-harbor',version:'0.1.0'});
     const instructions = client.getInstructions() ?? '';
-    for(const phrase of ['海报','私密草稿','转换','入库','替换','发布','禁止自动发布','父剧集']) assert.match(instructions,new RegExp(phrase));
+    for (const phrase of [
+      '联网', '来源', '年份', '简介', '题材', '单集名称', '海报',
+      '默认公开', '完整入库计划', '确认失效', '转换', '上传', '发布', '禁止自动发布',
+    ]) assert.match(instructions, new RegExp(phrase));
+    assert.doesNotMatch(instructions, /固定.*私密草稿/);
     const listed = await client.listTools();
     const names = listed.tools.map(tool=>tool.name).sort();
     assert.deepEqual(names,[
@@ -32,6 +36,17 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
     assert.ok(listed.tools.every(tool=>tool.outputSchema));
+    for (const [name, fields] of [
+      ['create_movie', ['synopsis', 'duration_minutes', 'visibility', 'confirmed']],
+      ['create_series', ['synopsis', 'visibility', 'confirmed']],
+      ['create_episode', ['name', 'duration_seconds', 'confirmed']],
+      ['upload_movie_video', ['confirmed']],
+    ] as const) {
+      const tool = listed.tools.find(tool => tool.name === name);
+      assert.ok(tool, `${name} must be listed`);
+      for (const field of fields) assert.ok(Object.hasOwn(tool.inputSchema.properties ?? {}, field), `${name} must expose ${field}`);
+      if (name === 'create_movie') assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, 'duration_seconds'), false);
+    }
     const result = await client.callTool({name:'search_movies',arguments:{name:'Unknown'}});
     assert.equal(result.isError,undefined);
     assert.deepEqual(result.structuredContent,{query:'Unknown',normalized_name:'unknown',matches:[],exact_match_count:0,requires_selection:false,next_actions:['create_movie']});
