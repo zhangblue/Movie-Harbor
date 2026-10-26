@@ -10,7 +10,16 @@ import { fileURLToPath } from 'node:url';
 const sourceMcp = fileURLToPath(new URL('../', import.meta.url));
 const sourceInstaller = join(sourceMcp, 'install.sh');
 
-type Server = { name: string; transport: { type: string; command?: string; args?: string[]; env?: Record<string, string> | null } };
+type Server = {
+  name: string;
+  enabled?: boolean;
+  disabled_reason?: string | null;
+  startup_timeout_sec?: number | null;
+  tool_timeout_sec?: number | null;
+  enabled_tools?: string[] | null;
+  disabled_tools?: string[] | null;
+  transport: { type: string; command?: string; args?: string[]; env?: Record<string, string> | null; env_vars?: string[]; cwd?: string | null };
+};
 
 async function executable(path: string, source: string) {
   await writeFile(path, source, { mode: 0o700 });
@@ -49,20 +58,32 @@ const prefix=args.at(-1); if(args[0]==='run'&&args[1]==='build'&&prefix){mkdirSy
 `);
   await executable(join(fakeBin, 'codex'), `#!/usr/bin/env node
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-const args=process.argv.slice(2); appendFileSync(process.env.FAKE_CALLS,JSON.stringify(['codex',...args])+'\\n');
+const args=process.argv.slice(2);
+const loggedArgs=args.map((arg,index)=>args[index-1]==='--env'?arg.slice(0,arg.indexOf('=')+1)+'<redacted>':arg);
+appendFileSync(process.env.FAKE_CALLS,JSON.stringify(['codex',...loggedArgs])+'\\n');
 if(process.env.FAKE_CODEX_MALFORMED==='1'&&args[0]==='mcp'&&args[1]==='list'){process.stdout.write('{bad');process.exit(0);}
 if(process.env.FAKE_CODEX_LIST_FAIL==='1'&&args[0]==='mcp'&&args[1]==='list'){process.stdout.write('[]');process.exit(17);}
 if(process.env.FAKE_CODEX_GET_FAIL==='1'&&args[0]==='mcp'&&args[1]==='get'){process.stdout.write('{}');process.exit(19);}
 let state=JSON.parse(readFileSync(process.env.FAKE_CODEX_STATE,'utf8'));
+const rendered=item=>({...item,enabled:item.enabled??true,disabled_reason:item.disabled_reason??null,transport:{...item.transport,env:item.transport.env??{},env_vars:item.transport.env_vars??[],cwd:item.transport.cwd??null},startup_timeout_sec:item.startup_timeout_sec??null,tool_timeout_sec:item.tool_timeout_sec??null,enabled_tools:item.enabled_tools??null,disabled_tools:item.disabled_tools??null,auth_status:'unsupported'});
 if(args[0]!=='mcp') process.exit(2);
-if(args[1]==='list'){process.stdout.write(JSON.stringify(state));process.exit(0);}
-if(args[1]==='get'){const item=state.find(x=>x.name===args[2]);if(!item)process.exit(1);process.stdout.write(JSON.stringify(item));process.exit(0);}
+if(args[1]==='list'){writeFileSync(1,JSON.stringify(state.map(rendered)));process.exit(0);}
+if(args[1]==='get'){
+ const item=state.find(x=>x.name===args[2]);if(!item)process.exit(1);
+ const getCount=readFileSync(process.env.FAKE_CALLS,'utf8').trim().split('\\n').filter(line=>JSON.parse(line)[1]==='mcp'&&JSON.parse(line)[2]==='get').length;
+ if(process.env.FAKE_CODEX_VERIFY_FAIL_ONCE==='1'&&getCount===2){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,args:['/wrong/server.js']}})));process.exit(0);}
+ if(process.env.FAKE_CODEX_RESTORE_VERIFY_CWD==='1'&&getCount===4){process.stdout.write(JSON.stringify(rendered({...item,transport:{...item.transport,cwd:'/unexpected/cwd'}})));process.exit(0);}
+ writeFileSync(1,JSON.stringify(rendered(item)));process.exit(0);
+}
 if(args[1]==='remove'){state=state.filter(x=>x.name!==args[2]);writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));process.exit(0);}
 if(args[1]==='add'){
- const separator=args.indexOf('--'); const envIndex=args.indexOf('--env');
- const envValue=envIndex>=0?args[envIndex+1]:''; const equal=envValue.indexOf('=');
- state.push({name:args[2],enabled:true,transport:{type:'stdio',command:args[separator+1],args:args.slice(separator+2),env:equal>0?{[envValue.slice(0,equal)]:envValue.slice(equal+1)}:null}});
- writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));process.exit(0);
+ const separator=args.indexOf('--'); const env={};
+ for(let index=0;index<separator;index++)if(args[index]==='--env'){const envValue=args[index+1]??'',equal=envValue.indexOf('=');if(equal>0)env[envValue.slice(0,equal)]=envValue.slice(equal+1);}
+ const addCount=readFileSync(process.env.FAKE_CALLS,'utf8').trim().split('\\n').filter(line=>JSON.parse(line)[1]==='mcp'&&JSON.parse(line)[2]==='add').length;
+ state.push({name:args[2],enabled:true,transport:{type:'stdio',command:args[separator+1],args:args.slice(separator+2),env}});
+ writeFileSync(process.env.FAKE_CODEX_STATE,JSON.stringify(state));
+ if((process.env.FAKE_CODEX_FAIL_ADD_AT??'').split(',').includes(String(addCount)))process.exit(29);
+ process.exit(0);
 }
 process.exit(2);
 `);
@@ -276,4 +297,159 @@ test('rejects symlinked credential or config files', async t => {
     assert.notEqual(result.code, 0, `${name} symlink unexpectedly accepted`);
     assert.deepEqual(await state(f), []);
   }
+});
+
+test('remove success followed by add failure removes the partial entry and restores the exact owned registration', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const original: Server = {
+    name: 'movie-harbor',
+    enabled: true,
+    transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
+  };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.match(result.stderr, /恢复|回滚/);
+  assert.doesNotMatch(result.stdout, /已全局注册/);
+  const recorded = await calls(f);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'add').length, 2);
+});
+
+test('successful add with failed verification removes the new entry and restores the exact owned registration', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const original: Server = {
+    name: 'movie-harbor',
+    enabled: true,
+    transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
+  };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.match(result.stderr, /恢复|回滚/);
+  assert.doesNotMatch(result.stdout, /已全局注册/);
+  const recorded = await calls(f);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 2);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'add').length, 2);
+  assert.equal(recorded.filter(call => call[1] === 'mcp' && call[2] === 'get').length, 4);
+});
+
+test('rollback failure is reported as a serious error and never claims installation success', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const original: Server = {
+    name: 'movie-harbor',
+    enabled: true,
+    transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } },
+  };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1', FAKE_CODEX_FAIL_ADD_AT: '2' });
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /严重.*回滚失败|回滚失败.*严重/);
+  assert.doesNotMatch(result.stdout, /已全局注册/);
+});
+
+test('failed first install removes a partially-created registration', async t => {
+  const f = await fixture(t);
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), []);
+  assert.match(result.stderr, /注册失败/);
+  assert.doesNotMatch(result.stdout, /已全局注册/);
+  assert.equal((await calls(f)).filter(call => call[1] === 'mcp' && call[2] === 'remove').length, 1);
+});
+
+test('fails closed before removal when an owned registration has fields add cannot restore', async t => {
+  for (const extra of [
+    { transport: { cwd: '/private/working-directory' } },
+    { transport: { env_vars: ['FORWARDED_SECRET'] } },
+    { topLevel: { disabled_reason: 'disabled by policy' } },
+    { topLevel: { startup_timeout_sec: 12 } },
+    { topLevel: { enabled_tools: ['only_this_tool'] } },
+  ]) {
+    const f = await fixture(t);
+    const paths = await writeExistingConfig(f);
+    const original: Server = {
+      name: 'movie-harbor',
+      enabled: true,
+      ...extra.topLevel,
+      transport: {
+        type: 'stdio',
+        command: 'node',
+        args: [join(f.mcp, 'dist/server.js')],
+        env: { MOVIE_HARBOR_MCP_CONFIG: paths.config },
+        ...extra.transport,
+      },
+    };
+    await writeFile(f.statePath, JSON.stringify([original]));
+
+    const result = await runInstall(f);
+
+    assert.notEqual(result.code, 0);
+    assert.deepEqual(await state(f), [original]);
+    assert.equal((await calls(f)).some(call => call[1] === 'mcp' && call[2] === 'remove'), false);
+  }
+});
+
+test('add failure restores every old literal env value without leaking secrets to diagnostics', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const oldSecret = 'old_mcp_secret_must_not_leak';
+  const original: Server = {
+    name: 'movie-harbor',
+    enabled: true,
+    transport: {
+      type: 'stdio',
+      command: 'node',
+      args: [join(f.mcp, 'dist/server.js')],
+      env: { MOVIE_HARBOR_MCP_CONFIG: paths.config, OTHER_MCP_SECRET: oldSecret },
+    },
+  };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.doesNotMatch(result.stdout + result.stderr + JSON.stringify(await calls(f)), new RegExp(oldSecret));
+});
+
+test('rollback transports a large multi-env snapshot without a single oversized argument', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const env: Record<string, string> = { MOVIE_HARBOR_MCP_CONFIG: paths.config };
+  for (let index = 0; index < 4; index++) env[`LARGE_${index}`] = String(index).repeat(40_000);
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_FAIL_ADD_AT: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.deepEqual(await state(f), [original]);
+  assert.match(result.stderr, /恢复|回滚/);
+});
+
+test('rollback verification rejects non-default fields and reports a serious failure', async t => {
+  const f = await fixture(t);
+  const paths = await writeExistingConfig(f);
+  const original: Server = { name: 'movie-harbor', enabled: true, transport: { type: 'stdio', command: 'node', args: [join(f.mcp, 'dist/server.js')], env: { MOVIE_HARBOR_MCP_CONFIG: paths.config } } };
+  await writeFile(f.statePath, JSON.stringify([original]));
+
+  const result = await runInstall(f, { FAKE_CODEX_VERIFY_FAIL_ONCE: '1', FAKE_CODEX_RESTORE_VERIFY_CWD: '1' });
+
+  assert.notEqual(result.code, 0);
+  assert.match(result.stderr, /严重.*回滚后的旧 MCP 注册验证失败/);
+  assert.doesNotMatch(result.stdout, /已全局注册/);
 });

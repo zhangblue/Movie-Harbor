@@ -48,6 +48,7 @@ try{if(result.error||result.status!==0)throw new Error();const value=JSON.parse(
 ') || fail "无法安全读取 Codex MCP 列表"
 
 verified_config_file=
+rollback_snapshot=
 case "$existing_count" in
   0) ;;
   1)
@@ -58,11 +59,33 @@ case "$existing_count" in
     else
       verified_config_file="$config_base/config.env"
     fi
-    node -e '
+    rollback_snapshot=$(node -e '
 const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
 const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
-try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;if(item.name!=="movie-harbor"||!transport||transport.type!=="stdio"||transport.command!=="node"||!Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!env||env.MOVIE_HARBOR_MCP_CONFIG!==config)throw new Error();}catch{console.error("同名 movie-harbor MCP 不属于当前仓库，拒绝覆盖");process.exit(1);}
-' "$entry" "$verified_config_file" || fail "已有同名 MCP 无法安全更新"
+try{
+  if(result.error||result.status!==0)throw new Error();
+  const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;
+  const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+  const clean=value=>typeof value==="string"&&!/[\0\r\n]/.test(value);
+  const validEnv=value=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.entries(value).every(([key,item])=>key.length>0&&!/[=\0\r\n]/.test(key)&&typeof item==="string"&&!/\0/.test(item));
+  if(!exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])||
+     item.name!=="movie-harbor"||item.enabled!==true||
+     (item.disabled_reason!==undefined&&item.disabled_reason!==null)||
+     (item.startup_timeout_sec!==undefined&&item.startup_timeout_sec!==null)||
+     (item.tool_timeout_sec!==undefined&&item.tool_timeout_sec!==null)||
+     (item.enabled_tools!==undefined&&item.enabled_tools!==null)||
+     (item.disabled_tools!==undefined&&item.disabled_tools!==null)||
+     !exactKeys(transport,["type","command","args","env","env_vars","cwd"])||
+     transport.type!=="stdio"||transport.command!=="node"||!clean(transport.command)||
+     !Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!clean(transport.args[0])||
+     !validEnv(env)||env.MOVIE_HARBOR_MCP_CONFIG!==config||!clean(env.MOVIE_HARBOR_MCP_CONFIG)||
+     (transport.env_vars!==undefined&&(!Array.isArray(transport.env_vars)||transport.env_vars.length!==0))||
+     (transport.cwd!==undefined&&transport.cwd!==null))throw new Error();
+  process.stdout.write(Buffer.from(JSON.stringify({command:transport.command,args:transport.args,env}),"utf8").toString("base64"));
+}catch{console.error("同名 movie-harbor MCP 不属于当前仓库，或包含无法无损恢复的配置，拒绝覆盖");process.exit(1);}
+' "$entry" "$verified_config_file") || fail "已有同名 MCP 无法安全更新"
+    # Keep only the already-validated, CLI-reconstructible fields in memory.
+    # The registration JSON itself may contain sensitive data and is never logged or written to disk.
     ;;
   *) fail "Codex MCP 列表包含异常的同名条目" ;;
 esac
@@ -133,16 +156,86 @@ try {
 }
 ' "$config_file" "$credentials_file" "$base_url" "$allowed_roots" "$generated_root" "$request_timeout" || fail "无法安全写入 MCP 配置"
 
+verify_registration() {
+  node -e '
+const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
+const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
+try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;if(item.name!=="movie-harbor"||item.enabled!==true||!transport||transport.type!=="stdio"||transport.command!=="node"||!Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!env||Object.keys(env).length!==1||env.MOVIE_HARBOR_MCP_CONFIG!==config)throw new Error();}catch{console.error("Codex MCP 注册验证失败");process.exit(1);}
+' "$entry" "$config_file"
+}
+
+new_snapshot=$(node -e 'const [entry,config]=process.argv.slice(1);process.stdout.write(Buffer.from(JSON.stringify({command:"node",args:[entry],env:{MOVIE_HARBOR_MCP_CONFIG:config}}),"utf8").toString("base64"));' "$entry" "$config_file") || fail "无法准备 MCP 注册事务"
+
+cleanup_registration() {
+  expected_snapshot=$1
+  printf '%s' "$expected_snapshot" | node -e '
+const fs=require("node:fs"),{spawnSync}=require("node:child_process"),expected=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8")),options={encoding:"utf8",maxBuffer:1024*1024};
+const run=args=>spawnSync("codex",args,options);
+const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+const sameMap=(left,right)=>exactKeys(left,Object.keys(right))&&Object.keys(left).length===Object.keys(right).length&&Object.entries(right).every(([key,value])=>left[key]===value);
+const isOwned=item=>{const transport=item&&item.transport;return exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])&&item.name==="movie-harbor"&&item.enabled===true&&(item.disabled_reason===undefined||item.disabled_reason===null)&&(item.startup_timeout_sec===undefined||item.startup_timeout_sec===null)&&(item.tool_timeout_sec===undefined||item.tool_timeout_sec===null)&&(item.enabled_tools===undefined||item.enabled_tools===null)&&(item.disabled_tools===undefined||item.disabled_tools===null)&&exactKeys(transport,["type","command","args","env","env_vars","cwd"])&&transport.type==="stdio"&&transport.command===expected.command&&JSON.stringify(transport.args)===JSON.stringify(expected.args)&&sameMap(transport.env,expected.env)&&(transport.env_vars===undefined||(Array.isArray(transport.env_vars)&&transport.env_vars.length===0))&&(transport.cwd===undefined||transport.cwd===null);};
+try{
+  const current=run(["mcp","get","movie-harbor","--json"]);
+  if(!current.error&&current.status===0){
+    if(!isOwned(JSON.parse(current.stdout)))throw new Error();
+    const removed=run(["mcp","remove","movie-harbor"]);if(removed.error||removed.status!==0)throw new Error();
+  }
+  const listed=run(["mcp","list","--json"]);if(listed.error||listed.status!==0)throw new Error();
+  const items=JSON.parse(listed.stdout);if(!Array.isArray(items)||items.some(item=>item&&item.name==="movie-harbor"))throw new Error();
+}catch{process.exit(1);}
+'
+}
+
+restore_registration() {
+  printf '%s' "$rollback_snapshot" | node -e '
+const fs=require("node:fs"),{spawnSync}=require("node:child_process"),snapshot=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8"));
+const args=["mcp","add","movie-harbor"];
+for(const [key,value] of Object.entries(snapshot.env))args.push("--env",`${key}=${value}`);
+args.push("--",snapshot.command,...snapshot.args);
+const result=spawnSync("codex",args,{encoding:"utf8",maxBuffer:1024*1024});if(result.error||result.status!==0)process.exit(1);
+'
+}
+
+verify_restored_registration() {
+  printf '%s' "$rollback_snapshot" | node -e '
+const fs=require("node:fs"),{spawnSync}=require("node:child_process"),snapshot=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8"));
+const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
+try{
+  if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport;
+  const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+  const sameMap=(left,right)=>exactKeys(left,Object.keys(right))&&Object.keys(left).length===Object.keys(right).length&&Object.entries(right).every(([key,value])=>left[key]===value);
+  if(!exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])||item.name!=="movie-harbor"||item.enabled!==true||(item.disabled_reason!==undefined&&item.disabled_reason!==null)||(item.startup_timeout_sec!==undefined&&item.startup_timeout_sec!==null)||(item.tool_timeout_sec!==undefined&&item.tool_timeout_sec!==null)||(item.enabled_tools!==undefined&&item.enabled_tools!==null)||(item.disabled_tools!==undefined&&item.disabled_tools!==null)||!exactKeys(transport,["type","command","args","env","env_vars","cwd"])||transport.type!=="stdio"||transport.command!==snapshot.command||JSON.stringify(transport.args)!==JSON.stringify(snapshot.args)||!sameMap(transport.env,snapshot.env)||(transport.env_vars!==undefined&&(!Array.isArray(transport.env_vars)||transport.env_vars.length!==0))||(transport.cwd!==undefined&&transport.cwd!==null))throw new Error();
+}catch{process.exit(1);}
+'
+}
+
+rollback_after_failure() {
+  original_error=$1
+  cleanup_registration "$new_snapshot" || fail "严重错误：$original_error，且无法清理新的或残留的 MCP 注册"
+  if [ "$existing_count" = 0 ]; then
+    fail "$original_error；已清理未完成的 MCP 注册"
+  fi
+  if ! restore_registration; then
+    cleanup_registration "$rollback_snapshot" >/dev/null 2>&1 || true
+    fail "严重错误：$original_error，且回滚失败，旧 MCP 注册未能恢复"
+  fi
+  if ! verify_restored_registration; then
+    cleanup_registration "$rollback_snapshot" >/dev/null 2>&1 || true
+    fail "严重错误：$original_error，且回滚后的旧 MCP 注册验证失败"
+  fi
+  fail "$original_error；已回滚并恢复旧 MCP 注册"
+}
+
 if [ "$existing_count" = 1 ]; then
   codex mcp remove movie-harbor || fail "无法移除当前仓库的旧 MCP 注册"
 fi
 
-codex mcp add movie-harbor --env "MOVIE_HARBOR_MCP_CONFIG=$config_file" -- node "$entry" || fail "Codex MCP 注册失败"
-node -e '
-const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
-const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
-try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;if(item.name!=="movie-harbor"||!transport||transport.type!=="stdio"||transport.command!=="node"||!Array.isArray(transport.args)||transport.args.length!==1||transport.args[0]!==entry||!env||env.MOVIE_HARBOR_MCP_CONFIG!==config)throw new Error();}catch{console.error("Codex MCP 注册验证失败");process.exit(1);}
-' "$entry" "$config_file" || fail "Codex MCP 注册后验证失败"
+if ! codex mcp add movie-harbor --env "MOVIE_HARBOR_MCP_CONFIG=$config_file" -- node "$entry"; then
+  rollback_after_failure "Codex MCP 注册失败"
+fi
+if ! verify_registration; then
+  rollback_after_failure "Codex MCP 注册后验证失败"
+fi
 
 printf '%s\n' 'Movie Harbor MCP 已全局注册到 Codex。'
 printf '%s\n' "请在 Movie Harbor 服务端设置 MCP_API_KEY_SHA256=$digest"
