@@ -12,6 +12,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - 内容列表：管理后台统一分页电影与剧集，公开站与管理后台均固定每页 20 条并支持数字页码。
 - 媒体能力：支持同步删除与替换、启动恢复、H.264/HEVC MP4 和 WebM。
 - 管理导出：详情展示视频容器内路径，支持一次下载全部内容的只读 JSON。
+- Codex 入库：提供独立 MCP，可检查、转换和上传本地视频，并在分阶段确认后创建与发布内容。
 - 发布工具：支持生成 `linux/arm64` 和 `linux/amd64` 单平台半离线 Docker 部署包，默认使用 `linux/arm64`。
 
 ## 核心设计
@@ -41,7 +42,7 @@ Movie Harbor 是一个面向个人或小型团队、可自行部署的电影与�
 - [内容迁移指南](docs/guides/content-transfer.md)：管理媒体路径、JSON 导出与可恢复导入。
 - [视频转换指南](docs/guides/video-conversion.md)：上传前的本机单文件转换、依赖与字幕限制。
 - [媒体与备份指南](docs/guides/media-and-backup.md)：目录权限、同步删除、迁移 v5、一致备份与恢复。
-- [Codex 视频入库 MCP 指南](docs/guides/codex-mcp.md)：全局安装、独立密钥、原子入库、转换与发布确认。
+- [Codex 视频入库 MCP 安装与使用指南](docs/guides/codex-mcp.md)：全局安装、远程服务配置、实际对话示例、独立密钥、转换、入库与发布确认。
 
 ## 开发文档
 
