@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,19 @@ function localMarkdownTargets(file) {
     .filter((target) => target && !/^[a-z]+:/i.test(target))
     .map((target) => path.resolve(path.dirname(file), decodeURI(target)));
 }
+
+test("README explains every registered MCP tool", () => {
+  const toolsDirectory = path.join(projectRoot, "mcp/src/tools");
+  const registered = readdirSync(toolsDirectory)
+    .filter((name) => name.endsWith(".ts"))
+    .flatMap((name) => [...readFileSync(path.join(toolsDirectory, name), "utf8")
+      .matchAll(/registerTool\(['"]([^'"]+)['"]/g)].map((match) => match[1]));
+  assert.ok(registered.length > 0);
+  const readme = readFileSync(readmePath, "utf8");
+  const documented = [...readme.matchAll(/^\| `([a-z_]+)` \| ([^|\n]+) \|$/gm)];
+  assert.deepEqual(documented.map((match) => match[1]).sort(), registered.sort());
+  for (const match of documented) assert.ok(match[2].trim().length > 0);
+});
 
 test("README guide navigation and guide links resolve", () => {
   const guides = [
