@@ -269,6 +269,7 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
           TRUST_PROXY_SECRET: "${TRUST_PROXY_SECRET:?set TRUST_PROXY_SECRET}",
           MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-53687091200}",
           VIDEO_MIME_ALLOWLIST: "${VIDEO_MIME_ALLOWLIST:-video/mp4,video/webm}",
+          MCP_API_KEY_SHA256: "${MCP_API_KEY_SHA256:-}",
           ADMIN_NAME: "${ADMIN_NAME:-}",
           ADMIN_INITIAL_PASSWORD: "${ADMIN_INITIAL_PASSWORD:-}",
         },
