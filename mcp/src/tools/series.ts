@@ -1,7 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import type { MovieHarborClient } from '../services/movie-harbor-client.js';
 import { MovieHarborClientError } from '../services/error-mapper.js';
-import { parseApi, writeAnnotations, toolResult, contentResult } from '../schemas/common.js';
+import { parseApi, writeAnnotations, toolResult, contentResult, roundedDurationSeconds } from '../schemas/common.js';
 import { createSeriesInput, createSeriesOutput, createSeasonInput, createSeasonOutput, createEpisodeInput, episodeOutput, updateSeriesInput, updateEpisodeInput, apiSeries, apiEpisodeEnvelope } from '../schemas/content.js';
 
 export async function createSeries(input: unknown, client: MovieHarborClient) {
@@ -20,6 +20,7 @@ export async function createSeason(input: unknown, client: MovieHarborClient) {
 }
 export async function createEpisode(input: unknown, client: MovieHarborClient) {
   const { series_id, season_id, confirmed: _confirmed, ...body } = createEpisodeInput.parse(input);
+  body.duration_seconds = roundedDurationSeconds(body.duration_seconds);
   const response = parseApi(apiSeries, await client.json('POST', `/api/admin/series/${series_id}/seasons/${season_id}/episodes`, body));
   const seasons = response.seasons.filter(season => season.id === season_id);
   if (response.id !== series_id || seasons.length !== 1) throw new MovieHarborClientError('invalid_response');
@@ -37,6 +38,7 @@ export async function updateSeriesMetadata(input: unknown, client: MovieHarborCl
 }
 export async function updateEpisodeMetadata(input: unknown, client: MovieHarborClient) {
   const { series_id, season_id, episode_id, ...patch } = updateEpisodeInput.parse(input);
+  if (patch.duration_seconds !== undefined) patch.duration_seconds = roundedDurationSeconds(patch.duration_seconds);
   const response = parseApi(apiEpisodeEnvelope, await client.json('PATCH', `/api/admin/series/${series_id}/seasons/${season_id}/episodes/${episode_id}`, patch));
   const episode = response.episode;
   if (episode.id !== episode_id || episode.season_id !== season_id
@@ -48,7 +50,7 @@ export async function updateEpisodeMetadata(input: unknown, client: MovieHarborC
 export function registerSeriesTools(server: McpServer, client: MovieHarborClient) {
   server.registerTool('create_series', { description: '创建完整剧集草稿，必须提供非空简介、年代、题材和暂存海报 token，并携带入库确认 confirmed: true；访问范围默认公开，可显式选择私密；不隐式创建季或单集。', inputSchema: createSeriesInput, outputSchema: createSeriesOutput, annotations: writeAnnotations }, input => createSeries(input, client));
   server.registerTool('create_season', { description: '按剧集 ID 和版本显式创建一个季，必须携带入库确认 confirmed: true；访问范围继承整剧；已归档剧集停止并由管理员处理。', inputSchema: createSeasonInput, outputSchema: createSeasonOutput, annotations: writeAnnotations }, input => createSeason(input, client));
-  server.registerTool('create_episode', { description: '按剧集版本在明确季下创建单集草稿，必须提供非空单集名称、秒数时长和入库确认 confirmed: true；访问范围继承整剧；已归档父剧集停止并由管理员处理。', inputSchema: createEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => createEpisode(input, client));
+  server.registerTool('create_episode', { description: '按剧集版本在明确季下创建单集草稿，必须提供非空单集名称、秒数时长（自动按分钟四舍五入，最少 1 分钟）和入库确认 confirmed: true；访问范围继承整剧；已归档父剧集停止并由管理员处理。', inputSchema: createEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => createEpisode(input, client));
   server.registerTool('update_series_metadata', { description: '按剧集 ID 和版本仅更新提交的元数据字段。', inputSchema: updateSeriesInput, outputSchema: contentResult, annotations: writeAnnotations }, input => updateSeriesMetadata(input, client));
-  server.registerTool('update_episode_metadata', { description: '按明确剧集、季、单集 ID 和单集版本仅更新元数据。', inputSchema: updateEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => updateEpisodeMetadata(input, client));
+  server.registerTool('update_episode_metadata', { description: '按明确剧集、季、单集 ID 和单集版本仅更新元数据；提交的秒数时长自动按分钟四舍五入，最少 1 分钟。', inputSchema: updateEpisodeInput, outputSchema: episodeOutput, annotations: writeAnnotations }, input => updateEpisodeMetadata(input, client));
 }

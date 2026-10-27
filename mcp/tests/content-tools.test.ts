@@ -29,6 +29,44 @@ const genreId = '55555555-5555-4555-8555-555555555555';
 const movie = { id: movieId, name: 'Alien', year: 1979, duration_seconds: 7000, status: 'draft', version: 3, is_private: true, poster: { id: genreId, local_path: 'SECRET' }, video: null, genres: [], synopsis: '', created_at: '', updated_at: '', published_at: null, archived_at: null };
 const episode = { id: episodeId, season_id: seasonId, number: 1, name: 'Pilot', duration_seconds: 500, status: 'draft', version: 1, video: null };
 const series = { ...movie, id: seriesId, seasons: [{ id: seasonId, number: 1, episodes: [episode] }] };
+for (const [seconds, stored] of [[1, 60], [29, 60], [30, 60], [89, 60], [90, 120], [120, 120], [4395, 4380], [3584, 3600], [2147483647, 2147483640]]) {
+  test(`episode duration ${seconds}s rounds to ${stored}s on create and update`, async () => {
+    const saved = { ...episode, duration_seconds: stored };
+    const f = clientFixture([
+      { ...series, seasons: [{ ...series.seasons[0], episodes: [saved] }] },
+      { series_version: 4, episode: saved },
+    ]);
+    const t = await tools(f.client);
+    await t.call('create_episode', {
+      series_id: seriesId, season_id: seasonId, version: 2, number: 1,
+      name: 'Pilot', duration_seconds: seconds, confirmed: true,
+    });
+    await t.call('update_episode_metadata', {
+      series_id: seriesId, season_id: seasonId, episode_id: episodeId,
+      version: 1, duration_seconds: seconds,
+    });
+    assert.deepEqual(f.calls.map(call => call.body), [
+      { version: 2, number: 1, name: 'Pilot', duration_seconds: stored },
+      { version: 1, duration_seconds: stored },
+    ]);
+  });
+}
+
+test('episode metadata-only updates omit duration and invalid seconds never reach HTTP', async () => {
+  const f = clientFixture([{ series_version: 4, episode }]);
+  const t = await tools(f.client);
+  const ids = { series_id: seriesId, season_id: seasonId, episode_id: episodeId, version: 1 };
+  await t.call('update_episode_metadata', { ...ids, name: 'Renamed' });
+  assert.deepEqual(f.calls[0]!.body, { version: 1, name: 'Renamed' });
+  for (const seconds of [0, -1, 1.5, 2147483648]) {
+    await assert.rejects(t.call('update_episode_metadata', { ...ids, duration_seconds: seconds }));
+    await assert.rejects(t.call('create_episode', {
+      series_id: seriesId, season_id: seasonId, version: 2, number: 1,
+      name: 'Pilot', duration_seconds: seconds, confirmed: true,
+    }));
+  }
+  assert.equal(f.calls.length, 1);
+});
 async function tools(client: any, allowedRoots: string[] = []) {
   const registrations = new Map<string, any>();
   const server = { registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
@@ -202,7 +240,7 @@ test('season and named episode require confirmation without forwarding it', asyn
     name: 'Pilot', duration_seconds: 500, confirmed: true,
   });
   assert.deepEqual(f.calls[0]!.body, { version: 2, number: 1 });
-  assert.deepEqual(f.calls[1]!.body, { version: 2, number: 1, name: 'Pilot', duration_seconds: 500 });
+  assert.deepEqual(f.calls[1]!.body, { version: 2, number: 1, name: 'Pilot', duration_seconds: 480 });
 });
 
 test('series creation rejects mismatched API visibility as invalid_response without retrying', async () => {
@@ -358,7 +396,7 @@ test('episode create extracts its own version and parent version and rejects mis
   const input = { series_id: seriesId, season_id: seasonId, version: 2, number: 1, name: ' Pilot ', duration_seconds: 500, confirmed: true };
   assert.deepEqual(await t.call('create_episode', input), { id: episodeId, version: 1, status: 'draft', series_version: 3, next_actions: ['upload_episode_video'] });
   for (let i = 0; i < 4; i++) await assert.rejects(t.call('create_episode',input), /数据格式无效/);
-  assert.deepEqual(f.calls[0], { method:'POST', path:`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes`, body:{ version:2, number:1, name:'Pilot', duration_seconds:500 } });
+  assert.deepEqual(f.calls[0], { method:'POST', path:`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes`, body:{ version:2, number:1, name:'Pilot', duration_seconds:480 } });
   assert.equal(f.calls.length, 5);
 });
 

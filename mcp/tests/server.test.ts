@@ -23,7 +23,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
     const instructions = client.getInstructions() ?? '';
     for (const phrase of [
       '联网', '来源', '年份', '简介', '题材', '单集名称', '海报',
-      '默认公开', '完整入库计划', '确认失效', '转换', '上传', '发布', '禁止自动发布',
+      '四舍五入', '最少 1 分钟', '默认公开', '完整入库计划', '确认失效', '转换', '上传', '发布', '禁止自动发布',
     ]) assert.match(instructions, new RegExp(phrase));
     assert.doesNotMatch(instructions, /固定.*私密草稿/);
     const listed = await client.listTools();

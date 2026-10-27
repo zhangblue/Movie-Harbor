@@ -32,6 +32,10 @@ export function durationSecondsFromMinutes(minutes: number): number {
   return seconds;
 }
 
+export function roundedDurationSeconds(seconds: number): number {
+  return durationSecondsFromMinutes(durationMinutesFromSeconds(seconds)!);
+}
+
 export function normalizedName(value: string) { return value.trim().toLowerCase(); }
 export function parseApi<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const parsed = schema.safeParse(value);
