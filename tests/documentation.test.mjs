@@ -20,7 +20,7 @@ function localMarkdownTargets(file) {
     .map((target) => path.resolve(path.dirname(file), decodeURI(target)));
 }
 
-test("README explains every registered MCP tool", () => {
+test("MCP guide explains every registered tool and README only links to the guide", () => {
   const toolsDirectory = path.join(projectRoot, "mcp/src/tools");
   const registered = readdirSync(toolsDirectory)
     .filter((name) => name.endsWith(".ts"))
@@ -28,7 +28,10 @@ test("README explains every registered MCP tool", () => {
       .matchAll(/registerTool\(['"]([^'"]+)['"]/g)].map((match) => match[1]));
   assert.ok(registered.length > 0);
   const readme = readFileSync(readmePath, "utf8");
-  const documented = [...readme.matchAll(/^\| `([a-z_]+)` \| ([^|\n]+) \|$/gm)];
+  const guide = readFileSync(path.join(projectRoot, "docs/guides/codex-mcp.md"), "utf8");
+  assert.doesNotMatch(readme, /^## Codex 视频入库 MCP$/m);
+  assert.doesNotMatch(readme, /^\| `[a-z_]+` \|/m);
+  const documented = [...guide.matchAll(/^\| `([a-z_]+)` \| ([^|\n]+) \|$/gm)];
   assert.deepEqual(documented.map((match) => match[1]).sort(), registered.sort());
   for (const match of documented) assert.ok(match[2].trim().length > 0);
 });
