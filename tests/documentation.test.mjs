@@ -147,6 +147,8 @@ test("offline guide documents the fixed ARM64 host zigbuild toolchain and Linux-
   assert.match(guide, /cargo zigbuild[\s\S]*--target aarch64-unknown-linux-musl/);
   assert.match(guide, /--target-dir/);
   assert.match(guide, /Rust 1\.91/);
+  assert.match(guide, /cargo-zigbuild --version\s+# 必须为 cargo-zigbuild 0\.23\.4/);
+  assert.doesNotMatch(guide, /^cargo zigbuild --version\b/m);
   assert.match(guide, /cargo-zigbuild 0\.23\.4/);
   assert.match(guide, /Zig 0\.15\.2/);
   assert.match(guide, /macOS Apple Silicon[\s\S]*Linux ARM64/);

@@ -14,7 +14,7 @@ ARM64 宿主机需预先安装 Rust 1.91、cargo-zigbuild 0.23.4、Zig 0.15.2 �
 
 ```bash
 rustc --version                         # 必须为 1.91.x
-cargo zigbuild --version                # 必须为 cargo-zigbuild 0.23.4
+cargo-zigbuild --version                # 必须为 cargo-zigbuild 0.23.4
 zig version                             # 必须为 0.15.2
 rustup target list --installed          # 必须包含 aarch64-unknown-linux-musl
 ```
