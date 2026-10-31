@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { AdminApi, ViewerApi, baseURL, createPublishableMovie } from "./helpers";
+import { AdminApi, ViewerApi, baseURL, createPublishableMovie, createPublishableSeries } from "./helpers";
 
 test("published content is searchable and has public details", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
@@ -33,6 +33,51 @@ test("anonymous users cannot discover or fetch private content while viewers can
     expect((await viewer.request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(200);
     expect((await viewer.request.get("/api/admin/users")).status()).toBe(401);
   } finally { await viewer.dispose(); await api.dispose(); }
+});
+
+test("private-only catalog filters movies and series and clears on logout", async ({ page, playwright }) => {
+  const api = await AdminApi.login(playwright);
+  try {
+    const prefix = `Private Filter ${Date.now()}`;
+    const user = await api.createUser(`private-filter-${Date.now()}`);
+    const publicMovie = await createPublishableMovie(api, `${prefix} Public Movie`);
+    const privateMovie = await api.setPrivacy("movies", await createPublishableMovie(api, `${prefix} Private Movie`), true);
+    const privateSeries = await api.setPrivacy("series", await createPublishableSeries(api, `${prefix} Private Series`), true);
+    await page.goto(`/?q=${encodeURIComponent(prefix)}`);
+    const privateOnly = page.getByRole("checkbox", { name: "只看私密", exact: true });
+    await expect(privateOnly).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: publicMovie.name, exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    const login = page.getByRole("dialog");
+    await login.getByLabel("用户名").fill(user.username);
+    await login.getByLabel("密码", { exact: true }).fill("viewer-initial-password");
+    await login.getByRole("button", { name: "登录", exact: true }).click();
+    for (const content of [publicMovie, privateMovie, privateSeries]) {
+      await expect(page.getByRole("heading", { name: content.name, exact: true })).toBeVisible();
+    }
+    await privateOnly.check();
+    await expect(privateOnly).toBeChecked();
+    await expect(page).toHaveURL((url) => url.searchParams.get("privacy") === "private" && url.searchParams.get("q") === prefix);
+    await expect(page.getByRole("heading", { name: publicMovie.name, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();
+
+    // An explicit first page keeps this saved URL valid with the three-content fixture.
+    await page.goto(`/?q=${encodeURIComponent(prefix)}&privacy=private&page=1`);
+    await expect(privateOnly).toBeChecked();
+    await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();
+    await expect(page).toHaveURL((url) => url.searchParams.get("page") === "1");
+    await page.getByRole("button", { name: "退出登录", exact: true }).click();
+    await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
+    await expect(privateOnly).toHaveCount(0);
+    await expect(page).toHaveURL((url) => !url.searchParams.has("privacy") && !url.searchParams.has("page") && url.searchParams.get("q") === prefix);
+    await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: publicMovie.name, exact: true })).toBeVisible();
+  } finally { await api.dispose(); }
 });
 
 test("public login and self password change refresh private content and revoke both sessions", async ({ page, playwright }) => {

@@ -157,5 +157,26 @@ export async function createSeriesDraftWithMedia(api: AdminApi, name: string, op
   return api.get<Series>(`/api/admin/series/${series.id}`);
 }
 
+export async function createPublishableSeries(api: AdminApi, name: string) {
+  let series = await createSeriesDraftWithMedia(api, name, {
+    synopsis: `${name} searchable synopsis`,
+    seasonNumber: 1,
+    episodeNumber: 1,
+    episodeName: "首集",
+    durationSeconds: 1,
+  });
+  const season = series.seasons[0]!;
+  const episode = season.episodes[0]!;
+  const published = await api.write<{ series_version: number }>(
+    "post",
+    `/api/admin/series/${series.id}/seasons/${season.id}/episodes/${episode.id}/publish`,
+    { version: episode.version },
+  );
+  series = await api.write<Series>("post", `/api/admin/series/${series.id}/publish`, {
+    version: published.series_version,
+  });
+  return series;
+}
+
 export function saveState(state: Record<string, JsonValue>) { writeFileSync(statePath, JSON.stringify(state), { mode: 0o600 }); }
 export function loadState<T>() { return JSON.parse(readFileSync(statePath, "utf8")) as T; }
