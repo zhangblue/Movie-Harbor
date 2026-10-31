@@ -1,5 +1,6 @@
 .DS_Store
 .agents/
+.superpowers/
 .worktrees/
 node_modules/
 target/
