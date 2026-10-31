@@ -21,6 +21,7 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
   const { state, retry } = usePublicRequest(load);
   const titleRef = useRef<HTMLHeadingElement>(null);
   const focusAfterLoad = useRef(false);
+  const wasAuthenticated = useRef(authenticated);
   const title = kind === "movie" ? "电影" : kind === "series" ? "剧集" : "全部影片";
 
   const update = useCallback((next: { kind?: CatalogKind; q?: string; privateOnly?: boolean; page?: number }, replace = false) => {
@@ -39,7 +40,9 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
   }, [kind, query, privateOnly, page, navigate]);
 
   useEffect(() => {
-    if (!discoveryPending && !authenticated && privateOnly) update({ privateOnly: false }, true);
+    const authenticationLost = wasAuthenticated.current && !authenticated;
+    wasAuthenticated.current = authenticated;
+    if (!discoveryPending && !authenticated && (privateOnly || authenticationLost)) update({ privateOnly: false }, true);
   }, [authenticated, discoveryPending, privateOnly, update]);
 
   useEffect(() => {

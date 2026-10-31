@@ -14,7 +14,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearC
 
 function server(initial = false) {
   const state = { authenticated: initial, username: "Summer", csrfToken: "viewer-csrf", sessionNetworkError: false, loginStatus: 200, passwordStatus: 204, logoutStatus: 204,
-    requests: [] as Array<{ url: URL; init?: RequestInit }>, catalogResponse: undefined as Promise<Response> | undefined,
+    requests: [] as Array<{ url: URL; init?: RequestInit }>, catalogTotal: undefined as number | undefined, catalogResponse: undefined as Promise<Response> | undefined,
     sessionResponse: undefined as Promise<Response> | undefined, writeResponse: undefined as Promise<Response> | undefined };
   vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
     const url = new URL(input, "http://localhost");
@@ -48,7 +48,7 @@ function server(initial = false) {
       const authenticatedItems = privateOnly ? [{ ...seriesCard, is_private: true }] : [movieCard, { ...seriesCard, is_private: true }];
       return state.catalogResponse ?? json({
         items: state.authenticated ? authenticatedItems : [movieCard],
-        total: state.authenticated ? authenticatedItems.length : 1, page: Number(url.searchParams.get("page") ?? 1), size: 20,
+        total: state.catalogTotal ?? (state.authenticated ? authenticatedItems.length : 1), page: Number(url.searchParams.get("page") ?? 1), size: 20,
       });
     }
     if (url.pathname.includes("/movies/")) return state.authenticated ? json({ ...movie, is_private: true }) : json({}, 404);
@@ -434,4 +434,36 @@ it("keeps a private filter deep link loading until session discovery finishes", 
   state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
   await act(async () => session.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
   expect(await screen.findByText("没有找到私密内容")).toBeInTheDocument();
+});
+
+
+it.each(["logout", "password", "expired"] as const)("clears the ordinary catalog page after %s even when the anonymous catalog has multiple pages", async (operation) => {
+  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  const state = server(true); state.catalogTotal = 41;
+  const user = userEvent.setup(); render(<App />);
+  await screen.findByText("Summer"); await screen.findByText("41 部影片");
+  expect(screen.getByRole("checkbox", { name: "只看私密" })).not.toBeChecked();
+  expect(new URLSearchParams(location.search).get("page")).toBe("2");
+  if (operation === "logout") await user.click(screen.getByRole("button", { name: "退出登录" }));
+  else if (operation === "password") {
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    await user.type(screen.getByLabelText("当前密码"), "old-password");
+    await user.type(screen.getByLabelText("新密码"), "new-password");
+    await user.click(screen.getByRole("button", { name: "保存新密码" }));
+  } else { state.authenticated = false; act(() => window.dispatchEvent(new Event("focus"))); }
+  await screen.findByRole("button", { name: "登录" });
+  await screen.findByText("41 部影片");
+  await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
+  expect(new URLSearchParams(location.search).get("privacy")).toBeNull();
+  expect(new URLSearchParams(location.search).get("kind")).toBe("series");
+  expect(new URLSearchParams(location.search).get("q")).toBe("星");
+});
+
+it("preserves an initial anonymous catalog page deep link", async () => {
+  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  const state = server(); state.catalogTotal = 41; render(<App />);
+  await screen.findByRole("button", { name: "登录" });
+  await screen.findByText("41 部影片");
+  expect(new URLSearchParams(location.search).get("page")).toBe("2");
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("page")).toBe("2");
 });
