@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
 const DEFAULT_PLATFORM = "linux/arm64";
+const ARM64_RUST_MINOR = "1.91";
+const ARM64_ZIGBUILD_VERSION = "0.23.4";
+const ARM64_ZIG_VERSION = "0.15.2";
+const ARM64_RUST_TARGET = "aarch64-unknown-linux-musl";
 const SUPPORTED_PLATFORMS = new Set([DEFAULT_PLATFORM, "linux/amd64"]);
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const DELIVERY_FILES = [
@@ -63,6 +67,77 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true } = {}) {
   });
 }
 
+function requireVersion(output, pattern, expected) {
+  if (!pattern.test(output)) {
+    throw new Error(`Expected ${expected}, found: ${output || "no version output"}`);
+  }
+}
+
+function validateArm64BinaryMetadata(output) {
+  if (!/ELF 64-bit/i.test(output)) throw new Error(`Expected a Linux ELF binary, found: ${output}`);
+  if (!/(ARM aarch64|AArch64|aarch64)/i.test(output)) {
+    throw new Error(`Expected an ARM64/aarch64 binary, found: ${output}`);
+  }
+  if (/dynamically linked/i.test(output) || !/(statically linked|static-pie linked)/i.test(output)) {
+    throw new Error(`Expected a statically linked musl binary, found: ${output}`);
+  }
+}
+
+async function prepareArm64ApiContext(signal) {
+  requireVersion(
+    await run("rustc", ["--version"], { signal }),
+    /^rustc 1\.91(?:\.|\s)/,
+    `Rust ${ARM64_RUST_MINOR}`,
+  );
+  requireVersion(
+    await run("cargo", ["zigbuild", "--version"], { signal }),
+    /cargo-zigbuild 0\.23\.4(?:\s|$)/,
+    `cargo-zigbuild ${ARM64_ZIGBUILD_VERSION}`,
+  );
+  requireVersion(
+    await run("zig", ["version"], { signal }),
+    /^0\.15\.2$/,
+    `Zig ${ARM64_ZIG_VERSION}`,
+  );
+  const targets = (await run("rustup", ["target", "list", "--installed"], { signal })).split("\n");
+  if (!targets.includes(ARM64_RUST_TARGET)) {
+    throw new Error(`Required ${ARM64_RUST_TARGET} Rust target is missing`);
+  }
+
+  const targetDirectory = await mkdtemp(join(tmpdir(), "movie-harbor-arm64-target-"));
+  let contextDirectory;
+  try {
+    contextDirectory = await mkdtemp(join(tmpdir(), "movie-harbor-api-arm64-"));
+    await run("cargo", [
+      "zigbuild", "--locked", "--release", "--target", ARM64_RUST_TARGET,
+      "--target-dir", targetDirectory, "-p", "movie-harbor-api",
+    ], { signal, capture: false });
+    const binary = join(targetDirectory, ARM64_RUST_TARGET, "release", "movie-harbor-api");
+    let binaryStat;
+    try {
+      binaryStat = await lstat(binary);
+    } catch (error) {
+      if (error.code === "ENOENT") throw new Error(`movie-harbor-api binary is missing: ${binary}`);
+      throw error;
+    }
+    if (!binaryStat.isFile()) throw new Error(`movie-harbor-api must be a regular file: ${binary}`);
+    const metadata = await run("file", [binary], { signal });
+    // The target name in the filename must not count as evidence of the ELF architecture.
+    const description = metadata.startsWith(`${binary}: `) ? metadata.slice(binary.length + 2) : metadata;
+    validateArm64BinaryMetadata(description);
+    const destination = join(contextDirectory, "movie-harbor-api");
+    await copyFile(binary, destination);
+    await chmod(destination, 0o755);
+    return { targetDirectory, contextDirectory };
+  } catch (error) {
+    await Promise.allSettled([
+      rm(targetDirectory, { recursive: true, force: true }),
+      ...(contextDirectory ? [rm(contextDirectory, { recursive: true, force: true })] : []),
+    ]);
+    throw error;
+  }
+}
+
 function requireExactEntries(actual, expected, description) {
   if (JSON.stringify([...actual].sort()) !== JSON.stringify([...expected].sort())) {
     throw new Error(`${description} does not match the allowlist`);
@@ -100,6 +175,7 @@ async function main(args) {
   process.on("SIGTERM", onTerm);
   let staging;
   let archiveDirectory;
+  let arm64Build;
   try {
     const { platform } = parsed;
     const version = validateVersion(parsed.version ?? await run("git", ["rev-parse", "--short=12", "HEAD"], { signal }));
@@ -117,9 +193,26 @@ async function main(args) {
     await run("docker", ["buildx", "version"], { signal });
     await run("docker", ["compose", "version", "--short"], { signal });
 
-    const dockerfiles = ["backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile"];
-    for (const [index, file] of dockerfiles.entries()) {
-      await run("docker", ["buildx", "build", "--load", "--platform", platform, "--file", file, "--tag", tags[index], "."], { signal, capture: false });
+    if (platform === "linux/arm64") {
+      arm64Build = await prepareArm64ApiContext(signal);
+      await run("docker", [
+        "buildx", "build", "--load", "--platform", platform,
+        "--file", "backend/Dockerfile.prebuilt", "--tag", tags[0], arm64Build.contextDirectory,
+      ], { signal, capture: false });
+    } else {
+      await run("docker", [
+        "buildx", "build", "--load", "--platform", platform,
+        "--file", "backend/Dockerfile", "--tag", tags[0], ".",
+      ], { signal, capture: false });
+    }
+    for (const [file, tag] of [
+      ["frontend/public-web/Dockerfile", tags[1]],
+      ["frontend/admin-web/Dockerfile", tags[2]],
+    ]) {
+      await run("docker", [
+        "buildx", "build", "--load", "--platform", platform,
+        "--file", file, "--tag", tag, ".",
+      ], { signal, capture: false });
     }
     for (const tag of tags) {
       const imagePlatform = await run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", tag], { signal });
@@ -159,7 +252,9 @@ async function main(args) {
     await link(archive, destination);
     console.log(`Created ${destination}`);
   } finally {
-    const cleanup = await Promise.allSettled([staging, archiveDirectory].filter(Boolean).map(directory => rm(directory, { recursive: true, force: true })));
+    const cleanup = await Promise.allSettled([
+      staging, archiveDirectory, arm64Build?.targetDirectory, arm64Build?.contextDirectory,
+    ].filter(Boolean).map(directory => rm(directory, { recursive: true, force: true })));
     process.removeListener("SIGINT", onInt);
     process.removeListener("SIGTERM", onTerm);
     for (const result of cleanup) if (result.status === "rejected") throw result.reason;

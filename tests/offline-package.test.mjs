@@ -26,7 +26,7 @@ const BUNDLE_ENTRIES = [
   "movie-harbor/load-images.sh",
 ];
 
-// Only Docker is replaced: its save boundary still emits a real tar archive.
+// Only external tools are replaced: Docker save still emits a real tar archive.
 const DOCKER_DOUBLE = `#!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
@@ -49,6 +49,16 @@ if (args[0] === 'info') {
   if (!args.includes('--load')) fail('Expected a loaded single-platform image');
   if (args[args.indexOf('--platform') + 1] !== targetPlatform) fail('Wrong build platform');
   if (!fs.existsSync(args[args.indexOf('--file') + 1])) fail('Dockerfile unavailable in build context');
+  if (args[args.indexOf('--file') + 1] === 'backend/Dockerfile.prebuilt') {
+    const context = args.at(-1);
+    if (JSON.stringify(fs.readdirSync(context)) !== JSON.stringify(['movie-harbor-api'])) {
+      fail('API context must contain only movie-harbor-api');
+    }
+    const binary = path.join(context, 'movie-harbor-api');
+    const metadata = fs.lstatSync(binary);
+    if (!metadata.isFile() || !(metadata.mode & 0o111)) fail('API binary must be a regular executable file');
+    if (fs.readFileSync(binary, 'utf8') !== 'fixture aarch64 static ELF') fail('API context must use this build output');
+  }
   if (mode === 'build-fails') fail('Build failed');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
   if (mode === 'inspect-fails') fail('Image missing');
@@ -89,7 +99,58 @@ if (args[0] === 'info') {
 } else { fail('Unexpected Docker command: ' + args.join(' ')); }
 `;
 
-async function fixture(t, mode = "success", platform = "linux/arm64") {
+const HOST_TOOL_DOUBLE = String.raw`#!/usr/bin/env node
+const fs = require('node:fs');
+const path = require('node:path');
+const tool = path.basename(process.argv[1]);
+const args = process.argv.slice(2);
+const mode = process.env.HOST_TOOL_TEST_MODE;
+fs.appendFileSync(process.env.HOST_TOOL_TEST_LOG, JSON.stringify([tool, ...args]) + '\n');
+function fail(message, code = 1) { console.error(message); process.exit(code); }
+function expectArgs(expected) {
+  if (JSON.stringify(args) !== JSON.stringify(expected)) fail('Unexpected ' + tool + ' command: ' + args.join(' '));
+}
+if (tool === 'rustc') {
+  expectArgs(['--version']);
+  if (mode === 'rust-missing') fail('rustc unavailable', 127);
+  console.log(mode === 'rust-wrong-version' ? 'rustc 1.910.0' : 'rustc 1.91.0 (f8297e351 2025-10-28)');
+} else if (tool === 'rustup') {
+  expectArgs(['target', 'list', '--installed']);
+  console.log(mode === 'target-missing' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl');
+} else if (tool === 'zig') {
+  expectArgs(['version']);
+  if (mode === 'zig-missing') fail('zig unavailable', 127);
+  console.log(mode === 'zig-wrong-version' ? '0.15.20' : '0.15.2');
+} else if (tool === 'cargo') {
+  if (args[0] === 'zigbuild' && args[1] === '--version') {
+    expectArgs(['zigbuild', '--version']);
+    if (mode === 'zigbuild-missing') fail('cargo-zigbuild unavailable', 127);
+    console.log(mode === 'zigbuild-wrong-version' ? 'cargo-zigbuild 0.23.40' : 'cargo-zigbuild 0.23.4');
+  } else if (args[0] === 'zigbuild') {
+    if (mode === 'zigbuild-fails') fail('cargo zigbuild failed');
+    if (mode !== 'binary-missing') {
+      const targetDirectory = args[args.indexOf('--target-dir') + 1];
+      const binary = path.join(targetDirectory, 'aarch64-unknown-linux-musl', 'release', 'movie-harbor-api');
+      fs.mkdirSync(path.dirname(binary), { recursive: true });
+      if (mode === 'binary-not-regular') fs.mkdirSync(binary);
+      else {
+        fs.writeFileSync(binary, 'fixture aarch64 static ELF');
+        fs.chmodSync(binary, 0o755);
+      }
+    }
+  } else fail('Unexpected cargo command: ' + args.join(' '));
+} else if (tool === 'file') {
+  if (args.length !== 1 || !fs.lstatSync(args[0]).isFile()) fail('Expected one compiled binary');
+  const metadata = {
+    'binary-wrong-arch': 'ELF 64-bit LSB pie executable, x86-64, statically linked',
+    'binary-dynamic': 'ELF 64-bit LSB pie executable, ARM aarch64, dynamically linked',
+    'binary-not-elf': 'Mach-O 64-bit executable arm64',
+  };
+  console.log(args[0] + ': ' + (metadata[mode] ?? 'ELF 64-bit LSB pie executable, ARM aarch64, statically linked'));
+} else fail('Unexpected host tool: ' + tool);
+`;
+
+async function fixture(t, mode = "success", platform = "linux/arm64", hostMode = "success") {
   const root = await mkdtemp(join(tmpdir(), "offline-package-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, "repo with spaces");
@@ -98,7 +159,7 @@ async function fixture(t, mode = "success", platform = "linux/arm64") {
   await Promise.all([mkdir(repo), mkdir(temporary), mkdir(bin)]);
   for (const file of [
     "tools/offline-package.mjs", "tools/build-offline-package.sh", "Caddyfile", ".env.example",
-    "backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
+    "backend/Dockerfile", "backend/Dockerfile.prebuilt", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
   ]) {
     await mkdir(dirname(join(repo, file)), { recursive: true });
     await copyFile(join(REPO_ROOT, file), join(repo, file));
@@ -109,25 +170,32 @@ async function fixture(t, mode = "success", platform = "linux/arm64") {
   }
   await writeFile(join(bin, "docker"), DOCKER_DOUBLE);
   await chmod(join(bin, "docker"), 0o755);
+  for (const tool of ["rustc", "rustup", "zig", "cargo", "file"]) {
+    await writeFile(join(bin, tool), HOST_TOOL_DOUBLE);
+    await chmod(join(bin, tool), 0o755);
+  }
+  const hostLog = join(root, "host-tools.log");
   const destination = join(repo, "dist/offline", `movie-harbor-offline-${platform.replace("/", "-")}-${VERSION}.tar.gz`);
   const log = join(root, "docker.log");
   const env = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: temporary,
     DOCKER_TEST_MODE: mode, DOCKER_TEST_PLATFORM: platform,
     DOCKER_TEST_LOG: log, DOCKER_TEST_DESTINATION: destination,
+    HOST_TOOL_TEST_LOG: hostLog, HOST_TOOL_TEST_MODE: hostMode,
   };
   return {
     repo, root, temporary, destination, env,
     run: (args = [VERSION]) => spawnSync("sh", [join(repo, "tools/build-offline-package.sh"), ...args], {
       cwd: root, env, encoding: "utf8",
     }),
+    hostCalls: async () => (await readFile(hostLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
     calls: async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
   };
 }
 
 async function assertClean(f, expectedFiles = []) {
   // Apple Git may create its own xcrun cache in TMPDIR; check directories owned by this workflow.
-  const staging = (await readdir(f.temporary)).filter(name => /^(movie-harbor-offline-|docker-save-)/.test(name));
+  const staging = (await readdir(f.temporary)).filter(name => /^(movie-harbor-offline-|movie-harbor-arm64-target-|movie-harbor-api-arm64-|docker-save-)/.test(name));
   assert.deepEqual(staging, [], "temporary staging must be removed");
   const outputs = await readdir(join(f.repo, "dist/offline")).catch(error => {
     if (error.code === "ENOENT") return [];
@@ -142,10 +210,28 @@ function tar(args) {
   return result.stdout;
 }
 
-test("shell CLI builds exactly three runtime images and publishes only the complete allowed bundle", async t => {
+test("ARM64 packaging cross-compiles on the host and assembles only the verified binary", async t => {
   const f = await fixture(t);
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
+  const hostCalls = await f.hostCalls();
+  assert.deepEqual(hostCalls.slice(0, 4), [
+    ["rustc", "--version"], ["cargo", "zigbuild", "--version"],
+    ["zig", "version"], ["rustup", "target", "list", "--installed"],
+  ]);
+  const build = hostCalls.find(args => args[0] === "cargo" && args[1] === "zigbuild" && !args.includes("--version"));
+  assert.ok(build, "ARM64 package must invoke cargo zigbuild");
+  assert.deepEqual(build.slice(1, 7), [
+    "zigbuild", "--locked", "--release", "--target",
+    "aarch64-unknown-linux-musl", "--target-dir",
+  ]);
+  assert.equal(build.length, 10);
+  assert.equal(build.at(-2), "-p");
+  assert.equal(build.at(-1), "movie-harbor-api");
+  const targetDirectory = build[7];
+  assert.equal(targetDirectory.startsWith(f.temporary), true);
+  assert.equal(targetDirectory.includes(join(f.repo, "target")), false);
+  assert.deepEqual(hostCalls.at(-1), ["file", join(targetDirectory, "aarch64-unknown-linux-musl", "release", "movie-harbor-api")]);
   const calls = await f.calls();
   const save = calls.find(args => args[0] === "image" && args[1] === "save");
   assert.ok(save, "CLI must export the runtime images");
@@ -158,14 +244,18 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
   assert.equal(builds.length, 3);
   assert.deepEqual(builds.map(args => args[args.indexOf("--file") + 1]), [
-    "backend/Dockerfile", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
+    "backend/Dockerfile.prebuilt", "frontend/public-web/Dockerfile", "frontend/admin-web/Dockerfile",
   ]);
   assert.deepEqual(builds.map(args => args[args.indexOf("--tag") + 1]), savedTags);
   for (const args of builds) {
     assert.equal(args.includes("--load"), true);
     assert.equal(args[args.indexOf("--platform") + 1], "linux/arm64");
-    assert.equal(args.at(-1), ".");
   }
+  const apiContext = builds[0].at(-1);
+  assert.equal(apiContext.startsWith(f.temporary), true);
+  assert.notEqual(apiContext, ".");
+  assert.deepEqual(await readdir(apiContext).catch(() => []), []);
+  assert.deepEqual(builds.slice(1).map(args => args.at(-1)), [".", "."]);
   const archiveEntries = tar(["-tzf", f.destination]).trim().split("\n").sort();
   assert.deepEqual(archiveEntries, BUNDLE_ENTRIES);
   const unpacked = join(f.root, "unpacked");
@@ -191,15 +281,18 @@ test("shell CLI builds exactly three runtime images and publishes only the compl
   await assertClean(f, [BUNDLE_NAME]);
 });
 
-test("shell CLI builds and packages a linux/amd64 release", async t => {
+test("AMD64 packaging keeps the existing containerized backend build", async t => {
   const f = await fixture(t, "success", "linux/amd64");
   const result = f.run(["--platform", "linux/amd64", VERSION]);
   assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await f.hostCalls(), []);
   assert.equal(f.destination.endsWith("movie-harbor-offline-linux-amd64-test-v1.tar.gz"), true);
 
   const calls = await f.calls();
   const builds = calls.filter(args => args[0] === "buildx" && args[1] === "build");
   assert.equal(builds.length, 3);
+  assert.equal(builds[0][builds[0].indexOf("--file") + 1], "backend/Dockerfile");
+  assert.deepEqual(builds.map(args => args.at(-1)), [".", ".", "."]);
   for (const args of builds) {
     assert.equal(args.includes("--load"), true);
     assert.equal(args[args.indexOf("--platform") + 1], "linux/amd64");
@@ -230,6 +323,34 @@ test("shell CLI builds and packages a linux/amd64 release", async t => {
   }
   await assertClean(f, ["movie-harbor-offline-linux-amd64-test-v1.tar.gz"]);
 });
+
+for (const [mode, error] of [
+  ["rust-missing", /rustc.*failed|Rust.*missing/i],
+  ["rust-wrong-version", /Rust 1\.91/i],
+  ["zigbuild-missing", /cargo zigbuild.*failed|cargo-zigbuild.*missing/i],
+  ["zigbuild-wrong-version", /cargo-zigbuild 0\.23\.4/i],
+  ["zig-missing", /zig.*failed|Zig.*missing/i],
+  ["zig-wrong-version", /Zig 0\.15\.2/i],
+  ["target-missing", /aarch64-unknown-linux-musl.*target/i],
+  ["zigbuild-fails", /cargo zigbuild/i],
+  ["binary-missing", /movie-harbor-api.*missing/i],
+  ["binary-wrong-arch", /ARM64|aarch64/i],
+  ["binary-dynamic", /static/i],
+  ["binary-not-elf", /Linux ELF/i],
+  ["binary-not-regular", /regular file/i],
+]) {
+  test(`ARM64 packaging fails cleanly when ${mode}`, async t => {
+    const f = await fixture(t, "success", "linux/arm64", mode);
+    const result = f.run();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, error);
+    const apiBuild = (await f.calls()).find(args =>
+      args[0] === "buildx" && args[1] === "build" && args.includes("backend/Dockerfile.prebuilt")
+    );
+    assert.equal(apiBuild, undefined);
+    await assertClean(f);
+  });
+}
 
 test("shell CLI accepts an explicit linux/arm64 target", async t => {
   const f = await fixture(t);
