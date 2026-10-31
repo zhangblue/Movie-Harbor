@@ -19,14 +19,16 @@ FROM (
     WHERE $1::text IN ('all', 'movie')
       AND movie.status = 'published'
       AND movie.published_at IS NOT NULL
-      AND ($2::boolean OR movie.is_private = false)
+      AND ((movie.is_private = false AND $2::boolean)
+          OR (movie.is_private = true AND $3::boolean))
     UNION ALL
     SELECT series.id
     FROM series
     WHERE $1::text IN ('all', 'series')
       AND series.status = 'published'
       AND series.published_at IS NOT NULL
-      AND ($2::boolean OR series.is_private = false)
+      AND ((series.is_private = false AND $2::boolean)
+          OR (series.is_private = true AND $3::boolean))
 ) candidates
 "#;
 
@@ -39,7 +41,8 @@ FROM (
       AND movie.status = 'published'
       AND movie.published_at IS NOT NULL
       AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
-      AND ($3::boolean OR movie.is_private = false)
+      AND ((movie.is_private = false AND $3::boolean)
+          OR (movie.is_private = true AND $4::boolean))
     UNION ALL
     SELECT movie.id
     FROM movie
@@ -48,7 +51,8 @@ FROM (
       AND movie.published_at IS NOT NULL
       AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
       AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
-      AND ($3::boolean OR movie.is_private = false)
+      AND ((movie.is_private = false AND $3::boolean)
+          OR (movie.is_private = true AND $4::boolean))
     UNION ALL
     SELECT series.id
     FROM series
@@ -56,7 +60,8 @@ FROM (
       AND series.status = 'published'
       AND series.published_at IS NOT NULL
       AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
-      AND ($3::boolean OR series.is_private = false)
+      AND ((series.is_private = false AND $3::boolean)
+          OR (series.is_private = true AND $4::boolean))
     UNION ALL
     SELECT series.id
     FROM series
@@ -65,7 +70,8 @@ FROM (
       AND series.published_at IS NOT NULL
       AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
       AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
-      AND ($3::boolean OR series.is_private = false)
+      AND ((series.is_private = false AND $3::boolean)
+          OR (series.is_private = true AND $4::boolean))
 ) candidates
 "#;
 
@@ -79,7 +85,8 @@ WITH candidates AS (
         WHERE $1::text IN ('all', 'movie')
           AND movie.status = 'published'
           AND movie.published_at IS NOT NULL
-          AND ($5::boolean OR movie.is_private = false)
+          AND ((movie.is_private = false AND $5::boolean)
+              OR (movie.is_private = true AND $6::boolean))
         ORDER BY published_at DESC, id
         LIMIT $4
     ) movie_candidates
@@ -91,7 +98,8 @@ WITH candidates AS (
         WHERE $1::text IN ('all', 'series')
           AND series.status = 'published'
           AND series.published_at IS NOT NULL
-          AND ($5::boolean OR series.is_private = false)
+          AND ((series.is_private = false AND $5::boolean)
+              OR (series.is_private = true AND $6::boolean))
         ORDER BY published_at DESC, id
         LIMIT $4
     ) series_candidates
@@ -118,7 +126,8 @@ WITH candidates AS (
             WHERE $1::text IN ('all', 'movie')
               AND movie.status = 'published'
               AND movie.published_at IS NOT NULL
-              AND ($6::boolean OR movie.is_private = false)
+              AND ((movie.is_private = false AND $6::boolean)
+                  OR (movie.is_private = true AND $7::boolean))
               AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
             UNION ALL
             SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
@@ -127,7 +136,8 @@ WITH candidates AS (
             WHERE $1::text IN ('all', 'movie')
               AND movie.status = 'published'
               AND movie.published_at IS NOT NULL
-              AND ($6::boolean OR movie.is_private = false)
+              AND ((movie.is_private = false AND $6::boolean)
+                  OR (movie.is_private = true AND $7::boolean))
               AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
               AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
         ) movie_matches
@@ -143,7 +153,8 @@ WITH candidates AS (
             WHERE $1::text IN ('all', 'series')
               AND series.status = 'published'
               AND series.published_at IS NOT NULL
-              AND ($6::boolean OR series.is_private = false)
+              AND ((series.is_private = false AND $6::boolean)
+                  OR (series.is_private = true AND $7::boolean))
               AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
             UNION ALL
             SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
@@ -152,7 +163,8 @@ WITH candidates AS (
             WHERE $1::text IN ('all', 'series')
               AND series.status = 'published'
               AND series.published_at IS NOT NULL
-              AND ($6::boolean OR series.is_private = false)
+              AND ((series.is_private = false AND $6::boolean)
+                  OR (series.is_private = true AND $7::boolean))
               AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
               AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
         ) series_matches
@@ -296,15 +308,22 @@ async fn list_on<C: ConnectionTrait>(
     filter: CatalogFilter,
     include_private: bool,
 ) -> Result<CatalogPage, DbErr> {
+    let allow_public = !filter.private_only;
+    let allow_private = include_private;
     let kind_value = || filter.kind.as_str().into();
     let (count_sql, count_values) = match &filter.search_pattern {
         Some(pattern) => (
             CATALOG_SEARCH_COUNT_SQL,
-            vec![kind_value(), pattern.clone().into(), include_private.into()],
+            vec![
+                kind_value(),
+                pattern.clone().into(),
+                allow_public.into(),
+                allow_private.into(),
+            ],
         ),
         None => (
             CATALOG_COUNT_SQL,
-            vec![kind_value(), include_private.into()],
+            vec![kind_value(), allow_public.into(), allow_private.into()],
         ),
     };
     let total_row = db
@@ -327,7 +346,8 @@ async fn list_on<C: ConnectionTrait>(
                 i64::try_from(filter.size).unwrap().into(),
                 i64::try_from(filter.offset).unwrap().into(),
                 i64::try_from(filter.window).unwrap().into(),
-                include_private.into(),
+                allow_public.into(),
+                allow_private.into(),
             ],
         ),
         None => (
@@ -337,7 +357,8 @@ async fn list_on<C: ConnectionTrait>(
                 i64::try_from(filter.size).unwrap().into(),
                 i64::try_from(filter.offset).unwrap().into(),
                 i64::try_from(filter.window).unwrap().into(),
-                include_private.into(),
+                allow_public.into(),
+                allow_private.into(),
             ],
         ),
     };

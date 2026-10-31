@@ -13,6 +13,7 @@ pub struct CatalogRequest {
     /// 去除首尾空白后的子串搜索。大小写折叠遵循数据库排序规则下 PostgreSQL 的 `lower`；
     /// LIKE 元字符会被转义，因此所有用户输入都按普通文本匹配。
     pub q: Option<String>,
+    pub privacy: Option<String>,
     pub page: Option<u64>,
     pub size: Option<u64>,
 }
@@ -38,6 +39,7 @@ impl CatalogKind {
 pub struct CatalogFilter {
     pub kind: CatalogKind,
     pub search_pattern: Option<String>,
+    pub private_only: bool,
     pub page: u64,
     pub size: u64,
     pub offset: u64,
@@ -71,9 +73,11 @@ impl TryFrom<CatalogRequest> for CatalogFilter {
             .map(|query| query.trim().to_owned())
             .filter(|query| !query.is_empty())
             .map(|query| format!("%{}%", escape_like(&query)));
+        let private_only = value.privacy.as_deref() == Some("private");
         Ok(Self {
             kind,
             search_pattern,
+            private_only,
             page,
             size,
             offset,
