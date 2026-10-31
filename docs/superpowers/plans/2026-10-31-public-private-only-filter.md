@@ -460,7 +460,7 @@ git commit -m "feat: add private-only catalog control"
 - 修改：`tests/e2e/helpers.ts:127-160`
 - 修改：`tests/e2e/public.spec.ts:17-74`
 
-- [ ] **步骤 1：编写失败的真实浏览器验收测试**
+- [ ] **步骤 1：编写真实浏览器验收测试**
 
 在 `tests/e2e/helpers.ts` 增加完整发布剧集夹具：
 
