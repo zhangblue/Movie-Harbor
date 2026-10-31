@@ -36,16 +36,28 @@ function parseArguments(args) {
   return { platform, version: remaining[0] };
 }
 
-function run(command, args, { cwd = REPO_ROOT, signal, capture = true } = {}) {
+function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGroup = false } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
       cwd, env: { ...process.env, COPYFILE_DISABLE: "1" },
       stdio: ["ignore", capture ? "pipe" : "inherit", "inherit"],
+      ...(processGroup ? { detached: true } : {}),
     });
     let output = "";
     let failure;
-    const abort = () => child.kill("SIGTERM");
+    const abort = () => {
+      if (!processGroup || !child.pid) return child.kill("SIGTERM");
+      // Host compilers spawn linkers and other descendants in this POSIX process group.
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch (error) {
+        if (error.code !== "ESRCH") {
+          failure = error;
+          child.kill("SIGTERM");
+        }
+      }
+    };
     signal?.addEventListener("abort", abort, { once: true });
     child.on("error", error => { failure = error; });
     child.stdout?.setEncoding("utf8");
@@ -111,7 +123,7 @@ async function prepareArm64ApiContext(signal) {
     await run("cargo", [
       "zigbuild", "--locked", "--release", "--target", ARM64_RUST_TARGET,
       "--target-dir", targetDirectory, "-p", "movie-harbor-api",
-    ], { signal, capture: false });
+    ], { signal, capture: false, processGroup: true });
     const binary = join(targetDirectory, ARM64_RUST_TARGET, "release", "movie-harbor-api");
     let binaryStat;
     try {
