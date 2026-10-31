@@ -6,9 +6,29 @@
 
 ## 半离线发布包
 
-后端按架构选择编译方式：ARM64 保持在目标 Linux 容器中执行普通 Cargo 构建，生成 `aarch64-unknown-linux-gnu` 程序；AMD64 在构建机原生平台的 Linux 容器中执行 `cargo zigbuild --locked --release --target x86_64-unknown-linux-musl -p movie-harbor-api`，生成静态链接程序。AMD64 构建固定 Rust 1.91、cargo-zigbuild 0.23.4 和 Zig 0.15.2，工具安装在容器内，宿主机无需单独安装 Zig。两个平台均保留现有 Debian 运行镜像、证书、curl 和非 root 用户。前端构建及运行镜像的安装步骤在跨架构时仍可能依赖 Docker/BuildKit 模拟支持。
+ARM64 后端在构建机宿主系统中执行 `cargo zigbuild --locked --release --target aarch64-unknown-linux-musl --target-dir <本次临时目录> -p movie-harbor-api`，再由 Docker 组装 Debian 运行镜像。构建机可以是 macOS Apple Silicon 或 Linux，但生成、打包和部署的程序仅支持 Linux ARM64；它不是 macOS 程序，也不能直接在 macOS 中运行。
 
-构建机需要 Docker Engine、Docker Buildx、Docker Compose v2、Node.js、Git 和 tar，并能下载构建依赖。工具按指定平台构建并校验最终镜像元数据，Docker 守护进程的架构无需与目标平台相同。在仓库根目录执行：
+AMD64 后端仍在现有 Linux 构建容器中使用固定的 `x86_64-unknown-linux-musl` Zig 工具链，宿主机不需要为 AMD64 单独安装 Zig。
+
+ARM64 宿主机需预先安装 Rust 1.91、cargo-zigbuild 0.23.4、Zig 0.15.2 和 Rust target `aarch64-unknown-linux-musl`。运行发布工具前检查版本与 target：
+
+```bash
+rustc --version                         # 必须为 1.91.x
+cargo zigbuild --version                # 必须为 cargo-zigbuild 0.23.4
+zig version                             # 必须为 0.15.2
+rustup target list --installed          # 必须包含 aarch64-unknown-linux-musl
+```
+
+使用者需主动安装 Rust 工具链、cargo-zigbuild 和 target：
+
+```bash
+rustup toolchain install 1.91.0
+rustup override set 1.91.0
+cargo install --locked cargo-zigbuild --version 0.23.4
+rustup target add aarch64-unknown-linux-musl
+```
+
+Zig 0.15.2 需按操作系统从 Zig 官方发布包安装并加入 `PATH`。发布工具只检查版本，不自动安装或升级任何宿主机工具。构建机还需要 Docker Engine、Docker Buildx、Docker Compose v2、Node.js、Git 和 tar，并能下载构建依赖。工具按指定平台构建并校验最终镜像元数据，Docker 守护进程的架构无需与目标平台相同。在仓库根目录执行：
 
 ```bash
 ./tools/build-offline-package.sh [版本]                       # 默认 linux/arm64

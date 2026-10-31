@@ -138,3 +138,18 @@ test("deployment skill separates standard authorization from data recovery appro
   assert.match(runbook, /不得编辑、猜测、补写或重建/);
   assert.match(runbook, /数据库恢复[\s\S]*媒体备份[\s\S]*重新取得明确授权/);
 });
+
+test("offline guide documents the fixed ARM64 host zigbuild toolchain and Linux-only output", () => {
+  const guide = readFileSync(
+    path.join(projectRoot, "docs/guides/offline-package.md"),
+    "utf8",
+  );
+  assert.match(guide, /cargo zigbuild[\s\S]*--target aarch64-unknown-linux-musl/);
+  assert.match(guide, /--target-dir/);
+  assert.match(guide, /Rust 1\.91/);
+  assert.match(guide, /cargo-zigbuild 0\.23\.4/);
+  assert.match(guide, /Zig 0\.15\.2/);
+  assert.match(guide, /macOS Apple Silicon[\s\S]*Linux ARM64/);
+  assert.match(guide, /rustup target add aarch64-unknown-linux-musl/);
+  assert.doesNotMatch(guide, /ARM64[^\n]*普通 Cargo|aarch64-unknown-linux-gnu/);
+});
