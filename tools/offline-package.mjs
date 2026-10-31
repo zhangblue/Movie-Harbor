@@ -36,6 +36,34 @@ function parseArguments(args) {
   return { platform, version: remaining[0] };
 }
 
+function signalProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (error.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(pid, timeoutMs) {
+  const deadline = performance.now() + timeoutMs;
+  while (signalProcessGroup(pid, 0)) {
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return false;
+    await new Promise(resolve => setTimeout(resolve, Math.min(25, remaining)));
+  }
+  return true;
+}
+
+async function finishProcessGroup(pid) {
+  if (await waitForProcessGroupExit(pid, 1000)) return;
+  signalProcessGroup(pid, "SIGKILL");
+  if (!(await waitForProcessGroupExit(pid, 1000))) {
+    throw new Error(`Compiler process group ${pid} did not exit after SIGKILL`);
+  }
+}
+
 function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGroup = false } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolveResult, reject) => {
@@ -46,16 +74,24 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
     });
     let output = "";
     let failure;
+    let groupTermination;
+    const waitForGroup = () => {
+      groupTermination ??= finishProcessGroup(child.pid);
+      return groupTermination;
+    };
     const abort = () => {
       if (!processGroup || !child.pid) return child.kill("SIGTERM");
       // Host compilers spawn linkers and other descendants in this POSIX process group.
       try {
-        process.kill(-child.pid, "SIGTERM");
-      } catch (error) {
-        if (error.code !== "ESRCH") {
+        signalProcessGroup(child.pid, "SIGTERM");
+        // Start the deadline now even if the wrapper itself ignores SIGTERM.
+        waitForGroup().catch(error => {
           failure = error;
-          child.kill("SIGTERM");
-        }
+          child.kill("SIGKILL");
+        });
+      } catch (error) {
+        failure = error;
+        child.kill("SIGKILL");
       }
     };
     signal?.addEventListener("abort", abort, { once: true });
@@ -70,11 +106,24 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
       }
     });
     child.on("close", (code, childSignal) => {
-      signal?.removeEventListener("abort", abort);
-      if (signal?.aborted) reject(signal.reason);
-      else if (failure) reject(failure);
-      else if (code !== 0) reject(new Error(`${command} ${args.join(" ")} failed (${childSignal ?? code})`));
-      else resolveResult(output.trim());
+      const finish = () => {
+        signal?.removeEventListener("abort", abort);
+        if (signal?.aborted) reject(signal.reason);
+        else if (failure) reject(failure);
+        else if (code !== 0) reject(new Error(`${command} ${args.join(" ")} failed (${childSignal ?? code})`));
+        else resolveResult(output.trim());
+      };
+      if (!processGroup || !child.pid) return finish();
+      // A compiler wrapper may exit before descendants finish handling SIGTERM.
+      waitForGroup().then(() => {
+        if (failure) {
+          signal?.removeEventListener("abort", abort);
+          reject(failure);
+        } else finish();
+      }, error => {
+        signal?.removeEventListener("abort", abort);
+        reject(error);
+      });
     });
   });
 }

@@ -130,23 +130,37 @@ if (tool === 'rustc') {
     if (mode === 'zigbuild-fails') fail('cargo zigbuild failed');
     const targetDirectory = args[args.indexOf('--target-dir') + 1];
     const binary = path.join(targetDirectory, 'aarch64-unknown-linux-musl', 'release', 'movie-harbor-api');
-    if (mode === 'zigbuild-wait-for-signal') {
+    if (['zigbuild-wait-for-signal', 'zigbuild-ignore-signal'].includes(mode)) {
       const { spawn } = require('node:child_process');
       spawn(process.execPath, ['-e', [
         "const fs = require('node:fs');",
         "const path = require('node:path');",
-        "const [targetDirectory, binary] = process.argv.slice(1);",
-        "let attempts = 0;",
-        "const poll = setInterval(() => {",
-        "  if (!fs.existsSync(targetDirectory)) {",
+        "const [targetDirectory, binary, mode] = process.argv.slice(1);",
+        "const keepAlive = setInterval(() => {}, 1000);",
+        "process.on('SIGTERM', () => {",
+        "  console.error('ZIGBUILD_DESCENDANT_RECEIVED_SIGTERM');",
+        "  if (mode === 'zigbuild-ignore-signal') return;",
+        "  setTimeout(() => {",
+        "    const existed = fs.existsSync(targetDirectory);",
         "    fs.mkdirSync(path.dirname(binary), { recursive: true });",
         "    fs.writeFileSync(binary, 'late descendant output');",
-        "    clearInterval(poll);",
-        "    console.error('ZIGBUILD_DESCENDANT_WROTE');",
-        "  } else if (++attempts === 300) { clearInterval(poll); process.exitCode = 2; }",
-        "}, 10);",
+        "    console.error(existed ? 'ZIGBUILD_DESCENDANT_FINALIZED_BEFORE_CLEANUP' : 'ZIGBUILD_DESCENDANT_WROTE_AFTER_CLEANUP');",
+        "    process.exit(0);",
+        "  }, 150);",
+        "});",
+        "setTimeout(() => {",
+        "  fs.mkdirSync(path.dirname(binary), { recursive: true });",
+        "  fs.writeFileSync(binary, 'unterminated descendant output');",
+        "  console.error('ZIGBUILD_DESCENDANT_SURVIVED');",
+        "  process.exit(2);",
+        "}, 3000);",
         "console.error('ZIGBUILD_TREE_WAITING');",
-      ].join('\n'), targetDirectory, binary], { stdio: ['ignore', 'ignore', 'inherit'] });
+      ].join('\n'), targetDirectory, binary, mode], { stdio: ['ignore', 'ignore', 'inherit'] });
+      console.error('ZIGBUILD_GROUP_PID:' + process.pid);
+      if (mode === 'zigbuild-ignore-signal') {
+        process.on('SIGTERM', () => console.error('ZIGBUILD_WRAPPER_RECEIVED_SIGTERM'));
+        setTimeout(() => { console.error('ZIGBUILD_WRAPPER_SURVIVED'); process.exit(2); }, 3500);
+      }
       setInterval(() => {}, 1000);
     } else if (mode !== 'binary-missing') {
       fs.mkdirSync(path.dirname(binary), { recursive: true });
@@ -475,32 +489,45 @@ test("shell CLI cannot overwrite an artifact that appears during packaging", asy
   await assertClean(f, [BUNDLE_NAME]);
 });
 
-test("ARM64 packaging stops compiler descendants before cleaning after SIGTERM", { timeout: 10000 }, async t => {
-  const f = await fixture(t, "success", "linux/arm64", "zigbuild-wait-for-signal");
-  const child = spawn("sh", [join(f.repo, "tools/build-offline-package.sh"), VERSION], {
-    cwd: f.root, env: f.env, stdio: ["ignore", "pipe", "pipe"],
+for (const [mode, behavior] of [
+  ["zigbuild-wait-for-signal", "waits for descendant shutdown"],
+  ["zigbuild-ignore-signal", "forcibly stops an unresponsive descendant"],
+]) {
+  test(`ARM64 packaging ${behavior} before cleaning after SIGTERM`, { timeout: 10000 }, async t => {
+    const f = await fixture(t, "success", "linux/arm64", mode);
+    const child = spawn("sh", [join(f.repo, "tools/build-offline-package.sh"), VERSION], {
+      cwd: f.root, env: f.env, stdio: ["ignore", "pipe", "pipe"],
+    });
+    t.after(() => child.kill("SIGKILL"));
+    let stderr = "";
+    let interrupted = false;
+    child.stderr.on("data", chunk => {
+      stderr += chunk.toString();
+      if (!interrupted && stderr.includes("ZIGBUILD_TREE_WAITING")) {
+        interrupted = true;
+        child.kill("SIGTERM");
+      }
+    });
+    // Inherited stderr keeps close pending until the real descendant exits or is killed.
+    const [code] = await new Promise(resolve => child.on("close", (...args) => resolve(args)));
+    assert.equal(interrupted, true, stderr);
+    assert.notEqual(code, 0);
+    assert.match(stderr, /Interrupted by SIGTERM/);
+    const hostCalls = await f.hostCalls();
+    assert.equal(hostCalls.some(args => args[0] === "cargo" && args[1] === "zigbuild" && !args.includes("--version")), true);
+    assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
+    await assertClean(f);
+    assert.match(stderr, /ZIGBUILD_DESCENDANT_RECEIVED_SIGTERM/);
+    assert.equal(stderr.includes("ZIGBUILD_DESCENDANT_WROTE_AFTER_CLEANUP"), false, stderr);
+    assert.equal(stderr.includes("ZIGBUILD_DESCENDANT_SURVIVED"), false, stderr);
+    assert.equal(stderr.includes("ZIGBUILD_WRAPPER_SURVIVED"), false, stderr);
+    if (mode === "zigbuild-ignore-signal") assert.match(stderr, /ZIGBUILD_WRAPPER_RECEIVED_SIGTERM/);
+    assert.equal(stderr.includes("ZIGBUILD_DESCENDANT_FINALIZED_BEFORE_CLEANUP"), mode === "zigbuild-wait-for-signal", stderr);
+    const groupPid = Number(stderr.match(/ZIGBUILD_GROUP_PID:(\d+)/)?.[1]);
+    assert.equal(Number.isInteger(groupPid) && groupPid > 0, true, stderr);
+    assert.throws(() => process.kill(-groupPid, 0), { code: "ESRCH" });
   });
-  t.after(() => child.kill("SIGKILL"));
-  let stderr = "";
-  let interrupted = false;
-  child.stderr.on("data", chunk => {
-    stderr += chunk.toString();
-    if (!interrupted && stderr.includes("ZIGBUILD_TREE_WAITING")) {
-      interrupted = true;
-      child.kill("SIGTERM");
-    }
-  });
-  // The descendant inherits stderr: close waits for it to terminate or write back after cleanup.
-  const [code] = await new Promise(resolve => child.on("close", (...args) => resolve(args)));
-  assert.equal(interrupted, true, stderr);
-  assert.notEqual(code, 0);
-  assert.match(stderr, /Interrupted by SIGTERM/);
-  const hostCalls = await f.hostCalls();
-  assert.equal(hostCalls.some(args => args[0] === "cargo" && args[1] === "zigbuild" && !args.includes("--version")), true);
-  assert.equal((await f.calls()).some(args => args[0] === "buildx" && args[1] === "build"), false);
-  await assertClean(f);
-  assert.equal(stderr.includes("ZIGBUILD_DESCENDANT_WROTE"), false, stderr);
-});
+}
 
 test("shell CLI cleans partial exports after SIGTERM", { timeout: 10000 }, async t => {
   const f = await fixture(t, "wait-for-signal");
