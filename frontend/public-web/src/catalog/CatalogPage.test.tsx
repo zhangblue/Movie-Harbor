@@ -298,3 +298,11 @@ it("ignores a stale page response after browser navigation selects another page"
   expect(screen.queryByRole("link", { name: "查看群星之间详情" })).not.toBeInTheDocument();
   expect(screen.getByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
+
+
+it("does not offer the private-only filter to anonymous visitors", async () => {
+  serve(() => catalog([movieCard]));
+  render(<App />);
+  await screen.findByRole("link", { name: "查看远方来信详情" });
+  expect(screen.queryByRole("checkbox", { name: "只看私密" })).not.toBeInTheDocument();
+});

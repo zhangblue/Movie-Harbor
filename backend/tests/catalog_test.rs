@@ -261,6 +261,71 @@ async fn private_catalog_filters_before_count_search_and_pagination() {
 }
 
 #[tokio::test]
+async fn private_only_catalog_requires_viewer_and_filters_before_count_search_and_pagination() {
+    let (_db, _root, app, viewer, admin) = private_fixture("private_only").await;
+
+    for cookie in [
+        None,
+        Some(admin.as_str()),
+        Some("mh_viewer_session=invalid"),
+    ] {
+        let payload =
+            json_body(get_with_cookie(&app, "/api/catalog?privacy=private", cookie).await).await;
+        assert_eq!(payload["total"], 0);
+        assert_eq!(payload["items"], serde_json::json!([]));
+    }
+
+    let all =
+        json_body(get_with_cookie(&app, "/api/catalog?privacy=private", Some(&viewer)).await).await;
+    assert_eq!(all["total"], 2);
+    assert!(
+        all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["is_private"] == true)
+    );
+
+    for (query, expected_name) in [
+        ("kind=movie", "Private movie"),
+        ("kind=series", "Private series"),
+        ("q=movie", "Private movie"),
+        ("q=series", "Private series"),
+    ] {
+        let payload = json_body(
+            get_with_cookie(
+                &app,
+                &format!("/api/catalog?privacy=private&{query}"),
+                Some(&viewer),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(payload["total"], 1);
+        assert_eq!(payload["items"][0]["name"], expected_name);
+    }
+
+    for page in [1, 2] {
+        let payload = json_body(
+            get_with_cookie(
+                &app,
+                &format!("/api/catalog?privacy=private&size=1&page={page}"),
+                Some(&viewer),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(payload["total"], 2);
+        assert_eq!(payload["items"].as_array().unwrap().len(), 1);
+        assert_eq!(payload["items"][0]["is_private"], true);
+    }
+
+    let unsupported =
+        json_body(get_with_cookie(&app, "/api/catalog?privacy=public", Some(&viewer)).await).await;
+    assert_eq!(unsupported["total"], 4);
+}
+
+#[tokio::test]
 async fn private_details_require_viewer_and_keep_publication_rules() {
     // Omitting either parent visibility or publication checks reveals private/nonpublished details.
     let (_db, _root, app, viewer, admin) = private_fixture("private_details").await;
@@ -917,6 +982,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
             CatalogFilter {
                 kind: CatalogKind::Movie,
                 search_pattern: None,
+                private_only: false,
                 page: 1,
                 size: 20,
                 offset: 0,
@@ -1122,6 +1188,7 @@ WHERE name ~ '^Series [0-9]+$'
             20_i64.into(),
             0_i64.into(),
             20_i64.into(),
+            true.into(),
             false.into(),
         ],
     )
@@ -1145,6 +1212,7 @@ WHERE name ~ '^Series [0-9]+$'
             0_i64.into(),
             20_i64.into(),
             true.into(),
+            true.into(),
         ],
     )
     .await;
@@ -1167,6 +1235,7 @@ WHERE name ~ '^Series [0-9]+$'
             20_i64.into(),
             0_i64.into(),
             20_i64.into(),
+            true.into(),
             false.into(),
         ],
     )

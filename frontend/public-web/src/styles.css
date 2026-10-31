@@ -19,6 +19,10 @@ a:focus-visible, button:focus-visible { outline: 3px solid #96aeeb; outline-offs
 .pill { min-height: 38px; border: 1px solid var(--mh-color-border-strong); border-radius: 999px; background: var(--mh-color-surface); color: var(--mh-color-text); padding: 8px 16px; cursor: pointer; }
 .pill:hover { background: var(--mh-color-surface-hover); }
 .pill.is-active { border-color: transparent; background: var(--mh-color-accent); color: var(--mh-color-accent-ink); font-weight: 750; }
+.private-only-filter { min-height: 38px; display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px; border: 1px solid var(--mh-color-border-strong); border-radius: 999px; background: var(--mh-color-surface); color: var(--mh-color-text); cursor: pointer; white-space: nowrap; }
+.private-only-filter:hover { background: var(--mh-color-surface-hover); }
+.private-only-filter:focus-within { box-shadow: var(--mh-focus-ring); }
+.private-only-filter input { width: 16px; height: 16px; margin: 0; accent-color: var(--mh-color-accent); }
 .search-box { width: 218px; height: 40px; display: flex; align-items: center; gap: 9px; padding: 0 12px; border: 1px solid var(--mh-color-border-strong); border-radius: 9px; background: var(--mh-color-surface); }
 .search-box:focus-within { border-color: #7485ad; box-shadow: var(--mh-focus-ring); }
 .search-box svg { width: 18px; flex-shrink: 0; fill: none; stroke: var(--mh-color-text-muted); stroke-width: 1.8; stroke-linecap: round; }
@@ -98,7 +102,7 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
 @media (max-width: 620px) {
   .site-shell { width: min(calc(100% - 24px), 520px); }
   .brand { font-size: 1rem; }
-  .catalog-tools { align-items: stretch; flex-direction: column; }
+  .catalog-tools { flex-wrap: wrap; justify-content: flex-start; }
   .search-box { width: 100%; }
   .catalog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 10px; }
   .mh-poster-card__copy { padding: 11px; }
