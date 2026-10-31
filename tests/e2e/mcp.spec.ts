@@ -110,21 +110,24 @@ test("MCP creates, uploads and independently publishes private movie and series"
   const inspected = await call("inspect_video", { path: compatibleVideoPath });
   expect(inspected).toMatchObject({ path: compatibleVideoPath, container: "mp4", compatibility: { accepted: true, conversion_required: false } });
   const duration = inspected.duration_seconds as number;
+  const movieDurationMinutes = Math.max(1, Math.round(duration / 60));
+  const movieDurationSeconds = movieDurationMinutes * 60;
   expect(duration).toBeGreaterThan(0);
 
   const listed = await call("list_genres", {});
   expect(Array.isArray(listed.genres)).toBe(true);
-  const genre = await call("create_genre", { name: `${prefix} 题材` });
+  const genre = await call("create_genre", { name: `${prefix} 题材`, confirmed: true });
   const genreId = genre.id as string;
 
-  const stagedMoviePoster = await call("stage_poster", { path: posterPath });
+  const stagedMoviePoster = await call("stage_poster", { path: posterPath, confirmed: true });
   const movie = await call("create_movie", {
-    name: `${prefix} Movie`, year: 2026, duration_seconds: duration,
+    name: `${prefix} Movie`, synopsis: "MCP 私密电影验收简介。", year: 2026,
+    duration_minutes: movieDurationMinutes, visibility: "private", confirmed: true,
     genre_ids: [genreId], staged_poster_token: stagedMoviePoster.staged_poster_token,
   });
   expect(movie).toMatchObject({ status: "draft", next_actions: ["upload_movie_video"] });
   const movieUpload = await call("upload_movie_video", {
-    movie_id: movie.id, version: movie.version, path: compatibleVideoPath,
+    movie_id: movie.id, version: movie.version, path: compatibleVideoPath, confirmed: true,
   });
   expect(movieUpload).toMatchObject({ generated_file_deleted: false, next_actions: ["publish_movie"] });
   const movieBeforePublish = await (await request.get(`/api/catalog/movies/${movie.id}`)).status();
@@ -138,20 +141,23 @@ test("MCP creates, uploads and independently publishes private movie and series"
   expect(await call("validate_poster", { path: posterPath })).toMatchObject({ format: "png", mime_type: "image/png" });
   expect(await call("inspect_video", { path: compatibleVideoPath })).toMatchObject({ compatibility: { accepted: true, conversion_required: false } });
   expect(await call("search_series", { name: seriesName })).toMatchObject({ matches: [], next_actions: ["create_series"] });
-  const stagedSeriesPoster = await call("stage_poster", { path: posterPath });
+  const stagedSeriesPoster = await call("stage_poster", { path: posterPath, confirmed: true });
   const series = await call("create_series", {
-    name: seriesName, year: 2025, genre_ids: [genreId],
+    name: seriesName, synopsis: "MCP 私密剧集验收简介。", year: 2025,
+    genre_ids: [genreId], visibility: "private", confirmed: true,
     staged_poster_token: stagedSeriesPoster.staged_poster_token,
   });
   expect(series).toMatchObject({ status: "draft", next_actions: ["create_season"] });
-  const season = await call("create_season", { series_id: series.id, version: series.version, number: 1 });
+  const season = await call("create_season", {
+    series_id: series.id, version: series.version, number: 1, confirmed: true,
+  });
   const episode = await call("create_episode", {
     series_id: series.id, season_id: season.season_id, version: season.series_version,
-    number: 1, name: "Pilot", duration_seconds: duration,
+    number: 1, name: "Pilot", duration_seconds: duration, confirmed: true,
   });
   const episodeUpload = await call("upload_episode_video", {
     series_id: series.id, season_id: season.season_id, episode_id: episode.id,
-    version: episode.version, path: compatibleVideoPath,
+    version: episode.version, path: compatibleVideoPath, confirmed: true,
   });
   const admin = await AdminApi.login(playwright);
   try {
@@ -176,7 +182,7 @@ test("MCP creates, uploads and independently publishes private movie and series"
 
     const movieDetail = await admin.get<any>(`/api/admin/movies/${movie.id}`);
     expect(movieDetail).toMatchObject({
-      name: `${prefix} Movie`, year: 2026, duration_seconds: duration,
+      name: `${prefix} Movie`, year: 2026, duration_seconds: movieDurationSeconds,
       status: "published", is_private: true,
     });
     expect(movieDetail.poster).not.toBeNull();
@@ -206,12 +212,16 @@ test("MCP converts only after confirmation and deletes only the generated upload
 
   const genres = await call("list_genres", {});
   const genreId = (genres.genres as Array<{ id: string }>)[0]!.id;
-  const staged = await call("stage_poster", { path: posterPath });
+  const staged = await call("stage_poster", { path: posterPath, confirmed: true });
+  const durationMinutes = Math.max(1, Math.round((converted.duration_seconds as number) / 60));
   const movie = await call("create_movie", {
-    name: prefix, year: 2024, duration_seconds: converted.duration_seconds,
+    name: prefix, synopsis: "MCP 转码验收简介。", year: 2024,
+    duration_minutes: durationMinutes, confirmed: true,
     genre_ids: [genreId], staged_poster_token: staged.staged_poster_token,
   });
-  const uploaded = await call("upload_movie_video", { movie_id: movie.id, version: movie.version, path: outputPath });
+  const uploaded = await call("upload_movie_video", {
+    movie_id: movie.id, version: movie.version, path: outputPath, confirmed: true,
+  });
   expect(uploaded).toMatchObject({ generated_file_deleted: true, retained_generated_path: null });
   expect(existsSync(outputPath)).toBe(false);
   expect(existsSync(incompatibleVideoPath)).toBe(true);
