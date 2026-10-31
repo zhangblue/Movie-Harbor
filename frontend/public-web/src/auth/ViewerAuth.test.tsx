@@ -43,10 +43,14 @@ function server(initial = false) {
       state.authenticated = false;
       return new Response(null, { status: 204 });
     }
-    if (url.pathname === "/api/catalog") return state.catalogResponse ?? json({
-      items: state.authenticated ? [movieCard, { ...seriesCard, is_private: true }] : [movieCard],
-      total: state.authenticated ? 2 : 1, page: Number(url.searchParams.get("page") ?? 1), size: 20,
-    });
+    if (url.pathname === "/api/catalog") {
+      const privateOnly = url.searchParams.get("privacy") === "private";
+      const authenticatedItems = privateOnly ? [{ ...seriesCard, is_private: true }] : [movieCard, { ...seriesCard, is_private: true }];
+      return state.catalogResponse ?? json({
+        items: state.authenticated ? authenticatedItems : [movieCard],
+        total: state.authenticated ? authenticatedItems.length : 1, page: Number(url.searchParams.get("page") ?? 1), size: 20,
+      });
+    }
     if (url.pathname.includes("/movies/")) return state.authenticated ? json({ ...movie, is_private: true }) : json({}, 404);
     if (url.pathname.includes("/series/")) return state.authenticated ? json({ ...series, is_private: true }) : json({}, 404);
     return json({}, 404);
@@ -346,4 +350,88 @@ it("does not let a previous viewer session response replace the new viewer's CSR
   const writes = state.requests.filter(({ url }) => url.pathname === "/api/viewer/password");
   expect(new Headers(writes.at(-1)?.init?.headers).get("x-csrf-token")).toBe("winter-csrf");
   expect(await screen.findByText("密码已修改，请重新登录")).toBeInTheDocument();
+});
+
+
+it("filters the authenticated catalog to private content and restores it from the URL", async () => {
+  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  const state = server(true); const user = userEvent.setup(); render(<App />);
+  const filter = await screen.findByRole("checkbox", { name: "只看私密" });
+  await screen.findByRole("link", { name: "查看远方来信详情" });
+  state.catalogResponse = deferred<Response>().promise;
+  act(() => {
+    window.history.pushState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
+  state.catalogResponse = undefined;
+  await user.click(filter);
+  await screen.findByRole("link", { name: "查看群星之间详情" });
+  expect(screen.queryByRole("link", { name: "查看远方来信详情" })).not.toBeInTheDocument();
+  expect(location.search).toContain("kind=series");
+  expect(location.search).toContain("q=%E6%98%9F");
+  expect(location.search).toContain("privacy=private");
+  expect(new URLSearchParams(location.search).get("page")).toBeNull();
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("privacy")).toBe("private");
+  act(() => { window.history.pushState(null, "", "/"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  expect(screen.getByRole("checkbox", { name: "只看私密" })).not.toBeChecked();
+  act(() => { window.history.pushState(null, "", "/?privacy=private"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  expect(await screen.findByRole("checkbox", { name: "只看私密" })).toBeChecked();
+  await user.click(screen.getByRole("checkbox", { name: "只看私密" }));
+  expect(new URLSearchParams(location.search).get("privacy")).toBeNull();
+  expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
+});
+
+it.each(["logout", "password", "expired"] as const)("clears private filtering and page but preserves the query after %s", async (operation) => {
+  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&privacy=private");
+  const state = server(true); const user = userEvent.setup(); render(<App />);
+  await screen.findByText("Summer"); await screen.findByText("私密");
+  state.catalogResponse = deferred<Response>().promise;
+  act(() => {
+    window.history.pushState(null, "", "/?kind=series&q=%E6%98%9F&privacy=private&page=2");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
+  if (operation === "logout") await user.click(screen.getByRole("button", { name: "退出登录" }));
+  else if (operation === "password") {
+    await user.click(screen.getByRole("button", { name: "修改密码" }));
+    await user.type(screen.getByLabelText("当前密码"), "old-password");
+    await user.type(screen.getByLabelText("新密码"), "new-password");
+    await user.click(screen.getByRole("button", { name: "保存新密码" }));
+  } else { state.authenticated = false; act(() => window.dispatchEvent(new Event("focus"))); }
+  await screen.findByRole("button", { name: "登录" });
+  await waitFor(() => expect(new URLSearchParams(location.search).get("privacy")).toBeNull());
+  expect(new URLSearchParams(location.search).get("page")).toBeNull();
+  expect(new URLSearchParams(location.search).get("kind")).toBe("series");
+  expect(new URLSearchParams(location.search).get("q")).toBe("星");
+  expect(screen.queryByRole("checkbox", { name: "只看私密" })).not.toBeInTheDocument();
+});
+
+it("ignores a delayed ordinary catalog after switching to the private filter", async () => {
+  const state = server(true); const user = userEvent.setup(); render(<App />);
+  await screen.findByText("Summer"); await screen.findByText("私密");
+  const old = deferred<Response>(); state.catalogResponse = old.promise;
+  fireEvent.change(screen.getByRole("searchbox"), { target: { value: "星" } });
+  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("q")).toBe("星"));
+  state.catalogResponse = undefined;
+  await user.click(screen.getByRole("checkbox", { name: "只看私密" }));
+  await screen.findByRole("link", { name: "查看群星之间详情" });
+  await act(async () => old.resolve(json({ items: [movieCard], total: 1, page: 1, size: 20 })));
+  expect(screen.queryByRole("link", { name: "查看远方来信详情" })).not.toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
+});
+
+it("keeps a private filter deep link loading until session discovery finishes", async () => {
+  window.history.replaceState(null, "", "/?privacy=private");
+  const state = server(true); const session = deferred<Response>(); state.sessionResponse = session.promise;
+  state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
+  render(<App />);
+  await waitFor(() => expect(state.requests.some(({ url }) => url.pathname === "/api/catalog")).toBe(true));
+  await act(async () => {});
+  expect(screen.queryByText("没有找到匹配内容")).not.toBeInTheDocument();
+  expect(screen.queryByText("没有找到私密内容")).not.toBeInTheDocument();
+  state.sessionResponse = undefined;
+  state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
+  await act(async () => session.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
+  expect(await screen.findByText("没有找到私密内容")).toBeInTheDocument();
 });
