@@ -1,7 +1,13 @@
 import { apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken } from "./http";
 import type { CatalogKind, CatalogPage, ChangePasswordRequest, MovieDetail, SeriesDetail, ViewerLoginRequest, ViewerLoginResponse, ViewerSessionResponse } from "./types";
 
-export interface CatalogQuery { kind?: CatalogKind; q?: string; page?: number; size?: number }
+export interface CatalogQuery {
+  kind?: CatalogKind;
+  q?: string;
+  privacy?: "private";
+  page?: number;
+  size?: number;
+}
 
 export async function viewerLogin(input: ViewerLoginRequest, acceptSession?: (session: ViewerSessionResponse) => boolean): Promise<ViewerLoginResponse> {
   clearCsrfToken();
@@ -26,7 +32,7 @@ export async function changeViewerPassword(input: ChangePasswordRequest, isCurre
 
 export async function listCatalog(query: CatalogQuery = {}): Promise<CatalogPage> {
   return requiredResponse(await apiRequest<CatalogPage>("/api/catalog", {
-    query: { kind: query.kind, q: query.q, page: query.page, size: query.size },
+    query: { kind: query.kind, q: query.q, privacy: query.privacy, page: query.page, size: query.size },
   }));
 }
 export async function getMovieDetail(id: string): Promise<MovieDetail> {
