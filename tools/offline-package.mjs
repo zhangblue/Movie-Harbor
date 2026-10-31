@@ -151,7 +151,7 @@ async function prepareArm64ApiContext(signal) {
     `Rust ${ARM64_RUST_MINOR}`,
   );
   requireVersion(
-    await run("cargo", ["zigbuild", "--version"], { signal }),
+    await run("cargo-zigbuild", ["--version"], { signal }),
     /cargo-zigbuild 0\.23\.4(?:\s|$)/,
     `cargo-zigbuild ${ARM64_ZIGBUILD_VERSION}`,
   );

@@ -121,11 +121,13 @@ if (tool === 'rustc') {
   expectArgs(['version']);
   if (mode === 'zig-missing') fail('zig unavailable', 127);
   console.log(mode === 'zig-wrong-version' ? '0.15.20' : '0.15.2');
+} else if (tool === 'cargo-zigbuild') {
+  expectArgs(['--version']);
+  if (mode === 'zigbuild-missing') fail('cargo-zigbuild unavailable', 127);
+  console.log(mode === 'zigbuild-wrong-version' ? 'cargo-zigbuild 0.23.40' : 'cargo-zigbuild 0.23.4');
 } else if (tool === 'cargo') {
-  if (args[0] === 'zigbuild' && args[1] === '--version') {
-    expectArgs(['zigbuild', '--version']);
-    if (mode === 'zigbuild-missing') fail('cargo-zigbuild unavailable', 127);
-    console.log(mode === 'zigbuild-wrong-version' ? 'cargo-zigbuild 0.23.40' : 'cargo-zigbuild 0.23.4');
+  if (args[0] === 'zigbuild' && (args.includes('--version') || args.includes('-V'))) {
+    fail('unexpected argument: cargo zigbuild does not accept a version flag', 2);
   } else if (args[0] === 'zigbuild') {
     if (mode === 'zigbuild-fails') fail('cargo zigbuild failed');
     const targetDirectory = args[args.indexOf('--target-dir') + 1];
@@ -202,7 +204,7 @@ async function fixture(t, mode = "success", platform = "linux/arm64", hostMode =
   }
   await writeFile(join(bin, "docker"), DOCKER_DOUBLE);
   await chmod(join(bin, "docker"), 0o755);
-  for (const tool of ["rustc", "rustup", "zig", "cargo", "file"]) {
+  for (const tool of ["rustc", "rustup", "zig", "cargo-zigbuild", "cargo", "file"]) {
     await writeFile(join(bin, tool), HOST_TOOL_DOUBLE);
     await chmod(join(bin, tool), 0o755);
   }
@@ -248,7 +250,7 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
   assert.equal(result.status, 0, result.stderr);
   const hostCalls = await f.hostCalls();
   assert.deepEqual(hostCalls.slice(0, 4), [
-    ["rustc", "--version"], ["cargo", "zigbuild", "--version"],
+    ["rustc", "--version"], ["cargo-zigbuild", "--version"],
     ["zig", "version"], ["rustup", "target", "list", "--installed"],
   ]);
   const build = hostCalls.find(args => args[0] === "cargo" && args[1] === "zigbuild" && !args.includes("--version"));
@@ -359,7 +361,7 @@ test("AMD64 packaging keeps the existing containerized backend build", async t =
 for (const [mode, error] of [
   ["rust-missing", /rustc.*failed|Rust.*missing/i],
   ["rust-wrong-version", /Rust 1\.91/i],
-  ["zigbuild-missing", /cargo zigbuild.*failed|cargo-zigbuild.*missing/i],
+  ["zigbuild-missing", /cargo-zigbuild.*failed|cargo-zigbuild.*missing/i],
   ["zigbuild-wrong-version", /cargo-zigbuild 0\.23\.4/i],
   ["zig-missing", /zig.*failed|Zig.*missing/i],
   ["zig-wrong-version", /Zig 0\.15\.2/i],
