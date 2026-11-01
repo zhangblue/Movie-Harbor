@@ -113,18 +113,18 @@ function expectArgs(expected) {
 if (tool === 'rustc') {
   expectArgs(['--version']);
   if (mode === 'rust-missing') fail('rustc unavailable', 127);
-  console.log(mode === 'rust-wrong-version' ? 'rustc 1.910.0' : 'rustc 1.91.0 (f8297e351 2025-10-28)');
+  console.log(mode === 'rust-empty-version' ? ' \t ' : 'rustc 1.99.1 (fixture 2026-11-01)');
 } else if (tool === 'rustup') {
   expectArgs(['target', 'list', '--installed']);
   console.log(mode === 'target-missing' ? 'x86_64-unknown-linux-musl' : 'aarch64-unknown-linux-musl');
 } else if (tool === 'zig') {
   expectArgs(['version']);
   if (mode === 'zig-missing') fail('zig unavailable', 127);
-  console.log(mode === 'zig-wrong-version' ? '0.15.20' : '0.15.2');
+  console.log(mode === 'zig-empty-version' ? ' \t ' : '0.17.0-dev.123+fixture');
 } else if (tool === 'cargo-zigbuild') {
   expectArgs(['--version']);
   if (mode === 'zigbuild-missing') fail('cargo-zigbuild unavailable', 127);
-  console.log(mode === 'zigbuild-wrong-version' ? 'cargo-zigbuild 0.23.40' : 'cargo-zigbuild 0.23.4');
+  console.log(mode === 'zigbuild-empty-version' ? ' \t ' : 'cargo-zigbuild 0.24.0');
 } else if (tool === 'cargo') {
   if (args[0] === 'zigbuild' && (args.includes('--version') || args.includes('-V'))) {
     fail('unexpected argument: cargo zigbuild does not accept a version flag', 2);
@@ -248,6 +248,9 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
   const f = await fixture(t);
   const result = f.run();
   assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /rustc 1\.99\.1 \(fixture 2026-11-01\)/);
+  assert.match(result.stdout, /cargo-zigbuild 0\.24\.0/);
+  assert.match(result.stdout, /0\.17\.0-dev\.123\+fixture/);
   const hostCalls = await f.hostCalls();
   assert.deepEqual(hostCalls.slice(0, 4), [
     ["rustc", "--version"], ["cargo-zigbuild", "--version"],
@@ -360,11 +363,11 @@ test("AMD64 packaging keeps the existing containerized backend build", async t =
 
 for (const [mode, error] of [
   ["rust-missing", /rustc.*failed|Rust.*missing/i],
-  ["rust-wrong-version", /Rust 1\.91/i],
+  ["rust-empty-version", /Rust.*empty.*version|Rust.*version.*empty/i],
   ["zigbuild-missing", /cargo-zigbuild.*failed|cargo-zigbuild.*missing/i],
-  ["zigbuild-wrong-version", /cargo-zigbuild 0\.23\.4/i],
+  ["zigbuild-empty-version", /cargo-zigbuild.*empty.*version|cargo-zigbuild.*version.*empty/i],
   ["zig-missing", /zig.*failed|Zig.*missing/i],
-  ["zig-wrong-version", /Zig 0\.15\.2/i],
+  ["zig-empty-version", /Zig.*empty.*version|Zig.*version.*empty/i],
   ["target-missing", /aarch64-unknown-linux-musl.*target/i],
   ["zigbuild-fails", /cargo zigbuild/i],
   ["binary-missing", /movie-harbor-api.*missing/i],

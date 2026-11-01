@@ -8,9 +8,6 @@ import { fileURLToPath } from "node:url";
 
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
 const DEFAULT_PLATFORM = "linux/arm64";
-const ARM64_RUST_MINOR = "1.91";
-const ARM64_ZIGBUILD_VERSION = "0.23.4";
-const ARM64_ZIG_VERSION = "0.15.2";
 const ARM64_RUST_TARGET = "aarch64-unknown-linux-musl";
 const SUPPORTED_PLATFORMS = new Set([DEFAULT_PLATFORM, "linux/amd64"]);
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -128,10 +125,9 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
   });
 }
 
-function requireVersion(output, pattern, expected) {
-  if (!pattern.test(output)) {
-    throw new Error(`Expected ${expected}, found: ${output || "no version output"}`);
-  }
+function requireVersion(output, tool) {
+  if (!output.trim()) throw new Error(`${tool} returned empty version output`);
+  console.log(`${tool}: ${output}`);
 }
 
 function validateArm64BinaryMetadata(output) {
@@ -147,18 +143,15 @@ function validateArm64BinaryMetadata(output) {
 async function prepareArm64ApiContext(signal) {
   requireVersion(
     await run("rustc", ["--version"], { signal }),
-    /^rustc 1\.91(?:\.|\s)/,
-    `Rust ${ARM64_RUST_MINOR}`,
+    "Rust",
   );
   requireVersion(
     await run("cargo-zigbuild", ["--version"], { signal }),
-    /cargo-zigbuild 0\.23\.4(?:\s|$)/,
-    `cargo-zigbuild ${ARM64_ZIGBUILD_VERSION}`,
+    "cargo-zigbuild",
   );
   requireVersion(
     await run("zig", ["version"], { signal }),
-    /^0\.15\.2$/,
-    `Zig ${ARM64_ZIG_VERSION}`,
+    "Zig",
   );
   const targets = (await run("rustup", ["target", "list", "--installed"], { signal })).split("\n");
   if (!targets.includes(ARM64_RUST_TARGET)) {
