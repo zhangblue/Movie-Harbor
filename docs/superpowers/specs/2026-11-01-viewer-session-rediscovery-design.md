@@ -29,4 +29,3 @@
 - 保留普通匿名媒体失败不请求会话、并发 focus/visibility 复用单次请求、陈旧响应不覆盖新用户等现有测试。
 - 公开站 workspace 全部测试和构建通过。
 - 隔离完整 E2E 全部通过，包括两个 late logout/password 场景及 persistence 阶段。
-
