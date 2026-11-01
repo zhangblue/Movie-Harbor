@@ -80,14 +80,15 @@ export function App() {
   }, [transitionViewer]);
   const expire = useCallback(() => becomeAnonymous("登录已失效，请重新登录。"), [becomeAnonymous]);
   const recordScope = useCallback((isPrivate: boolean) => { privateContent.current = isPrivate; }, []);
-  const validate = useCallback(() => {
-    if (viewerRef.current.status !== "authenticated") return Promise.resolve(true);
+  const validate = useCallback((discoverAnonymous = false) => {
+    const startedStatus = viewerRef.current.status;
+    if (startedStatus !== "authenticated" && !(discoverAnonymous && startedStatus === "anonymous")) return Promise.resolve(true);
     if (validation.current) return validation.current;
     const startedAt = identity.current;
     const request = getViewerSession((session) => acceptSession(session, startedAt)).then(
       () => startedAt === identity.current,
       (cause: CaughtValue) => {
-        if (startedAt !== identity.current) return false;
+        if (startedAt !== identity.current || startedStatus === "anonymous") return false;
         if (cause instanceof ApiError && cause.status === 401) { expire(); return false; }
         setMessage("暂时无法确认登录状态，请稍后重试。");
         return true;
@@ -107,8 +108,8 @@ export function App() {
     return () => { ignore = true; };
   }, [acceptSession, transitionViewer]);
   useEffect(() => {
-    const onFocus = () => { void validate(); };
-    const onVisible = () => { if (document.visibilityState === "visible") void validate(); };
+    const onFocus = () => { void validate(true); };
+    const onVisible = () => { if (document.visibilityState === "visible") void validate(true); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
     return () => { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onVisible); };

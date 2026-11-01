@@ -76,6 +76,33 @@ it("keeps the anonymous catalog usable when the initial session returns 401", as
   expect(screen.queryByText("私密")).not.toBeInTheDocument();
 });
 
+it.each(["401", "network error"] as const)("silently keeps an anonymous viewer signed out when focus discovery has a %s", async (failure) => {
+  const state = server(); render(<App />);
+  await screen.findByRole("link", { name: "查看远方来信详情" });
+  await screen.findByRole("button", { name: "登录" });
+  const before = state.requests.filter(({ url }) => url.pathname === "/api/viewer/session").length;
+  state.sessionNetworkError = failure === "network error";
+
+  await act(async () => { window.dispatchEvent(new Event("focus")); });
+
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/viewer/session")).toHaveLength(before + 1);
+  expect(screen.getByRole("button", { name: "登录" })).toBeEnabled();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
+it("does not revalidate an anonymous viewer when a public poster fails", async () => {
+  const state = server(); render(<App />);
+  await screen.findByRole("button", { name: "登录" });
+  const poster = await screen.findByRole("img", { name: "远方来信海报" });
+  const before = state.requests.filter(({ url }) => url.pathname === "/api/viewer/session").length;
+
+  await act(async () => { fireEvent.error(poster); });
+
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/viewer/session")).toHaveLength(before);
+  expect(screen.getByRole("button", { name: "登录" })).toBeEnabled();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+});
+
 it("discards a pre-discovery private catalog after the initial session returns 401", async () => {
   const state = server();
   const session = deferred<Response>(); const old = deferred<Response>();
@@ -306,6 +333,29 @@ it("detects a revoked viewer session when a private poster fails", async () => {
   state.authenticated = false; fireEvent.error(poster);
   expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
   expect(location.pathname).toBe("/");
+});
+
+it("rediscovers Winter on focus after Summer's private poster failure expires the session", async () => {
+  window.history.replaceState(null, "", "/movies/movie-1");
+  const state = server(true); render(<App />);
+  await screen.findByText("Summer");
+  const poster = await screen.findByRole("img", { name: "远方来信海报" });
+
+  state.authenticated = false; fireEvent.error(poster);
+  await screen.findByRole("button", { name: "登录" });
+  expect(screen.getByText("登录已失效，请重新登录。")).toBeInTheDocument();
+  expect(location.pathname).toBe("/");
+  expect(screen.queryByText("Summer")).not.toBeInTheDocument();
+  const before = state.requests.filter(({ url }) => url.pathname === "/api/viewer/session").length;
+  state.authenticated = true; state.username = "Winter"; state.csrfToken = "winter-csrf";
+
+  act(() => window.dispatchEvent(new Event("focus")));
+
+  expect(state.requests.filter(({ url }) => url.pathname === "/api/viewer/session")).toHaveLength(before + 1);
+  expect(await screen.findByText("Winter")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  expect(await screen.findByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
 });
 
 it.each(["/", "/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
