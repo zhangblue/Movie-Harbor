@@ -353,9 +353,10 @@ it("rediscovers Winter on focus after Summer's private poster failure expires th
 
   expect(state.requests.filter(({ url }) => url.pathname === "/api/viewer/session")).toHaveLength(before + 1);
   expect(await screen.findByText("Winter")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
-  expect(screen.queryByRole("status")).not.toBeInTheDocument();
   expect(await screen.findByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "登录" })).not.toBeInTheDocument();
+  expect(screen.queryByText("登录已失效，请重新登录。")).not.toBeInTheDocument();
+  expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
 
 it.each(["/", "/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
