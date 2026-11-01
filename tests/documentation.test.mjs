@@ -139,18 +139,26 @@ test("deployment skill separates standard authorization from data recovery appro
   assert.match(runbook, /数据库恢复[\s\S]*媒体备份[\s\S]*重新取得明确授权/);
 });
 
-test("offline guide documents the fixed ARM64 host zigbuild toolchain and Linux-only output", () => {
+test("offline guide documents the installed local ARM64 toolchain and Linux-only output", () => {
   const guide = readFileSync(
     path.join(projectRoot, "docs/guides/offline-package.md"),
     "utf8",
   );
   assert.match(guide, /cargo zigbuild[\s\S]*--target aarch64-unknown-linux-musl/);
   assert.match(guide, /--target-dir/);
-  assert.match(guide, /Rust 1\.91/);
-  assert.match(guide, /cargo-zigbuild --version\s+# 必须为 cargo-zigbuild 0\.23\.4/);
+  assert.match(guide, /直接使用本机已安装[\s\S]*PATH[\s\S]*rustup/);
+  assert.match(guide, /^rustc --version\b/m);
+  assert.match(guide, /^cargo-zigbuild --version\b/m);
+  assert.match(guide, /^zig version\b/m);
+  assert.match(guide, /^rustup target list --installed\b/m);
   assert.doesNotMatch(guide, /^cargo zigbuild --version\b/m);
-  assert.match(guide, /cargo-zigbuild 0\.23\.4/);
-  assert.match(guide, /Zig 0\.15\.2/);
+  assert.doesNotMatch(guide, /Rust 1\.91|cargo-zigbuild 0\.23\.4|Zig 0\.15\.2/);
+  assert.doesNotMatch(guide, /rustup toolchain install 1\.91|rustup override set 1\.91|cargo install[^\n]*--version 0\.23\.4/);
+  assert.match(guide, /命令必须[\s\S]*成功[\s\S]*非空/);
+  assert.match(guide, /cargo-zigbuild[\s\S]*自行校验[\s\S]*Zig[\s\S]*兼容性/);
+  assert.match(guide, /打印[\s\S]*实际[\s\S]*版本/);
+  assert.match(guide, /ARM64[^\n]*校验[^\n]*`file`/);
+  assert.match(guide, /AMD64[\s\S]*容器[\s\S]*固定[\s\S]*x86_64-unknown-linux-musl/);
   assert.match(guide, /macOS Apple Silicon[\s\S]*Linux ARM64/);
   assert.match(guide, /rustup target add aarch64-unknown-linux-musl/);
   assert.doesNotMatch(guide, /ARM64[^\n]*普通 Cargo|aarch64-unknown-linux-gnu/);

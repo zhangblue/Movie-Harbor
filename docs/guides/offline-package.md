@@ -10,25 +10,24 @@ ARM64 后端在构建机宿主系统中执行 `cargo zigbuild --locked --release
 
 AMD64 后端仍在现有 Linux 构建容器中使用固定的 `x86_64-unknown-linux-musl` Zig 工具链，宿主机不需要为 AMD64 单独安装 Zig。
 
-ARM64 宿主机需预先安装 Rust 1.91、cargo-zigbuild 0.23.4、Zig 0.15.2 和 Rust target `aarch64-unknown-linux-musl`。运行发布工具前检查版本与 target：
+ARM64 构建直接使用本机已安装的 Rust、cargo-zigbuild 和 Zig，沿用当前 `PATH` 和 rustup 环境，不要求精确版本。运行发布工具前检查版本与 Rust target：
 
 ```bash
-rustc --version                         # 必须为 1.91.x
-cargo-zigbuild --version                # 必须为 cargo-zigbuild 0.23.4
-zig version                             # 必须为 0.15.2
+rustc --version
+cargo-zigbuild --version
+zig version
 rustup target list --installed          # 必须包含 aarch64-unknown-linux-musl
 ```
 
-使用者需主动安装 Rust 工具链、cargo-zigbuild 和 target：
+前三条命令必须执行成功并输出非空版本文本。cargo-zigbuild 自行校验 Zig 的最低版本和实际兼容性；发布工具不比较具体版本号，也不拒绝开发版版本字符串。构建会打印本次实际使用的三个工具版本。
+
+如未安装 ARM64 musl target，由使用者主动安装：
 
 ```bash
-rustup toolchain install 1.91.0
-rustup override set 1.91.0
-cargo install --locked cargo-zigbuild --version 0.23.4
 rustup target add aarch64-unknown-linux-musl
 ```
 
-Zig 0.15.2 需按操作系统从 Zig 官方发布包安装并加入 `PATH`。发布工具只检查版本，不自动安装或升级任何宿主机工具。构建机还需要 Docker Engine、Docker Buildx、Docker Compose v2、Node.js、Git 和 tar，并能下载构建依赖。工具按指定平台构建并校验最终镜像元数据，Docker 守护进程的架构无需与目标平台相同。在仓库根目录执行：
+工具或 target 缺失时，发布工具会在 Docker API 镜像构建前失败，不自动安装、升级或切换宿主机工具链。构建机还需要 Docker Engine、Docker Buildx、Docker Compose v2、Node.js、Git 和 tar，以及用于 ARM64 程序架构与静态链接校验的 `file` 命令，并能下载构建依赖。AMD64 继续使用固定版本的容器工具链。工具按指定平台构建并校验最终镜像元数据，Docker 守护进程的架构无需与目标平台相同。在仓库根目录执行：
 
 ```bash
 ./tools/build-offline-package.sh [版本]                       # 默认 linux/arm64
