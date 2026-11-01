@@ -10,7 +10,13 @@ ARM64 后端在构建机宿主系统中执行 `cargo zigbuild --locked --release
 
 AMD64 后端仍在现有 Linux 构建容器中使用固定的 `x86_64-unknown-linux-musl` Zig 工具链，宿主机不需要为 AMD64 单独安装 Zig。
 
-ARM64 构建直接使用本机已安装的 Rust、cargo-zigbuild 和 Zig，沿用当前 `PATH` 和 rustup 环境，不要求精确版本。运行发布工具前检查版本与 Rust target：
+ARM64 构建直接使用本机已安装的 Rust、cargo-zigbuild 和 Zig，沿用当前 `PATH` 和 rustup 环境，不要求精确版本。如果本机安装了多个 Zig，先把需要的稳定版 Zig 目录放在 `PATH` 最前，再运行发布工具：
+
+```bash
+export PATH="/path/to/stable-zig:$PATH"
+```
+
+发布工具会解析 `PATH` 中的第一个 `zig`，用它输出版本，并为本次编译设置 `CARGO_ZIGBUILD_ZIG_COMMAND`，因此不会被 Python `ziglang` 或外部遗留的 cargo-zigbuild Zig 覆盖变量切换到另一个版本。随后检查版本与 Rust target：
 
 ```bash
 rustc --version
@@ -19,7 +25,7 @@ zig version
 rustup target list --installed          # 必须包含 aarch64-unknown-linux-musl
 ```
 
-前三条命令必须执行成功并输出非空版本文本。cargo-zigbuild 自行校验 Zig 的最低版本和实际兼容性；发布工具不比较具体版本号，也不拒绝开发版版本字符串。构建会打印本次实际使用的三个工具版本。
+前三条命令必须执行成功并输出非空版本文本。cargo-zigbuild 自行校验选定 Zig 的最低版本和实际兼容性；发布工具不比较具体版本号，也不拒绝开发版版本字符串。构建会打印本次实际使用的三个工具版本。
 
 如未安装 ARM64 musl target，由使用者主动安装：
 

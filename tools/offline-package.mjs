@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { createReadStream, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,115}$/;
@@ -61,11 +61,11 @@ async function finishProcessGroup(pid) {
   }
 }
 
-function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGroup = false } = {}) {
+function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGroup = false, env = {} } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolveResult, reject) => {
     const child = spawn(command, args, {
-      cwd, env: { ...process.env, COPYFILE_DISABLE: "1" },
+      cwd, env: { ...process.env, ...env, COPYFILE_DISABLE: "1" },
       stdio: ["ignore", capture ? "pipe" : "inherit", "inherit"],
       ...(processGroup ? { detached: true } : {}),
     });
@@ -126,8 +126,22 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
 }
 
 function requireVersion(output, tool) {
-  if (!output.trim()) throw new Error(`${tool} returned empty version output`);
-  console.log(`${tool}: ${output}`);
+  const version = output.trim();
+  if (!version) throw new Error(`${tool} returned empty version output`);
+  console.log(`${tool}: ${version}`);
+  return version;
+}
+
+function resolvePathCommand(command) {
+  for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+    const candidate = resolve(directory || ".", command);
+    try {
+      return realpathSync(candidate);
+    } catch (error) {
+      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+    }
+  }
+  throw new Error(`${command} is missing from PATH`);
 }
 
 function validateArm64BinaryMetadata(output) {
@@ -149,8 +163,9 @@ async function prepareArm64ApiContext(signal) {
     await run("cargo-zigbuild", ["--version"], { signal }),
     "cargo-zigbuild",
   );
-  requireVersion(
-    await run("zig", ["version"], { signal }),
+  const zigCommand = resolvePathCommand("zig");
+  const zigVersion = requireVersion(
+    await run(zigCommand, ["version"], { signal }),
     "Zig",
   );
   const targets = (await run("rustup", ["target", "list", "--installed"], { signal })).split("\n");
@@ -165,7 +180,16 @@ async function prepareArm64ApiContext(signal) {
     await run("cargo", [
       "zigbuild", "--locked", "--release", "--target", ARM64_RUST_TARGET,
       "--target-dir", targetDirectory, "-p", "movie-harbor-api",
-    ], { signal, capture: false, processGroup: true });
+    ], {
+      signal,
+      capture: false,
+      processGroup: true,
+      env: {
+        CARGO_ZIGBUILD_ZIG_COMMAND: zigCommand,
+        CARGO_ZIGBUILD_ZIG_COMMAND_ARGS: "",
+        CARGO_ZIGBUILD_ZIG_VERSION: zigVersion,
+      },
+    });
     const binary = join(targetDirectory, ARM64_RUST_TARGET, "release", "movie-harbor-api");
     let binaryStat;
     try {

@@ -156,6 +156,7 @@ test("offline guide documents the installed local ARM64 toolchain and Linux-only
   assert.doesNotMatch(guide, /rustup toolchain install 1\.91|rustup override set 1\.91|cargo install[^\n]*--version 0\.23\.4/);
   assert.match(guide, /命令必须[\s\S]*成功[\s\S]*非空/);
   assert.match(guide, /cargo-zigbuild[\s\S]*自行校验[\s\S]*Zig[\s\S]*兼容性/);
+  assert.match(guide, /稳定版 Zig[\s\S]*PATH[\s\S]*CARGO_ZIGBUILD_ZIG_COMMAND/);
   assert.match(guide, /打印[\s\S]*实际[\s\S]*版本/);
   assert.match(guide, /ARM64[^\n]*校验[^\n]*`file`/);
   assert.match(guide, /AMD64[\s\S]*容器[\s\S]*固定[\s\S]*x86_64-unknown-linux-musl/);

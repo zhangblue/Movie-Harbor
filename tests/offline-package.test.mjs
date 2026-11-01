@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -126,6 +126,13 @@ if (tool === 'rustc') {
   if (mode === 'zigbuild-missing') fail('cargo-zigbuild unavailable', 127);
   console.log(mode === 'zigbuild-empty-version' ? ' \t ' : 'cargo-zigbuild 0.24.0');
 } else if (tool === 'cargo') {
+  if (args[0] === 'zigbuild') {
+    fs.writeFileSync(process.env.HOST_TOOL_ENV_LOG, JSON.stringify({
+      command: process.env.CARGO_ZIGBUILD_ZIG_COMMAND,
+      commandArgs: process.env.CARGO_ZIGBUILD_ZIG_COMMAND_ARGS,
+      version: process.env.CARGO_ZIGBUILD_ZIG_VERSION,
+    }));
+  }
   if (args[0] === 'zigbuild' && (args.includes('--version') || args.includes('-V'))) {
     fail('unexpected argument: cargo zigbuild does not accept a version flag', 2);
   } else if (args[0] === 'zigbuild') {
@@ -209,20 +216,22 @@ async function fixture(t, mode = "success", platform = "linux/arm64", hostMode =
     await chmod(join(bin, tool), 0o755);
   }
   const hostLog = join(root, "host-tools.log");
+  const hostEnvLog = join(root, "host-tool-env.json");
   const destination = join(repo, "dist/offline", `movie-harbor-offline-${platform.replace("/", "-")}-${VERSION}.tar.gz`);
   const log = join(root, "docker.log");
   const env = {
     ...process.env, PATH: `${bin}:${process.env.PATH}`, TMPDIR: temporary,
     DOCKER_TEST_MODE: mode, DOCKER_TEST_PLATFORM: platform,
     DOCKER_TEST_LOG: log, DOCKER_TEST_DESTINATION: destination,
-    HOST_TOOL_TEST_LOG: hostLog, HOST_TOOL_TEST_MODE: hostMode,
+    HOST_TOOL_TEST_LOG: hostLog, HOST_TOOL_ENV_LOG: hostEnvLog, HOST_TOOL_TEST_MODE: hostMode,
   };
   return {
-    repo, root, temporary, destination, env,
+    repo, root, temporary, bin, destination, env,
     run: (args = [VERSION]) => spawnSync("sh", [join(repo, "tools/build-offline-package.sh"), ...args], {
       cwd: root, env, encoding: "utf8",
     }),
     hostCalls: async () => (await readFile(hostLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
+    hostBuildEnv: async () => JSON.parse(await readFile(hostEnvLog, "utf8")),
     calls: async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
   };
 }
@@ -316,6 +325,20 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
   assert.equal(checksumVerification.status, 0, checksumVerification.stderr);
   assert.ok((await stat(join(bundle, "load-images.sh"))).mode & 0o111);
   await assertClean(f, [BUNDLE_NAME]);
+});
+
+test("ARM64 packaging binds cargo-zigbuild to the probed PATH Zig", async t => {
+  const f = await fixture(t);
+  f.env.CARGO_ZIGBUILD_ZIG_COMMAND = "/unexpected/python-ziglang";
+  f.env.CARGO_ZIGBUILD_ZIG_COMMAND_ARGS = "-m ziglang";
+  f.env.CARGO_ZIGBUILD_ZIG_VERSION = "0.16.0-unexpected";
+  const result = f.run();
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(await f.hostBuildEnv(), {
+    command: await realpath(join(f.bin, "zig")),
+    commandArgs: "",
+    version: "0.17.0-dev.123+fixture",
+  });
 });
 
 test("AMD64 packaging keeps the existing containerized backend build", async t => {
