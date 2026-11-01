@@ -4,7 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -329,6 +329,13 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
 
 test("ARM64 packaging binds cargo-zigbuild to the probed PATH Zig", async t => {
   const f = await fixture(t);
+  const directoryShadow = join(f.root, "zig-directory-shadow");
+  const fileShadow = join(f.root, "zig-file-shadow");
+  await mkdir(join(directoryShadow, "zig"), { recursive: true });
+  await mkdir(fileShadow);
+  await writeFile(join(fileShadow, "zig"), "not executable");
+  await chmod(join(fileShadow, "zig"), 0o644);
+  f.env.PATH = [directoryShadow, fileShadow, f.env.PATH].join(delimiter);
   f.env.CARGO_ZIGBUILD_ZIG_COMMAND = "/unexpected/python-ziglang";
   f.env.CARGO_ZIGBUILD_ZIG_COMMAND_ARGS = "-m ziglang";
   f.env.CARGO_ZIGBUILD_ZIG_VERSION = "0.16.0-unexpected";

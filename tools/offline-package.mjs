@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createReadStream, realpathSync } from "node:fs";
+import { accessSync, constants, createReadStream, lstatSync, realpathSync } from "node:fs";
 import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
@@ -136,9 +136,12 @@ function resolvePathCommand(command) {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     const candidate = resolve(directory || ".", command);
     try {
-      return realpathSync(candidate);
+      const resolved = realpathSync(candidate);
+      if (!lstatSync(resolved).isFile()) continue;
+      accessSync(resolved, constants.X_OK);
+      return resolved;
     } catch (error) {
-      if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+      if (!new Set(["EACCES", "ENOENT", "ENOTDIR"]).has(error.code)) throw error;
     }
   }
   throw new Error(`${command} is missing from PATH`);
