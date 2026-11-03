@@ -1,5 +1,7 @@
+// 定义分页条目，供相关请求、状态或组件使用。
 export type PaginationItem = number | "ellipsis";
 
+// 在渲染分页控件时计算页码及省略号窗口。
 export function paginationItems(currentPage: number, totalPages: number): PaginationItem[] {
   if (
     !Number.isSafeInteger(currentPage) ||

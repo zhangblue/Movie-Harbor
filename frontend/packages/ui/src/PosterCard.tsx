@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
+// 定义海报卡片属性，供相关请求、状态或组件使用。
 export interface PosterCardProps {
   href: string;
   title: string;
@@ -11,6 +12,7 @@ export interface PosterCardProps {
   className?: string;
 }
 
+// 由内容列表渲染海报卡片，按可用空间展示题材。
 export function PosterCard({ href, title, kind, year, posterUrl, genres, genreCount, className }: PosterCardProps) {
   const [posterFailed, setPosterFailed] = useState(false);
   useEffect(() => setPosterFailed(false), [posterUrl]);
@@ -34,6 +36,7 @@ export function PosterCard({ href, title, kind, year, posterUrl, genres, genreCo
     setMeasuredNameCount(maximumNameCount);
     if (typeof ResizeObserver === "undefined" || total === 0) return;
 
+    // 卡片尺寸变化时测量候选题材宽度，更新可展示数量。
     const measure = () => {
       const available = genresRef.current?.getBoundingClientRect().width;
       const candidates = Array.from(
@@ -55,6 +58,7 @@ export function PosterCard({ href, title, kind, year, posterUrl, genres, genreCo
     return () => observer.disconnect();
   }, [maximumNameCount, namesKey, total]);
 
+  // 卡片测量和渲染时生成题材及溢出数量标签。
   const candidateBadges = (nameCount: number) => {
     const visible = names.slice(0, nameCount);
     const overflow = total - nameCount;

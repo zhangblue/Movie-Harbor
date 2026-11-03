@@ -3,12 +3,14 @@ import { ApiError, changeViewerPassword } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useViewer } from "./ViewerContext";
 
+// 由应用在用户修改密码时渲染表单并协调会话失效。
 export function ViewerPasswordDialog({ onClose, onChanged, isCurrent }: { onClose: () => void; onChanged: () => void; isCurrent: () => boolean }) {
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const { expire } = useViewer();
+  // 提交表单时阻止重复请求，并将结果或错误反馈给用户。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending) return;

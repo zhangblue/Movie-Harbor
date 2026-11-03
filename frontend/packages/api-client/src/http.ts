@@ -1,23 +1,29 @@
 import { isJsonObject, normalizeError, type CaughtValue, type JsonObject, type JsonValue } from "./dataTypes";
 
+// 定义查询值，供相关请求、状态或组件使用。
 export type QueryValue = string | number | boolean | null | undefined;
+// 定义查询，供相关请求、状态或组件使用。
 export type Query = Record<string, QueryValue | readonly QueryValue[]>;
 
+// 定义API请求初始化参数，供相关请求、状态或组件使用。
 export interface ApiRequestInit<JsonBody extends object = Record<string, never>> extends Omit<RequestInit, "body"> {
   body?: BodyInit | null;
   json?: JsonBody;
   query?: Query;
 }
 
+// 定义API下载，供相关请求、状态或组件使用。
 export interface ApiDownload {
   blob: Blob;
   filename: string;
 }
 
+// 定义API上传进度，供相关请求、状态或组件使用。
 export type ApiUploadProgress =
   | { phase: "uploading"; percent: number | null }
   | { phase: "processing"; percent: 100 };
 
+// 定义API上传初始化参数，供相关请求、状态或组件使用。
 export interface ApiUploadInit {
   method: "POST";
   body: FormData;
@@ -25,11 +31,13 @@ export interface ApiUploadInit {
   onProgress: (progress: ApiUploadProgress) => void;
 }
 
+// 定义API错误，供相关请求、状态或组件使用。
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
   readonly details: JsonValue | undefined;
 
+  // 在请求返回失败状态时保存 HTTP 状态、消息和响应详情。
   constructor(status: number, statusText: string, message: string, details: JsonValue | undefined) {
     super(message);
     this.name = "ApiError";
@@ -39,10 +47,12 @@ export class ApiError extends Error {
   }
 }
 
+// 定义API网络错误，供相关请求、状态或组件使用。
 export class ApiNetworkError extends Error {
   readonly aborted: boolean;
   override readonly cause: Error;
 
+  // 在请求中断或网络失败时保存原因和中断标记。
   constructor(cause: Error) {
     const aborted = cause instanceof DOMException && cause.name === "AbortError";
     super(aborted ? "Request was aborted" : "Unable to reach the server", { cause });
@@ -52,10 +62,12 @@ export class ApiNetworkError extends Error {
   }
 }
 
+// 定义API响应解析错误，供相关请求、状态或组件使用。
 export class ApiResponseParseError extends Error {
   readonly status: number;
   override readonly cause: Error;
 
+  // 在响应 JSON 无法解析时保存状态和原始原因。
   constructor(status: number, cause: Error) {
     super("The server returned invalid JSON", { cause });
     this.name = "ApiResponseParseError";
@@ -66,24 +78,29 @@ export class ApiResponseParseError extends Error {
 
 let csrfToken: string | undefined;
 
+// 在会话恢复后保存规范化 CSRF 令牌，供后续受保护写请求使用。
 export function setCsrfToken(token: string | null | undefined): void {
   const normalized = token?.trim();
   csrfToken = normalized || undefined;
 }
 
+// 在身份结束或切换时清除内存中的 CSRF 令牌。
 export function clearCsrfToken(): void {
   csrfToken = undefined;
 }
 
+// 在调用方需要响应体时拒绝空响应，避免后续使用缺失数据。
 export function requiredResponse<T>(value: T | undefined): T {
   if (value === undefined) throw new TypeError("Expected an API response body");
   return value;
 }
 
+// 在构造 API 路径时编码各段，避免标识符改变路径结构。
 export function apiPath(...segments: Array<string | number>): string {
   return `/api/${segments.map((segment) => encodeURIComponent(String(segment))).join("/")}`;
 }
 
+// 在发送请求前校验同源 API 路径并编码查询参数。
 export function buildApiUrl(path: string, query?: Query): string {
   const validationBase = "https://movie-harbor.invalid";
   let normalized: URL;
@@ -116,6 +133,7 @@ export function buildApiUrl(path: string, query?: Query): string {
   return encoded ? `${path}?${encoded}` : path;
 }
 
+// 发送普通 API 请求并解析响应，供领域 API 调用。
 export async function apiRequest<ResponseBody = JsonValue, JsonBody extends object = Record<string, never>>(
   path: string,
   init: ApiRequestInit<JsonBody> = {},
@@ -125,6 +143,7 @@ export async function apiRequest<ResponseBody = JsonValue, JsonBody extends obje
   return parseApiResponse<ResponseBody>(response);
 }
 
+// 请求并校验 JSON 下载内容，供管理导出使用。
 export async function apiDownload(
   path: string,
   init: ApiRequestInit = {},
@@ -143,6 +162,7 @@ export async function apiDownload(
   return { blob, filename: downloadFilename(response.headers.get("content-disposition")) };
 }
 
+// 上传媒体并通知进度，供带进度反馈的上传流程使用。
 export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | undefined> {
   const url = buildApiUrl(path, init.query);
   return new Promise((resolve, reject) => {
@@ -151,6 +171,7 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
     let hasComputableProgress = false;
     let settled = false;
 
+    // 上传发生网络异常时统一拒绝一次请求，避免重复完成。
     const rejectNetwork = (cause: CaughtValue) => {
       if (settled) return;
       settled = true;
@@ -184,6 +205,7 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
   });
 }
 
+// 在普通请求发送前设置凭据与 CSRF，并将失败转换为统一错误。
 async function performApiFetch<JsonBody extends object>(path: string, init: ApiRequestInit<JsonBody>): Promise<Response> {
   const { query, json, body, ...requestInit } = init;
   if (json !== undefined && body !== undefined) {
@@ -196,6 +218,7 @@ async function performApiFetch<JsonBody extends object>(path: string, init: ApiR
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (json !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (csrfToken && isUnsafeSessionRequest(url, method) && !headers.has("X-CSRF-Token")) {
+    // 只给会话写请求附加令牌，服务端据此验证操作来源。
     headers.set("X-CSRF-Token", csrfToken);
   }
   const requestBody = json === undefined ? body : JSON.stringify(json);
@@ -213,10 +236,12 @@ async function performApiFetch<JsonBody extends object>(path: string, init: ApiR
     throw new ApiNetworkError(normalizeError(cause as CaughtValue));
   }
 
+  // 在返回给领域接口前统一转换失败响应，保留状态供界面判断。
   if (!response.ok) throw await responseError(response);
   return response;
 }
 
+// 读取成功响应并解析 JSON，供请求和上传结果复用。
 async function parseApiResponse<T>(response: Response): Promise<T | undefined> {
   let text: string;
   try {
@@ -238,6 +263,7 @@ async function parseApiResponse<T>(response: Response): Promise<T | undefined> {
   return parsed as T | undefined;
 }
 
+// 上传完成后将 XHR 响应转换为统一解析结果或错误。
 async function resolveXhrResponse<T>(xhr: XMLHttpRequest): Promise<T | undefined> {
   const response = new Response(
     xhr.status === 204 || xhr.status === 205 ? null : xhr.responseText,
@@ -248,6 +274,7 @@ async function resolveXhrResponse<T>(xhr: XMLHttpRequest): Promise<T | undefined
   return parseApiResponse<T>(response);
 }
 
+// 在处理上传响应时解析原始响应头。
 function xhrResponseHeaders(rawHeaders: string): Headers {
   const headers = new Headers();
   for (const line of rawHeaders.split(/\r?\n/)) {
@@ -257,6 +284,7 @@ function xhrResponseHeaders(rawHeaders: string): Headers {
   return headers;
 }
 
+// 将失败响应转换为带状态和详情的 API 错误，供界面区分失败原因。
 async function responseError(response: Response): Promise<ApiError> {
   let text: string;
   try {
@@ -278,11 +306,13 @@ async function responseError(response: Response): Promise<ApiError> {
   return new ApiError(response.status, response.statusText, errorMessage(parsed, text, response.statusText), parsed);
 }
 
+// 判断响应是否声明 JSON 类型，供解析和下载校验使用。
 function isJsonContentType(contentType: string | null): boolean {
   const normalized = contentType?.toLowerCase() ?? "";
   return normalized.includes("application/json") || normalized.includes("+json");
 }
 
+// 从导出响应提取安全文件名，异常时使用默认名称。
 function downloadFilename(contentDisposition: string | null): string {
   const match = contentDisposition?.match(/(?:^|;)\s*filename\s*=\s*(?:"([^"]*)"|([^;\s]*))/i);
   const filename = match?.[1] ?? match?.[2];
@@ -291,10 +321,12 @@ function downloadFilename(contentDisposition: string | null): string {
     : "movie-harbor-content-export.json";
 }
 
+// 判断是否为受会话保护的写请求，以决定是否附加 CSRF 令牌。
 function isUnsafeSessionRequest(url: string, method: string): boolean {
   return (url.startsWith("/api/admin/") || url.startsWith("/api/viewer/")) && !["GET", "HEAD", "OPTIONS"].includes(method);
 }
 
+// 从失败响应提取可展示的错误文本，供统一错误转换使用。
 function errorMessage(parsed: JsonValue | undefined, rawText: string, statusText: string): string {
   if (isJsonObject(parsed)) {
     const record: JsonObject = parsed;

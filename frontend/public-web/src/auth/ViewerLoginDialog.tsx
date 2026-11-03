@@ -2,11 +2,13 @@ import { useState, type FormEvent } from "react";
 import { ApiError, viewerLogin, type ViewerSessionResponse } from "@movie-harbor/api-client";
 import { Button, Dialog, Field } from "@movie-harbor/ui";
 
+// 由应用在用户选择登录时渲染凭据表单。
 export function ViewerLoginDialog({ onClose, onLogin }: { onClose: () => void; onLogin: (session: ViewerSessionResponse) => boolean }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  // 提交表单时阻止重复请求，并将结果或错误反馈给用户。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending) return;

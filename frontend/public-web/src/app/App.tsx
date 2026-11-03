@@ -10,10 +10,14 @@ import { ViewerContext } from "../auth/ViewerContext";
 import { ViewerLoginDialog } from "../auth/ViewerLoginDialog";
 import { ViewerPasswordDialog } from "../auth/ViewerPasswordDialog";
 
+// 读取当前路径和查询参数，在初始化及浏览器历史变化时同步界面。
 const currentLocation = () => window.location.pathname + window.location.search;
+// 提取电影或剧集路径，在导航时判断是否离开当前内容。
 const contentPath = (path: string) => /^\/(movies|series)\/[^/]+/.exec(path)?.[0];
+// 定义普通用户状态，供相关请求、状态或组件使用。
 type ViewerState = { status: "loading" | "anonymous" | "authenticated" | "error"; username?: string };
 
+// 作为公开站根组件管理路由、普通用户身份和页面切换。
 export function App() {
   const [location, setLocation] = useState(currentLocation);
   const mainRef = useRef<HTMLElement>(null);
@@ -41,6 +45,7 @@ export function App() {
   } catch { /* Invalid paths use public 404. */ }
 
   useEffect(() => {
+    // 在浏览器历史变化时同步路由，并在离开内容页时清除私密标记。
     const onPopState = () => {
       if (!contentPath(window.location.pathname)) privateContent.current = false;
       setLocation(currentLocation());
@@ -50,12 +55,14 @@ export function App() {
   }, []);
   useEffect(() => { mainRef.current?.focus(); }, [url.pathname]);
 
+  // 在站内导航时更新浏览器历史和当前页面，必要时清除私密内容标记。
   const navigate = useCallback((href: string, replace = false) => {
     if (contentPath(window.location.pathname) !== contentPath(href)) privateContent.current = false;
     if (replace) window.history.replaceState(null, "", href);
     else window.history.pushState(null, "", href);
     setLocation(currentLocation());
   }, []);
+  // 切换用户身份并清理旧会话状态，必要时退出私密页面并刷新数据。
   const transitionViewer = useCallback((next: ViewerState, notice = "") => {
     const wasAuthenticated = viewerRef.current.status === "authenticated";
     const closePrivateContent = wasAuthenticated && privateContent.current;
@@ -70,7 +77,9 @@ export function App() {
     if (closePrivateContent) navigate("/", true);
     if (closePrivateContent || next.status !== "authenticated") privateContent.current = false;
   }, [navigate]);
+  // 在退出或会话失效时切换为匿名状态并显示提示。
   const becomeAnonymous = useCallback((notice = "") => transitionViewer({ status: "anonymous" }, notice), [transitionViewer]);
+  // 只接受当前身份代次的会话结果，防止过期请求覆盖新身份。
   const acceptSession = useCallback((session: ViewerSessionResponse, generation: number) => {
     if (generation !== identity.current) return false;
     if (viewerRef.current.status !== "authenticated" || viewerRef.current.username !== session.username) {
@@ -78,8 +87,11 @@ export function App() {
     } else setMessage("");
     return true;
   }, [transitionViewer]);
+  // 在会话失效时转为匿名并提示重新登录。
   const expire = useCallback(() => becomeAnonymous("登录已失效，请重新登录。"), [becomeAnonymous]);
+  // 记录当前内容是否私密，供身份切换时决定是否离开页面。
   const recordScope = useCallback((isPrivate: boolean) => { privateContent.current = isPrivate; }, []);
+  // 在访问受保护数据或页面重新可见时复用会话校验，失效则退出登录。
   const validate = useCallback((discoverAnonymous = false) => {
     const startedStatus = viewerRef.current.status;
     if (startedStatus !== "authenticated" && !(discoverAnonymous && startedStatus === "anonymous")) return Promise.resolve(true);
@@ -100,6 +112,7 @@ export function App() {
   useEffect(() => {
     let ignore = false;
     const startedAt = identity.current;
+    // 首次渲染时恢复已有会话；忽略卸载或身份切换后的迟到结果。
     getViewerSession((session) => !ignore && acceptSession(session, startedAt)).catch((cause: CaughtValue) => {
       if (ignore || startedAt !== identity.current) return;
       if (cause instanceof ApiError && cause.status === 401) transitionViewer({ status: "anonymous" });
@@ -108,7 +121,9 @@ export function App() {
     return () => { ignore = true; };
   }, [acceptSession, transitionViewer]);
   useEffect(() => {
+    // 窗口重新获得焦点时检查普通用户会话。
     const onFocus = () => { void validate(true); };
+    // 页面重新可见时检查普通用户会话。
     const onVisible = () => { if (document.visibilityState === "visible") void validate(true); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
@@ -120,9 +135,11 @@ export function App() {
       <button className="pill" type="button" disabled={loggingOut} onClick={() => setDialog("password")}>修改密码</button>
       <button className="pill" type="button" disabled={loggingOut} onClick={async () => {
         const startedAt = identity.current;
+        // 异步操作完成时检查身份代次，避免旧结果改变新会话。
         const isCurrent = () => startedAt === identity.current;
         setLoggingOut(true);
         try {
+          // 先确认会话仍属于当前用户，避免旧退出操作清除新登录的身份。
           if (!(await validate()) || !isCurrent()) return;
           await viewerLogout(isCurrent);
           if (isCurrent()) becomeAnonymous();
@@ -135,6 +152,7 @@ export function App() {
       }}>{loggingOut ? "正在退出…" : "退出登录"}</button></>
       : <button className="pill" type="button" disabled={viewer.status === "loading"} onClick={() => setDialog("login")}>登录</button>}
   </div>;
+  // 拦截站内普通链接并交给应用导航，保留外部链接和浏览器快捷操作。
   function followLink(event: MouseEvent<HTMLElement>) {
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     const anchor = (event.target as Element).closest<HTMLAnchorElement>("a[href]");

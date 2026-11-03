@@ -20,10 +20,12 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// 测试请求时构造指定响应，供模拟服务返回。
 function respond(body: string | null, init: ResponseInit = {}) {
   return new Response(body, init);
 }
 
+// 定义模拟网络请求，供测试中模拟相关行为。
 class FakeXMLHttpRequest extends EventTarget {
   readonly upload = new EventTarget();
   readonly headers = new Map<string, string>();
@@ -35,31 +37,38 @@ class FakeXMLHttpRequest extends EventTarget {
   responseText = "";
   private responseHeaders = new Headers();
 
+  // 记录模拟请求的目标，供测试断言请求路径。
   open(method: string, url: string): void {
     this.method = method;
     this.url = url;
   }
 
+  // 模拟设置请求头，供上传测试使用。
   setRequestHeader(name: string, value: string): void {
     this.headers.set(name.toLowerCase(), value);
   }
 
+  // 模拟发送请求，等待测试触发响应。
   send(body: Document | XMLHttpRequestBodyInit | null): void {
     this.body = body;
   }
 
+  // 返回模拟响应头，供上传响应解析使用。
   getAllResponseHeaders(): string {
     return [...this.responseHeaders].map(([name, value]) => `${name}: ${value}`).join("\r\n");
   }
 
+  // 测试上传时触发指定进度事件，供断言进度状态使用。
   uploadProgress(event: { lengthComputable: boolean; loaded: number; total: number }): void {
     this.upload.dispatchEvent(progressEvent("progress", event));
   }
 
+  // 触发上传完成事件，供测试验证处理阶段。
   finishUpload(): void {
     this.upload.dispatchEvent(new Event("load"));
   }
 
+  // 设置并触发模拟响应，供异步请求测试继续执行。
   respond(status: number, responseText: string, headers: HeadersInit = {}): void {
     this.status = status;
     this.statusText = status === 415 ? "Unsupported Media Type" : "OK";
@@ -68,24 +77,29 @@ class FakeXMLHttpRequest extends EventTarget {
     this.dispatchEvent(new Event("load"));
   }
 
+  // 触发模拟网络失败，供测试验证错误转换。
   fail(type: "error" | "timeout" | "abort"): void {
     this.dispatchEvent(new Event(type));
   }
 }
 
+// 测试上传进度时构造带已传输字节数的事件。
 function progressEvent(type: string, values: { lengthComputable: boolean; loaded: number; total: number }): ProgressEvent {
   return Object.assign(new Event(type), values) as ProgressEvent;
 }
 
+// 测试上传时安装可控制的模拟网络请求。
 function installFakeXhr(): FakeXMLHttpRequest {
   let instance: FakeXMLHttpRequest | undefined;
   vi.stubGlobal("XMLHttpRequest", class extends FakeXMLHttpRequest {
+    // 在测试创建模拟请求时记录当前实例，供后续触发响应。
     constructor() {
       super();
       instance = this;
     }
   });
   return new Proxy({} as FakeXMLHttpRequest, {
+    // 代理访问模拟请求属性，供测试操作当前实例。
     get(_target, property, receiver) {
       if (!instance) throw new Error("XMLHttpRequest was not created");
       const value = Reflect.get(instance, property, receiver);
@@ -286,6 +300,7 @@ describe("apiRequest", () => {
 
   it("reports a response stream failure as a network failure", async () => {
     const stream = new ReadableStream({
+      // 在测试构造响应流时执行控制器逻辑。
       start(controller) {
         controller.error(new TypeError("connection reset"));
       },
@@ -466,6 +481,7 @@ describe("apiDownload", () => {
 
   it("maps a response blob stream failure to ApiNetworkError", async () => {
     const stream = new ReadableStream({
+      // 在测试构造响应流时执行控制器逻辑。
       start(controller) {
         controller.error(new TypeError("connection reset"));
       },

@@ -9,4 +9,5 @@ export const ViewerContext = createContext({
   recordScope: (_private: boolean) => {},
 });
 
+// 在公开站组件渲染时读取共享的普通用户会话上下文。
 export const useViewer = () => useContext(ViewerContext);

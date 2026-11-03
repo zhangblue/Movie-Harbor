@@ -1,10 +1,12 @@
 import { useState, type ReactNode } from "react";
 import type { MovieDetail, SeriesDetail } from "@movie-harbor/api-client";
 
+// 在单集列表渲染时将时长转换为展示文字。
 export function durationLabel(seconds: number | null) {
   return seconds === null ? "时长未知" : `${Math.ceil(seconds / 60)} 分钟`;
 }
 
+// 由电影和剧集详情页渲染共享的内容信息布局。
 export function DetailsLayout({ detail, children }: { detail: MovieDetail | SeriesDetail; children: ReactNode }) {
   const [posterFailed, setPosterFailed] = useState(false);
   return <>

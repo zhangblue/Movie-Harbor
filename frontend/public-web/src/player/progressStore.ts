@@ -2,23 +2,29 @@ import type { JsonObject, JsonValue } from "@movie-harbor/api-client";
 
 export const PROGRESS_STORAGE_KEY = "movie-harbor:playback:v1";
 
+// 定义播放内容键，供相关请求、状态或组件使用。
 export type PlaybackContentKey = `movie:${string}` | `episode:${string}`;
+// 定义剧集进度键，供相关请求、状态或组件使用。
 export type SeriesProgressKey = `series:${string}`;
 
+// 定义播放进度，供相关请求、状态或组件使用。
 export interface PlaybackProgress {
   position: number;
   duration: number;
   updatedAt: number;
 }
 
+// 定义进度状态，供相关请求、状态或组件使用。
 interface ProgressState {
   version: 1;
   progress: Record<string, PlaybackProgress>;
   recentEpisodes: Record<string, string>;
 }
 
+// 本地数据缺失或无效时创建空的版本化播放进度状态。
 const emptyState = (): ProgressState => ({ version: 1, progress: {}, recentEpisodes: {} });
 
+// 读写进度前选择注入的存储或浏览器本地存储，不可用时返回空。
 function resolveStorage(storage?: Storage): Storage | null {
   if (storage) return storage;
   try {
@@ -28,10 +34,12 @@ function resolveStorage(storage?: Storage): Storage | null {
   }
 }
 
+// 判断 JSON 值是否为非数组对象，供读取对象字段前校验。
 function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 读取并校验本地播放记录，存储不可用或数据损坏时回退为空状态。
 function readState(storage?: Storage): ProgressState {
   const target = resolveStorage(storage);
   if (!target) return emptyState();
@@ -67,6 +75,7 @@ function readState(storage?: Storage): ProgressState {
   }
 }
 
+// 保存播放状态，浏览器拒绝存储时仍允许播放继续。
 function writeState(state: ProgressState, storage?: Storage) {
   const target = resolveStorage(storage);
   if (!target) return;
@@ -77,10 +86,12 @@ function writeState(state: ProgressState, storage?: Storage) {
   }
 }
 
+// 在播放器初始化时读取指定内容的播放进度。
 export function getProgress(key: PlaybackContentKey, storage?: Storage): PlaybackProgress | null {
   return readState(storage).progress[key] ?? null;
 }
 
+// 播放期间保存有效进度，开头或接近结尾时清除恢复记录。
 export function saveProgress(key: PlaybackContentKey, position: number, duration: number, storage?: Storage) {
   if (!Number.isFinite(position) || !Number.isFinite(duration) || position < 0 || duration <= 0) return;
   if (position === 0 || duration - position < 30) {
@@ -92,16 +103,19 @@ export function saveProgress(key: PlaybackContentKey, position: number, duration
   writeState(state, storage);
 }
 
+// 播放结束或从头播放时删除指定内容的进度。
 export function clearProgress(key: PlaybackContentKey, storage?: Storage) {
   const state = readState(storage);
   delete state.progress[key];
   writeState(state, storage);
 }
 
+// 进入剧集播放页时读取最近观看的单集。
 export function getRecentEpisode(key: SeriesProgressKey, storage?: Storage): string | null {
   return readState(storage).recentEpisodes[key] ?? null;
 }
 
+// 选择单集或进入播放器时更新最近观看记录。
 export function setRecentEpisode(key: SeriesProgressKey, episodeId: string | null, storage?: Storage) {
   const state = readState(storage);
   if (episodeId) state.recentEpisodes[key] = episodeId;

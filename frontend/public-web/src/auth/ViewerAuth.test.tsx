@@ -12,6 +12,7 @@ beforeEach(() => {
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearCsrfToken(); window.history.replaceState(null, "", "/"); });
 
+// 认证测试时创建可控制登录状态的模拟服务。
 function server(initial = false) {
   const state = { authenticated: initial, username: "Summer", csrfToken: "viewer-csrf", sessionNetworkError: false, loginStatus: 200, passwordStatus: 204, logoutStatus: 204,
     requests: [] as Array<{ url: URL; init?: RequestInit }>, catalogTotal: undefined as number | undefined, catalogResponse: undefined as Promise<Response> | undefined,
@@ -58,6 +59,7 @@ function server(initial = false) {
   return state;
 }
 
+// 在认证测试中填写并提交普通用户登录表单，返回模拟用户供后续操作。
 async function login(username = "Summer") {
   const user = userEvent.setup();
   await user.click(await screen.findByRole("button", { name: "登录" }));
@@ -385,6 +387,7 @@ it("does not let a previous viewer session response replace the new viewer's CSR
   const old = deferred<Response>(); state.sessionResponse = old.promise;
   act(() => window.dispatchEvent(new Event("focus")));
   state.sessionResponse = undefined;
+  // 在认证测试中填写并提交普通用户改密表单，供后续断言身份变化。
   async function changePassword() {
     await user.click(screen.getByRole("button", { name: "修改密码" }));
     const dialog = screen.getByRole("dialog", { name: "修改密码" });

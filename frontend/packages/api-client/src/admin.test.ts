@@ -14,6 +14,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// 定义模拟上传网络请求，供测试中模拟相关行为。
 class FakeUploadXMLHttpRequest extends EventTarget {
   readonly upload = new EventTarget();
   url: string | undefined;
@@ -22,17 +23,22 @@ class FakeUploadXMLHttpRequest extends EventTarget {
   responseText = "";
   private responseHeaders = new Headers();
 
+  // 记录模拟请求的目标，供测试断言请求路径。
   open(_method: string, url: string): void {
     this.url = url;
   }
 
+  // 模拟设置请求头，供上传测试使用。
   setRequestHeader(): void {}
+  // 模拟发送请求，等待测试触发响应。
   send(): void {}
 
+  // 返回模拟响应头，供上传响应解析使用。
   getAllResponseHeaders(): string {
     return [...this.responseHeaders].map(([name, value]) => `${name}: ${value}`).join("\r\n");
   }
 
+  // 触发模拟上传进度，供测试断言进度反馈。
   uploadProgress(loaded: number, total: number): void {
     this.upload.dispatchEvent(Object.assign(new Event("progress"), {
       lengthComputable: true,
@@ -41,6 +47,7 @@ class FakeUploadXMLHttpRequest extends EventTarget {
     }));
   }
 
+  // 设置并触发模拟响应，供异步请求测试继续执行。
   respond(body: string): void {
     this.status = 200;
     this.statusText = "OK";
@@ -50,15 +57,18 @@ class FakeUploadXMLHttpRequest extends EventTarget {
   }
 }
 
+// 测试管理上传时安装可控制的模拟网络请求。
 function installFakeUploadXhr(): FakeUploadXMLHttpRequest {
   let instance: FakeUploadXMLHttpRequest | undefined;
   vi.stubGlobal("XMLHttpRequest", class extends FakeUploadXMLHttpRequest {
+    // 在测试创建模拟请求时记录当前实例，供后续触发响应。
     constructor() {
       super();
       instance = this;
     }
   });
   return new Proxy({} as FakeUploadXMLHttpRequest, {
+    // 代理访问模拟请求属性，供测试操作当前实例。
     get(_target, property, receiver) {
       if (!instance) throw new Error("XMLHttpRequest was not created");
       const value = Reflect.get(instance, property, receiver);
@@ -240,6 +250,7 @@ const series = {
   genres: [], poster: null, seasons: [],
 };
 
+// 测试管理请求时记录请求并依次返回预设响应。
 function recordRequests(responses: Response[]) {
   const requests: Array<{ url: string; method: string | undefined; json: JsonValue | undefined; csrf: string | null; credentials: string | undefined }> = [];
   vi.stubGlobal("fetch", async (url: RequestInfo | URL, init?: RequestInit) => {
@@ -255,6 +266,7 @@ function recordRequests(responses: Response[]) {
   return requests;
 }
 
+// 测试 API 时构造 JSON 响应。
 function jsonResponse(value: JsonValue | ViewerUserPage | ViewerUserSummary, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }

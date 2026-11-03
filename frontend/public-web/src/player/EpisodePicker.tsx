@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { PublicSeason } from "@movie-harbor/api-client";
 import { orderedPlayableEpisodes, orderSeasons, type OrderedEpisode } from "../series/ordering";
 
+// 由剧集播放器渲染季和单集选择入口。
 export function EpisodePicker({ seasons, current, select }: {
   seasons: PublicSeason[];
   current: OrderedEpisode;

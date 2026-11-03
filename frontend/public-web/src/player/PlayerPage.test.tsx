@@ -6,18 +6,26 @@ import { App } from "../app/App";
 import { json, movie, series, serve } from "../test/fixtures";
 import { getProgress, saveProgress, setRecentEpisode } from "./progressStore";
 
+// 播放器测试中设置媒体时间和时长，模拟浏览器播放状态。
 function setMediaTime(video: HTMLVideoElement, currentTime: number, duration = 600) {
   Object.defineProperty(video, "duration", { configurable: true, value: duration });
   video.currentTime = currentTime;
 }
 
+// 定义内存存储，供测试中模拟相关行为。
 class MemoryStorage implements Storage {
   #items = new Map<string, string>();
+  // 读取内存存储的条目数，供测试检查存储状态。
   get length() { return this.#items.size; }
+  // 清空模拟存储，供测试重置数据。
   clear() { this.#items.clear(); }
+  // 从模拟存储读取键值，供播放进度测试使用。
   getItem(key: string) { return this.#items.get(key) ?? null; }
+  // 按索引读取模拟存储键，供存储接口测试使用。
   key(index: number) { return [...this.#items.keys()][index] ?? null; }
+  // 从模拟存储删除键值，供播放进度测试使用。
   removeItem(key: string) { this.#items.delete(key); }
+  // 将键值写入模拟存储，供播放进度测试使用。
   setItem(key: string, value: string) { this.#items.set(key, value); }
 }
 

@@ -1,5 +1,6 @@
 import type { CatalogKind } from "@movie-harbor/api-client";
 
+// 由目录页渲染内容筛选与搜索控件。
 export function CatalogToolbar({ kind, query, authenticated, privateOnly, onKindChange, onQueryChange, onPrivateOnlyChange }: {
   kind: CatalogKind; query: string; authenticated: boolean; privateOnly: boolean;
   onKindChange: (kind: CatalogKind) => void; onQueryChange: (query: string) => void;

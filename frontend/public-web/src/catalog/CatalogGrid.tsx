@@ -1,6 +1,7 @@
 import type { CatalogCard } from "@movie-harbor/api-client";
 import { PosterCard } from "@movie-harbor/ui";
 
+// 由目录页渲染内容卡片网格。
 export function CatalogGrid({ items }: { items: CatalogCard[] }) {
   return <ul className="catalog-grid catalog-grid--five" aria-label="影片目录">
     {items.map((item) => <li key={`${item.kind}:${item.id}`}>

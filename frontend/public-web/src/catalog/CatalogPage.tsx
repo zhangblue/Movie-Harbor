@@ -8,6 +8,7 @@ import { CatalogGrid } from "./CatalogGrid";
 import { CatalogPagination } from "./CatalogPagination";
 import { CatalogToolbar } from "./CatalogToolbar";
 
+// 由应用首页渲染目录，协调筛选、请求、分页和焦点。
 export function CatalogPage({ search, navigate, account }: { search: string; navigate: (href: string, replace?: boolean) => void; account?: ReactNode }) {
   const { authenticated, discoveryPending } = useViewer();
   const params = new URLSearchParams(search);
@@ -17,6 +18,7 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
   const privateOnly = params.get("privacy") === "private";
   const rawPage = Number(params.get("page"));
   const page = Number.isSafeInteger(rawPage) && rawPage > 0 && rawPage <= 1_000_000 ? rawPage : 1;
+  // 让请求随筛选和页码变化重新执行，服务端返回的数据决定当前目录内容。
   const load = useCallback(() => listCatalog({ kind, q: query, privacy: privateOnly ? "private" : undefined, page, size: 20 }), [kind, query, privateOnly, page]);
   const { state, retry } = usePublicRequest(load);
   const titleRef = useRef<HTMLHeadingElement>(null);
@@ -24,6 +26,7 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
   const wasAuthenticated = useRef(authenticated);
   const title = kind === "movie" ? "电影" : kind === "series" ? "剧集" : "全部影片";
 
+  // 筛选或分页变化时更新目录 URL，并在换页后安排焦点恢复。
   const update = useCallback((next: { kind?: CatalogKind; q?: string; privateOnly?: boolean; page?: number }, replace = false) => {
     const updated = new URLSearchParams();
     const nextKind = next.kind ?? kind;
@@ -49,6 +52,7 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
     if (state.status !== "ready" || (privateOnly && !authenticated)) return;
     const totalPages = Math.max(1, Math.ceil(state.data.total / state.data.size));
     if (page > totalPages) {
+      // 数据缩减导致页码越界时替换地址，随后重新请求最后一页。
       update({ page: totalPages }, true);
       return;
     }

@@ -34,21 +34,26 @@ export const series: SeriesDetail = {
     ] },
   ],
 };
+// 定义公开测试数据载荷，供测试中模拟相关行为。
 type PublicFixturePayload = JsonValue | CatalogPage | MovieDetail | SeriesDetail;
 
+// 公开站测试中构造 JSON 响应。
 export function json(value: PublicFixturePayload, status = 200) {
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
+// 公开站测试中构造目录分页数据。
 export function catalog(items: CatalogCard[], total = items.length, page = 1) {
   return json({ items, total, page, size: 25 });
 }
 // Only the network boundary is replaced; shared request encoding and error handling run unchanged.
+// 公开站测试中安装按 URL 分派的模拟服务。
 export function serve(handler: (url: URL) => Response | Promise<Response>) {
   vi.stubGlobal("fetch", (input: string) => {
     const url = new URL(input, "http://localhost");
     return url.pathname === "/api/viewer/session" ? json({ error: "未登录" }, 401) : handler(url);
   });
 }
+// 异步测试中创建可由测试控制完成时机的 Promise。
 export function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((done) => { resolve = done; });

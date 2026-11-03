@@ -8,6 +8,7 @@ let availableWidth = 500;
 let chipWidths: Record<string, number> = {};
 let resizeCallback: ResizeObserverCallback | undefined;
 
+// 海报卡片测试时构造指定宽度的布局矩形。
 function rect(width: number): DOMRect {
   return { x: 0, y: 0, width, height: 20, top: 0, right: width, bottom: 20, left: 0, toJSON: () => ({}) };
 }
@@ -16,10 +17,15 @@ beforeEach(() => {
   availableWidth = 500;
   chipWidths = {};
   resizeCallback = undefined;
+  // 在海报布局测试中模拟尺寸观察器，允许测试主动触发测量。
   class MockResizeObserver {
+    // 在布局测试创建监听器时保存尺寸变化回调。
     constructor(callback: ResizeObserverCallback) { resizeCallback = callback; }
+    // 模拟开始监听尺寸，供布局测试使用。
     observe() {}
+    // 模拟取消监听尺寸，供布局测试使用。
     unobserve() {}
+    // 模拟断开尺寸监听，供组件卸载测试使用。
     disconnect() {}
   }
   vi.stubGlobal("ResizeObserver", MockResizeObserver);
@@ -42,6 +48,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// 海报卡片测试中触发尺寸变化通知。
 function resize() {
   expect(resizeCallback).toBeTypeOf("function");
   act(() => resizeCallback?.([], {} as ResizeObserver));

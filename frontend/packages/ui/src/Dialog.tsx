@@ -1,6 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useEffectEvent, useId, useRef, type ReactNode } from "react";
 
+// 定义对话框属性，供相关请求、状态或组件使用。
 export interface DialogProps {
   open: boolean;
   title: ReactNode;
@@ -15,6 +16,7 @@ const focusableSelector = [
   "iframe", "audio[controls]", "video[controls]", "[contenteditable]:not([contenteditable='false'])", "[tabindex]",
 ].join(",");
 
+// 对话框打开或处理 Tab 时计算实际可聚焦的元素顺序。
 function tabbableElements(panel: HTMLElement, activeElement: Element | null = null): HTMLElement[] {
   const candidates = Array.from(panel.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
     if (element.tabIndex < 0) return false;
@@ -73,6 +75,7 @@ function tabbableElements(panel: HTMLElement, activeElement: Element | null = nu
   ));
 }
 
+// 由页面渲染模态对话框，打开时约束焦点并在关闭后恢复焦点。
 export function Dialog({ open, title, onClose, children, closeLabel, className }: DialogProps) {
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement>(null);
@@ -86,9 +89,11 @@ export function Dialog({ open, title, onClose, children, closeLabel, className }
     const first = panel ? tabbableElements(panel)[0] : undefined;
     (first ?? panel)?.focus();
 
+    // 对话框打开期间处理 Escape 关闭和 Tab 焦点循环。
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
+        // 通知拥有对话框状态的上层关闭；焦点将在 Effect 清理时恢复。
         closeFromEffect();
         return;
       }

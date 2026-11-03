@@ -1,5 +1,6 @@
 import { Button, paginationItems } from "@movie-harbor/ui";
 
+// 定义属性，供相关请求、状态或组件使用。
 type Props = {
   page: number;
   size: number;
@@ -8,6 +9,7 @@ type Props = {
   onPage: (page: number) => void;
 };
 
+// 由目录页渲染分页按钮，并将目标页交给上层导航。
 export function CatalogPagination({ page, size, total, disabled, onPage }: Props) {
   const totalPages = Math.max(1, Math.ceil(total / size));
   return <nav className="pagination" aria-label="目录分页">

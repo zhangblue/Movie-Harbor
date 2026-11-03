@@ -4,7 +4,9 @@ import { Loading, RequestError } from "../app/RequestState";
 import { usePublicRequest } from "../app/usePublicRequest";
 import { DetailsLayout } from "./DetailsLayout";
 
+// 由应用路由渲染电影详情并请求公开数据。
 export function MovieDetails({ id }: { id: string }) {
+  // 内容标识变化时重新读取电影详情，供请求状态 Hook 渲染结果或错误。
   const load = useCallback(() => getMovieDetail(id), [id]);
   const { state, retry } = usePublicRequest(load);
   if (state.status === "loading") return <Loading />;

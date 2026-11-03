@@ -5,7 +5,9 @@ import { usePublicRequest } from "../app/usePublicRequest";
 import { DetailsLayout, durationLabel } from "./DetailsLayout";
 import { orderEpisodes, orderSeasons } from "../series/ordering";
 
+// 由应用路由渲染剧集详情和按季排列的单集。
 export function SeriesDetails({ id }: { id: string }) {
+  // 内容标识变化时重新读取剧集详情，再按返回的季和集展示。
   const load = useCallback(() => getSeriesDetail(id), [id]);
   const { state, retry } = usePublicRequest(load);
   const [selectedSeason, setSelectedSeason] = useState<string>();
