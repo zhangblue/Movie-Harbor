@@ -1,17 +1,21 @@
 import { ImportRequestError } from "./client.mjs";
 
+// 创建致命导入错误，供无法安全继续的冲突或状态异常使用。
 function fatal(message) {
   return new ImportRequestError(message, { fatal: true, category: "content" });
 }
 
+// 读取自有属性，避免导入名称触发原型链属性。
 function ownEntry(record, name) {
   return Object.hasOwn(record, name) ? record[name] : undefined;
 }
 
+// 写入自有属性，允许特殊名称作为进度键而不改变原型。
 function setOwnEntry(record, name, value) {
   Object.defineProperty(record, name, { value, writable: true, enumerable: true, configurable: true });
 }
 
+// 汇总来源电影与剧集的题材名称，供导入前同步题材。
 function collectGenreNames(source) {
   const names = new Set();
   for (const content of [...source.movies, ...source.series]) {
@@ -23,6 +27,7 @@ function collectGenreNames(source) {
   return names;
 }
 
+// 导入内容前同步题材并保存映射，供恢复和内容关联复用。
 export async function syncGenres({ source, client, progress, logger }) {
   const requiredNames = collectGenreNames(source);
   const genreIds = new Map();
@@ -52,6 +57,7 @@ export async function syncGenres({ source, client, progress, logger }) {
   return genreIds;
 }
 
+// 读取目标内容建立冲突索引，供导入前检测同名项目。
 export async function loadConflictIndex(client) {
   const conflicts = { movie: new Set(), series: new Set() };
   for (const kind of ["movie", "series"]) {
@@ -73,11 +79,13 @@ export async function loadConflictIndex(client) {
   return conflicts;
 }
 
+// 保存电影当前步骤及版本，供中断后安全续传。
 function saveMovieStep(progress, name, changes) {
   Object.assign(ownEntry(progress.state.movies, name), changes);
   return progress.save();
 }
 
+// 按元数据、媒体和发布步骤导入电影，并在每一步保存进度。
 async function importMovie({ movie, client, progress, genreIds, logger }) {
   const name = movie.name;
   let state = ownEntry(progress.state.movies, name);
@@ -128,11 +136,13 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
   return resumed ? "resumed" : "completed";
 }
 
+// 保存剧集当前步骤及版本，供中断后恢复。
 function saveSeriesStep(progress, name, changes) {
   Object.assign(ownEntry(progress.state.series, name), changes);
   return progress.save();
 }
 
+// 保存单集步骤和父剧集版本，供中断后恢复并发检查。
 function saveEpisodeStep(progress, seriesName, seasonNumber, episodeNumber, seriesVersion, changes) {
   const state = ownEntry(progress.state.series, seriesName);
   const season = ownEntry(state.seasons, String(seasonNumber));
@@ -141,6 +151,7 @@ function saveEpisodeStep(progress, seriesName, seasonNumber, episodeNumber, seri
   return progress.save();
 }
 
+// 续传剧集前核对目标状态、版本与可见性，防止覆盖外部修改。
 function validateSeriesResume(target, state, name, isPrivate) {
   if (target.id !== state.id || target.status !== "draft" || target.version !== state.version || target.name !== name || target.is_private !== isPrivate) {
     throw new ImportRequestError(`resume target changed: ${name}`, { status: 409 });
@@ -160,6 +171,7 @@ function validateSeriesResume(target, state, name, isPrivate) {
   }
 }
 
+// 按剧集、季和单集顺序导入内容，并记录可恢复的步骤。
 async function importSeries({ series, client, progress, genreIds, logger }) {
   const name = series.name;
   let state = ownEntry(progress.state.series, name);
@@ -249,6 +261,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
   return resumed ? "resumed" : "completed";
 }
 
+// 协调题材同步、冲突检查和逐条导入，返回成功、跳过及失败统计。
 export async function importContent({ source, client, progress, logger }) {
   const genreIds = await syncGenres({ source, client, progress, logger });
   const conflicts = await loadConflictIndex(client);

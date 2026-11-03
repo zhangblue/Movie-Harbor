@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublishableMovie, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Movie, type ViewerUser } from "./helpers";
 
+// 验证用户管理保留 Unicode 用户名，改密或删除撤销全部会话。
 test("user management preserves Unicode usernames and resets or deletes every viewer session", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
   const name = `ui-viewer-${Date.now()}`;
@@ -61,6 +62,7 @@ test("user management preserves Unicode usernames and resets or deletes every vi
   } finally { await first.dispose(); await second.dispose(); await api.dispose(); }
 });
 
+// 验证空部署初始化管理员及电影完整生命周期。
 test("empty deployment initializes the admin and a movie completes its lifecycle", async ({ page, playwright, request }) => {
   await page.goto("/admin/");
   await page.getByLabel("管理员名称").fill(adminName);
@@ -120,6 +122,7 @@ test("empty deployment initializes the admin and a movie completes its lifecycle
   await expect(page.getByRole("heading", { name: "内容管理" })).toBeVisible();
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
   for (const path of [...moviePosterFiles, ...movieVideoFiles]) {
+    // 轮询上传文件消失，确认内容删除后物理媒体也被清理。
     await expect.poll(() => existsSync(path)).toBe(false);
   }
   expect((await request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(404);

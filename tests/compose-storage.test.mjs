@@ -13,11 +13,13 @@ const expectedDefaults = {
   MAX_UPLOAD_BYTES: "53687091200",
 };
 
+// 解析根环境示例，供默认配置断言使用。
 function parseEnvExample() {
   return Object.fromEntries(
     readFileSync(path.join(projectRoot, ".env.example"), "utf8")
       .split(/\r?\n/)
       .filter((line) => line && !line.startsWith("#"))
+      // 解析每行环境配置，供默认值及部署边界检查。
       .map((line) => {
         const separator = line.indexOf("=");
         return [line.slice(0, separator), line.slice(separator + 1)];
@@ -25,6 +27,7 @@ function parseEnvExample() {
   );
 }
 
+// 以指定环境解析 Compose 配置，供挂载和默认值测试使用。
 function composeConfig(environment = {}) {
   const cleanEnvironment = { ...process.env };
   for (const name of Object.keys(expectedDefaults)) {
@@ -44,10 +47,12 @@ function composeConfig(environment = {}) {
   );
 }
 
+// 按服务及容器目标路径查找挂载，供存储契约断言使用。
 function mountAt(config, service, target) {
   return config.services[service].volumes.find((mount) => mount.target === target);
 }
 
+// 验证根环境示例声明本地部署默认值。
 test("declares the local deployment defaults in the root environment example", () => {
   const example = parseEnvExample();
   for (const [name, value] of Object.entries(expectedDefaults)) {
@@ -55,6 +60,7 @@ test("declares the local deployment defaults in the root environment example", (
   }
 });
 
+// 验证部署指南说明本地、可信局域网及 HTTPS 的边界。
 test("deployment guide explains the local, trusted LAN, and HTTPS deployment boundaries", () => {
   const deploymentGuide = readFileSync(
     path.join(projectRoot, "docs/guides/deployment.md"),
@@ -74,6 +80,7 @@ test("deployment guide explains the local, trusted LAN, and HTTPS deployment bou
   );
 });
 
+// 验证生产 Compose 配置包含相同的默认回退表达式。
 test("production Compose owns the same fallback expressions", () => {
   const source = readFileSync(path.join(projectRoot, "docker-compose.yml"), "utf8");
   assert.match(source, /PUBLIC_ORIGIN: \$\{PUBLIC_ORIGIN:-http:\/\/localhost:8080\}/);
@@ -82,6 +89,7 @@ test("production Compose owns the same fallback expressions", () => {
   assert.match(source, /MAX_UPLOAD_BYTES: \$\{MAX_UPLOAD_BYTES:-53687091200\}/);
 });
 
+// 验证生产 Compose 正确解析 API 本地默认值。
 test("production Compose resolves the local defaults for the API", () => {
   const environment = composeConfig().services.api.environment;
   for (const [name, value] of Object.entries(expectedDefaults)) {
@@ -89,6 +97,7 @@ test("production Compose resolves the local defaults for the API", () => {
   }
 });
 
+// 验证显式环境变量覆盖生产默认值。
 test("explicit environment values override the production defaults", () => {
   const environment = composeConfig({
     PUBLIC_ORIGIN: "https://media.example.com",
@@ -102,6 +111,7 @@ test("explicit environment values override the production defaults", () => {
   assert.equal(environment.MAX_UPLOAD_BYTES, "1073741824");
 });
 
+// 验证PostgreSQL 默认使用宿主机数据目录。
 test("defaults PostgreSQL storage to a host data directory", () => {
   const config = composeConfig();
   const mount = mountAt(config, "postgres", "/var/lib/postgresql/data");
@@ -110,6 +120,7 @@ test("defaults PostgreSQL storage to a host data directory", () => {
   assert.equal(mount.source, path.join(projectRoot, "data/postgres"));
 });
 
+// 验证API 可写媒体目录与只读文件服务共享同一目录。
 test("shares one writable media directory with read-only serving", () => {
   const config = composeConfig();
   const expected = path.join(projectRoot, "data/media");
@@ -120,6 +131,7 @@ test("shares one writable media directory with read-only serving", () => {
   assert.equal(mountAt(config, "caddy", "/srv/media").read_only, true);
 });
 
+// 验证宿主机存储目录可以由配置覆盖。
 test("host storage directories can be overridden", () => {
   const config = composeConfig({
     DATABASE_HOST_DIR: "/tmp/movie-harbor-db-override",

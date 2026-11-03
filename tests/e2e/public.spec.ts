@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { AdminApi, ViewerApi, baseURL, createPublishableMovie, createPublishableSeries } from "./helpers";
 
+// 验证已发布内容可搜索并显示公开详情。
 test("published content is searchable and has public details", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
   const name = `Public Movie ${Date.now()}`;
@@ -15,6 +16,7 @@ test("published content is searchable and has public details", async ({ page, pl
 });
 
 // Removing the server visibility predicate would expose both search results and direct details.
+// 验证匿名用户无法发现或读取私密内容，登录用户可以访问。
 test("anonymous users cannot discover or fetch private content while viewers can", async ({ request, playwright }) => {
   const api = await AdminApi.login(playwright);
   const user = await api.createUser(`catalog-viewer-${Date.now()}`);
@@ -35,6 +37,7 @@ test("anonymous users cannot discover or fetch private content while viewers can
   } finally { await viewer.dispose(); await api.dispose(); }
 });
 
+// 验证私密目录筛选电影和剧集，并在退出后清除。
 test("private-only catalog filters movies and series and clears on logout", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
   try {
@@ -80,6 +83,7 @@ test("private-only catalog filters movies and series and clears on logout", asyn
   } finally { await api.dispose(); }
 });
 
+// 验证公开站登录、本人改密、私密内容刷新及会话撤销。
 test("public login and self password change refresh private content and revoke both sessions", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
   const user = await api.createUser(`public-ui-${Date.now()}`);
@@ -119,6 +123,7 @@ test("public login and self password change refresh private content and revoke b
 });
 
 for (const operation of ["logout", "password"] as const) {
+  // 验证较晚返回的操作不会覆盖更新后的用户 Cookie 与界面。
   test(`late ${operation} response preserves a newer viewer cookie and UI`, async ({ page, context, playwright }) => {
     const api = await AdminApi.login(playwright);
     const summer = await api.createUser(`summer-${operation}-${Date.now()}`);
@@ -129,10 +134,13 @@ for (const operation of ["logout", "password"] as const) {
     expect(summerLogin.status()).toBe(200);
     const oldCookie = (await context.cookies()).find((cookie) => cookie.name === "mh_viewer_session")!;
     let release!: () => void;
+    // 保存放行回调以暂缓旧响应，制造登录状态变化后的竞态。
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let received!: () => void;
+    // 保存响应到达通知，确保测试先观察旧请求再变更会话。
     const responseReceived = new Promise<void>((resolve) => { received = resolve; });
     let headers: Record<string, string> = {};
+    // 拦截目标请求并等待放行，验证迟到响应不会覆盖更新后的会话。
     await page.route(`**/api/viewer/${operation}`, async (route) => {
       const response = await route.fetch();
       headers = response.headers();

@@ -2,6 +2,7 @@ import { defineConfig } from "@playwright/test";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:18080";
 
+// 固定单 worker 和项目依赖顺序，让跨阶段数据与服务重启测试按预期执行。
 export default defineConfig({
   testDir: "tests/e2e",
   fullyParallel: false,

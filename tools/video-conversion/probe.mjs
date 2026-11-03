@@ -1,11 +1,14 @@
+// 判断探测输出是否为对象，供解析嵌套字段时使用。
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// 规范化可选字符串，供轨道缺失元数据时使用。
 function optionalString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+// 解析并校验 FFprobe 输出，提取可转换的视频、音频、字幕和时长。
 export function parseProbeOutput(text) {
   let output;
   try {
@@ -20,6 +23,7 @@ export function parseProbeOutput(text) {
   if (!Array.isArray(output.streams)) throw new Error("FFprobe 缺少有效的 streams 列表");
 
   const indices = new Set();
+  // 逐轨校验索引并记录已见索引，拒绝重复或无效探测结果。
   const streams = output.streams.map((stream) => {
     if (!isRecord(stream) || !Number.isInteger(stream.index) || stream.index < 0) {
       throw new Error("FFprobe 轨道索引必须是非负整数");

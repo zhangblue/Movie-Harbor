@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 
+// 缺少安全模块时保留空对象，让各契约断言明确报告所需能力缺失。
 const safety = await import("./run-safety.mjs").catch(() => ({}));
 
+// 创建隔离工作区与运行标识，供清理安全测试使用。
 function fixture() {
   const workspaceRoot = mkdtempSync(join(tmpdir(), "movie-harbor-e2e-safety-"));
   const generatedRoot = join(workspaceRoot, "tests", "e2e", ".generated");
@@ -13,10 +15,12 @@ function fixture() {
   return { workspaceRoot, generatedRoot };
 }
 
+// 验证单次运行拥有独立项目、数据库和媒体目录并覆盖继承的存储配置。
 test("a run owns a unique project, database, and media directory and overrides inherited storage configuration", (t) => {
   assert.equal(typeof safety.createE2ERun, "function");
   assert.equal(typeof safety.buildE2EEnvironment, "function");
   const roots = fixture();
+  // 测试结束时删除专属模拟工作区，避免残留目录影响其他安全用例。
   t.after(() => rmSync(roots.workspaceRoot, { recursive: true, force: true }));
 
   const first = safety.createE2ERun({ ...roots, runId: "a".repeat(32), ownerToken: "first-owner" });
@@ -40,10 +44,12 @@ test("a run owns a unique project, database, and media directory and overrides i
   assert.equal(resolve(first.databaseDir), first.databaseDir);
 });
 
+// 验证清理只接受生成目录中带本次运行标记的目录。
 test("cleanup accepts only this run's marked directory under the generated runs root", (t) => {
   assert.equal(typeof safety.createE2ERun, "function");
   assert.equal(typeof safety.cleanupE2ERun, "function");
   const roots = fixture();
+  // 测试结束时删除专属模拟工作区，避免残留目录影响其他安全用例。
   t.after(() => rmSync(roots.workspaceRoot, { recursive: true, force: true }));
   const run = safety.createE2ERun({ ...roots, runId: "c".repeat(32), ownerToken: "owned-run" });
   writeFileSync(join(run.runDir, "runner-file"), "runner");
@@ -54,10 +60,12 @@ test("cleanup accepts only this run's marked directory under the generated runs 
   assert.equal(existsSync(roots.workspaceRoot), true);
 });
 
+// 验证生成容器清理计划时不遍历无法访问的非空挂载目录。
 test("container cleanup is planned without traversing inaccessible nonempty bind directories", (t) => {
   assert.equal(typeof safety.buildBindCleanupPlan, "function");
   const roots = fixture();
   const run = safety.createE2ERun({ ...roots, runId: "f".repeat(32), ownerToken: "owned-run" });
+  // 测试结束时恢复受限目录权限再清理，确保失败场景也可回收夹具。
   t.after(() => {
     if (existsSync(run.mediaDir)) chmodSync(run.mediaDir, 0o700);
     if (existsSync(run.databaseDir)) chmodSync(run.databaseDir, 0o700);
@@ -88,15 +96,18 @@ test("container cleanup is planned without traversing inaccessible nonempty bind
   assert.throws(() => safety.buildBindCleanupPlan(run, { uid: -1, gid: 20 }), /non-negative integers/);
 });
 
+// 验证清理拒绝空值、宽泛路径、生产默认、外部、无标记和已替换目标。
 test("cleanup rejects empty, broad, production-default, external, unmarked, and replaced targets", (t) => {
   assert.equal(typeof safety.createE2ERun, "function");
   assert.equal(typeof safety.cleanupE2ERun, "function");
   const roots = fixture();
+  // 测试结束时删除专属模拟工作区，避免残留目录影响其他安全用例。
   t.after(() => rmSync(roots.workspaceRoot, { recursive: true, force: true }));
   const run = safety.createE2ERun({ ...roots, runId: "d".repeat(32), ownerToken: "owned-run" });
   const productionMedia = join(roots.workspaceRoot, "data", "media");
   const productionDatabase = join(roots.workspaceRoot, "data", "postgres");
   const external = mkdtempSync(join(tmpdir(), "movie-harbor-e2e-external-"));
+  // 测试结束时删除独立外部目录，避免安全用例留下数据。
   t.after(() => rmSync(external, { recursive: true, force: true }));
 
   for (const unsafe of ["", "/", roots.workspaceRoot, productionMedia, productionDatabase, external]) {
@@ -122,9 +133,11 @@ test("cleanup rejects empty, broad, production-default, external, unmarked, and 
   assert.equal(existsSync(external), true);
 });
 
+// 验证创建运行目录时拒绝无效标识和符号链接生成根目录。
 test("creation rejects invalid ids and a symlinked generated root", (t) => {
   assert.equal(typeof safety.createE2ERun, "function");
   const roots = fixture();
+  // 测试结束时删除专属模拟工作区，避免残留目录影响其他安全用例。
   t.after(() => rmSync(roots.workspaceRoot, { recursive: true, force: true }));
 
   assert.throws(

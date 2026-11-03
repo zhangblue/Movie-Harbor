@@ -35,6 +35,7 @@ const args = process.argv.slice(2);
 const mode = process.env.DOCKER_TEST_MODE;
 const targetPlatform = process.env.DOCKER_TEST_PLATFORM;
 fs.appendFileSync(process.env.DOCKER_TEST_LOG, JSON.stringify(args) + '\\n');
+// 模拟外部命令失败并退出，供打包错误路径测试使用。
 function fail(message) { console.error(message); process.exit(1); }
 if (args[0] === 'info') {
   if (mode === 'docker-down') fail('Docker daemon unavailable');
@@ -106,7 +107,9 @@ const tool = path.basename(process.argv[1]);
 const args = process.argv.slice(2);
 const mode = process.env.HOST_TOOL_TEST_MODE;
 fs.appendFileSync(process.env.HOST_TOOL_TEST_LOG, JSON.stringify([tool, ...args]) + '\n');
+// 模拟外部命令失败并退出，供打包错误路径测试使用。
 function fail(message, code = 1) { console.error(message); process.exit(code); }
+// 模拟宿主工具时检查参数，避免测试替身接受错误调用。
 function expectArgs(expected) {
   if (JSON.stringify(args) !== JSON.stringify(expected)) fail('Unexpected ' + tool + ' command: ' + args.join(' '));
 }
@@ -141,14 +144,17 @@ if (tool === 'rustc') {
     const binary = path.join(targetDirectory, 'aarch64-unknown-linux-musl', 'release', 'movie-harbor-api');
     if (['zigbuild-wait-for-signal', 'zigbuild-ignore-signal'].includes(mode)) {
       const { spawn } = require('node:child_process');
+      // 创建继承进程组的模拟编译后代，测试取消时是否等待或强制终止它。
       spawn(process.execPath, ['-e', [
         "const fs = require('node:fs');",
         "const path = require('node:path');",
         "const [targetDirectory, binary, mode] = process.argv.slice(1);",
+        // 保持后代运行直到信号；其处理器按场景延迟收尾或忽略终止。
         "const keepAlive = setInterval(() => {}, 1000);",
         "process.on('SIGTERM', () => {",
         "  console.error('ZIGBUILD_DESCENDANT_RECEIVED_SIGTERM');",
         "  if (mode === 'zigbuild-ignore-signal') return;",
+        // 延迟写入以确认清理在后代退出之后发生。
         "  setTimeout(() => {",
         "    const existed = fs.existsSync(targetDirectory);",
         "    fs.mkdirSync(path.dirname(binary), { recursive: true });",
@@ -157,6 +163,7 @@ if (tool === 'rustc') {
         "    process.exit(0);",
         "  }, 150);",
         "});",
+        // 若未成功终止则写入标记并失败，暴露残留后代。
         "setTimeout(() => {",
         "  fs.mkdirSync(path.dirname(binary), { recursive: true });",
         "  fs.writeFileSync(binary, 'unterminated descendant output');",
@@ -167,6 +174,7 @@ if (tool === 'rustc') {
       ].join('\n'), targetDirectory, binary, mode], { stdio: ['ignore', 'ignore', 'inherit'] });
       console.error('ZIGBUILD_GROUP_PID:' + process.pid);
       if (mode === 'zigbuild-ignore-signal') {
+        // 包装进程在忽略模式中记录信号但继续运行，验证强制终止路径。
         process.on('SIGTERM', () => console.error('ZIGBUILD_WRAPPER_RECEIVED_SIGTERM'));
         setTimeout(() => { console.error('ZIGBUILD_WRAPPER_SURVIVED'); process.exit(2); }, 3500);
       }
@@ -191,8 +199,10 @@ if (tool === 'rustc') {
 } else fail('Unexpected host tool: ' + tool);
 `;
 
+// 创建临时打包环境及外部工具替身，供各平台与故障测试使用。
 async function fixture(t, mode = "success", platform = "linux/arm64", hostMode = "success") {
   const root = await mkdtemp(join(tmpdir(), "offline-package-test-"));
+  // 结束时删除本次隔离仓库和模拟工具，避免污染后续打包测试。
   t.after(() => rm(root, { recursive: true, force: true }));
   const repo = join(root, "repo with spaces");
   const temporary = join(root, "temporary");
@@ -227,19 +237,25 @@ async function fixture(t, mode = "success", platform = "linux/arm64", hostMode =
   };
   return {
     repo, root, temporary, bin, destination, env,
+    // 启动隔离仓库内的真实 Shell 入口，供检查参数、退出码与产物。
     run: (args = [VERSION]) => spawnSync("sh", [join(repo, "tools/build-offline-package.sh"), ...args], {
       cwd: root, env, encoding: "utf8",
     }),
+    // 读取宿主工具调用日志；文件不存在时视为没有调用，供失败路径断言。
     hostCalls: async () => (await readFile(hostLog, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
+    // 读取模拟构建时的环境记录，供检查工具链绑定。
     hostBuildEnv: async () => JSON.parse(await readFile(hostEnvLog, "utf8")),
+    // 读取模拟 Docker 调用记录；不存在时视为没有调用。
     calls: async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse),
   };
 }
 
+// 检查测试打包目录的残留文件，供失败及取消场景使用。
 async function assertClean(f, expectedFiles = []) {
   // Apple Git may create its own xcrun cache in TMPDIR; check directories owned by this workflow.
   const staging = (await readdir(f.temporary)).filter(name => /^(movie-harbor-offline-|movie-harbor-arm64-target-|movie-harbor-api-arm64-|docker-save-)/.test(name));
   assert.deepEqual(staging, [], "temporary staging must be removed");
+  // 读取产物目录并将不存在视为空，其他错误继续抛出。
   const outputs = await readdir(join(f.repo, "dist/offline")).catch(error => {
     if (error.code === "ENOENT") return [];
     throw error;
@@ -247,12 +263,14 @@ async function assertClean(f, expectedFiles = []) {
   assert.deepEqual(outputs.sort(), expectedFiles, "no partial or unexpected output remains");
 }
 
+// 调用归档工具读取测试包，供核对实际产物内容使用。
 function tar(args) {
   const result = spawnSync("tar", args, { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
   return result.stdout;
 }
 
+// 验证ARM64 包在宿主机交叉编译且只组装验证过的二进制。
 test("ARM64 packaging cross-compiles on the host and assembles only the verified binary", async t => {
   const f = await fixture(t);
   const result = f.run();
@@ -300,6 +318,7 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
   const apiContext = builds[0].at(-1);
   assert.equal(apiContext.startsWith(f.temporary), true);
   assert.notEqual(apiContext, ".");
+  // 临时构建目录已删除也视为空，供核验打包结束后没有遗留 API 上下文。
   assert.deepEqual(await readdir(apiContext).catch(() => []), []);
   assert.deepEqual(builds.slice(1).map(args => args.at(-1)), [".", "."]);
   const archiveEntries = tar(["-tzf", f.destination]).trim().split("\n").sort();
@@ -327,6 +346,7 @@ test("ARM64 packaging cross-compiles on the host and assembles only the verified
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+// 验证ARM64 打包将 cargo-zigbuild 绑定到从 PATH 检查过的 Zig。
 test("ARM64 packaging binds cargo-zigbuild to the probed PATH Zig", async t => {
   const f = await fixture(t);
   const directoryShadow = join(f.root, "zig-directory-shadow");
@@ -348,6 +368,7 @@ test("ARM64 packaging binds cargo-zigbuild to the probed PATH Zig", async t => {
   });
 });
 
+// 验证AMD64 打包继续使用容器化后端构建。
 test("AMD64 packaging keeps the existing containerized backend build", async t => {
   const f = await fixture(t, "success", "linux/amd64");
   const result = f.run(["--platform", "linux/amd64", VERSION]);
@@ -406,6 +427,7 @@ for (const [mode, error] of [
   ["binary-not-elf", /Linux ELF/i],
   ["binary-not-regular", /regular file/i],
 ]) {
+  // 验证ARM64 打包遇到各类异常时干净失败。
   test(`ARM64 packaging fails cleanly when ${mode}`, async t => {
     const f = await fixture(t, "success", "linux/arm64", mode);
     const result = f.run();
@@ -419,6 +441,7 @@ for (const [mode, error] of [
   });
 }
 
+// 验证Shell 入口接受显式 linux/arm64 目标。
 test("shell CLI accepts an explicit linux/arm64 target", async t => {
   const f = await fixture(t);
   const result = f.run(["--platform", "linux/arm64", VERSION]);
@@ -426,6 +449,7 @@ test("shell CLI accepts an explicit linux/arm64 target", async t => {
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+// 验证Shell 入口可通过 ARM64 Docker 守护进程构建 AMD64。
 test("shell CLI can build AMD64 from an ARM64 Docker daemon", async t => {
   const f = await fixture(t, "wrong-host", "linux/amd64");
   const result = f.run(["--platform", "linux/amd64", VERSION]);
@@ -433,6 +457,7 @@ test("shell CLI can build AMD64 from an ARM64 Docker daemon", async t => {
   await assertClean(f, ["movie-harbor-offline-linux-amd64-test-v1.tar.gz"]);
 });
 
+// 验证Shell 入口拒绝架构不符的 AMD64 镜像且不留下产物。
 test("shell CLI rejects a non-target AMD64 image and leaves no artifact", async t => {
   const f = await fixture(t, "wrong-image", "linux/amd64");
   const result = f.run(["--platform", "linux/amd64", VERSION]);
@@ -448,6 +473,7 @@ for (const [args, error] of [
   [["--platform", "linux/amd64", "one", "two"], /usage|argument/i],
   [["--unknown"], /usage|argument/i],
 ]) {
+  // 验证Shell 入口在启动 Docker 前拒绝各类无效参数。
   test(`shell CLI rejects invalid arguments ${JSON.stringify(args)} before Docker runs`, async t => {
     const f = await fixture(t);
     const result = f.run(args);
@@ -458,6 +484,7 @@ for (const [args, error] of [
   });
 }
 
+// 验证目标平台不支持时 Shell 入口说明支持的平台和用法。
 test("shell CLI explains supported platforms and usage for an unsupported target", async t => {
   const f = await fixture(t);
   const result = f.run(["--platform", "linux/386", VERSION]);
@@ -468,6 +495,7 @@ test("shell CLI explains supported platforms and usage for an unsupported target
   await assertClean(f);
 });
 
+// 验证Shell 入口接受兼容的 Compose 5.1.2 插件。
 test("shell CLI accepts a compatible Compose plugin with version 5.1.2", async t => {
   const f = await fixture(t, "compose-new-major");
   const result = f.run();
@@ -476,6 +504,7 @@ test("shell CLI accepts a compatible Compose plugin with version 5.1.2", async t
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+// 验证Shell 入口在构建前拒绝不可用的 Compose 插件。
 test("shell CLI rejects an unavailable Compose plugin before building", async t => {
   const f = await fixture(t, "compose-down");
   const result = f.run();
@@ -494,6 +523,7 @@ for (const [mode, error] of [
   ["bad-tar", /tar/i], ["extra-staging-file", /allowlist|whitelist|staging/i],
   ["symlink-staging-file", /regular file|staging/i],
 ]) {
+  // 验证Shell 入口在各依赖不可用情形下干净失败。
   test(`shell CLI fails cleanly when ${mode}`, async t => {
     const f = await fixture(t, mode);
     const result = f.run();
@@ -503,6 +533,7 @@ for (const [mode, error] of [
   });
 }
 
+// 验证构建前拒绝已有产物并保留原始字节。
 test("shell CLI refuses an existing artifact before building and preserves its bytes", async t => {
   const f = await fixture(t);
   await mkdir(dirname(f.destination), { recursive: true });
@@ -515,6 +546,7 @@ test("shell CLI refuses an existing artifact before building and preserves its b
   await assertClean(f, [BUNDLE_NAME]);
 });
 
+// 验证打包期间出现的同名产物不会被覆盖。
 test("shell CLI cannot overwrite an artifact that appears during packaging", async t => {
   const f = await fixture(t, "publication-race");
   const result = f.run();
@@ -528,14 +560,18 @@ for (const [mode, behavior] of [
   ["zigbuild-wait-for-signal", "waits for descendant shutdown"],
   ["zigbuild-ignore-signal", "forcibly stops an unresponsive descendant"],
 ]) {
+  // 验证ARM64 打包收到 SIGTERM 后等待进程组退出，再清理产物。
   test(`ARM64 packaging ${behavior} before cleaning after SIGTERM`, { timeout: 10000 }, async t => {
     const f = await fixture(t, "success", "linux/arm64", mode);
+    // 以子进程运行隔离打包入口，供测试构建中断与进程组清理。
     const child = spawn("sh", [join(f.repo, "tools/build-offline-package.sh"), VERSION], {
       cwd: f.root, env: f.env, stdio: ["ignore", "pipe", "pipe"],
     });
+    // 测试结束时强制清理残留打包进程，避免后台进程影响后续测试。
     t.after(() => child.kill("SIGKILL"));
     let stderr = "";
     let interrupted = false;
+    // 监听就绪标记后发送 SIGTERM，确保中断发生在预期构建阶段。
     child.stderr.on("data", chunk => {
       stderr += chunk.toString();
       if (!interrupted && stderr.includes("ZIGBUILD_TREE_WAITING")) {
@@ -544,6 +580,7 @@ for (const [mode, behavior] of [
       }
     });
     // Inherited stderr keeps close pending until the real descendant exits or is killed.
+    // 等待子进程及继承的输出流关闭，再断言退出码和清理结果。
     const [code] = await new Promise(resolve => child.on("close", (...args) => resolve(args)));
     assert.equal(interrupted, true, stderr);
     assert.notEqual(code, 0);
@@ -560,29 +597,36 @@ for (const [mode, behavior] of [
     assert.equal(stderr.includes("ZIGBUILD_DESCENDANT_FINALIZED_BEFORE_CLEANUP"), mode === "zigbuild-wait-for-signal", stderr);
     const groupPid = Number(stderr.match(/ZIGBUILD_GROUP_PID:(\d+)/)?.[1]);
     assert.equal(Number.isInteger(groupPid) && groupPid > 0, true, stderr);
+    // 以零信号检查进程组已不存在，确认测试结束前后代均已退出。
     assert.throws(() => process.kill(-groupPid, 0), { code: "ESRCH" });
   });
 }
 
+// 验证收到 SIGTERM 后清理未完成的导出。
 test("shell CLI cleans partial exports after SIGTERM", { timeout: 10000 }, async t => {
   const f = await fixture(t, "wait-for-signal");
+  // 以子进程运行隔离打包入口，供测试构建中断与进程组清理。
   const child = spawn("sh", [join(f.repo, "tools/build-offline-package.sh"), VERSION], {
     cwd: f.root, env: f.env, stdio: ["ignore", "pipe", "pipe"],
   });
+  // 测试结束时强制清理残留打包进程，避免后台进程影响后续测试。
   t.after(() => child.kill("SIGKILL"));
   let waiting = false;
+  // 监听就绪标记后发送 SIGTERM，确保中断发生在预期构建阶段。
   child.stderr.on("data", chunk => {
     if (chunk.toString().includes("SAVE_WAITING")) {
       waiting = true;
       child.kill("SIGTERM");
     }
   });
+  // 等待子进程及继承的输出流关闭，再断言退出码和清理结果。
   const [code] = await new Promise(resolve => child.on("close", (...args) => resolve(args)));
   assert.equal(waiting, true, "CLI must reach image export before interruption");
   assert.notEqual(code, 0);
   await assertClean(f);
 });
 
+// 验证帮助命令无需 Docker 或输出目录即可成功。
 test("shell CLI help succeeds without Docker or output", async t => {
   const f = await fixture(t, "docker-down");
   const result = f.run(["--help"]);
@@ -593,6 +637,7 @@ test("shell CLI help succeeds without Docker or output", async t => {
   await assertClean(f);
 });
 
+// 验证Shell 入口默认使用仓库的 12 位 Git 修订号。
 test("shell CLI defaults to the repository's 12-character Git revision", async t => {
   const f = await fixture(t);
   await rm(join(f.repo, ".git"), { recursive: true });
@@ -609,6 +654,7 @@ test("shell CLI defaults to the repository's 12-character Git revision", async t
   await assertClean(f, [`movie-harbor-offline-linux-arm64-${revision}.tar.gz`]);
 });
 
+// 验证发布版本通过严格的标签安全白名单校验。
 test("validates the release version against a strict tag-safe whitelist", () => {
   const longestTagSafeVersion = "v".repeat(116);
 
@@ -620,6 +666,7 @@ test("validates the release version against a strict tag-safe whitelist", () => 
   assert.throws(() => validateVersion(""), /invalid version/);
 });
 
+// 验证只接受两个受支持的目标平台。
 test("accepts only the two supported target platforms", () => {
   assert.equal(normalizePlatform(), "linux/arm64");
   assert.equal(normalizePlatform("linux/arm64"), "linux/arm64");
@@ -627,6 +674,7 @@ test("accepts only the two supported target platforms", () => {
   assert.throws(() => normalizePlatform("linux/386"), /linux\/arm64.*linux\/amd64/i);
 });
 
+// 验证使用三个准确的自研镜像标签。
 test("uses the three exact self-hosted image tags", () => {
   assert.deepEqual(imageTags(VERSION), [
     "movie-harbor-api:test-v1-linux-arm64",
@@ -635,6 +683,7 @@ test("uses the three exact self-hosted image tags", () => {
   ]);
 });
 
+// 验证请求 AMD64 时使用对应镜像标签和模板。
 test("uses AMD64 image tags and templates when requested", () => {
   assert.deepEqual(imageTags("test-v1", "linux/amd64"), [
     "movie-harbor-api:test-v1-linux-amd64",
@@ -647,6 +696,7 @@ test("uses AMD64 image tags and templates when requested", () => {
   assert.match(renderBundleReadme("test-v1", "linux/amd64"), /linux\/amd64/);
 });
 
+// 检查部署配置中的挂载结构，供生产及离线 Compose 契约测试使用。
 function assertDeploymentMounts(compose) {
   for (const name of ["public-web", "admin-web"]) {
     assert.equal(Object.hasOwn(compose.services[name], "volumes"), false, `${name} must not mount host files`);
@@ -668,6 +718,7 @@ function assertDeploymentMounts(compose) {
 }
 
 for (const service of ["public-web", "admin-web", "caddy"]) {
+  // 验证挂载检查针对各服务拒绝简写源挂载。
   test(`deployment mount assertions reject short source mounts on ${service}`, () => {
     const compose = JSON.parse(renderCompose(VERSION));
     compose.services[service].volumes ??= [];
@@ -676,6 +727,7 @@ for (const service of ["public-web", "admin-web", "caddy"]) {
   });
 }
 
+// 验证离线 Compose 渲染相同的本地配置默认值。
 test("renders the same local configuration fallbacks in the offline Compose", () => {
   const environment = JSON.parse(renderCompose(VERSION)).services.api.environment;
   assert.deepEqual(
@@ -694,6 +746,7 @@ test("renders the same local configuration fallbacks in the offline Compose", ()
   );
 });
 
+// 验证渲染只含镜像且与生产拓扑一致的 Compose 部署。
 test("renders an image-only Compose deployment with the production topology", () => {
   const compose = JSON.parse(renderCompose(VERSION));
 
@@ -832,6 +885,7 @@ test("renders an image-only Compose deployment with the production topology", ()
   });
 });
 
+// 验证加载脚本在导入前验证文件并检查全部镜像。
 test("renders a loader that verifies before importing and checks all images", () => {
   const script = renderLoadScript(VERSION);
   const checksum = script.indexOf("sha256sum -c SHA256SUMS");
@@ -846,6 +900,7 @@ test("renders a loader that verifies before importing and checks all images", ()
   assert.match(script, /docker image inspect/);
 });
 
+// 验证部署说明保留官方基础镜像在线获取的边界。
 test("renders deployment guidance that keeps official images online", () => {
   const readme = renderBundleReadme(VERSION);
 
@@ -858,6 +913,7 @@ test("renders deployment guidance that keeps official images online", () => {
   assert.match(readme, /test-v1/);
 });
 
+// 验证部署包说明解释 HTTPS 终止及匹配的来源和 Cookie 设置。
 test("bundle guidance explains HTTPS termination and matching origin and cookie settings", () => {
   const readme = renderBundleReadme(VERSION);
 
@@ -878,6 +934,7 @@ test("bundle guidance explains HTTPS termination and matching origin and cookie 
   assert.match(readme, /不得[^\n]*公网[^\n]*不可信网络/);
 });
 
+// 验证部署包说明解释初始管理员凭据和独立代理密钥。
 test("bundle guidance explains initial administrator credentials and independent proxy secrets", () => {
   const readme = renderBundleReadme(VERSION);
 

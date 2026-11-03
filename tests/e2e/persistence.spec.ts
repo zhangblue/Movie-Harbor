@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { AdminApi, adminName, baseURL, changedPassword, initialPassword, loadState } from "./helpers";
 
+// 验证数据库、媒体和修改后的密码在服务重启后保留且不被环境覆盖。
 test("database, media and changed password survive restart without environment overwrite", async ({ playwright, request }) => {
   const state = loadState<{ movieId: string; videoUrl: string }>();
   const oldContext = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Origin: baseURL } });

@@ -8,12 +8,15 @@ import { openProgressStore } from "../tools/content-import/progress.mjs";
 const targetOrigin = "https://media.example.test";
 const sourceIdentity = { exportedAt: "2026-09-24T00:00:00Z", sha256: "a".repeat(64) };
 
+// 为每个进度测试创建临时路径并在结束后清理。
 async function progressPath(t) {
   const directory = await mkdtemp(join(tmpdir(), "movie-harbor-progress-"));
+  // 测试结束时删除专属进度目录，避免干扰后续持久化检查。
   t.after(() => rm(directory, { recursive: true, force: true }));
   return join(directory, "progress.json");
 }
 
+// 验证创建的空进度绑定目标与来源身份。
 test("creates an empty store bound to the target and source", async (t) => {
   const path = await progressPath(t);
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -24,6 +27,7 @@ test("creates an empty store bound to the target and source", async (t) => {
   });
 });
 
+// 验证成功状态以私有文件权限持久化。
 test("persists successful state with private permissions", async (t) => {
   const path = await progressPath(t);
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -34,6 +38,7 @@ test("persists successful state with private permissions", async (t) => {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 });
 
+// 验证拒绝属于其他目标或来源的进度。
 test("rejects progress belonging to a different target or source", async (t) => {
   const path = await progressPath(t);
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -43,12 +48,14 @@ test("rejects progress belonging to a different target or source", async (t) => 
   await assert.rejects(openProgressStore({ path, targetOrigin, sourceIdentity: { ...sourceIdentity, exportedAt: "2026-09-23T00:00:00Z" } }), /source identity/);
 });
 
+// 验证拒绝不支持的进度格式版本。
 test("rejects unsupported progress format versions", async (t) => {
   const path = await progressPath(t);
   await writeFile(path, JSON.stringify({ formatVersion: 2 }));
   await assert.rejects(openProgressStore({ path, targetOrigin, sourceIdentity }), /format version/);
 });
 
+// 验证进度不会保存认证数据或完整 API 响应。
 test("does not persist authentication data or complete API responses", async (t) => {
   const path = await progressPath(t);
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -56,6 +63,7 @@ test("does not persist authentication data or complete API responses", async (t)
   await assert.rejects(store.save(), /unsupported progress field/);
 });
 
+// 验证读取和保存时拒绝嵌套凭据、完整响应及错误类型。
 test("rejects nested credentials, complete responses, and values with the wrong types on load and save", async (t) => {
   const path = await progressPath(t);
   const invalidMovies = [
@@ -98,6 +106,7 @@ test("rejects nested credentials, complete responses, and values with the wrong 
   await assert.rejects(store.save(), /progress|unsupported/);
 });
 
+// 验证成功保存后清理临时文件。
 test("cleans temporary files after a successful save", async (t) => {
   const path = await progressPath(t);
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -105,6 +114,7 @@ test("cleans temporary files after a successful save", async (t) => {
   assert.deepEqual(await readdir(join(path, "..")), ["progress.json"]);
 });
 
+// 验证重命名失败时保留正式文件并仅删除临时文件。
 test("rename failure preserves the formal file and removes only its temporary file", async (t) => {
   const path = await progressPath(t);
   const original = await openProgressStore({ path, targetOrigin, sourceIdentity });
@@ -122,6 +132,7 @@ test("rename failure preserves the formal file and removes only its temporary fi
   assert.deepEqual(await readdir(join(path, "..")), ["progress.json"]);
 });
 
+// 验证权限设置失败时保留正式文件并删除临时文件。
 test("chmod failure preserves the formal file and removes the temporary file", async (t) => {
   const path = await progressPath(t);
   const original = await openProgressStore({ path, targetOrigin, sourceIdentity });

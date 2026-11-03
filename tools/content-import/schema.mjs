@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolveMediaReference } from "./media-path.mjs";
 
+// 读取导出结构时要求对象值，并用字段上下文报告错误。
 function object(value, field) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${field} must be an object`);
@@ -9,11 +10,13 @@ function object(value, field) {
   return value;
 }
 
+// 读取必需自有字段，避免原型属性被当成导出数据。
 function field(source, name, context) {
   if (!Object.hasOwn(source, name)) throw new Error(`${context}.${name} is required`);
   return source[name];
 }
 
+// 读取并校验字符串字段，必要时拒绝空白值。
 function string(source, name, context, nonblank = false) {
   const value = field(source, name, context);
   if (typeof value !== "string" || (nonblank && value.trim() === "")) {
@@ -22,12 +25,14 @@ function string(source, name, context, nonblank = false) {
   return value;
 }
 
+// 读取可选布尔字段，兼容未包含该字段的旧导出。
 function optionalBoolean(source, name, context, fallback = false) {
   if (!Object.hasOwn(source, name)) return fallback;
   if (typeof source[name] !== "boolean") throw new Error(`${context}.${name} must be a boolean`);
   return source[name];
 }
 
+// 校验可空整数及范围，供年份和时长等字段解析使用。
 function nullableInteger(source, name, context, minimum = -2147483648) {
   const value = field(source, name, context);
   if (value !== null && (!Number.isInteger(value) || value < minimum || value > 2147483647)) {
@@ -36,6 +41,7 @@ function nullableInteger(source, name, context, minimum = -2147483648) {
   return value;
 }
 
+// 校验非空字符串数组，供题材列表解析使用。
 function stringArray(source, name, context) {
   const value = field(source, name, context);
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || item.trim() === "")) {
@@ -44,12 +50,14 @@ function stringArray(source, name, context) {
   return value;
 }
 
+// 读取必需数组字段，供内容和层级解析使用。
 function array(source, name, context) {
   const value = field(source, name, context);
   if (!Array.isArray(value)) throw new Error(`${context}.${name} must be an array`);
   return value;
 }
 
+// 校验导出时间及日历日期，供来源身份和续传使用。
 function timestamp(source) {
   const value = string(source, "exported_at", "export");
   const match = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
@@ -63,6 +71,7 @@ function timestamp(source) {
   return value;
 }
 
+// 解析媒体字段并验证本地引用，供电影、剧集和单集预检使用。
 async function media(source, name, kind, mediaRoot, context) {
   const path = field(source, name, context);
   if (path !== null && typeof path !== "string") {
@@ -71,6 +80,7 @@ async function media(source, name, kind, mediaRoot, context) {
   return resolveMediaReference(mediaRoot, path, kind);
 }
 
+// 验证电影导出字段和媒体，导入前形成规范化数据。
 async function parseMovies(source, mediaRoot) {
   const names = new Set();
   const result = [];
@@ -94,6 +104,7 @@ async function parseMovies(source, mediaRoot) {
   return result;
 }
 
+// 验证剧集、季和单集层级及媒体，导入前形成规范化数据。
 async function parseSeries(source, mediaRoot) {
   const names = new Set();
   const result = [];
@@ -136,6 +147,7 @@ async function parseSeries(source, mediaRoot) {
   return result;
 }
 
+// 读取并完整预检导出文件与媒体，计算来源身份后才允许导入。
 export async function loadAndValidateExport(jsonPath, mediaRoot) {
   const bytes = await readFile(jsonPath);
   const parsed = object(JSON.parse(bytes), "export");

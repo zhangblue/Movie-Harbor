@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { request as rawRequest } from "node:http";
 import { AdminApi, baseURL, createMovieDraftWithMedia, createPublishableMovie, createSeriesDraftWithMedia, video, type Movie, type Series } from "./helpers";
 
+// 验证媒体分段请求和公开播放器使用的媒体地址。
 test("media supports byte ranges and the public player uses the media URL", async ({ page, playwright, request }) => {
   expect((await request.get("/media/.incoming/e2e-private-sentinel")).status()).toBe(404);
   expect((await request.get("/media/.quarantine/e2e-private-sentinel")).status()).toBe(404);
@@ -21,10 +22,12 @@ test("media supports byte ranges and the public player uses the media URL", asyn
     element.muted = true;
     await element.play();
   });
+  // 播放推进是异步的，轮询时间而不是只检查播放器是否渲染。
   await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0);
   await api.dispose();
 });
 
+// 验证海报、电影与单集的分段授权随生命周期和退出登录变化。
 test("media authorization applies to posters, movie and episode ranges, lifecycle and logout", async ({ playwright, request }) => {
   const api = await AdminApi.login(playwright);
   const username = `media-viewer-${Date.now()}`;
@@ -101,6 +104,7 @@ test("media authorization applies to posters, movie and episode ranges, lifecycl
   } finally { await viewer.dispose(); await api.dispose(); }
 });
 
+// 验证 Caddy 拒绝不安全原始路径和外部授权探测请求。
 test("Caddy rejects unsafe original paths and external authorization probes", async ({ playwright, request }) => {
   const api = await AdminApi.login(playwright);
   try {
@@ -116,10 +120,14 @@ test("Caddy rejects unsafe original paths and external authorization probes", as
       "/media/video/aa/aa000000000000000000000000000000.mp4",
     ]) {
       // Use the raw request target so the HTTP client cannot normalize traversal before Caddy sees it.
+      // 等待原始路径请求结束，供验证代理不会接受伪造授权头。
       const status = await new Promise<number | undefined>((resolve, reject) => {
+        // 发送原始路径及伪造代理头，检查服务端是否拒绝绕过授权。
         const req = rawRequest(baseURL, { path, headers: { "X-Forwarded-Uri": url, "X-Movie-Harbor-Proxy-Token": "forged" } }, (response) => {
+          // 消费代理响应并在结束时返回状态码，供不安全路径断言使用。
           response.resume(); response.on("end", () => resolve(response.statusCode));
         });
+        // 网络请求失败即拒绝测试，并在发送后等待响应。
         req.on("error", reject); req.end();
       });
       expect(status, path).toBe(404);

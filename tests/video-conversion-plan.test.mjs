@@ -3,6 +3,7 @@ import test from "node:test";
 import { parseProbeOutput } from "../tools/video-conversion/probe.mjs";
 
 // Catch cover selection, lost later tracks, and discarded track metadata.
+// 验证探测保留全部音频及字幕轨道并选择首个真实视频轨。
 test("probe preserves every audio/subtitle track and selects the first real video", () => {
   const media = parseProbeOutput(JSON.stringify({
     format: { duration: "120.5", tags: { title: "示例" } },
@@ -43,6 +44,7 @@ for (const [name, input, message] of [
 
 // Catch fabricating a reliable duration or compatible codec when fields are absent.
 for (const duration of [undefined, "N/A", "Infinity", "0", "-1", ""]) {
+  // 验证探测时各无效时长均规范化为未知。
   test(`probe reports unknown duration for ${duration}`, () => {
     const media = parseProbeOutput(JSON.stringify({ format: { duration }, streams: [{ index: 8, codec_type: "video" }, { index: 9 }] }));
     assert.equal(media.durationSeconds, null);
@@ -54,6 +56,7 @@ for (const duration of [undefined, "N/A", "Infinity", "0", "-1", ""]) {
 }
 
 // Catch automatic stream selection, omitted tracks, and a global audio codec override.
+// 验证转换计划显式映射所有轨道并独立设置音频及字幕编码器。
 test("plan emits complete explicit maps and independent audio/subtitle encoders", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({
@@ -80,6 +83,7 @@ test("plan emits complete explicit maps and independent audio/subtitle encoders"
 });
 
 // Catch omitting MP4's mdta metadata mode while retaining the faststart requirement.
+// 验证转换计划同时启用自定义全局元数据和 faststart。
 test("plan enables custom global metadata tags alongside faststart", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({
@@ -91,6 +95,7 @@ test("plan enables custom global metadata tags alongside faststart", async () =>
 });
 
 // Catch omitting explicit zero disposition requests; the MP4 muxer may still infer defaults.
+// 验证转换计划对每条输出轨道显式设置零标志。
 test("plan requests zero dispositions explicitly for every output track", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const media = parseProbeOutput(JSON.stringify({ streams: [
@@ -106,6 +111,7 @@ test("plan requests zero dispositions explicitly for every output track", async 
 });
 
 // Catch missing enabled disposition arguments or forwarding attached_pic; MP4 may not represent every flag.
+// 验证转换计划显式保留已启用的输入轨道标志并排除封面标志。
 test("plan passes enabled input disposition flags explicitly and excludes cover flags", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({
@@ -126,6 +132,7 @@ for (const [codec, pixelFormat, mode, encoders] of [
   ["h264", "yuv444p", "transcode", ["libx264"]],
   ["hevc", "yuv420p", "transcode", ["libx264"]],
   [null, null, "transcode", ["libx264"]],
+// 逐组验证无音频及字幕时，视频编码和像素格式决定复制还是转码。
 ]) test(`plan ${mode} for ${codec}/${pixelFormat} with no audio or subtitle`, async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({ video: { index: 7, codec, pixelFormat }, audio: [], subtitles: [] });
@@ -139,6 +146,7 @@ for (const [codec, pixelFormat, mode, encoders] of [
 });
 
 // Catch rejecting unknown text codecs or requesting encoders for copied AAC.
+// 验证转换计划保留未知字幕并复制所有 AAC 音轨。
 test("plan keeps unknown subtitles and copies all AAC tracks", async () => {
   const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
   const plan = buildConversionPlan({ video: { index: 0, codec: "h264", pixelFormat: "yuv420p" }, audio: [{ index: 5, codec: "aac" }, { index: 9, codec: "aac" }], subtitles: [{ index: 20, codec: null }] });
@@ -150,6 +158,7 @@ test("plan keeps unknown subtitles and copies all AAC tracks", async () => {
 
 // Catch silently dropping or trying to mux any known bitmap subtitle.
 for (const codec of ["hdmv_pgs_subtitle", "dvd_subtitle", "dvb_subtitle", "xsub"]) {
+  // 验证转换前拒绝每种不支持的图像字幕编码。
   test(`plan rejects image subtitle ${codec} before conversion`, async () => {
     const { buildConversionPlan } = await import("../tools/video-conversion/plan.mjs");
     assert.throws(() => buildConversionPlan({ video: { index: 0, codec: "h264", pixelFormat: "yuv420p" }, audio: [], subtitles: [{ index: 42, codec }] }), (error) => /图像字幕/.test(error.message) && error.message.includes("42") && error.message.includes(codec));

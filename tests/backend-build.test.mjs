@@ -8,6 +8,7 @@ const prebuiltDockerfile = readFileSync(
   "utf8",
 );
 
+// 从 Dockerfile 提取指定构建阶段，供镜像构建契约检查。
 function stage(name) {
   const sections = dockerfile.split(/^FROM /m).slice(1);
   const section = sections.find((value) => new RegExp(` AS ${name}\\n`).test(value));
@@ -15,6 +16,7 @@ function stage(name) {
   return section;
 }
 
+// 验证AMD64 后端在本机构建平台使用固定工具交叉编译 musl。
 test("AMD64 backend cross-compiles musl on the native build platform with pinned tools", () => {
   const amd = stage("builder-amd64");
   assert.match(amd, /^--platform=\$BUILDPLATFORM rust:1\.91-bookworm AS builder-amd64/);
@@ -28,6 +30,7 @@ test("AMD64 backend cross-compiles musl on the native build platform with pinned
   assert.match(amd, /target\/x86_64-unknown-linux-musl\/release\/movie-harbor-api \/out\/movie-harbor-api/);
 });
 
+// 验证预构建后端镜像只在 Debian 运行时组装已验证二进制。
 test("prebuilt backend image only assembles the verified binary in the Debian runtime", () => {
   assert.match(prebuiltDockerfile, /^FROM debian:bookworm-slim AS runtime/m);
   assert.match(prebuiltDockerfile, /ca-certificates curl/);
@@ -41,6 +44,7 @@ test("prebuilt backend image only assembles the verified binary in the Debian ru
   assert.doesNotMatch(prebuiltDockerfile, /\brust\b|cargo|zig|backend\/src|COPY Cargo/iu);
 });
 
+// 验证运行时选择指定架构并保留 Debian 非 root 开发镜像。
 test("runtime selects the requested architecture and preserves the Debian non-root development image", () => {
   assert.match(dockerfile, /FROM builder-\$\{TARGETARCH\} AS builder/);
   const runtime = stage("runtime");

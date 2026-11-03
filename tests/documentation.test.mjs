@@ -12,6 +12,7 @@ const deploymentSkillPath = path.join(
   ".agents/skills/deploy-movie-harbor-ubuntu/SKILL.md",
 );
 
+// 提取文档中的本地 Markdown 链接，供链接完整性检查使用。
 function localMarkdownTargets(file) {
   const content = readFileSync(file, "utf8");
   return [...content.matchAll(/\[[^\]]+\]\(([^)]+)\)/g)]
@@ -20,6 +21,7 @@ function localMarkdownTargets(file) {
     .map((target) => path.resolve(path.dirname(file), decodeURI(target)));
 }
 
+// 验证MCP 指南说明全部注册工具，README 只链接至指南。
 test("MCP guide explains every registered tool and README only links to the guide", () => {
   const toolsDirectory = path.join(projectRoot, "mcp/src/tools");
   const registered = readdirSync(toolsDirectory)
@@ -36,6 +38,7 @@ test("MCP guide explains every registered tool and README only links to the guid
   for (const match of documented) assert.ok(match[2].trim().length > 0);
 });
 
+// 验证README 导航与指南链接均可解析。
 test("README guide navigation and guide links resolve", () => {
   const guides = [
     "deployment.md",
@@ -64,6 +67,7 @@ test("README guide navigation and guide links resolve", () => {
   }
 });
 
+// 验证项目部署技能的本地引用均可解析。
 test("project deployment skill has resolvable local references", () => {
   assert.ok(existsSync(deploymentSkillPath), "deployment skill is missing");
   const targets = localMarkdownTargets(deploymentSkillPath);
@@ -81,6 +85,7 @@ test("project deployment skill has resolvable local references", () => {
   }
 });
 
+// 验证AGENTS 将 Ubuntu 部署细节交给项目技能。
 test("AGENTS delegates Ubuntu deployment details to the project skill", () => {
   const agents = readFileSync(agentsPath, "utf8");
   assert.ok(
@@ -102,6 +107,7 @@ test("AGENTS delegates Ubuntu deployment details to the project skill", () => {
   );
 });
 
+// 验证AGENTS 按实际变更限定项目流程规则。
 test("AGENTS scopes project process rules to the actual change", () => {
   const agents = readFileSync(agentsPath, "utf8");
 
@@ -115,6 +121,7 @@ test("AGENTS scopes project process rules to the actual change", () => {
   assert.match(agents, /只执行已发布且已验证的部署包/);
 });
 
+// 验证AGENTS 区分完整灾难恢复和部署安全备份。
 test("AGENTS distinguishes disaster recovery from deployment safety backup", () => {
   const agents = readFileSync(agentsPath, "utf8");
   assert.match(agents, /完整灾难恢复[\s\S]*数据库和媒体作为同一一致性备份集/);
@@ -122,6 +129,7 @@ test("AGENTS distinguishes disaster recovery from deployment safety backup", () 
   assert.match(agents, /迁移前置条件要求媒体一致备份[\s\S]*取得媒体备份明确授权/);
 });
 
+// 验证部署技能区分标准授权与数据恢复审批。
 test("deployment skill separates standard authorization from data recovery approval", () => {
   const skill = readFileSync(deploymentSkillPath, "utf8");
   const runbookPath = path.join(
@@ -139,6 +147,7 @@ test("deployment skill separates standard authorization from data recovery appro
   assert.match(runbook, /数据库恢复[\s\S]*媒体备份[\s\S]*重新取得明确授权/);
 });
 
+// 验证离线指南说明本机 ARM64 工具链和仅 Linux 输出。
 test("offline guide documents the installed local ARM64 toolchain and Linux-only output", () => {
   const guide = readFileSync(
     path.join(projectRoot, "docs/guides/offline-package.md"),

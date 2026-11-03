@@ -6,6 +6,7 @@ import { probeMedia, verifyRequiredEncoders, executeConversion } from "./video-c
 
 const help = "用法：node tools/convert-video.mjs <本机 .mkv 或 .mp4 文件>\n      node tools/convert-video.mjs --help\n输出：同目录下 <文件名>.movie-harbor.mp4；已有目标不会覆盖。";
 
+// 验证命令参数和输入输出路径，依次探测、计划、检查编码器并执行转换。
 export async function run(argv, dependencies = {}) {
   const stdout = dependencies.stdout ?? process.stdout;
   const stderr = dependencies.stderr ?? process.stderr;
@@ -28,10 +29,12 @@ export async function run(argv, dependencies = {}) {
       await lstat(outputPath);
       throw new Error(`目标已存在：${outputPath}，请移动已有文件后重试`);
     } catch (error) { if (error.code !== "ENOENT") throw error; }
+    // 先探测轨道并检查所需编码器，全部成功后才启动转换和发布。
     const media = await (dependencies.probeMedia ?? probeMedia)(inputPath);
     const plan = (dependencies.buildConversionPlan ?? buildConversionPlan)(media);
     await (dependencies.verifyRequiredEncoders ?? verifyRequiredEncoders)(plan.requiredEncoders);
     await (dependencies.executeConversion ?? executeConversion)({ inputPath, outputPath, media, plan }, {
+      // 转换期间将进度输出给调用者；写入错误由执行流程处理。
       onProgress: (message) => stdout.write(`${message}\n`),
     });
     stdout.write(`完成：${outputPath}\n`); return 0;

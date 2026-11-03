@@ -16,6 +16,7 @@ const DELIVERY_FILES = [
 ];
 const USAGE = "Usage: ./tools/build-offline-package.sh [--platform linux/arm64|linux/amd64] [version]\nDefault version: Git short revision (12 characters). Output: dist/offline/";
 
+// 解析离线包命令参数，供构建前验证目标平台和版本。
 function parseArguments(args) {
   if (args.length === 1 && args[0] === "--help") return { help: true };
   let platform = DEFAULT_PLATFORM;
@@ -33,6 +34,7 @@ function parseArguments(args) {
   return { platform, version: remaining[0] };
 }
 
+// 向构建子进程组发送信号，供取消时同时终止后代进程。
 function signalProcessGroup(pid, signal) {
   try {
     process.kill(-pid, signal);
@@ -43,16 +45,19 @@ function signalProcessGroup(pid, signal) {
   }
 }
 
+// 等待进程组退出，供取消构建时确定后续清理时机。
 async function waitForProcessGroupExit(pid, timeoutMs) {
   const deadline = performance.now() + timeoutMs;
   while (signalProcessGroup(pid, 0)) {
     const remaining = deadline - performance.now();
     if (remaining <= 0) return false;
+    // 轮询进程组退出时短暂让出事件循环，并遵守剩余等待期限。
     await new Promise(resolve => setTimeout(resolve, Math.min(25, remaining)));
   }
   return true;
 }
 
+// 终止并等待进程组，避免构建失败后留下后台进程。
 async function finishProcessGroup(pid) {
   if (await waitForProcessGroupExit(pid, 1000)) return;
   signalProcessGroup(pid, "SIGKILL");
@@ -61,9 +66,12 @@ async function finishProcessGroup(pid) {
   }
 }
 
+// 启动构建外部命令并处理输出、取消和进程组生命周期。
 function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGroup = false, env = {} } = {}) {
   signal?.throwIfAborted();
+  // 等待外部命令完成及进程组清理，供打包步骤依序执行。
   return new Promise((resolveResult, reject) => {
+    // 直接启动构建命令并按需隔离进程组，取消时可终止其后代。
     const child = spawn(command, args, {
       cwd, env: { ...process.env, ...env, COPYFILE_DISABLE: "1" },
       stdio: ["ignore", capture ? "pipe" : "inherit", "inherit"],
@@ -72,16 +80,19 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
     let output = "";
     let failure;
     let groupTermination;
+    // 取消后复用同一个进程组退出等待任务，避免重复清理。
     const waitForGroup = () => {
       groupTermination ??= finishProcessGroup(child.pid);
       return groupTermination;
     };
+    // 中断构建子进程及其后代，供取消信号触发。
     const abort = () => {
       if (!processGroup || !child.pid) return child.kill("SIGTERM");
       // Host compilers spawn linkers and other descendants in this POSIX process group.
       try {
         signalProcessGroup(child.pid, "SIGTERM");
         // Start the deadline now even if the wrapper itself ignores SIGTERM.
+        // 等待后代进程失败时记录错误并强制终止包装进程。
         waitForGroup().catch(error => {
           failure = error;
           child.kill("SIGKILL");
@@ -92,8 +103,10 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
       }
     };
     signal?.addEventListener("abort", abort, { once: true });
+    // 记录启动错误，随后由关闭回调统一返回。
     child.on("error", error => { failure = error; });
     child.stdout?.setEncoding("utf8");
+    // 捕获受限大小的工具输出；超限时终止命令。
     child.stdout?.on("data", chunk => {
       if (failure) return;
       output += chunk;
@@ -102,7 +115,9 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
         child.kill("SIGTERM");
       }
     });
+    // 命令关闭后再检查进程组和取消状态，避免残留后代。
     child.on("close", (code, childSignal) => {
+      // 子进程结束后汇总输出与清理结果，再结算构建命令。
       const finish = () => {
         signal?.removeEventListener("abort", abort);
         if (signal?.aborted) reject(signal.reason);
@@ -112,11 +127,13 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
       };
       if (!processGroup || !child.pid) return finish();
       // A compiler wrapper may exit before descendants finish handling SIGTERM.
+      // 等待编译器后代退出后再结算，清理失败则拒绝本次构建。
       waitForGroup().then(() => {
         if (failure) {
           signal?.removeEventListener("abort", abort);
           reject(failure);
         } else finish();
+      // 进程组收尾失败时移除取消监听并拒绝，避免误报构建成功。
       }, error => {
         signal?.removeEventListener("abort", abort);
         reject(error);
@@ -125,6 +142,7 @@ function run(command, args, { cwd = REPO_ROOT, signal, capture = true, processGr
   });
 }
 
+// 校验工具版本输出，供构建依赖预检使用。
 function requireVersion(output, tool) {
   const version = output.trim();
   if (!version) throw new Error(`${tool} returned empty version output`);
@@ -132,6 +150,7 @@ function requireVersion(output, tool) {
   return version;
 }
 
+// 从 PATH 查找可执行命令，供构建环境预检使用。
 function resolvePathCommand(command) {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
     const candidate = resolve(directory || ".", command);
@@ -147,6 +166,7 @@ function resolvePathCommand(command) {
   throw new Error(`${command} is missing from PATH`);
 }
 
+// 校验 ARM64 API 可执行文件元数据，避免打包错误架构。
 function validateArm64BinaryMetadata(output) {
   if (!/ELF 64-bit/i.test(output)) throw new Error(`Expected a Linux ELF binary, found: ${output}`);
   if (!/(ARM aarch64|AArch64|aarch64)/i.test(output)) {
@@ -157,6 +177,7 @@ function validateArm64BinaryMetadata(output) {
   }
 }
 
+// 为 ARM64 镜像准备并检查 API 构建上下文，失败时清理临时资源。
 async function prepareArm64ApiContext(signal) {
   requireVersion(
     await run("rustc", ["--version"], { signal }),
@@ -219,12 +240,14 @@ async function prepareArm64ApiContext(signal) {
   }
 }
 
+// 核对打包目录条目与预期完全一致，防止遗漏或意外包含文件。
 function requireExactEntries(actual, expected, description) {
   if (JSON.stringify([...actual].sort()) !== JSON.stringify([...expected].sort())) {
     throw new Error(`${description} does not match the allowlist`);
   }
 }
 
+// 归档前检查暂存内容和文件类型，避免发布不完整或多余文件。
 async function validateStaging(directory, files) {
   requireExactEntries(await readdir(directory), files, "staging");
   for (const file of files) {
@@ -234,12 +257,14 @@ async function validateStaging(directory, files) {
   }
 }
 
+// 计算归档摘要，供生成与校验发布文件使用。
 async function sha256(file, signal) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file, { signal })) hash.update(chunk);
   return hash.digest("hex");
 }
 
+// 协调依赖预检、镜像构建、暂存、归档和校验文件生成。
 async function main(args) {
   const parsed = parseArguments(args);
   if (parsed.help) {
@@ -249,8 +274,11 @@ async function main(args) {
 
   const controller = new AbortController();
   const { signal } = controller;
+  // 将系统信号转换为取消原因，供打包阶段停止。
   const interrupt = received => controller.abort(new Error(`Interrupted by ${received}`));
+  // 收到 SIGINT 时取消当前打包。
   const onInt = () => interrupt("SIGINT");
+  // 收到 SIGTERM 时取消当前打包。
   const onTerm = () => interrupt("SIGTERM");
   process.on("SIGINT", onInt);
   process.on("SIGTERM", onTerm);
@@ -335,6 +363,7 @@ async function main(args) {
   } finally {
     const cleanup = await Promise.allSettled([
       staging, archiveDirectory, arm64Build?.targetDirectory, arm64Build?.contextDirectory,
+    // 构建结束时并行清除本次临时目录；任一清理失败会继续报告。
     ].filter(Boolean).map(directory => rm(directory, { recursive: true, force: true })));
     process.removeListener("SIGINT", onInt);
     process.removeListener("SIGTERM", onTerm);
@@ -343,12 +372,14 @@ async function main(args) {
 }
 
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  // CLI 顶层报告构建失败并设置退出码，供调用脚本识别。
   main(process.argv.slice(2)).catch(error => {
     console.error(error.message);
     process.exitCode = 1;
   });
 }
 
+// 验证版本标签可安全用于镜像和文件名，供参数解析及渲染使用。
 export function validateVersion(value) {
   if (typeof value !== "string" || !VERSION_PATTERN.test(value)) {
     throw new Error("invalid version: use only letters, numbers, dots, underscores, and hyphens");
@@ -356,6 +387,7 @@ export function validateVersion(value) {
   return value;
 }
 
+// 规范化并校验目标平台，供镜像标签及打包配置使用。
 export function normalizePlatform(value = DEFAULT_PLATFORM) {
   if (!SUPPORTED_PLATFORMS.has(value)) {
     throw new Error("supported platforms are linux/arm64 and linux/amd64");
@@ -363,10 +395,12 @@ export function normalizePlatform(value = DEFAULT_PLATFORM) {
   return value;
 }
 
+// 生成平台对应的文件名后缀，供区分单架构归档使用。
 function platformSuffix(platform) {
   return normalizePlatform(platform).replace("/", "-");
 }
 
+// 为指定版本和平台生成自研镜像标签，供构建及加载脚本使用。
 export function imageTags(version, platform = DEFAULT_PLATFORM) {
   const safeVersion = validateVersion(version);
   const suffix = platformSuffix(platform);
@@ -374,6 +408,7 @@ export function imageTags(version, platform = DEFAULT_PLATFORM) {
     .map(name => `movie-harbor-${name}:${safeVersion}-${suffix}`);
 }
 
+// 生成 Compose bind mount 配置，供渲染发布包部署文件使用。
 function bind(source, target, options = {}) {
   return {
     type: "bind",
@@ -384,6 +419,7 @@ function bind(source, target, options = {}) {
   };
 }
 
+// 生成 Compose 健康检查配置，供部署时等待依赖就绪。
 function healthcheck(test, retries, startPeriod) {
   return {
     test,
@@ -394,6 +430,7 @@ function healthcheck(test, retries, startPeriod) {
   };
 }
 
+// 渲染指定版本和平台的部署配置，供离线包生成使用。
 export function renderCompose(version, platform = DEFAULT_PLATFORM) {
   const [apiImage, publicWebImage, adminWebImage] = imageTags(version, platform);
   const mediaSource = "${MEDIA_HOST_DIR:-./data/media}";
@@ -497,6 +534,7 @@ export function renderCompose(version, platform = DEFAULT_PLATFORM) {
   }, null, 2)}\n`;
 }
 
+// 渲染目标机镜像加载脚本，供离线包部署时使用。
 export function renderLoadScript(version, platform = DEFAULT_PLATFORM) {
   const tags = imageTags(version, platform);
   const quotedTags = tags.map((tag) => `  '${tag}'`).join(" \\\n");
@@ -520,6 +558,7 @@ done
 `;
 }
 
+// 渲染发布包部署说明，供目标机安装和升级时参考。
 export function renderBundleReadme(version, platform = DEFAULT_PLATFORM) {
   const tags = imageTags(version, platform);
   return [

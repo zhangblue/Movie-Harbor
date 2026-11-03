@@ -9,25 +9,36 @@ import { openProgressStore } from "../tools/content-import/progress.mjs";
 
 const identity = { exportedAt: "2026-09-24T00:00:00Z", sha256: "a".repeat(64) };
 const timestamp = "2026-09-24T00:00:00Z";
+// 构造带来源身份的导入数据，供各内容导入场景使用。
 const source = (movies = [], series = []) => ({ identity, movies, series });
+// 构造电影来源数据，供创建、失败和续传场景使用。
 const movie = (name, overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, durationSeconds: 100, genres: [], poster: null, video: null, isPrivate: false, ...overrides });
+// 构造剧集来源数据，供层级导入场景使用。
 const series = (name, episodes = [], overrides = {}) => ({ name, synopsis: `${name} synopsis`, year: 2024, genres: [], poster: null, episodes, isPrivate: false, ...overrides });
+// 构造指定季和集序号的来源单集，供剧集导入使用。
 const episode = (seasonNumber, episodeNumber, overrides = {}) => ({ seasonNumber, episodeNumber, name: `Episode ${episodeNumber}`, durationSeconds: 45, video: null, ...overrides });
+// 构造指定启用状态的题材，供同步和冲突场景使用。
 const genre = (name, id, enabled = true) => ({ id, name, sort_order: 10, enabled });
+// 构造目标管理列表项，供同名冲突检查使用。
 const listItem = (name, kind, id = `${kind}-${name}`) => ({ id, kind, name, status: "draft", version: 1, created_at: timestamp, poster_url: null });
+// 构造模拟媒体响应，供上传步骤和版本检查使用。
 const media = (id, slot) => ({ id: `${id}-${slot}`, url: `/media/${id}-${slot}`, local_path: `/media/${id}-${slot}`,
   original_name: `${slot}.${slot === "poster" ? "png" : "mp4"}`, mime_type: slot === "poster" ? "image/png" : "video/mp4", byte_size: 8 });
+// 构造带版本的模拟电影响应，供导入与续传测试使用。
 function movieResponse(name, id, version = 1, fields = {}) {
   return { id, name, synopsis: "", year: null, duration_seconds: null, is_private: false, status: "draft", version,
     published_at: null, archived_at: null, created_at: timestamp, updated_at: timestamp,
     genres: [], poster: null, video: null, ...fields };
 }
+// 构造带版本的模拟剧集响应，供层级导入测试使用。
 function seriesResponse(name, id, version = 1, fields = {}) {
   return { id, name, synopsis: "", year: null, is_private: false, status: "draft", version,
     published_at: null, archived_at: null, created_at: timestamp, updated_at: timestamp,
     genres: [], poster: null, seasons: [], ...fields };
 }
+// 深拷贝请求数据，供比较后续变更前的状态。
 function snapshot(value) { return structuredClone(value); }
+// 模拟管理 API 和故障，记录内容写入供导入断言使用。
 function fakeClient({ genres = [], existingMovies = [], existingSeries = [], failure } = {}) {
   const calls = [];
   const records = new Map();
@@ -36,6 +47,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
   const client = {
     calls,
     records,
+    // 模拟 JSON 管理请求和版本变化，供检查每一步导入及冲突。
     async json(method, path, body) {
       calls.push({ method, path, body });
       const injected = failure?.({ method, path, body, calls, records, genres: genreRecords });
@@ -68,6 +80,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
         const current = records.get(movieMatch[1]);
         assert.equal(body.version, current.version);
         const updated = { ...current, name: body.name, synopsis: body.synopsis, year: body.year,
+          // 根据题材 ID 生成模拟响应，供校验导入时题材映射。
           duration_seconds: body.duration_seconds, genres: body.genre_ids.map((id) => {
             const match = genreRecords.find((entry) => entry.id === id);
             return { id, name: match.name, enabled: match.enabled };
@@ -130,6 +143,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
       }
       throw new Error(`unexpected ${method} ${path}`);
     },
+    // 模拟媒体上传与注入故障，供续传和错误处理测试使用。
     async upload(path, file) {
       calls.push({ method: "UPLOAD", path, file });
       const injected = failure?.({ method: "UPLOAD", path, file, calls, records, genres: genreRecords });
@@ -168,16 +182,20 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
   return client;
 }
 
+// 为导入测试创建隔离进度文件和清理钩子。
 async function setup(t) {
   const directory = await mkdtemp(join(tmpdir(), "mh-importer-"));
+  // 测试结束时删除专属进度目录，避免续传状态泄漏到其他用例。
   t.after(() => rm(directory, { recursive: true, force: true }));
   const path = join(directory, "progress.json");
   const progress = await openProgressStore({ path, targetOrigin: "https://target.example.test", sourceIdentity: identity });
   const messages = [];
+  // 收集各级日志，供检查阶段提示与敏感信息脱敏。
   const logger = { info: (message) => messages.push(["info", message]), warn: (message) => messages.push(["warn", message]), error: (message) => messages.push(["error", message]) };
   return { path, progress, messages, logger };
 }
 
+// 验证复用启用题材、创建缺失题材且仅跳过同类型冲突。
 test("reuses enabled genres, creates missing genres, and skips only same-kind conflicts", async (t) => {
   const { path, progress, logger, messages } = await setup(t);
   const client = fakeClient({ genres: [genre("剧情", "genre-drama")], existingMovies: [listItem("Existing", "movie")], existingSeries: [listItem("New", "series")] });
@@ -193,9 +211,11 @@ test("reuses enabled genres, creates missing genres, and skips only same-kind co
   assert.equal(result.failed.length, 0);
 });
 
+// 验证题材创建冲突后重新读取并仅接受启用的精确名称。
 test("re-reads a genre after create conflict and accepts only an enabled exact name", async (t) => {
   const { progress, logger } = await setup(t);
   let conflict = true;
+  // 首次创建题材时模拟并发冲突并插入同名题材，供重读断言。
   const client = fakeClient({ failure({ method, path, body, genres }) {
     if (conflict && method === "POST" && path === "/api/admin/genres") {
       conflict = false;
@@ -209,6 +229,7 @@ test("re-reads a genre after create conflict and accepts only an enabled exact n
   assert.deepEqual(client.calls.find((call) => call.method === "PATCH").body.genre_ids, ["raced-id"]);
 });
 
+// 验证精确匹配的题材已禁用时在内容写入前停止。
 test("disabled exact genre stops before content writes", async (t) => {
   const { progress, logger } = await setup(t);
   const client = fakeClient({ genres: [genre("剧情", "disabled", false)] });
@@ -216,6 +237,7 @@ test("disabled exact genre stops before content writes", async (t) => {
   assert.deepEqual(client.calls.map((call) => call.path), ["/api/admin/genres"]);
 });
 
+// 验证冲突索引读取全部页面并跳过后续页中的外部匹配。
 test("conflict index reads every page and skips an external match on a later page", async (t) => {
   const { progress, logger } = await setup(t);
   const client = fakeClient({ existingMovies: [...Array.from({ length: 20 }, (_, index) => listItem(`Other ${index}`, "movie")), listItem("Later", "movie")] });
@@ -225,6 +247,7 @@ test("conflict index reads every page and skips an external match on a later pag
   assert.equal(client.calls.filter((call) => call.path === "/api/admin/movies").length, 0);
 });
 
+// 验证电影创建、元数据、海报和视频保存各自返回的版本，重跑不重复。
 test("movie create, metadata, poster and video save each returned version; rerun does not duplicate", async (t) => {
   const { path, progress, logger } = await setup(t);
   const poster = { localPath: "/safe/poster.png", fileName: "poster.png", byteSize: 8 };
@@ -245,9 +268,11 @@ test("movie create, metadata, poster and video save each returned version; rerun
   assert.equal(client.calls.filter((call) => call.method === "UPLOAD").length, 2);
 });
 
+// 验证电影视频失败后续传不重复创建、元数据或海报。
 test("a failed movie video resumes without repeating create, metadata or poster", async (t) => {
   const { path, progress, logger } = await setup(t);
   let fail = true;
+  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
   const client = fakeClient({ failure({ method, path }) {
     if (fail && method === "UPLOAD" && path.includes("/video?")) {
       fail = false;
@@ -265,8 +290,10 @@ test("a failed movie video resumes without repeating create, metadata or poster"
   assert.equal(client.calls.filter((call) => call.method === "GET" && call.path === "/api/admin/movies/new-movie-1").length, 1);
 });
 
+// 验证普通电影失败后继续下一项且不保存失败步骤。
 test("ordinary movie failure continues to the next item and leaves failed step unsaved", async (t) => {
   const { path, progress, logger, messages } = await setup(t);
+  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "PATCH" && path === "/api/admin/movies/new-movie-1") return new ImportRequestError("invalid metadata", { status: 422 });
   } });
@@ -277,8 +304,10 @@ test("ordinary movie failure continues to the next item and leaves failed step u
   assert.ok(messages.some(([, message]) => message.includes("FAILED") && message.includes("Bad")));
 });
 
+// 验证续传目标缺失或变化时仅受影响电影失败。
 test("missing or changed resume targets fail only the affected movie", async (t) => {
   for (const scenario of ["missing", "changed"]) {
+    // 对每种续传异常建立独立夹具，避免状态相互影响。
     await t.test(scenario, async (nested) => {
       const { progress, logger } = await setup(nested);
       progress.state.movies.Stale = { id: "old-id", version: 2, metadataUpdated: true };
@@ -294,6 +323,7 @@ test("missing or changed resume targets fail only the affected movie", async (t)
   }
 });
 
+// 验证完成的检查点仍会报告目标已删除并继续其他内容。
 test("a completed checkpoint still reports a deleted target and continues", async (t) => {
   const { progress, logger } = await setup(t);
   progress.state.movies.Gone = { id: "gone-id", version: 4, metadataUpdated: true, completed: true };
@@ -305,6 +335,7 @@ test("a completed checkpoint still reports a deleted target and continues", asyn
   assert.equal(client.calls.filter((call) => call.method === "GET" && call.path === "/api/admin/movies/gone-id").length, 1);
 });
 
+// 验证创建时保留私密状态，续传时拒绝已变化的访问范围。
 test("preserves private state on create and rejects privacy changes during resume", async (t) => {
   const { progress, logger } = await setup(t);
   const input = source([movie("Private film", { isPrivate: true })], [series("Private show", [], { isPrivate: true })]);
@@ -326,8 +357,10 @@ test("preserves private state on create and rejects privacy changes during resum
   assert.equal(client.calls.filter((call) => ["POST", "PATCH", "UPLOAD"].includes(call.method)).length, priorWrites);
 });
 
+// 验证认证失败立即停止且不保存未完成题材。
 test("auth failure stops immediately and does not persist an incomplete genre", async (t) => {
   const { path, progress, logger } = await setup(t);
+  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "POST" && path === "/api/admin/genres") return new ImportRequestError("unauthorized", { fatal: true, category: "auth", status: 401 });
   } });
@@ -337,6 +370,7 @@ test("auth failure stops immediately and does not persist an incomplete genre", 
   await assert.rejects(readFile(path, "utf8"), { code: "ENOENT" });
 });
 
+// 验证特殊名称 __proto__ 作为进度自有属性保存并在重跑时复用。
 test("a __proto__ genre is stored as an own progress entry and reused on rerun", async (t) => {
   const { path, progress, logger } = await setup(t);
   const client = fakeClient();
@@ -356,9 +390,11 @@ test("a __proto__ genre is stored as an own progress entry and reused on rerun",
   assert.equal(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/movies").length, 1);
 });
 
+// 验证特殊电影名称 constructor 和 toString 使用自有检查点并可无重复续传。
 test("constructor and toString movie names create own checkpoints and resume without duplicates", async (t) => {
   const { path, progress, logger } = await setup(t);
   let failVideo = true;
+  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
   const client = fakeClient({ failure({ method, path }) {
     if (failVideo && method === "UPLOAD" && path.includes("/video?")) {
       failVideo = false;
@@ -391,6 +427,7 @@ test("constructor and toString movie names create own checkpoints and resume wit
   ]);
 });
 
+// 验证剧集按顺序导入季和单集并使用返回的父子版本。
 test("series imports sorted seasons and episodes with returned parent and child versions", async (t) => {
   const { path, progress, logger } = await setup(t);
   const video = { localPath: "/safe/episode.mp4", fileName: "episode.mp4", byteSize: 12 };
@@ -424,6 +461,7 @@ test("series imports sorted seasons and episodes with returned parent and child 
   assert.equal(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/series").length, 1);
 });
 
+// 验证剧集从各中断层级步骤续传时不重复已保存写入。
 test("series resumes each interrupted hierarchy step without repeating saved writes", async (t) => {
   const video = { localPath: "/safe/episode.mp4", fileName: "episode.mp4", byteSize: 12 };
   const steps = [
@@ -433,9 +471,11 @@ test("series resumes each interrupted hierarchy step without repeating saved wri
     ["video", ({ method, path }) => method === "UPLOAD" && path.includes("/episodes/")],
   ];
   for (const [label, matches] of steps) {
+    // 分别重现各层级中断位置，验证保存步骤不会重复。
     await t.test(label, async (nested) => {
       const { path, progress, logger } = await setup(nested);
       let interrupted = false;
+      // 在指定层级步骤仅注入一次网络中断，供逐步骤续传验证。
       const client = fakeClient({ failure(call) {
         if (!interrupted && matches(call)) {
           interrupted = true;
@@ -457,8 +497,10 @@ test("series resumes each interrupted hierarchy step without repeating saved wri
   }
 });
 
+// 验证剧集续传在写入前拒绝缺失、变化或非草稿的层级。
 test("series resume rejects missing, changed and non-draft hierarchy before writing", async (t) => {
   for (const scenario of ["missing", "parent-version", "parent-status", "season-id", "episode-id", "episode-version", "episode-status"]) {
+    // 对每种续传异常建立独立夹具，避免状态相互影响。
     await t.test(scenario, async (nested) => {
       const { progress, logger } = await setup(nested);
       const input = source([], [series("Stale", [episode(1, 1)]), series("Next")]);
@@ -482,10 +524,12 @@ test("series resume rejects missing, changed and non-draft hierarchy before writ
   }
 });
 
+// 验证剧集从单集视频检查点续传时不重复上传。
 test("series resumes after an episode video checkpoint without reuploading it", async (t) => {
   const { path, progress, logger } = await setup(t);
   const originalSave = progress.save;
   let stopped = false;
+  // 包装进度保存以在指定检查点注入中断，供续传测试使用。
   progress.save = async () => {
     const item = progress.state.series.Show?.seasons?.[1]?.episodes?.[1];
     if (!stopped && item?.videoUploaded && item.completed) {
@@ -505,9 +549,11 @@ test("series resumes after an episode video checkpoint without reuploading it", 
 });
 
 for (const [checkpoint, version] of [["season", 3], ["episode", 4], ["duration", 5]]) {
+  // 验证各持久检查点重新打开后不会重复已保存的写入。
   test(`series reopens disk after saved ${checkpoint} checkpoint without repeating writes`, async (t) => {
     const { path, progress, logger } = await setup(t);
     const originalSave = progress.save;
+    // 包装进度保存以在指定检查点注入中断，供续传测试使用。
     progress.save = async () => {
       await originalSave();
       if (progress.state.series.Show?.version === version) throw new Error(`stopped after ${checkpoint} saved`);
@@ -535,12 +581,14 @@ for (const [checkpoint, version] of [["season", 3], ["episode", 4], ["duration",
   });
 }
 
+// 验证导入及上传开始前记录阶段且不输出路径或认证数据。
 test("logs import and upload stages before their work without paths or authentication data", async (t) => {
   const { progress, messages, logger } = await setup(t);
   const client = fakeClient();
   const poster = { localPath: "/private/source/poster.png", fileName: "private-poster.png", byteSize: 8 };
   const video = { localPath: "/private/source/film.mp4", fileName: "private-film.mp4", byteSize: 12 };
   const originalUpload = client.upload;
+  // 包装上传以记录调用或注入错误，供检查日志和恢复顺序。
   client.upload = async (path, file) => {
     assert.match(messages.at(-1)?.[1] ?? "", /^UPLOAD /, "stage must be visible while upload is pending");
     return originalUpload(path, file);
@@ -559,6 +607,7 @@ test("logs import and upload stages before their work without paths or authentic
   assert.doesNotMatch(messages.flat().join("\n"), /\/private|private-poster|private-film|cookie|csrf|password/i);
 });
 
+// 验证剧集精确名称冲突只跳过剧集，类似原型属性的名称可安全续传。
 test("series exact-name conflict skips only series and prototype-like name resumes safely", async (t) => {
   const { path, progress, logger } = await setup(t);
   const client = fakeClient({ existingSeries: [listItem("Existing", "series")], existingMovies: [listItem("constructor", "movie")] });
@@ -571,8 +620,10 @@ test("series exact-name conflict skips only series and prototype-like name resum
   assert.equal(client.calls.filter((call) => call.method === "POST" && call.path === "/api/admin/series").length, 1);
 });
 
+// 验证单集业务失败保留检查点并继续下一条内容。
 test("series episode business failure leaves its checkpoint and continues to next content", async (t) => {
   const { path, progress, logger } = await setup(t);
+  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "PATCH" && path.includes("/episodes/")) return new ImportRequestError("invalid duration", { status: 422 });
   } });

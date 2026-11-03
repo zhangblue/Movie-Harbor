@@ -11,8 +11,10 @@ const fixture = { format: { duration: "10" }, streams: [
   { index: 0, codec_type: "video", codec_name: "h264", pix_fmt: "yuv420p", disposition: {} },
 ] };
 
+// 创建隔离的视频、模拟工具和清理钩子，供转换 CLI 测试使用。
 async function sandbox(t, name = "电影.mkv") {
   const directory = await mkdtemp(join(tmpdir(), "movie-conversion-"));
+  // 测试结束后删除专属视频及模拟程序，失败时也释放临时目录。
   t.after(() => rm(directory, { recursive: true, force: true }));
   const bin = join(directory, "bin");
   await mkdir(bin);
@@ -46,10 +48,12 @@ else {
  process.stdout.write(process.env.PROGRESS || 'out_time_ms=5000000\\nprogress=continue\\n');
  if (process.env.RACE_OUTPUT) fs.writeFileSync(process.env.RACE_OUTPUT, 'competitor');
  if (process.env.MODE === 'wait') {
+   // 模拟 FFmpeg 接收中断后记录信号并退出，供检查转发和清理。
    for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
      fs.writeFileSync(process.env.SIGNAL_LOG, signal); process.exit(130);
    });
    fs.writeFileSync(process.env.READY_LOG, String(process.pid));
+   // 让模拟 FFmpeg 保持运行，直到测试发出中断。
    setInterval(() => {}, 1000);
  } else if (process.env.MODE === 'fail') {
    process.stderr.write(process.env.DIAGNOSTIC || '转换诊断尾部'); process.exitCode = 9;
@@ -59,22 +63,31 @@ else {
   return { directory, input, env, output: join(directory, name.slice(0, -4) + ".movie-harbor.mp4") };
 }
 
+// 启动转换 CLI 子进程，供信号传递和输出断言使用。
 function launch(args, env, nodeArguments = []) {
+  // 启动真实转换 CLI 子进程，供信号、退出码和输出测试使用。
   const child = spawn(process.execPath, [...nodeArguments, entry, ...args], { env, stdio: ["ignore", "pipe", "pipe"] });
   let stdout = "", stderr = "";
+  // 收集子进程标准输出，供进度与成功消息断言。
   child.stdout.on("data", (chunk) => { stdout += chunk; });
+  // 收集子进程标准错误，供失败诊断与信号断言。
   child.stderr.on("data", (chunk) => { stderr += chunk; });
+  // 等待进程错误或关闭后返回退出状态和收集的输出。
   const finished = new Promise((resolveResult, reject) => {
     child.on("error", reject);
+    // 进程关闭后返回退出码、信号和输出，保证断言读取完整结果。
     child.on("close", (code, signal) => resolveResult({ code, signal, stdout, stderr }));
   });
   return { child, finished };
 }
+// 断言指定路径不存在，供失败后清理检查使用。
 const absent = async (path) => assert.rejects(access(path), { code: "ENOENT" });
+// 断言目录中没有转换临时 MP4，供失败和中断场景使用。
 const noTemporary = async (directory) => assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".tmp.mp4")), []);
 
 // Breakage caught: removing listeners on child close leaves the publication/cleanup window unprotected.
 for (const signal of ["SIGINT", "SIGTERM"]) {
+  // 验证FFmpeg 关闭后收到中断信号时不发布并清理临时文件。
   test(`${signal} after FFmpeg close prevents publication and cleans the temporary file`, { timeout: 10_000 }, async (t) => {
     const s = await sandbox(t);
     const gate = join(s.directory, "publication-ready");
@@ -87,6 +100,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { setTimeout as delay } from 'node:timers/promises';
 const original = fs.promises.lstat;
 const originalEmit = process.emit;
+// 测试预加载脚本观察信号分发并写入握手文件，不新增信号监听器。
 process.emit = function(event, ...args) {
   const result = originalEmit.call(this, event, ...args);
   if (event === 'SIGINT' || event === 'SIGTERM') {
@@ -94,6 +108,7 @@ process.emit = function(event, ...args) {
   }
   return result;
 };
+// 测试预加载脚本在临时文件校验处等待握手，重现关闭后发布前的信号窗口。
 fs.promises.lstat = async (...args) => {
   if (String(args[0]).endsWith('.tmp.mp4')) {
     fs.writeFileSync(${JSON.stringify(gate)}, 'ready');
@@ -110,7 +125,9 @@ fs.promises.lstat = async (...args) => {
 syncBuiltinESMExports();
 `);
     const { child, finished } = launch([s.input], s.env, ["--import", preload]);
+    // 设置超时兜底以终止卡住的进程，防止测试永久阻塞。
     const emergency = setTimeout(() => child.kill("SIGKILL"), 8000);
+    // 测试结束时取消兜底定时器、终止进程并等待退出。
     t.after(async () => { clearTimeout(emergency); child.kill("SIGKILL"); await finished; });
     let ready = false;
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -141,6 +158,7 @@ syncBuiltinESMExports();
 }
 
 // Breakage caught: help/invalid arguments must never start external programs.
+// 验证帮助和无效参数在运行外部程序前结束。
 test("help and invalid arguments stop before external programs", async (t) => {
   const s = await sandbox(t);
   for (const [args, code] of [[['--help'], 0], [[], 2], [[s.input, s.input], 2], [['--unknown'], 2], [[join(s.directory, 'movie.avi')], 2]]) {
@@ -151,6 +169,7 @@ test("help and invalid arguments stop before external programs", async (t) => {
 });
 
 // Breakage caught: filesystem preflight must precede probe and preserve existing output.
+// 验证输入缺失、输入是目录或输出已存在时不执行探测。
 test("missing input, directories and existing output stop before probe", async (t) => {
   const s = await sandbox(t);
   await mkdir(join(s.directory, "directory.mkv"));
@@ -165,6 +184,7 @@ test("missing input, directories and existing output stop before probe", async (
 });
 
 // Breakage caught: shell interpolation/splitting and direct writes to final output.
+// 验证特殊路径保持单个参数，成功输出从临时 MP4 发布。
 test("special paths stay one argument and successful output is published from a temporary MP4", async (t) => {
   const s = await sandbox(t, "中文 空格 ' ; $(touch injected).MKV");
   const result = await launch([s.input], s.env).finished;
@@ -183,6 +203,7 @@ test("special paths stay one argument and successful output is published from a 
 });
 
 // Breakage caught: a forbidden image subtitle must fail before any FFmpeg invocation.
+// 验证执行 FFmpeg 前拒绝 PGS 并报告轨道和编码。
 test("PGS is rejected with track and codec before FFmpeg", async (t) => {
   const s = await sandbox(t);
   s.env.FIXTURE = JSON.stringify({ ...fixture, streams: [...fixture.streams,
@@ -194,6 +215,7 @@ test("PGS is rejected with track and codec before FFmpeg", async (t) => {
 });
 
 // Breakage caught: failed FFmpeg must remove partial files and expose its diagnostic.
+// 验证FFmpeg 失败时清理临时输出并报告诊断。
 test("failed FFmpeg cleans temporary output and reports diagnostics", async (t) => {
   const s = await sandbox(t); s.env.MODE = "fail";
   const result = await launch([s.input], s.env).finished;
@@ -203,6 +225,7 @@ test("failed FFmpeg cleans temporary output and reports diagnostics", async (t) 
 });
 
 // Breakage caught: missing programs and required encoders must produce actionable errors.
+// 验证缺少 FFprobe 或所需 libx264 时阻止转换。
 test("missing FFprobe and required libx264 prevent conversion", async (t) => {
   const s = await sandbox(t);
   await rm(join(s.directory, "bin", "ffprobe"));
@@ -219,9 +242,11 @@ test("missing FFprobe and required libx264 prevent conversion", async (t) => {
 
 // Breakage caught: interrupted conversion must forward the signal and clean partial output.
 for (const signal of ["SIGINT", "SIGTERM"]) {
+  // 验证中断信号传递给 FFmpeg 并清理部分输出。
   test(`${signal} reaches FFmpeg and cleans its partial output`, async (t) => {
     const s = await sandbox(t); s.env.MODE = "wait";
     const { child, finished } = launch([s.input], s.env);
+    // 测试结束时强制清理可能仍在运行的转换进程。
     t.after(() => { child.kill("SIGKILL"); });
     let pid;
     for (let attempt = 0; attempt < 100; attempt++) {
@@ -229,6 +254,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
       catch (error) { if (error.code !== "ENOENT") throw error; await delay(30); }
     }
     assert.ok(pid, "FFmpeg must be ready before sending a signal");
+    // 设置子进程兜底终止定时器，防止信号测试悬挂。
     const emergency = setTimeout(() => { try { process.kill(pid, "SIGKILL"); } catch {} }, 1500);
     try {
       child.kill(signal);
@@ -241,6 +267,7 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 // Breakage caught: progress must remain meaningful when duration is unknown.
+// 验证未知时长显示已处理时间而不显示百分比。
 test("unknown duration reports processed time without a percentage", async (t) => {
   const s = await sandbox(t); s.env.FIXTURE = JSON.stringify({ streams: fixture.streams });
   const result = await launch([s.input], s.env).finished;
@@ -249,6 +276,7 @@ test("unknown duration reports processed time without a percentage", async (t) =
 });
 
 // Breakage caught: failure output must not retain unbounded early diagnostics.
+// 验证过长标准错误仅保留末尾诊断。
 test("long stderr retains only the final diagnostic tail", async (t) => {
   const s = await sandbox(t); s.env.MODE = "fail";
   s.env.DIAGNOSTIC = "EARLY_MARKER" + "x".repeat(25_000) + "TAIL_MARKER";
@@ -259,6 +287,7 @@ test("long stderr retains only the final diagnostic tail", async (t) => {
 });
 
 // Breakage caught: probe output overflow or invalid media must stop before conversion.
+// 验证探测失败、JSON 无效、视频缺失及输出过大均阻止转换。
 test("probe failures, invalid JSON, missing video and oversized outputs stop conversion", async (t) => {
   for (const changes of [{ PROBE_FAIL: "1" }, { FIXTURE: "not-json" }, { FIXTURE: '{"streams":[]}' },
     { PROBE_LARGE: "stdout" }, { PROBE_LARGE: "stderr" }]) {
@@ -270,6 +299,7 @@ test("probe failures, invalid JSON, missing video and oversized outputs stop con
 });
 
 // Breakage caught: a concurrent output creator or dangling symlink must never be overwritten.
+// 验证原子发布拒绝并发创建的目标和悬空符号链接。
 test("atomic publication rejects concurrent output creation and dangling symlinks", async (t) => {
   const s = await sandbox(t); s.env.RACE_OUTPUT = s.output;
   const result = await launch([s.input], s.env).finished;
@@ -282,6 +312,7 @@ test("atomic publication rejects concurrent output creation and dangling symlink
 });
 
 // Breakage caught: unknown subtitles must reach conversion and report FFmpeg rejection.
+// 验证未知字幕转换失败时保留诊断并清理输出。
 test("unknown subtitle conversion errors preserve diagnostics and clean output", async (t) => {
   const s = await sandbox(t); s.env.MODE = "fail"; s.env.DIAGNOSTIC = "unsupported subtitle encoding";
   s.env.FIXTURE = JSON.stringify({ ...fixture, streams: [...fixture.streams,
@@ -293,6 +324,7 @@ test("unknown subtitle conversion errors preserve diagnostics and clean output",
 });
 
 // Breakage caught: missing FFmpeg must fail cleanly both for copy and encoder-list plans.
+// 验证缺少 FFmpeg 时报告错误且不留下输出。
 test("missing FFmpeg is reported and never leaves output", async (t) => {
   for (const codec of ["h264", "hevc"]) {
     const s = await sandbox(t);
@@ -305,6 +337,7 @@ test("missing FFmpeg is reported and never leaves output", async (t) => {
 });
 
 // Breakage caught: missing/nonregular output must not be published; cleanup failure must coexist with main error.
+// 验证进程成功但无普通输出时拒绝发布，并合并清理错误。
 test("successful process without a regular output is refused and cleanup errors are combined", async (t) => {
   const missing = await sandbox(t); missing.env.MODE = "no-output";
   const result = await launch([missing.input], missing.env).finished;
@@ -318,6 +351,7 @@ test("successful process without a regular output is refused and cleanup errors 
 });
 
 // Breakage caught: microsecond progress must clamp finite percentages into 0..100.
+// 验证微秒进度的上下溢被限制在有效范围内。
 test("microsecond progress clamps underflow and overflow", async (t) => {
   const s = await sandbox(t);
   s.env.PROGRESS = "out_time_us=-1000000\nprogress=continue\nout_time_us=20000000\nprogress=end\n";
@@ -327,6 +361,7 @@ test("microsecond progress clamps underflow and overflow", async (t) => {
 });
 
 // Breakage caught: callable run must return errors and preserve its host process.
+// 验证运行入口返回错误而不终止调用方，并清理信号监听器。
 test("run returns errors without terminating its caller and cleans signal listeners", async (t) => {
   const { run } = await import("../tools/convert-video.mjs");
   const { probeMedia, executeConversion } = await import("../tools/video-conversion/execute.mjs");
@@ -335,6 +370,7 @@ test("run returns errors without terminating its caller and cleans signal listen
   const listeners = [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
   let diagnostics = "";
   const code = await run([s.input], {
+    // 用内存输出替身捕获错误诊断，避免测试写入真实终端。
     stdout: { write() {} }, stderr: { write(text) { diagnostics += text; } },
     probeMedia: (input) => probeMedia(input, { env: s.env }),
     executeConversion: (conversion, options) => executeConversion(conversion, { ...options, env: s.env }),
@@ -346,6 +382,7 @@ test("run returns errors without terminating its caller and cleans signal listen
   const media = await probeMedia(s.input, { env: s.env });
   s.env.MODE = "wait";
   await assert.rejects(executeConversion({ inputPath: s.input, outputPath: s.output, media, plan: buildConversionPlan(media) },
+    // 进度回调故意抛错，验证转换进程仍会停止并清理临时文件。
     { env: s.env, onProgress() { throw new Error("progress sink failed"); } }), /progress sink failed/);
   assert.deepEqual([process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")], listeners);
   await absent(s.output); await noTemporary(s.directory);

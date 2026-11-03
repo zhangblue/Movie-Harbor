@@ -5,8 +5,11 @@ import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { AdminApi, ViewerApi, baseURL } from "./helpers";
 
+// 描述 MCP 结构化结果允许的 JSON 原始值，供结果类型使用。
 type JsonPrimitive = string | number | boolean | null;
+// 递归描述 MCP 结果中的 JSON 值，供工具参数和断言使用。
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+// 描述 MCP 结构化结果对象，供工具调用辅助函数使用。
 type Structured = Record<string, JsonValue>;
 
 const runDir = process.env.E2E_RUN_DIR;
@@ -36,11 +39,13 @@ const childEnvironment: Record<string, string> = {
   MOVIE_HARBOR_MCP_CONFIG: configPath,
 };
 const isolatedEnvironmentVariables = ["HOME", "TMPDIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"] as const;
+// 预计算测试媒体的多种编码，供检查 MCP 输出未泄漏完整媒体字节。
 const mediaFixtureRepresentations = [compatibleVideoPath, incompatibleVideoPath].flatMap(path => {
   const bytes = readFileSync(path);
   return [bytes.toString("base64"), bytes.toString("hex"), JSON.stringify(bytes), JSON.stringify([...bytes])];
 });
 
+// 启动 MCP 前检查实际路径位于本次隔离目录中。
 function isInsideRunDir(path: string): boolean {
   const pathFromRun = relative(canonicalRunDir, realpathSync(path));
   return pathFromRun !== "" && !pathFromRun.startsWith("..") && !isAbsolute(pathFromRun);
@@ -53,6 +58,7 @@ let client: Client;
 let transport: StdioClientTransport;
 const observedResults: Array<Awaited<ReturnType<Client["callTool"]>>> = [];
 
+// 检查工具结果不泄漏密钥、媒体或内部路径，并限制响应大小。
 function assertSafeResult(value: object, requireBoundedResult = true): void {
   const encoded = JSON.stringify(value);
   expect(encoded.includes("local_path"), "MCP result exposed local_path").toBe(false);
@@ -63,6 +69,7 @@ function assertSafeResult(value: object, requireBoundedResult = true): void {
   if (requireBoundedResult) expect(encoded.length).toBeLessThan(32 * 1024);
 }
 
+// 调用 MCP 工具并断言成功，同时检查结果的敏感信息。
 async function call(name: string, args: Record<string, JsonValue>): Promise<Structured> {
   const result = await client.callTool({ name, arguments: args });
   expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
@@ -71,6 +78,7 @@ async function call(name: string, args: Record<string, JsonValue>): Promise<Stru
   return result.structuredContent as Structured;
 }
 
+// 调用预期失败的 MCP 工具，并检查错误结果不泄漏敏感信息。
 async function callError(name: string, args: Record<string, JsonValue>) {
   const result = await client.callTool({ name, arguments: args });
   expect(result.isError).toBe(true);
@@ -79,6 +87,7 @@ async function callError(name: string, args: Record<string, JsonValue>) {
   return result;
 }
 
+// 启动 MCP 前验证配置和环境目录隔离，随后建立测试连接。
 test.beforeAll(async () => {
   expect(existsSync(entry)).toBe(true);
   expect(Object.keys(childEnvironment).sort()).toEqual([...isolatedEnvironmentVariables, "MOVIE_HARBOR_MCP_CONFIG", "PATH"].sort());
@@ -98,11 +107,13 @@ test.beforeAll(async () => {
   await client.connect(transport);
 });
 
+// 测试结束后关闭连接并复查全部结果未泄漏敏感数据。
 test.afterAll(async () => {
   await client?.close();
   assertSafeResult(observedResults, false);
 });
 
+// 验证 MCP 创建、上传并分别发布私密电影和剧集。
 test("MCP creates, uploads and independently publishes private movie and series", async ({ request, playwright }) => {
   const prefix = `MCP E2E ${Date.now()}`;
   const poster = await call("validate_poster", { path: posterPath });
@@ -205,6 +216,7 @@ test("MCP creates, uploads and independently publishes private movie and series"
   } finally { await admin.dispose(); }
 });
 
+// 验证 MCP 仅在确认后转换，并只删除其生成的上传文件。
 test("MCP converts only after confirmation and deletes only the generated upload", async () => {
   const prefix = `MCP Convert ${Date.now()}`;
   const incompatible = await call("inspect_video", { path: incompatibleVideoPath });
@@ -229,6 +241,7 @@ test("MCP converts only after confirmation and deletes only the generated upload
   expect(existsSync(incompatibleVideoPath)).toBe(true);
 });
 
+// 验证受限 MCP 密钥拒绝缺失、错误和不允许的管理员访问。
 test("restricted MCP key rejects missing, wrong and forbidden administrator access", async ({ request, playwright }) => {
   expect((await request.get("/api/admin/genres")).status()).toBe(401);
   const wrong = await playwright.request.newContext({ baseURL, extraHTTPHeaders: { Authorization: "Bearer mhmcp_wrong-key" } });

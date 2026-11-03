@@ -4,6 +4,7 @@ import { lstat, link, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { parseProbeOutput } from "./probe.mjs";
 
+// 将子进程启动错误转换为可操作的诊断信息，供探测和转换使用。
 function processError(executable, error) {
   if (error.code === "ENOENT" || error.code === "EACCES") {
     return new Error(`${executable} 未安装或不可执行，请安装 FFmpeg（含 FFprobe）并检查 PATH`);
@@ -11,12 +12,17 @@ function processError(executable, error) {
   return new Error(`${executable} 启动失败：${error.message}`);
 }
 
+// 无 shell 地启动媒体工具，限制输出并等待进程关闭后返回结果或错误。
 function runProcess(executable, args, options = {}) {
+  // 启动媒体进程时以 Promise 等待退出，错误和退出状态经同一收尾路径返回。
   return new Promise((resolve, reject) => {
+    // 使用参数数组直接启动子进程；启动失败或输出超限时转换不会继续。
     const child = spawn(executable, args, { shell: false, stdio: ["ignore", "pipe", "pipe"], env: options.env ?? process.env });
     let stdout = Buffer.alloc(0), stderr = Buffer.alloc(0), stderrBytes = 0, failure;
     options.onChild?.(child);
+    // 进程启动失败时保存可读诊断，等待关闭事件统一结算。
     child.on("error", (error) => { failure = processError(executable, error); });
+    // 处理进程标准输出：转换时解析进度，探测时限制缓冲大小。
     child.stdout.on("data", (chunk) => {
       if (options.onStdout) {
         try { options.onStdout(chunk); }
@@ -29,6 +35,7 @@ function runProcess(executable, args, options = {}) {
         }
       }
     });
+    // 收集有限诊断尾部；超限时终止进程，避免错误输出占满内存。
     child.stderr.on("data", (chunk) => {
       stderrBytes += chunk.length;
       stderr = Buffer.from(Buffer.concat([stderr, chunk]).subarray(-16 * 1024));
@@ -36,6 +43,7 @@ function runProcess(executable, args, options = {}) {
         failure ??= new Error(`${executable} 诊断输出超过大小限制`); child.kill("SIGKILL");
       }
     });
+    // 仅在进程及其流关闭后返回结果，确保错误与退出码都已确定。
     child.on("close", (code, signal) => {
       options.onChild?.(null);
       if (failure) reject(failure);
@@ -45,6 +53,7 @@ function runProcess(executable, args, options = {}) {
   });
 }
 
+// 运行 FFprobe 并解析轨道，供制定转换计划前使用。
 export async function probeMedia(inputPath, options = {}) {
   const text = await runProcess(options.ffprobe ?? "ffprobe", [
     "-v", "error", "-show_entries",
@@ -54,28 +63,39 @@ export async function probeMedia(inputPath, options = {}) {
   return parseProbeOutput(text);
 }
 
+// 转换前检查计划所需编码器，缺失时及早失败避免生成不完整文件。
 export async function verifyRequiredEncoders(requiredEncoders, options = {}) {
   if (requiredEncoders.length === 0) return;
+  // 先运行 FFmpeg 写入临时文件；进程失败时不会执行发布。
   const output = await runProcess(options.ffmpeg ?? "ffmpeg", ["-hide_banner", "-encoders"], options);
   const available = new Set(output.split(/\r?\n/).map((line) => line.match(/^\s*[VAS][A-Z.]{5}\s+(\S+)\s/)?.[1]).filter(Boolean));
   const missing = requiredEncoders.filter((encoder) => !available.has(encoder));
   if (missing.length) throw new Error(`FFmpeg 缺少所需编码器：${missing.join("、")}，请安装包含这些编码器的 FFmpeg`);
 }
 
+// 运行转换并原子发布结果，中断或失败时终止子进程并清理临时文件。
 export async function executeConversion({ inputPath, outputPath, media, plan }, options = {}) {
   const temporaryPath = join(dirname(outputPath), `.${basename(outputPath)}.${process.pid}.${randomUUID()}.tmp.mp4`);
   let failure, published = false, activeChild, interrupted;
   let partial = "", seconds = 0;
+  // 记录首个中断信号并转发给运行中的 FFmpeg。
   const forward = (signal) => { interrupted ??= signal; activeChild?.kill(signal); };
+  // 收到 SIGINT 时通知转换子进程停止。
   const onInterrupt = () => forward("SIGINT");
+  // 收到 SIGTERM 时通知转换子进程停止。
   const onTerminate = () => forward("SIGTERM");
+  // 生成包含发布状态的中断错误，供清理完成后报告。
   const interruptionError = () => new Error(`转换已中断（${interrupted}），已停止 FFmpeg${published ? "；最终文件已完整发布" : ""}`);
+  // 发布前检查已记录的中断，避免取消后继续发布。
   const checkInterrupted = () => { if (interrupted) throw interruptionError(); };
   process.on("SIGINT", onInterrupt); process.on("SIGTERM", onTerminate);
   try {
+    // 先运行 FFmpeg 写入临时文件；进程失败时不会执行发布。
     await runProcess(options.ffmpeg ?? "ffmpeg", plan.buildArguments({ inputPath, temporaryPath }), {
       ...options,
+      // 登记当前子进程，供中断信号转发使用。
       onChild(child) { activeChild = child; },
+      // 解析 FFmpeg 的分段进度输出，并限制未完成行的大小。
       onStdout(chunk) {
         partial += chunk.toString("utf8");
         const lines = partial.split("\n"); partial = lines.pop();
@@ -97,6 +117,7 @@ export async function executeConversion({ inputPath, outputPath, media, plan }, 
     catch (error) { throw new Error(`FFmpeg 未生成普通临时文件 ${temporaryPath}：${error.message}`); }
     if (!temporaryFile.isFile()) throw new Error(`FFmpeg 未生成普通临时文件：${temporaryPath}`);
     checkInterrupted();
+    // 以硬链接发布完整临时文件；目标已存在时拒绝覆盖。
     try { await link(temporaryPath, outputPath); published = true; }
     catch (error) {
       throw new Error(error.code === "EEXIST" ? `目标已存在：${outputPath}` : `无法发布输出：${error.message}`);

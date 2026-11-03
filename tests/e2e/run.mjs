@@ -8,6 +8,7 @@ import { buildBindCleanupPlan, buildE2EEnvironment, cleanupE2ERun, createE2ERun 
 const root = resolve(import.meta.dirname, "../..");
 const generated = resolve(import.meta.dirname, ".generated");
 const runId = randomUUID().replaceAll("-", "");
+// 每次运行都使用独立项目和目录，避免 Compose 与现有数据或并行测试互相影响。
 const isolatedRun = createE2ERun({
   workspaceRoot: root,
   generatedRoot: generated,
@@ -28,6 +29,7 @@ const mcpKey = `mhmcp_${randomBytes(32).toString("hex")}`;
 const mcpDigest = createHash("sha256").update(mcpKey).digest("hex");
 const compose = ["compose", "-p", project, "--env-file", envFile, "-f", "docker-compose.yml"];
 const runEnvironment = buildE2EEnvironment(process.env, isolatedRun);
+// 所有子进程继承隔离目录，命令失败时立即中止当前测试阶段。
 const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: root,
   stdio: "inherit",
@@ -35,10 +37,14 @@ const run = (command, args, options = {}) => execFileSync(command, args, {
   ...options,
 });
 
+// 启动隔离 Compose 前检查本地端口，避免与已有服务冲突。
 async function assertPortAvailable() {
+  // 监听回环地址确认端口可用后立即关闭，防止测试连接到其他服务。
   await new Promise((accept, reject) => {
     const server = createServer();
+    // 端口占用时附带原因拒绝启动，避免误操作已有实例。
     server.once("error", (error) => reject(new Error(`E2E port ${port} is unavailable`, { cause: error })));
+    // 端口监听成功即关闭临时服务，释放端口供随后启动的 Compose 使用。
     server.listen(Number(port), "127.0.0.1", () => server.close(accept));
   });
 }
@@ -89,6 +95,7 @@ try {
     "base64",
   ), { mode: 0o600 });
 
+  // 在隔离目录生成浏览器可播放的小视频；生成失败时不启动服务。
   const ffmpeg = spawnSync("ffmpeg", [
     "-loglevel", "error", "-f", "lavfi", "-i", "color=c=navy:s=32x32:d=0.4",
     "-an", "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
@@ -106,12 +113,14 @@ try {
 
   run("npm", ["run", "build:mcp"]);
 
+  // 项目名带运行标识，因此清理和启动只作用于本次隔离的 Compose 项目。
   run("docker", [...compose, "down", "--volumes", "--remove-orphans"]);
   await assertPortAvailable();
   containerStartAttempted = true;
   run("docker", [...compose, "up", "-d", "--build", "--wait"]);
   run("docker", [...compose, "exec", "-T", "--user", "10001", "api", "sh", "-c", "printf private > /media/.incoming/e2e-private-sentinel"]);
   const requestedPlaywrightArgs = process.argv.slice(2);
+  // 将隔离目录和凭据传给浏览器测试，确保上传和登录只访问本次实例。
   run("npx", ["playwright", "test", ...(requestedPlaywrightArgs.length ? requestedPlaywrightArgs : ["--project=admin"])], { env: testEnv });
   if (requestedPlaywrightArgs.length === 0) {
     run("docker", [...compose, "restart"]);
@@ -125,6 +134,7 @@ try {
     cleanupE2ERun(isolatedRun);
   } else {
     run("docker", [...compose, "stop"]);
+    // 容器停止后才清理 bind 目录；计划会重新校验目录身份，失败则保留现场。
     const cleanupPlan = buildBindCleanupPlan(isolatedRun, {
       uid: process.getuid(),
       gid: process.getgid(),

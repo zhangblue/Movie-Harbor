@@ -11,16 +11,19 @@ const EMPTY_PROGRESS = {
   series: {},
 };
 
+// 判断值是否为普通记录形态，供进度结构校验使用。
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+// 校验进度对象的字段集合，避免忽略未知格式造成错误续传。
 function rejectUnknownKeys(value, allowed) {
   if (Object.keys(value).some((key) => !allowed.has(key))) {
     throw new Error("unsupported progress field");
   }
 }
 
+// 递归校验内容、季和单集的标识、版本及步骤标记，供读写进度时使用。
 function validateRecord(record, allowedFields, { version = false, flags = [], seasons = false, episodes = false } = {}) {
   if (!isRecord(record)) throw new Error("progress item must be an object");
   rejectUnknownKeys(record, allowedFields);
@@ -51,6 +54,7 @@ function validateRecord(record, allowedFields, { version = false, flags = [], se
   }
 }
 
+// 核对进度格式、目标和源文件身份，防止将其他导入任务的进度用于当前任务。
 function validateProgress(progress, targetOrigin, sourceIdentity) {
   if (!isRecord(progress) || progress.formatVersion !== EMPTY_PROGRESS.formatVersion) {
     throw new Error("unsupported progress format version");
@@ -82,6 +86,7 @@ function validateProgress(progress, targetOrigin, sourceIdentity) {
   return progress;
 }
 
+// 读取或初始化导入进度，并提供持久化入口以支持安全续传。
 export async function openProgressStore({ path, targetOrigin, sourceIdentity, fs = defaultFs }) {
   let state;
   try {
@@ -101,6 +106,7 @@ export async function openProgressStore({ path, targetOrigin, sourceIdentity, fs
 
   return {
     state,
+    // 保存步骤前重新校验进度，以同步临时文件后重命名避免留下半写入状态。
     async save() {
       validateProgress(state, targetOrigin, sourceIdentity);
       const temporaryPath = join(dirname(path), `.${basename(path)}.${randomUUID()}.tmp`);
@@ -116,8 +122,10 @@ export async function openProgressStore({ path, targetOrigin, sourceIdentity, fs
         await fs.rename(temporaryPath, path);
         renamed = true;
       } finally {
+        // 失败收尾时尽力关闭临时文件句柄，不覆盖原始写入错误。
         if (handle) await handle.close().catch(() => {});
         if (!renamed) {
+          // 保存未完成时只清理本次临时文件；不存在可忽略，其他清理错误继续报告。
           await fs.unlink(temporaryPath).catch((error) => {
             if (error.code !== "ENOENT") throw error;
           });

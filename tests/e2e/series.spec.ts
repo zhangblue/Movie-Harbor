@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { AdminApi, adminName, initialPassword, poster, snapshotMediaFiles, uploadedSince, video, type Series } from "./helpers";
 
+// 验证剧集逐集发布及归档后立即生效的流程。
 test("a series publishes episodes incrementally and archives immediately", async ({ page, playwright, request }) => {
   await page.goto("/admin/");
   await page.getByLabel("管理员名称").fill(adminName);
@@ -67,6 +68,7 @@ test("a series publishes episodes incrementally and archives immediately", async
   const row = page.getByRole("row", { name: new RegExp(name) });
   await row.getByRole("button", { name: "归档" }).click();
   await expect(row.getByRole("button", { name: "原样发布" })).toBeVisible();
+  // 等待公开目录反映归档状态，确认访问立即失效而非仅更新后台界面。
   await expect.poll(async () => (await request.get(`/api/catalog/series/${series.id}`)).status()).toBe(404);
   await page.goto(`/series/${series.id}`);
   await expect(page.getByRole("heading", { name: "404 · 内容不存在" })).toBeVisible();
@@ -85,6 +87,7 @@ test("a series publishes episodes incrementally and archives immediately", async
   await page.getByLabel("输入完整内容名称").fill("Pilot");
   await page.getByRole("button", { name: "确认永久删除" }).click();
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
+  // 逐个核对上传文件已从隔离媒体目录消失，避免只验证数据库响应。
   for (const path of firstVideoFiles) await expect.poll(() => existsSync(path)).toBe(false);
 
   const secondForDelete = archivedSeason.getByRole("form", { name: /第 2 集 · Second Wave/ });
@@ -94,6 +97,7 @@ test("a series publishes episodes incrementally and archives immediately", async
   await page.getByLabel("输入完整内容名称").fill("第 1 季");
   await page.getByRole("button", { name: "确认永久删除" }).click();
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
+  // 删除第二集后检查其实际文件，确认级联操作完成。
   for (const path of secondVideoFiles) await expect.poll(() => existsSync(path)).toBe(false);
 
   await page.getByRole("button", { name: "永久删除剧集" }).click();
@@ -101,10 +105,12 @@ test("a series publishes episodes incrementally and archives immediately", async
   await page.getByRole("button", { name: "确认永久删除" }).click();
   await expect(page.getByRole("heading", { name: "内容管理" })).toBeVisible();
   await expect(page.getByText("内容及其媒体文件已删除")).toBeVisible();
+  // 删除整剧后检查海报文件，确认物理清理与内容删除一致。
   for (const path of seriesPosterFiles) await expect.poll(() => existsSync(path)).toBe(false);
   await api.dispose();
 });
 
+// 验证无海报剧集缺少单集时的提示，以及补齐后发布。
 test("a posterless series reports the exact episode requirement then publishes", async ({ page }) => {
   await page.goto("/admin/");
   await page.getByLabel("管理员名称").fill(adminName);

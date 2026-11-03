@@ -6,8 +6,10 @@ import {
   initialPassword,
 } from "./helpers";
 
+// 描述分页 API 的页码、总数及内容，供分页断言使用。
 type PageResult = { page: number; size: number; total: number; items: Array<{ name: string }> };
 
+// 验证管理和公开内容列表超过二十条后的分页。
 test("admin and public content lists paginate after twenty items", async ({ page, playwright }) => {
   test.setTimeout(180_000);
   const api = await AdminApi.login(playwright);

@@ -14,10 +14,12 @@ const ownerMarker = ".movie-harbor-e2e-owner";
 const runIdPattern = /^[a-f0-9]{32}$/;
 const projectPattern = /^mh-task15-e2e(?:-[a-z0-9-]+)?$/;
 
+// 拒绝不满足所有权或路径约束的清理，避免删除非本次运行数据。
 function refuse(reason) {
   throw new Error(`refusing E2E cleanup: ${reason}`);
 }
 
+// 验证目录存在且不是符号链接，供创建和清理隔离目录时使用。
 function requireRealDirectory(path, message) {
   if (!existsSync(path)) throw new Error(message);
   const metadata = lstatSync(path);
@@ -25,6 +27,7 @@ function requireRealDirectory(path, message) {
   return realpathSync(path);
 }
 
+// 读取目录设备号和 inode，供清理前检测目录被替换。
 function directoryIdentity(path, message) {
   if (!existsSync(path)) throw new Error(message);
   const metadata = lstatSync(path);
@@ -32,10 +35,12 @@ function directoryIdentity(path, message) {
   return { dev: metadata.dev, ino: metadata.ino };
 }
 
+// 比较目录身份，供清理前确认 bind mount 未被替换。
 function sameIdentity(actual, expected) {
   return actual.dev === expected?.dev && actual.ino === expected?.ino;
 }
 
+// 创建带所有权标记的独立运行目录、数据库和媒体目录，并生成独立 Compose 项目名。
 export function createE2ERun({
   workspaceRoot,
   generatedRoot,
@@ -92,6 +97,7 @@ export function createE2ERun({
   };
 }
 
+// 清理或使用环境前复核路径、目录身份和所有权标记，任何异常均拒绝操作。
 function verifyOwnedRun(run) {
   if (!run?.runDir || !run?.mediaDir) refuse("empty target");
   const workspace = requireRealDirectory(run.workspaceRoot, "workspace root must be a real directory");
@@ -124,6 +130,7 @@ function verifyOwnedRun(run) {
   if (owner.runId !== run.runId || owner.ownerToken !== run.ownerToken) refuse("owner marker mismatch");
 }
 
+// 在确认目录归属后覆盖数据库和媒体路径，防止 E2E 使用生产数据。
 export function buildE2EEnvironment(inherited, run) {
   verifyOwnedRun(run);
   return {
@@ -134,6 +141,7 @@ export function buildE2EEnvironment(inherited, run) {
   };
 }
 
+// 校验目录归属后生成隔离容器清理计划，处理容器拥有的文件并恢复目录权限。
 export function buildBindCleanupPlan(run, { uid, gid }) {
   verifyOwnedRun(run);
   if (!Number.isSafeInteger(uid) || uid < 0 || !Number.isSafeInteger(gid) || gid < 0) {
@@ -157,6 +165,7 @@ export function buildBindCleanupPlan(run, { uid, gid }) {
   };
 }
 
+// 仅在身份匹配且 bind 目录已清空后删除本次运行目录。
 export function cleanupE2ERun(run) {
   try {
     verifyOwnedRun(run);

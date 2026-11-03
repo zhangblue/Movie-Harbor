@@ -6,24 +6,37 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { AdminApi, adminName, baseURL, initialPassword, poster, mediaHostDir, createMovieDraftWithMedia, createSeriesDraftWithMedia, type Genre, type Movie, type Series } from "./helpers";
 
+// 描述导入后读取的共同元数据，供电影和剧集断言使用。
 type Metadata = { synopsis: string; year: number | null; genres: Genre[]; duration_seconds: number | null };
+// 描述包含媒体和层级的导入剧集，供导入结果断言使用。
 type ImportedSeries = Series & Metadata & { seasons: Array<{ id: string; number: number; episodes: Array<{ id: string; name: string; number: number; status: string; duration_seconds: number | null; video: { local_path: string } | null }> }> };
+// 描述导入进度中的内容标识，供续传测试使用。
 type Checkpoint = { movies: Record<string, { id: string }>; series: Record<string, { id: string }> };
 
+// 启动导入 CLI 并提供隔离媒体目录，供真实导入和续传测试使用。
 function runImport(jsonPath: string, mediaRoot: string) {
+  // 等待真实导入子进程启动、输出和退出，失败时向测试报告。
   return new Promise<{ code: number | null; output: string }>((accept, reject) => {
+    // 使用真实 CLI 子进程并通过标准输入传密码，才能覆盖进程退出码和完整导入流程。
     const child = spawn(process.execPath, ["tools/import-content.mjs", "--json", jsonPath, "--media-root", mediaRoot, "--target", baseURL, "--admin-name", adminName], { stdio: ["pipe", "pipe", "pipe"] });
     let output = "";
+    // 导入子进程超时时强制终止并拒绝，避免跨服务测试无限等待。
     const timer = setTimeout(() => { child.kill("SIGTERM"); reject(new Error("import CLI timed out")); }, 45_000);
+    // 收集 CLI 输出，供导入结果与脱敏断言使用。
     child.stdout.on("data", (chunk) => { output += chunk; });
+    // 收集 CLI 错误输出，供失败诊断及断言使用。
     child.stderr.on("data", (chunk) => { output += chunk; });
+    // 进程启动出错时清理超时并拒绝等待。
     child.once("error", (error) => { clearTimeout(timer); reject(error); });
+    // 进程关闭后清理超时并返回退出码和完整输出。
     child.once("close", (code) => { clearTimeout(timer); accept({ code, output }); });
+    // 密码管道写入失败时拒绝测试，避免将未登录视为导入结果。
     child.stdin.on("error", reject);
     child.stdin.end(`${initialPassword}\n`);
   });
 }
 
+// 验证命令行按草稿导入媒体与层级、续传不重复并跳过冲突。
 test("CLI imports media and hierarchy as drafts, resumes without duplicates, and skips conflicts", async ({ playwright }) => {
   test.setTimeout(180_000);
   const runDir = process.env.E2E_RUN_DIR!;
@@ -95,6 +108,7 @@ test("CLI imports media and hierarchy as drafts, resumes without duplicates, and
   } finally { await api.dispose(); }
 });
 
+// 验证导出与命令行导入保留电影和整剧的公开或私密范围。
 test("export and CLI import preserve public and private movies and whole series", async ({ playwright }) => {
   test.setTimeout(180_000);
   const api = await AdminApi.login(playwright);
@@ -110,6 +124,7 @@ test("export and CLI import preserve public and private movies and whole series"
       privacy.set(`series:${series.name}`, isPrivate);
     }
     const exported = await (await api.request.get("/api/admin/contents/export")).json();
+    // 描述导出电影或剧集的隐私字段，供往返导入断言使用。
     type ExportItem = { name: string; is_private: boolean; episodes?: JsonValue[] };
     for (const kind of ["movies", "series"] as const) {
       exported[kind] = exported[kind].filter((item: ExportItem) => item.name.startsWith(prefix));

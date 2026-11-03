@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+// 导入前验证媒体键、实际路径和普通文件属性，拒绝越过媒体根目录的引用。
 export async function resolveMediaReference(mediaRoot, mediaPath, expectedKind) {
   if (mediaPath === null) return null;
   const prefix = `/media/${expectedKind}/`;

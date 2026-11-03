@@ -3,11 +3,16 @@ import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AdminApi, adminName, initialPassword, createMovieDraftWithMedia, createSeriesDraftWithMedia, createPublishableMovie, type Genre, type Movie, type Series } from "./helpers";
 
+// 描述导出电影的字段，供全量导出断言使用。
 type ExportMovie = { name: string; is_private: boolean; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; video_path: string | null; duration_seconds: number | null };
+// 描述导出单集的序号、媒体和时长，供导出断言使用。
 type ExportEpisode = { season_number: number; episode_number: number; name: string; video_path: string | null; duration_seconds: number | null };
+// 描述导出剧集及单集，供导出层级断言使用。
 type ExportSeries = { name: string; is_private: boolean; synopsis: string; year: number | null; genres: string[]; poster_path: string | null; episodes: ExportEpisode[] };
+// 描述完整内容导出结构，供分页和状态覆盖断言使用。
 type ContentExport = { exported_at: string; movies: ExportMovie[]; series: ExportSeries[] };
 
+// 验证 JSON 导出覆盖所有状态和页，并保留准确媒体路径及时长秒数。
 test("JSON export includes every state and page with exact media paths and seconds", async ({ page, playwright }, testInfo) => {
   test.setTimeout(180_000);
   const api = await AdminApi.login(playwright);
