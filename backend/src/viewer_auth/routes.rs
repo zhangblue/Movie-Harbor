@@ -23,6 +23,7 @@ use tokio::time::Instant;
 // 固定、有效且与默认 Argon2id 参数等成本的摘要。未知账号也必须执行密码计算。
 const UNKNOWN_USER_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$bW92aWUtaGFyYm9yLWR1bW15$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
+// 构建普通用户认证路由，供应用启动聚合时调用。
 pub fn router(state: AuthState) -> Router {
     let protected = Router::new()
         .route("/api/viewer/session", get(read_session))
@@ -38,6 +39,7 @@ pub fn router(state: AuthState) -> Router {
         .with_state(state)
 }
 
+// 要求普通用户会话并校验写请求，供受保护路由中间件调用。
 pub async fn require_session(
     State(state): State<AuthState>,
     mut request: Request,
@@ -46,6 +48,7 @@ pub async fn require_session(
     if !state.origin_policy.host_allowed(request.headers()) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
+    // 进入业务处理器前确认会话有效；失败时直接拒绝，写请求还需同源与 CSRF 校验。
     let current = session::authenticate(&state.db, request.headers()).await?;
     if !matches!(
         *request.method(),
@@ -61,6 +64,7 @@ pub async fn require_session(
     Ok(response)
 }
 
+// 校验普通用户凭据并创建会话，供登录请求调用。
 async fn login(
     State(state): State<AuthState>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
@@ -87,6 +91,7 @@ async fn login(
         address.ip()
     };
     let normalized_username = input.username.trim().to_lowercase();
+    // 密码计算前按来源和归一化账号取得限流许可，超限时不继续查询或计算。
     let window = state.limits.for_login(client_ip, &normalized_username);
     let admission = window
         .admit(Instant::now())
@@ -96,6 +101,7 @@ async fn login(
         .filter(viewer_user::Column::NormalizedUsername.eq(&normalized_username))
         .one(&state.db)
         .await?;
+    // 未知账号也验证固定摘要，使不存在账号的失败路径仍执行同等成本的密码计算。
     let verified_hash = viewer
         .as_ref()
         .map(|viewer| viewer.password_hash.as_str())
@@ -127,6 +133,7 @@ async fn login(
     let mut model: viewer_user::ActiveModel = viewer.into();
     model.last_login_at = Set(Some(chrono::Utc::now().fixed_offset()));
     let viewer = model.update(&tx).await?;
+    // 更新登录时间与创建会话同事务提交；失败时不会返回可用登录凭据。
     let raw = session::create(&tx, &viewer).await?;
     tx.commit().await?;
     admission.success().await;
@@ -143,6 +150,7 @@ async fn login(
         .into_response())
 }
 
+// 返回当前普通用户会话，供会话查询请求调用。
 async fn read_session(Extension(current): Extension<session::CurrentSession>) -> Response {
     Json(SessionResponse {
         username: current.viewer.username,
@@ -151,6 +159,7 @@ async fn read_session(Extension(current): Extension<session::CurrentSession>) ->
     .into_response()
 }
 
+// 撤销当前普通用户会话，供退出登录请求调用。
 async fn logout(
     State(state): State<AuthState>,
     Extension(current): Extension<session::CurrentSession>,
@@ -163,6 +172,7 @@ async fn logout(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+// 修改普通用户密码并撤销全部会话，供改密请求调用。
 async fn change_password(
     State(state): State<AuthState>,
     Extension(current): Extension<session::CurrentSession>,
@@ -208,6 +218,7 @@ async fn change_password(
     model.version = Set(next_version);
     model.updated_at = Set(chrono::Utc::now().fixed_offset());
     model.update(&tx).await?;
+    // 与密码更新同事务撤销全部会话，提交后旧凭据不能继续使用。
     viewer_session::Entity::delete_many()
         .filter(viewer_session::Column::ViewerUserId.eq(current.viewer.id))
         .exec(&tx)

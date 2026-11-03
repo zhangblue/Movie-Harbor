@@ -9,12 +9,14 @@ pub const COOKIE_NAME: &str = "mh_session";
 const SESSION_SECONDS: i64 = 86400;
 
 #[derive(Clone)]
+// 保存已认证管理员及会话信息，供受保护路由使用。
 pub struct CurrentSession {
     pub session: admin_session::Model,
     pub admin: admin_user::Model,
     pub csrf_token: String,
 }
 
+// 生成管理员会话 Cookie，供登录和清除会话时调用。
 pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
     // 管理 API 与媒体预览都使用此 Cookie；公开目录仍必须只读取普通用户 Cookie。
     format!(
@@ -24,10 +26,12 @@ pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
     )
 }
 
+// 生成旧路径会话清除 Cookie，供退出或改密时调用。
 pub fn clear_legacy_cookie(secure: bool) -> String {
     cookie("", secure, true).replacen("Path=/;", "Path=/api/admin;", 1)
 }
 
+// 构建当前和旧路径的清除头，供撤销管理员会话后返回。
 pub fn clear_cookies(secure: bool) -> axum::http::HeaderMap {
     let mut headers = axum::http::HeaderMap::new();
     for value in [cookie("", secure, true), clear_legacy_cookie(secure)] {
@@ -37,6 +41,7 @@ pub fn clear_cookies(secure: bool) -> axum::http::HeaderMap {
     headers
 }
 
+// 创建管理员会话并返回原始令牌，供登录成功后调用。
 pub async fn create<C: ConnectionTrait>(
     db: &C,
     admin: &admin_user::Model,
@@ -59,6 +64,7 @@ pub async fn create<C: ConnectionTrait>(
     Ok(raw)
 }
 
+// 验证管理员 Cookie 和未过期会话，供受保护请求调用。
 pub async fn authenticate<C: ConnectionTrait>(
     db: &C,
     headers: &HeaderMap,
@@ -99,6 +105,7 @@ pub async fn authenticate<C: ConnectionTrait>(
     })
 }
 
+// 校验同源和 CSRF 令牌，供管理员写请求放行前调用。
 pub fn authorize_write(
     current: &CurrentSession,
     headers: &HeaderMap,

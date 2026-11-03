@@ -3,6 +3,7 @@ use movie_harbor_api::{app, config::Config};
 use tokio::net::TcpListener;
 
 #[tokio::main]
+// 加载配置、连接数据库并启动 HTTP 服务，作为后端进程入口调用。
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
     let db = sea_orm::Database::connect(&config.database_url).await?;

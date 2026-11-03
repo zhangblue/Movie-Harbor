@@ -225,6 +225,7 @@ ORDER BY season.number, season.id, episode.number, episode.id
 "#;
 
 #[derive(Debug, FromQueryResult)]
+// 承载目录列表查询行，供转换公开卡片时使用。
 struct CatalogRow {
     id: Uuid,
     is_private: bool,
@@ -236,6 +237,7 @@ struct CatalogRow {
 }
 
 #[derive(Debug, FromQueryResult)]
+// 承载电影详情查询行，供组装公开电影详情使用。
 struct MovieRow {
     id: Uuid,
     is_private: bool,
@@ -248,6 +250,7 @@ struct MovieRow {
 }
 
 #[derive(Debug, FromQueryResult)]
+// 承载剧集详情查询行，供组装公开剧集详情使用。
 struct SeriesRow {
     id: Uuid,
     is_private: bool,
@@ -258,6 +261,7 @@ struct SeriesRow {
 }
 
 #[derive(Debug, FromQueryResult)]
+// 承载单集查询行，供组装公开剧集详情使用。
 struct EpisodeRow {
     season_id: Uuid,
     season_number: i32,
@@ -268,6 +272,7 @@ struct EpisodeRow {
     video_storage_key: Option<String>,
 }
 
+// 承载题材查询行，供公开内容题材分组使用。
 struct GenreRow {
     content_kind: String,
     content_id: Uuid,
@@ -276,6 +281,7 @@ struct GenreRow {
 }
 
 impl GenreRow {
+    // 从数据库结果读取题材行，供题材批量查询转换时调用。
     fn from_query_result(row: &QueryResult) -> Result<Self, DbErr> {
         Ok(Self {
             content_kind: row.try_get("", "content_kind")?,
@@ -286,6 +292,7 @@ impl GenreRow {
     }
 }
 
+// 在一致性快照中读取公开目录分页，供目录路由调用。
 pub async fn list(
     db: &DatabaseConnection,
     filter: CatalogFilter,
@@ -303,6 +310,7 @@ pub async fn list(
     Ok(page)
 }
 
+// 按筛选与可见性读取目录分页，供目录事务内查询调用。
 async fn list_on<C: ConnectionTrait>(
     db: &C,
     filter: CatalogFilter,
@@ -396,6 +404,7 @@ async fn list_on<C: ConnectionTrait>(
     })
 }
 
+// 在一致性快照中读取公开电影详情，供电影详情路由调用。
 pub async fn movie_detail(
     db: &DatabaseConnection,
     id: Uuid,
@@ -413,6 +422,7 @@ pub async fn movie_detail(
     Ok(detail)
 }
 
+// 按可见性读取电影及题材，供电影详情事务内查询调用。
 async fn movie_detail_on<C: ConnectionTrait>(
     db: &C,
     id: Uuid,
@@ -442,6 +452,7 @@ async fn movie_detail_on<C: ConnectionTrait>(
     }))
 }
 
+// 在一致性快照中读取公开剧集详情，供剧集详情路由调用。
 pub async fn series_detail(
     db: &DatabaseConnection,
     id: Uuid,
@@ -459,6 +470,7 @@ pub async fn series_detail(
     Ok(detail)
 }
 
+// 按可见性读取剧集、季和单集，供剧集详情事务内查询调用。
 async fn series_detail_on<C: ConnectionTrait>(
     db: &C,
     id: Uuid,
@@ -508,6 +520,7 @@ async fn series_detail_on<C: ConnectionTrait>(
     }))
 }
 
+// 执行参数化查询并映射多行，供目录查询内部调用。
 async fn query_models<T: FromQueryResult>(
     db: &impl ConnectionTrait,
     sql: &str,
@@ -524,6 +537,7 @@ async fn query_models<T: FromQueryResult>(
     .collect()
 }
 
+// 执行参数化查询并映射单行，供目录详情查询内部调用。
 async fn query_model<T: FromQueryResult>(
     db: &impl ConnectionTrait,
     sql: &str,
@@ -540,6 +554,7 @@ async fn query_model<T: FromQueryResult>(
     .transpose()
 }
 
+// 批量查询内容题材，供目录和详情结果组装时调用。
 async fn genres_for(
     db: &impl ConnectionTrait,
     references: &[(&str, Uuid)],

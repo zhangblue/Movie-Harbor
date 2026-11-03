@@ -7,12 +7,14 @@ use uuid::Uuid;
 
 #[derive(Clone)]
 #[allow(clippy::large_enum_variant)] // 保持管理主体的 Admin 变体直接承载既有会话类型。
+// 区分管理员会话与 MCP 凭据主体，供管理路由授权使用。
 pub enum ManagementPrincipal {
     Admin(session::CurrentSession),
     Mcp { key_digest: String },
 }
 
 impl fmt::Debug for ManagementPrincipal {
+    // 输出不含会话敏感信息的主体调试表示，供日志格式化时调用。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Admin(_) => f.write_str("Admin"),
@@ -24,6 +26,7 @@ impl fmt::Debug for ManagementPrincipal {
     }
 }
 
+// 判断方法和路径是否在 MCP 白名单内，供管理请求授权时调用。
 pub fn route_allowed(method: &Method, path: &str) -> bool {
     let Some(relative) = path.strip_prefix("/api/admin/") else {
         return false;
@@ -66,6 +69,7 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
     }
 }
 
+// 校验 Bearer 凭据摘要并构造 MCP 主体，供管理路由认证时调用。
 pub fn authenticate(headers: &HeaderMap, expected: Option<&str>) -> Option<ManagementPrincipal> {
     let expected = expected?;
     let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();

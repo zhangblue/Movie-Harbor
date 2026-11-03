@@ -14,6 +14,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 #[derive(Debug)]
+// 表示题材校验、冲突与数据库错误，供题材服务和路由使用。
 pub enum GenreError {
     Invalid,
     NotFound,
@@ -23,6 +24,7 @@ pub enum GenreError {
 }
 
 impl From<DbErr> for GenreError {
+    // 将数据库错误映射为题材错误，供服务查询失败时调用。
     fn from(error: DbErr) -> Self {
         // 创建或改名触发的数据库唯一约束统一映射为可恢复的题材冲突。
         if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
@@ -34,6 +36,7 @@ impl From<DbErr> for GenreError {
 }
 
 impl IntoResponse for GenreError {
+    // 将题材错误转换为 HTTP 响应，供题材路由失败时调用。
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::Invalid => (StatusCode::BAD_REQUEST, "invalid genre request"),
@@ -46,6 +49,7 @@ impl IntoResponse for GenreError {
     }
 }
 
+// 按顺序读取题材列表，供题材管理路由调用。
 pub async fn list<C: ConnectionTrait>(db: &C) -> Result<Vec<genre::Model>, GenreError> {
     Ok(genre::Entity::find()
         .order_by_asc(genre::Column::SortOrder)
@@ -54,6 +58,7 @@ pub async fn list<C: ConnectionTrait>(db: &C) -> Result<Vec<genre::Model>, Genre
         .await?)
 }
 
+// 校验并创建题材，供管理员创建题材时调用。
 pub async fn create(db: &DatabaseConnection, name: String) -> Result<genre::Model, GenreError> {
     let name = normalized_name(name)?;
     let tx = db.begin().await?;
@@ -76,6 +81,7 @@ pub async fn create(db: &DatabaseConnection, name: String) -> Result<genre::Mode
     Ok(model)
 }
 
+// 校验并修改题材名称，供管理员重命名时调用。
 pub async fn rename(
     db: &DatabaseConnection,
     id: Uuid,
@@ -92,6 +98,7 @@ pub async fn rename(
     Ok(active.update(db).await?)
 }
 
+// 停用题材，供管理员管理题材时调用。
 pub async fn deactivate(db: &DatabaseConnection, id: Uuid) -> Result<genre::Model, GenreError> {
     let model = genre::Entity::find_by_id(id)
         .one(db)
@@ -107,6 +114,7 @@ pub async fn deactivate(db: &DatabaseConnection, id: Uuid) -> Result<genre::Mode
     Ok(active.update(db).await?)
 }
 
+// 事务内更新题材顺序，供管理员排序时调用。
 pub async fn reorder(
     db: &DatabaseConnection,
     requested: Vec<(Uuid, i32)>,
@@ -156,6 +164,7 @@ pub async fn reorder(
     Ok(result)
 }
 
+// 按关联约束删除题材，供管理员删除时调用。
 pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<(), GenreError> {
     let tx = db.begin().await?;
     let model = genre::Entity::find_by_id(id)
@@ -186,6 +195,7 @@ pub async fn delete(db: &DatabaseConnection, id: Uuid) -> Result<(), GenreError>
 ///
 /// 调用方必须让 `tx` 持续到关联表插入和提交完成。共享行锁会与停用操作的 `UPDATE`
 /// 冲突，从而原子地确定关联与停用的先后顺序。
+// 校验题材可用于关联，供内容保存关联前在事务中调用。
 pub async fn ensure_associable(tx: &DatabaseTransaction, ids: &[Uuid]) -> Result<(), GenreError> {
     let distinct = ids.iter().copied().collect::<HashSet<_>>();
     if distinct.len() != ids.len() {
@@ -206,6 +216,7 @@ pub async fn ensure_associable(tx: &DatabaseTransaction, ids: &[Uuid]) -> Result
     Ok(())
 }
 
+// 规范化并校验题材名称，供创建和重命名前调用。
 fn normalized_name(name: String) -> Result<String, GenreError> {
     let name = name.trim();
     if name.is_empty() {

@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
 };
 
+// 保存启动配置，供应用初始化和路由共享状态构建时使用。
 #[derive(Clone)]
 pub struct Config {
     pub listen_addr: SocketAddr,
@@ -24,6 +25,7 @@ pub struct Config {
     pub admin_initial_password: Option<String>,
 }
 
+// 区分缺失与非法配置，供启动配置解析和错误报告使用。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     Missing(&'static str),
@@ -31,6 +33,7 @@ pub enum ConfigError {
 }
 
 impl Display for ConfigError {
+    // 格式化配置错误，供启动失败时输出具体环境变量名称。
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Missing(name) => {
@@ -46,10 +49,12 @@ impl Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    // 从进程环境加载配置，供主程序启动时调用。
     pub fn from_env() -> Result<Self, ConfigError> {
         Self::from_lookup(|name| env::var(name).ok())
     }
 
+    // 解析并校验配置来源，供环境加载和配置测试调用。
     fn from_lookup<F>(lookup: F) -> Result<Self, ConfigError>
     where
         F: Fn(&str) -> Option<String>,
@@ -127,7 +132,7 @@ impl Config {
         Ok(config)
     }
 
-    /// 在环境解析和应用启动两个边界均校验。
+    /// 校验公开来源与 Cookie 安全策略；在环境解析和应用启动两个边界均调用。
     pub fn validated_origin(&self) -> Result<url::Url, ConfigError> {
         let origin =
             parse_origin(&self.public_origin).ok_or(ConfigError::Invalid("PUBLIC_ORIGIN"))?;
@@ -152,6 +157,7 @@ impl Config {
     }
 }
 
+// 解析完整连接地址或组合数据库配置，供启动配置解析调用。
 fn database_url<F>(lookup: &F) -> Result<String, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -206,6 +212,7 @@ where
     Ok(url.into())
 }
 
+// 解析并校验视频类型白名单，供启动配置解析调用。
 fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
     const BROWSER_VIDEO_TYPES: [&str; 2] = ["video/mp4", "video/webm"];
     // 只接受浏览器可直接播放的格式，避免上传后公开站无法播放媒体。
@@ -225,7 +232,7 @@ fn parse_video_mime_types(value: &str) -> Result<Vec<String>, ConfigError> {
     Ok(result)
 }
 
-/// 解析 HTTP Origin，拒绝不属于 Origin 的 URL 组成部分。
+/// 解析 HTTP Origin 并拒绝额外 URL 组成部分，供启动配置与请求来源校验调用。
 pub(crate) fn parse_origin(value: &str) -> Option<url::Url> {
     // 公开来源只能是纯 HTTP Origin，避免凭据或路径混入同源与 Cookie 判断。
     if value.contains('\\') || value.chars().any(char::is_whitespace) {
@@ -242,6 +249,7 @@ pub(crate) fn parse_origin(value: &str) -> Option<url::Url> {
     .then_some(origin)
 }
 
+// 读取非空必填配置，供各启动配置项解析调用。
 fn required<F>(lookup: &F, name: &'static str) -> Result<String, ConfigError>
 where
     F: Fn(&str) -> Option<String>,
@@ -257,6 +265,7 @@ mod tests {
 
     use super::{Config, ConfigError};
 
+    // 构造有效必填配置，供配置解析测试复用。
     fn required_values() -> HashMap<&'static str, &'static str> {
         HashMap::from([
             ("LISTEN_ADDR", "127.0.0.1:3000"),
@@ -271,6 +280,7 @@ mod tests {
     }
 
     #[test]
+    // 验证 MCP 摘要可选且只接受小写 SHA-256，供配置测试运行。
     fn mcp_digest_is_optional_and_accepts_only_lowercase_sha256() {
         let mut values = required_values();
         for value in ["", "  "] {
@@ -310,6 +320,7 @@ mod tests {
 
     // Catches accepting plaintext or malformed MCP credentials at startup.
     #[test]
+    // 验证错误格式的 MCP 摘要阻止启动，供配置测试运行。
     fn malformed_mcp_digest_is_rejected_at_startup() {
         let mut values = required_values();
         for invalid in [
@@ -329,6 +340,7 @@ mod tests {
     }
 
     #[test]
+    // 验证局域网 HTTP 默认关闭且布尔值严格解析，供配置测试运行。
     fn insecure_lan_http_is_disabled_when_omitted_and_strictly_parsed() {
         let values = required_values();
         let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
@@ -343,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    // 验证局域网 HTTP 例外要求回环 HTTP 与非安全 Cookie，供配置测试运行。
     fn insecure_lan_http_requires_loopback_http_and_insecure_cookies() {
         for (origin, cookie_secure) in [
             ("https://localhost:8080", "false"),
@@ -362,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    // 验证符合条件的回环 HTTP 配置可启动，供配置测试运行。
     fn insecure_lan_http_accepts_loopback_http_configuration() {
         for origin in [
             "http://localhost:8080",
@@ -379,6 +393,7 @@ mod tests {
     }
 
     #[test]
+    // 验证完整数据库地址不能与拆分配置混用，供配置测试运行。
     fn database_url_cannot_be_combined_with_component_settings() {
         let mut values = required_values();
         values.insert("DATABASE_HOST", "db");
@@ -387,6 +402,7 @@ mod tests {
     }
 
     #[test]
+    // 验证代理头信任必须显式启用并配置密钥，供配置测试运行。
     fn trusted_proxy_headers_are_explicit_and_strictly_parsed() {
         let values = required_values();
         let config = Config::from_lookup(|name| values.get(name).map(ToString::to_string)).unwrap();
@@ -451,6 +467,7 @@ mod tests {
     }
 
     #[test]
+    // 验证初始管理员凭据延迟到数据库初始化校验，供配置测试运行。
     fn defers_initial_credentials_to_database_initialization() {
         let mut values = required_values();
         values.remove("ADMIN_NAME");

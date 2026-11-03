@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 #[derive(FromQueryResult)]
+// 承载导出快照中的电影行，供组装电影导出数据使用。
 struct MovieRow {
     id: Uuid,
     is_private: bool,
@@ -20,6 +21,7 @@ struct MovieRow {
 }
 
 #[derive(FromQueryResult)]
+// 承载导出快照中的剧集行，供组装剧集导出数据使用。
 struct SeriesRow {
     id: Uuid,
     is_private: bool,
@@ -30,6 +32,7 @@ struct SeriesRow {
 }
 
 #[derive(FromQueryResult)]
+// 承载导出快照中的单集行，供按剧集组装单集使用。
 struct EpisodeRow {
     series_id: Uuid,
     season_number: i32,
@@ -40,17 +43,20 @@ struct EpisodeRow {
 }
 
 #[derive(FromQueryResult)]
+// 承载导出快照中的媒体标识和存储键，供生成受控路径使用。
 struct MediaRow {
     id: Uuid,
     storage_key: String,
 }
 
 #[derive(FromQueryResult)]
+// 承载内容与题材名称的关联行，供导出时按内容分组。
 struct GenreRow {
     content_id: Uuid,
     name: String,
 }
 
+// 在只读一致性快照中读取并组装全量内容，供导出路由调用。
 pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<ContentExport, DbErr> {
     // 父内容、题材、单集和媒体必须在同一只读快照中读取，导出不能混入并发修改的关联数据。
     let tx = db
@@ -155,6 +161,7 @@ WHERE media_asset.id IN (
     })
 }
 
+// 按内容标识归组有序题材名称，供导出结果组装时调用。
 fn group_genres(rows: Vec<GenreRow>) -> HashMap<Uuid, Vec<String>> {
     let mut grouped: HashMap<Uuid, Vec<String>> = HashMap::new();
     for row in rows {
@@ -163,6 +170,7 @@ fn group_genres(rows: Vec<GenreRow>) -> HashMap<Uuid, Vec<String>> {
     grouped
 }
 
+// 从受控存储键生成媒体路径，供组装导出项时调用。
 fn media_path(
     media: &HashMap<Uuid, String>,
     id: Option<Uuid>,

@@ -17,6 +17,7 @@ use axum::{
     routing::{delete, get, put},
 };
 
+// 构建受管理员认证保护的用户管理路由，供应用启动时聚合。
 pub fn router(state: AuthState) -> Router {
     Router::new()
         .route("/api/admin/users", get(list).post(create))
@@ -29,6 +30,7 @@ pub fn router(state: AuthState) -> Router {
         .with_state(state)
 }
 
+// 解析筛选条件并返回用户分页，供管理列表请求调用。
 async fn list(
     State(state): State<AuthState>,
     Query(request): Query<ViewerUserRequest>,
@@ -38,6 +40,7 @@ async fn list(
     ))
 }
 
+// 创建普通用户，供管理员创建账号请求调用。
 async fn create(
     State(state): State<AuthState>,
     Json(request): Json<CreateViewerRequest>,
@@ -48,6 +51,7 @@ async fn create(
     ))
 }
 
+// 按版本重置普通用户密码，供管理员改密请求调用。
 async fn change_password(
     State(state): State<AuthState>,
     Path(id): Path<String>,
@@ -59,6 +63,7 @@ async fn change_password(
     ))
 }
 
+// 按版本删除普通用户，供管理员删除请求调用。
 async fn delete_user(
     State(state): State<AuthState>,
     Path(id): Path<String>,

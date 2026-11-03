@@ -1,3 +1,4 @@
+// 聚合数据库实体模块，供各领域服务和查询访问持久化模型。
 pub mod admin_session;
 pub mod admin_user;
 pub mod episode;

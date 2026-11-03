@@ -5,6 +5,7 @@ use rand_core::OsRng;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
+// 在阻塞线程生成密码哈希，供管理员初始化调用。
 pub async fn hash(password: String) -> Result<String, AuthError> {
     // Argon2 是 CPU 密集型计算，移入阻塞线程池以免占用 Tokio 的异步工作线程。
     tokio::task::spawn_blocking(move || {
@@ -18,6 +19,7 @@ pub async fn hash(password: String) -> Result<String, AuthError> {
     .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?
 }
 
+// 在阻塞线程校验密码哈希，供需要验证凭据的流程调用。
 pub async fn verify(password: String, hash: String) -> Result<bool, AuthError> {
     // 校验同样可能耗尽 CPU，不能直接在异步执行器上运行。
     tokio::task::spawn_blocking(move || {
@@ -31,6 +33,7 @@ pub async fn verify(password: String, hash: String) -> Result<bool, AuthError> {
     .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?
 }
 
+// 在并发限制下生成密码哈希，供账号创建或改密调用。
 pub async fn hash_limited(limit: &Arc<Semaphore>, password: String) -> Result<String, AuthError> {
     // 信号量限制同时进行的 Argon2 数量，避免密码修改高峰把所有 CPU 时间耗尽。
     let permit = limit
@@ -51,6 +54,7 @@ pub async fn hash_limited(limit: &Arc<Semaphore>, password: String) -> Result<St
     .map_err(|_| AuthError(StatusCode::INTERNAL_SERVER_ERROR))?
 }
 
+// 在并发限制下校验密码哈希，供登录和改密流程调用。
 pub async fn verify_limited(
     limit: &Arc<Semaphore>,
     password: String,

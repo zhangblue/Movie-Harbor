@@ -18,6 +18,7 @@ use sea_orm::{
 use std::net::SocketAddr;
 use tokio::time::Instant;
 
+// 构建管理员认证路由，供应用启动聚合时调用。
 pub fn router(state: AuthState) -> Router {
     let protected = Router::new()
         .route("/api/admin/session", get(read_session))
@@ -34,6 +35,7 @@ pub fn router(state: AuthState) -> Router {
 }
 
 /// 此中间件适用于所有需要认证的管理路由，包括未来新增的领域写操作。
+// 认证管理请求并执行写请求授权，供受保护管理路由中间件调用。
 pub async fn require_session(
     State(state): State<AuthState>,
     mut request: Request,
@@ -75,6 +77,7 @@ pub async fn require_session(
     Ok(response)
 }
 
+// 校验管理员凭据并创建会话，供登录请求调用。
 async fn login(
     State(state): State<AuthState>,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
@@ -161,6 +164,7 @@ async fn login(
     Ok(response)
 }
 
+// 返回当前管理员会话，供会话查询请求调用。
 async fn read_session(
     Extension(current): Extension<session::CurrentSession>,
 ) -> Result<Response, AuthError> {
@@ -174,6 +178,7 @@ async fn read_session(
         .into_response())
 }
 
+// 撤销当前管理员会话，供退出登录请求调用。
 async fn logout(
     State(state): State<AuthState>,
     Extension(current): Extension<session::CurrentSession>,
@@ -189,6 +194,7 @@ async fn logout(
         .into_response())
 }
 
+// 修改管理员密码并撤销旧会话，供改密请求调用。
 async fn change_password(
     State(state): State<AuthState>,
     Extension(current): Extension<session::CurrentSession>,

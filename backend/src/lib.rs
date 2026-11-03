@@ -1,3 +1,4 @@
+// 后端库入口公开各领域模块，供进程入口、路由聚合与集成测试使用。
 pub mod admin_content;
 pub mod admin_export;
 pub mod admin_users;

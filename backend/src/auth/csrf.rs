@@ -2,16 +2,19 @@ use axum::http::HeaderMap;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
+// 计算令牌摘要，供会话凭据保存与比较时调用。
 pub fn digest(value: &str) -> String {
     // 会话与 CSRF 的数据库字段只保存 SHA-256 摘要，泄露记录时不能直接复用原始令牌。
     format!("{:x}", Sha256::digest(value.as_bytes()))
 }
 
 // 随机且仅 HttpOnly Cookie 可见的会话令牌才是秘密；固定前缀把 CSRF 令牌置于独立派生域。
+// 从会话令牌派生 CSRF 令牌，供会话创建和认证时调用。
 pub fn token(session_token: &str) -> String {
     digest(&format!("movie-harbor:csrf:v1:{session_token}"))
 }
 
+// 比较令牌与保存的摘要，供写请求授权时调用。
 pub fn matches(value: &str, stored_digest: &str) -> bool {
     // 先摘要再以常量时间比较，避免根据首个不匹配位置泄露已存令牌摘要的信息。
     digest(value)
@@ -21,12 +24,14 @@ pub fn matches(value: &str, stored_digest: &str) -> bool {
 }
 
 #[derive(Clone)]
+// 保存请求来源策略，供认证与写请求同源校验使用。
 pub struct OriginPolicy {
     configured: url::Url,
     allow_insecure_lan_http: bool,
 }
 
 impl OriginPolicy {
+    // 构建来源策略，供应用启动时根据配置调用。
     pub fn new(configured: url::Url, allow_insecure_lan_http: bool) -> Self {
         Self {
             configured,
@@ -34,11 +39,13 @@ impl OriginPolicy {
         }
     }
 
+    // 校验请求主机是否符合策略，供认证中间件调用。
     pub fn host_allowed(&self, headers: &HeaderMap) -> bool {
         self.request_origin(headers)
             .is_some_and(|origin| self.origin_allowed(&origin))
     }
 
+    // 校验请求来源与主机，供写请求授权时调用。
     pub fn same_origin(&self, headers: &HeaderMap) -> bool {
         let Some(request_origin) = self.request_origin(headers) else {
             return false;
@@ -51,12 +58,14 @@ impl OriginPolicy {
         origin.origin() == request_origin.origin() && self.origin_allowed(&origin)
     }
 
+    // 提取并解析请求来源，供来源策略校验调用。
     fn request_origin(&self, headers: &HeaderMap) -> Option<url::Url> {
         // 仅采信唯一 Host，不从转发头推导管理请求的来源。
         let host = single_header(headers, axum::http::header::HOST)?;
         parse_request_origin(&format!("{}://{host}", self.configured.scheme()))
     }
 
+    // 判断来源是否符合配置与局域网例外，供同源校验调用。
     fn origin_allowed(&self, origin: &url::Url) -> bool {
         if origin.origin() == self.configured.origin() {
             return true;
@@ -82,6 +91,7 @@ impl OriginPolicy {
     }
 }
 
+// 严格解析请求来源，供来源策略读取请求头时调用。
 fn parse_request_origin(value: &str) -> Option<url::Url> {
     // 请求头必须先满足来源文法，不能让 URL 解析器补斜杠、清理路径或丢弃空 userinfo。
     // 配置来源仍使用既有解析规则；这里只收紧浏览器发来的 Host/Origin。
@@ -93,6 +103,7 @@ fn parse_request_origin(value: &str) -> Option<url::Url> {
     crate::config::parse_origin(value)
 }
 
+// 提取唯一合法请求头，供来源与主机校验调用。
 fn single_header(headers: &HeaderMap, name: axum::http::header::HeaderName) -> Option<&str> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?.to_str().ok()?;
@@ -103,6 +114,7 @@ fn single_header(headers: &HeaderMap, name: axum::http::header::HeaderName) -> O
 mod tests {
     use super::*;
 
+    // 构造 Host 和 Origin 请求头，供来源策略测试复用。
     fn headers(host: &str, origin: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
         headers.insert("host", host.parse().unwrap());
@@ -111,6 +123,7 @@ mod tests {
     }
 
     #[test]
+    // 验证局域网例外只接受匹配端口的私网数字来源，供来源策略测试运行。
     fn lan_policy_accepts_only_matching_private_numeric_origins_on_the_configured_port() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
         for authority in [
@@ -156,6 +169,7 @@ mod tests {
     }
 
     #[test]
+    // 验证来源与主机不匹配及无效请求头均被拒绝，供来源策略测试运行。
     fn lan_policy_rejects_origin_host_mismatch_and_missing_or_malformed_headers() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
         for origin in [
@@ -215,6 +229,7 @@ mod tests {
     }
 
     #[test]
+    // 验证主机和来源中的用户凭据被拒绝，供请求语法测试运行。
     fn request_syntax_rejects_userinfo_in_host_and_origin() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
         for authority in [
@@ -238,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    // 验证缺少双斜杠的来源被拒绝，供请求语法测试运行。
     fn request_syntax_rejects_origins_without_two_scheme_slashes() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
         for origin in [
@@ -253,6 +269,7 @@ mod tests {
     }
 
     #[test]
+    // 验证来源中的额外斜杠或路径被拒绝，供请求语法测试运行。
     fn request_syntax_rejects_origins_with_extra_slashes_or_paths() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), true);
         for origin in [
@@ -271,6 +288,7 @@ mod tests {
     }
 
     #[test]
+    // 验证合法 IPv6 大小写和默认端口归一化，供请求语法测试运行。
     fn request_syntax_keeps_legal_ipv6_case_and_default_port_normalization() {
         let policy = OriginPolicy::new(url::Url::parse("HTTPS://HARBOR.TEST:443/").unwrap(), false);
         assert!(policy.same_origin(&headers("HARBOR.TEST:443", "HTTPS://harbor.test")));
@@ -279,6 +297,7 @@ mod tests {
     }
 
     #[test]
+    // 验证关闭局域网例外时只接受配置的来源，供来源策略测试运行。
     fn disabled_policy_accepts_only_the_configured_origin() {
         let policy = OriginPolicy::new(url::Url::parse("http://localhost:8080").unwrap(), false);
         assert!(policy.same_origin(&headers("LOCALHOST:8080", "http://localhost:8080")));
@@ -301,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    // 验证局域网例外要求 HTTP 并归一化默认端口，供来源策略测试运行。
     fn lan_policy_requires_http_and_normalizes_default_ports() {
         let policy = OriginPolicy::new(url::Url::parse("https://localhost:8080").unwrap(), true);
         assert!(!policy.same_origin(&headers("192.168.1.20:8080", "https://192.168.1.20:8080")));

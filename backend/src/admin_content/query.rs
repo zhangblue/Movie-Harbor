@@ -57,6 +57,7 @@ LIMIT $5 OFFSET $6
 "#;
 
 #[derive(Debug, FromQueryResult)]
+// 承载管理内容查询行，供映射分页响应时使用。
 struct AdminContentRow {
     id: Uuid,
     is_private: bool,
@@ -68,6 +69,7 @@ struct AdminContentRow {
     poster_storage_key: Option<String>,
 }
 
+// 读取电影和剧集的统一分页列表，供管理内容路由调用。
 pub async fn list(
     db: &DatabaseConnection,
     filter: AdminContentFilter,

@@ -4,9 +4,11 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+// 表示普通用户密码不符合规则，供密码校验失败时返回。
 pub(crate) struct InvalidPassword;
 
 impl IntoResponse for InvalidPassword {
+    // 将密码规则错误转换为客户端响应，供路由处理校验失败时调用。
     fn into_response(self) -> Response {
         (
             StatusCode::BAD_REQUEST,
@@ -17,6 +19,7 @@ impl IntoResponse for InvalidPassword {
 }
 
 // 普通用户独立规则；不得加入管理员共用的密码哈希/校验模块。
+// 检查普通用户密码规则，供创建账号和修改密码前调用。
 pub(crate) fn validate(password: &str) -> Result<(), InvalidPassword> {
     if password.trim().is_empty() || password.chars().count() < 8 {
         return Err(InvalidPassword);

@@ -20,6 +20,7 @@ use sea_orm::{
 use uuid::Uuid;
 
 #[derive(Debug)]
+// 表示普通用户管理中的校验、冲突和数据库错误，供服务及路由使用。
 pub enum ViewerUserError {
     Invalid,
     InvalidPassword,
@@ -29,6 +30,7 @@ pub enum ViewerUserError {
 }
 
 impl From<DbErr> for ViewerUserError {
+    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
     fn from(error: DbErr) -> Self {
         if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
             Self::Conflict
@@ -39,12 +41,14 @@ impl From<DbErr> for ViewerUserError {
 }
 
 impl From<crate::auth::model::AuthError> for ViewerUserError {
+    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
     fn from(_: crate::auth::model::AuthError) -> Self {
         Self::Database
     }
 }
 
 impl IntoResponse for ViewerUserError {
+    // 将用户管理错误转换为 HTTP 响应，供路由失败时调用。
     fn into_response(self) -> Response {
         let (status, message) = match self {
             Self::Invalid => (StatusCode::BAD_REQUEST, "用户管理请求无效"),
@@ -65,6 +69,7 @@ const USER_COLUMNS: &str = "u.id, u.username, u.version, u.created_at, u.last_lo
 
 // 数据库时间类型停留在查询边界，响应使用项目统一的 RFC 3339 字符串格式。
 #[derive(FromQueryResult)]
+// 承载用户统计查询行，供转换管理列表摘要使用。
 struct ViewerUserRow {
     id: Uuid,
     username: String,
@@ -75,6 +80,7 @@ struct ViewerUserRow {
 }
 
 impl From<ViewerUserRow> for ViewerUserSummary {
+    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
     fn from(row: ViewerUserRow) -> Self {
         Self {
             id: row.id,
@@ -87,6 +93,7 @@ impl From<ViewerUserRow> for ViewerUserSummary {
     }
 }
 
+// 在一致性快照中查询用户分页与概览，供管理列表路由调用。
 pub async fn list(
     db: &DatabaseConnection,
     filter: ViewerUserFilter,
@@ -134,6 +141,7 @@ pub async fn list(
     })
 }
 
+// 校验并创建普通用户，供管理员创建账号时调用。
 pub async fn create(
     state: &AuthState,
     username: String,
@@ -160,6 +168,7 @@ pub async fn create(
     Ok(model.into())
 }
 
+// 锁定用户并校验版本，供改密或删除事务写入前调用。
 async fn locked_user(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -176,6 +185,7 @@ async fn locked_user(
     Ok(user)
 }
 
+// 重置用户密码并撤销所有会话，供管理员改密路由调用。
 pub async fn change_password(
     state: &AuthState,
     id: Uuid,
@@ -189,6 +199,7 @@ pub async fn change_password(
     // CPU 密集计算在锁外执行；真正写入前必须在用户锁内重新校验并发版本。
     let hash = password::hash_limited(&state.password_work, password).await?;
     let tx = state.db.begin().await?;
+    // 在事务中锁定用户并重验版本；冲突时不更新密码或撤销会话。
     let user = locked_user(&tx, id, version).await?;
     let next_version = user
         .version
@@ -199,6 +210,7 @@ pub async fn change_password(
     model.version = Set(next_version);
     model.updated_at = Set(chrono::Utc::now().fixed_offset());
     let user = model.update(&tx).await?;
+    // 密码变更与会话撤销同事务提交，失败时两者均不生效。
     viewer_session::Entity::delete_many()
         .filter(viewer_session::Column::ViewerUserId.eq(id))
         .exec(&tx)
@@ -207,6 +219,7 @@ pub async fn change_password(
     Ok(user.into())
 }
 
+// 按版本删除用户及其会话，供管理员删除路由调用。
 pub async fn delete(
     db: &DatabaseConnection,
     id: Uuid,

@@ -1,3 +1,4 @@
+// 聚合管理员认证组件，供应用初始化和管理路由使用。
 pub mod csrf;
 pub mod mcp;
 pub mod model;
@@ -16,6 +17,7 @@ use sea_orm::{
 use std::sync::Arc;
 
 #[derive(Clone)]
+// 保存管理路由共享的认证和安全策略，供应用聚合路由时构建。
 pub struct AuthState {
     pub db: DatabaseConnection,
     pub cookie_secure: bool,
@@ -27,6 +29,7 @@ pub struct AuthState {
     pub password_work: Arc<tokio::sync::Semaphore>,
 }
 
+// 在启动事务中按需初始化管理员，供应用监听前调用。
 pub async fn initialize(
     db: &DatabaseConnection,
     config: &Config,

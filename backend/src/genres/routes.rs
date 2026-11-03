@@ -14,6 +14,7 @@ use axum::{
     routing::{get, patch, post, put},
 };
 
+// 构建受管理员认证保护的题材路由，供应用启动时聚合。
 pub fn router(state: AuthState) -> Router {
     Router::new()
         .route("/api/admin/genres", get(list).post(create))
@@ -27,6 +28,7 @@ pub fn router(state: AuthState) -> Router {
         .with_state(state)
 }
 
+// 返回题材列表，供管理员列表请求调用。
 async fn list(State(state): State<AuthState>) -> Result<Json<Vec<GenreResponse>>, GenreError> {
     Ok(Json(
         service::list(&state.db)
@@ -37,6 +39,7 @@ async fn list(State(state): State<AuthState>) -> Result<Json<Vec<GenreResponse>>
     ))
 }
 
+// 创建题材，供管理员创建请求调用。
 async fn create(
     State(state): State<AuthState>,
     Json(request): Json<CreateGenreRequest>,
@@ -45,6 +48,7 @@ async fn create(
     Ok((StatusCode::CREATED, Json(model.into())))
 }
 
+// 重命名题材，供管理员修改请求调用。
 async fn rename(
     State(state): State<AuthState>,
     Path(id): Path<String>,
@@ -56,6 +60,7 @@ async fn rename(
     ))
 }
 
+// 解析题材排序并提交服务，供管理员排序请求调用。
 async fn reorder(
     State(state): State<AuthState>,
     Json(request): Json<ReorderGenresRequest>,
@@ -79,6 +84,7 @@ async fn reorder(
     ))
 }
 
+// 停用题材，供管理员停用请求调用。
 async fn deactivate(
     State(state): State<AuthState>,
     Path(id): Path<String>,
@@ -87,6 +93,7 @@ async fn deactivate(
     Ok(Json(service::deactivate(&state.db, id).await?.into()))
 }
 
+// 删除题材，供管理员删除请求调用。
 async fn delete_genre(
     State(state): State<AuthState>,
     Path(id): Path<String>,

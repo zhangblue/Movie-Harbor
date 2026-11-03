@@ -12,12 +12,14 @@ pub const COOKIE_NAME: &str = "mh_viewer_session";
 const SESSION_SECONDS: i64 = 86400;
 
 #[derive(Clone)]
+// 保存已认证普通用户及会话信息，供受保护请求和目录授权使用。
 pub struct CurrentSession {
     pub session: viewer_session::Model,
     pub viewer: viewer_user::Model,
     pub csrf_token: String,
 }
 
+// 生成普通用户会话 Cookie，供登录和清除会话时调用。
 pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
     format!(
         "{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
@@ -26,6 +28,7 @@ pub fn cookie(token: &str, secure: bool, clear: bool) -> String {
     )
 }
 
+// 创建普通用户会话并返回原始令牌，供登录成功后调用。
 pub async fn create<C: ConnectionTrait>(
     db: &C,
     viewer: &viewer_user::Model,
@@ -46,6 +49,7 @@ pub async fn create<C: ConnectionTrait>(
     Ok(raw)
 }
 
+// 要求有效普通用户会话，供受保护路由认证时调用。
 pub async fn authenticate<C: ConnectionTrait>(
     db: &C,
     headers: &HeaderMap,
@@ -55,6 +59,7 @@ pub async fn authenticate<C: ConnectionTrait>(
         .ok_or(AuthError(StatusCode::UNAUTHORIZED))
 }
 
+// 可选地认证普通用户会话，供公开目录判断私密内容可见性时调用。
 pub async fn authenticate_optional<C: ConnectionTrait>(
     db: &C,
     headers: &HeaderMap,
@@ -105,6 +110,7 @@ pub async fn authenticate_optional<C: ConnectionTrait>(
     }))
 }
 
+// 校验同源和 CSRF 令牌，供普通用户写请求授权时调用。
 pub fn authorize_write(
     current: &CurrentSession,
     headers: &HeaderMap,

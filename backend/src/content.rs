@@ -3,12 +3,14 @@ use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+// 表示内容字段或生命周期规则失败，供内容服务映射领域错误。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ContentRuleError {
     Invalid,
     Conflict,
 }
 
+// 区分部分更新的缺失、清空和值，供内容更新请求反序列化使用。
 #[derive(Debug, Default)]
 pub enum Patch<T> {
     #[default]
@@ -21,6 +23,7 @@ impl<'de, T> Deserialize<'de> for Patch<T>
 where
     T: Deserialize<'de>,
 {
+    // 读取显式空值或新值，供部分更新请求反序列化时调用。
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -33,6 +36,7 @@ where
     }
 }
 
+// 表示允许请求的目标生命周期状态，供状态转换服务使用。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TargetState {
     Draft,
@@ -40,6 +44,7 @@ pub enum TargetState {
     Archived,
 }
 
+// 去除空白并拒绝空值，供内容必填文本保存前校验。
 pub fn normalize_required(value: String) -> Result<String, ContentRuleError> {
     let value = value.trim();
     if value.is_empty() {
@@ -49,20 +54,24 @@ pub fn normalize_required(value: String) -> Result<String, ContentRuleError> {
     }
 }
 
+// 要求长整数字段大于零，供内容字段校验调用。
 pub fn require_positive_i64(value: i64) -> Result<(), ContentRuleError> {
     (value > 0).then_some(()).ok_or(ContentRuleError::Invalid)
 }
 
+// 要求整数字段大于零，供内容字段校验调用。
 pub fn require_positive_i32(value: i32) -> Result<(), ContentRuleError> {
     (value > 0).then_some(()).ok_or(ContentRuleError::Invalid)
 }
 
+// 校验版本一致性，供并发更新写入前调用。
 pub fn require_version(actual: i64, expected: i64) -> Result<(), ContentRuleError> {
     (actual == expected)
         .then_some(())
         .ok_or(ContentRuleError::Conflict)
 }
 
+// 解析并去重校验关联标识，供内容关联写入前调用。
 pub fn parse_unique_uuids(values: Vec<String>) -> Result<Vec<Uuid>, ContentRuleError> {
     let values = values
         .into_iter()
@@ -75,6 +84,7 @@ pub fn parse_unique_uuids(values: Vec<String>) -> Result<Vec<Uuid>, ContentRuleE
     Ok(values)
 }
 
+// 按部分更新语义应用文本，供内容字段更新时调用。
 pub fn apply_text(
     current: &mut String,
     patch: Patch<String>,
@@ -94,6 +104,7 @@ pub fn apply_text(
     }
 }
 
+// 按部分更新语义应用可选整数，供内容字段更新时调用。
 pub fn apply_optional_i32(
     current: &mut Option<i32>,
     patch: Patch<i32>,
@@ -113,6 +124,7 @@ pub fn apply_optional_i32(
     }
 }
 
+// 解析目标状态名称，供生命周期转换请求校验时调用。
 pub fn parse_target(value: &str) -> Result<TargetState, ContentRuleError> {
     match value {
         "draft" => Ok(TargetState::Draft),
@@ -122,6 +134,7 @@ pub fn parse_target(value: &str) -> Result<TargetState, ContentRuleError> {
     }
 }
 
+// 校验当前状态到目标状态的转换，供状态更新前调用。
 pub fn ensure_transition(current: &str, target: TargetState) -> Result<(), ContentRuleError> {
     // 生命周期转换由后端统一维护，避免客户端绕过发布和归档约束。
     matches!(
@@ -135,6 +148,7 @@ pub fn ensure_transition(current: &str, target: TargetState) -> Result<(), Conte
     .ok_or(ContentRuleError::Conflict)
 }
 
+// 写入目标状态及对应时间戳，供已校验的生命周期转换调用。
 pub fn apply_target_state(
     status: &mut String,
     published_at: &mut Option<DateTime<FixedOffset>>,
@@ -164,6 +178,7 @@ pub fn apply_target_state(
 }
 
 impl TargetState {
+    // 判断目标与当前状态是否相同，供转换前的幂等判断调用。
     pub fn matches(self, current: &str) -> bool {
         matches!(
             (self, current),
