@@ -66,7 +66,9 @@ const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"
 try{
   if(result.error||result.status!==0)throw new Error();
   const item=JSON.parse(result.stdout),transport=item&&item.transport,env=transport&&transport.env;
+  // 覆盖旧注册前限制对象字段，确保快照可由命令无损重建。
   const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+  // 验证旧注册参数时排除控制字符，避免恢复时引入非法值。
   const clean=value=>typeof value==="string"&&!/[\0\r\n]/.test(value);
   if(!exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])||
      item.name!=="movie-harbor"||item.enabled!==true||
@@ -214,10 +216,15 @@ cleanup_registration() {
   expected_snapshot=$1
   printf '%s' "$expected_snapshot" | node -e '
 const fs=require("node:fs"),{spawnSync}=require("node:child_process"),expected=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8")),options={encoding:"utf8",maxBuffer:16*1024*1024};
+// 清理注册时同步调用 Codex，供状态读取和删除使用。
 const run=args=>spawnSync("codex",args,options);
+// 清理前限制注册对象字段，避免将未知配置误判为本项目所有。
 const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+// 检查当前注册环境是否与快照完全一致，避免删除其他注册。
 const sameMap=(left,right)=>exactKeys(left,Object.keys(right))&&Object.keys(left).length===Object.keys(right).length&&Object.entries(right).every(([key,value])=>left[key]===value);
+// 清理前比对完整可恢复字段，仅将符合预期快照的注册视为本项目所有。
 const isOwned=item=>{const transport=item&&item.transport;return exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])&&item.name==="movie-harbor"&&item.enabled===true&&(item.disabled_reason===undefined||item.disabled_reason===null)&&(item.startup_timeout_sec===undefined||item.startup_timeout_sec===null)&&(item.tool_timeout_sec===undefined||item.tool_timeout_sec===null)&&(item.enabled_tools===undefined||item.enabled_tools===null)&&(item.disabled_tools===undefined||item.disabled_tools===null)&&exactKeys(transport,["type","command","args","env","env_vars","cwd"])&&transport.type==="stdio"&&transport.command===expected.command&&JSON.stringify(transport.args)===JSON.stringify(expected.args)&&sameMap(transport.env,expected.env)&&(transport.env_vars===undefined||(Array.isArray(transport.env_vars)&&transport.env_vars.length===0))&&(transport.cwd===undefined||transport.cwd===null);};
+// 每次删除前后重新读取注册，区分已删除、属于本项目和属于其他项目。
 const state=()=>{
   const current=run(["mcp","get","movie-harbor","--json"]);
   if(!current.error&&current.status===0)return isOwned(JSON.parse(current.stdout))?"owned":"foreign";
@@ -251,7 +258,9 @@ const fs=require("node:fs"),{spawnSync}=require("node:child_process"),snapshot=J
 const result=spawnSync("codex",["mcp","get","movie-harbor","--json"],{encoding:"utf8",maxBuffer:1024*1024});
 try{
   if(result.error||result.status!==0)throw new Error();const item=JSON.parse(result.stdout),transport=item&&item.transport;
+  // 恢复后校验允许的注册字段，防止未恢复的额外配置被忽略。
   const exactKeys=(value,allowed)=>value&&typeof value==="object"&&!Array.isArray(value)&&Object.keys(value).every(key=>allowed.includes(key));
+  // 恢复验证时比较环境变量的键和值，确保与原快照完全一致。
   const sameMap=(left,right)=>exactKeys(left,Object.keys(right))&&Object.keys(left).length===Object.keys(right).length&&Object.entries(right).every(([key,value])=>left[key]===value);
   if(!exactKeys(item,["name","enabled","disabled_reason","transport","startup_timeout_sec","tool_timeout_sec","enabled_tools","disabled_tools","auth_status"])||item.name!=="movie-harbor"||item.enabled!==true||(item.disabled_reason!==undefined&&item.disabled_reason!==null)||(item.startup_timeout_sec!==undefined&&item.startup_timeout_sec!==null)||(item.tool_timeout_sec!==undefined&&item.tool_timeout_sec!==null)||(item.enabled_tools!==undefined&&item.enabled_tools!==null)||(item.disabled_tools!==undefined&&item.disabled_tools!==null)||!exactKeys(transport,["type","command","args","env","env_vars","cwd"])||transport.type!=="stdio"||transport.command!==snapshot.command||JSON.stringify(transport.args)!==JSON.stringify(snapshot.args)||!sameMap(transport.env,snapshot.env)||(transport.env_vars!==undefined&&(!Array.isArray(transport.env_vars)||transport.env_vars.length!==0))||(transport.cwd!==undefined&&transport.cwd!==null))throw new Error();
 }catch{process.exit(1);}

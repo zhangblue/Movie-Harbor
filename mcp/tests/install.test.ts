@@ -68,6 +68,7 @@ if(process.env.FAKE_CODEX_MALFORMED==='1'&&args[0]==='mcp'&&args[1]==='list'){pr
 if(process.env.FAKE_CODEX_LIST_FAIL==='1'&&args[0]==='mcp'&&args[1]==='list'){process.stdout.write('[]');process.exit(17);}
 if(process.env.FAKE_CODEX_GET_FAIL==='1'&&args[0]==='mcp'&&args[1]==='get'){process.stdout.write('{}');process.exit(19);}
 let state=JSON.parse(readFileSync(process.env.FAKE_CODEX_STATE,'utf8'));
+// 模拟 Codex 读取注册时补齐默认字段，使安装和回滚测试接近真实响应。
 const rendered=item=>({...item,enabled:item.enabled??true,disabled_reason:item.disabled_reason??null,transport:{...item.transport,env:item.transport.env??{},env_vars:item.transport.env_vars??[],cwd:item.transport.cwd??null},startup_timeout_sec:item.startup_timeout_sec??null,tool_timeout_sec:item.tool_timeout_sec??null,enabled_tools:item.enabled_tools??null,disabled_tools:item.disabled_tools??null,auth_status:'unsupported'});
 if(args[0]!=='mcp') process.exit(2);
 if(args[1]==='list'){writeFileSync(1,JSON.stringify(state.map(rendered)));process.exit(0);}
