@@ -179,6 +179,7 @@ function validateArm64BinaryMetadata(output) {
 
 // 为 ARM64 镜像准备并检查 API 构建上下文，失败时清理临时资源。
 async function prepareArm64ApiContext(signal) {
+  // 先确认宿主编译工具可用；缺少工具或目标平台时在构建镜像前停止。
   requireVersion(
     await run("rustc", ["--version"], { signal }),
     "Rust",
@@ -187,6 +188,7 @@ async function prepareArm64ApiContext(signal) {
     await run("cargo-zigbuild", ["--version"], { signal }),
     "cargo-zigbuild",
   );
+  // 固定已检查的 Zig 路径和版本，确保后续交叉编译使用同一工具。
   const zigCommand = resolvePathCommand("zig");
   const zigVersion = requireVersion(
     await run(zigCommand, ["version"], { signal }),
@@ -201,6 +203,7 @@ async function prepareArm64ApiContext(signal) {
   let contextDirectory;
   try {
     contextDirectory = await mkdtemp(join(tmpdir(), "movie-harbor-api-arm64-"));
+    // 在独立目录交叉编译 ARM64 API，失败或中断时由外层清理临时结果。
     await run("cargo", [
       "zigbuild", "--locked", "--release", "--target", ARM64_RUST_TARGET,
       "--target-dir", targetDirectory, "-p", "movie-harbor-api",
@@ -223,6 +226,7 @@ async function prepareArm64ApiContext(signal) {
       throw error;
     }
     if (!binaryStat.isFile()) throw new Error(`movie-harbor-api must be a regular file: ${binary}`);
+    // 读取真实二进制元数据而非依赖文件名，校验架构和静态链接后才组装镜像。
     const metadata = await run("file", [binary], { signal });
     // The target name in the filename must not count as evidence of the ELF architecture.
     const description = metadata.startsWith(`${binary}: `) ? metadata.slice(binary.length + 2) : metadata;
@@ -298,22 +302,26 @@ async function main(args) {
       if (error.code !== "ENOENT") throw error;
     }
 
+    // 在开始耗时构建前检查 Docker 守护进程、Buildx 和 Compose；任一不可用即停止。
     await run("docker", ["info", "--format", "{{.OSType}}/{{.Architecture}}"], { signal });
     await run("docker", ["buildx", "version"], { signal });
     await run("docker", ["compose", "version", "--short"], { signal });
 
     if (platform === "linux/arm64") {
+      // ARM64 先在宿主机交叉编译并验证 API，再用预构建二进制组装目标镜像。
       arm64Build = await prepareArm64ApiContext(signal);
       await run("docker", [
         "buildx", "build", "--load", "--platform", platform,
         "--file", "backend/Dockerfile.prebuilt", "--tag", tags[0], arm64Build.contextDirectory,
       ], { signal, capture: false });
     } else {
+      // AMD64 使用原有 Dockerfile 在构建容器中编译 API，无需宿主 ARM64 工具链。
       await run("docker", [
         "buildx", "build", "--load", "--platform", platform,
         "--file", "backend/Dockerfile", "--tag", tags[0], ".",
       ], { signal, capture: false });
     }
+    // 公开站和管理后台分别按同一目标平台构建，任一失败都阻止生成发布包。
     for (const [file, tag] of [
       ["frontend/public-web/Dockerfile", tags[1]],
       ["frontend/admin-web/Dockerfile", tags[2]],
@@ -323,6 +331,7 @@ async function main(args) {
         "--file", file, "--tag", tag, ".",
       ], { signal, capture: false });
     }
+    // 构建后检查三个镜像的实际系统和架构；不符时拒绝导出和归档。
     for (const tag of tags) {
       const imagePlatform = await run("docker", ["image", "inspect", "--format", "{{.Os}}/{{.Architecture}}", tag], { signal });
       if (imagePlatform !== platform) throw new Error(`Expected ${tag} to use ${platform}, found ${imagePlatform}`);
