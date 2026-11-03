@@ -18,6 +18,7 @@ test("media supports byte ranges and the public player uses the media URL", asyn
   const video = page.getByTestId("native-video");
   await expect(video).toHaveAttribute("src", body.video_url);
   await expect(page.getByRole("status")).toHaveText("视频已可以播放");
+  // 在浏览器中静音后主动播放，避免自动播放限制影响实际播放进度验证。
   await video.evaluate(async (element: HTMLVideoElement) => {
     element.muted = true;
     await element.play();

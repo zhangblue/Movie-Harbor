@@ -29,17 +29,29 @@ test("probe preserves every audio/subtitle track and selects the first real vide
 
 // Catch accepting malformed probe output or ambiguous/invalid absolute stream indices.
 for (const [name, input, message] of [
+  // 空输入不是合法 JSON，应报告解析错误。
   ["empty", "", /FFprobe.*JSON/],
+  // 非 JSON 文本应报告解析错误。
   ["non JSON", "bad", /FFprobe.*JSON/],
+  // JSON null 不是探测对象，应报告结构错误。
   ["null", "null", /FFprobe.*结构/],
+  // 缺少 streams 数组时不能规划轨道。
   ["missing streams", JSON.stringify({ format: {} }), /streams/],
+  // format 为数组而非对象时拒绝结构。
   ["invalid format", JSON.stringify({ format: [], streams: [] }), /format/],
+  // 重复轨道索引会造成映射歧义，必须拒绝。
   ["duplicate index", JSON.stringify({ streams: [{ index: 0 }, { index: 0 }] }), /轨道索引.*重复/],
+  // 非整数轨道索引不能用于 FFmpeg 映射。
   ["fraction index", JSON.stringify({ streams: [{ index: 0.5 }] }), /轨道索引/],
+  // 负轨道索引不属于有效的输入轨道。
   ["negative index", JSON.stringify({ streams: [{ index: -1 }] }), /轨道索引/],
+  // 字符串轨道索引不得隐式转换为数字。
   ["string index", JSON.stringify({ streams: [{ index: "0" }] }), /轨道索引/],
+  // 缺少索引时不能安全指定输入轨道。
   ["missing index", JSON.stringify({ streams: [{}] }), /轨道索引/],
+  // 只有附加封面图时不能将其当成可播放的视频轨。
   ["cover only", JSON.stringify({ streams: [{ index: 0, codec_type: "video", disposition: { attached_pic: 1 } }] }), /没有可用的视频轨/],
+// 对每组无效探测结果断言具体错误，避免后续计划使用不可靠轨道信息。
 ]) test(`probe rejects ${name}`, () => assert.throws(() => parseProbeOutput(input), message));
 
 // Catch fabricating a reliable duration or compatible codec when fields are absent.

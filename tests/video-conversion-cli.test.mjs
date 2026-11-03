@@ -372,7 +372,9 @@ test("run returns errors without terminating its caller and cleans signal listen
   const code = await run([s.input], {
     // 用内存输出替身捕获错误诊断，避免测试写入真实终端。
     stdout: { write() {} }, stderr: { write(text) { diagnostics += text; } },
+    // 将探测进程限定到隔离的模拟工具，供断言调用方不会被终止。
     probeMedia: (input) => probeMedia(input, { env: s.env }),
+    // 将转换进程使用同一隔离环境，供检查失败输出与监听器清理。
     executeConversion: (conversion, options) => executeConversion(conversion, { ...options, env: s.env }),
   });
   assert.equal(code, 1); assert.match(diagnostics, /转换诊断尾部/);

@@ -50,6 +50,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
     // 模拟 JSON 管理请求和版本变化，供检查每一步导入及冲突。
     async json(method, path, body) {
       calls.push({ method, path, body });
+      // 优先执行当前场景的故障替身；若返回错误则不修改模拟服务状态。
       const injected = failure?.({ method, path, body, calls, records, genres: genreRecords });
       if (injected) throw injected;
       if (method === "GET" && path === "/api/admin/genres") return genreRecords.map((item) => ({ ...item }));
@@ -137,6 +138,7 @@ function fakeClient({ genres = [], existingMovies = [], existingSeries = [], fai
         assert.equal(body.version, item.version);
         assert.equal(Object.hasOwn(body, "duration_seconds"), true);
         item.duration_seconds = body.duration_seconds;
+        // 模拟单集修改同时推进父子版本，使续传测试能发现版本未保存的问题。
         item.version += 1;
         current.version += 1;
         return { series_version: current.version, episode: snapshot(item) };
@@ -553,7 +555,7 @@ for (const [checkpoint, version] of [["season", 3], ["episode", 4], ["duration",
   test(`series reopens disk after saved ${checkpoint} checkpoint without repeating writes`, async (t) => {
     const { path, progress, logger } = await setup(t);
     const originalSave = progress.save;
-    // 包装进度保存以在指定检查点注入中断，供续传测试使用。
+    // 先实际落盘，再按父版本注入中断，模拟从指定持久检查点恢复。
     progress.save = async () => {
       await originalSave();
       if (progress.state.series.Show?.version === version) throw new Error(`stopped after ${checkpoint} saved`);
@@ -594,6 +596,7 @@ test("logs import and upload stages before their work without paths or authentic
     return originalUpload(path, file);
   };
   const originalJson = client.json;
+  // 创建电影或剧集前检查最新阶段日志，再交给原替身执行请求。
   client.json = async (method, path, body) => {
     if (method === "POST" && ["/api/admin/movies", "/api/admin/series"].includes(path)) {
       assert.match(messages.at(-1)?.[1] ?? "", /^IMPORT /, "stage must precede content creation");

@@ -75,6 +75,7 @@ if (args[0] === 'info') {
   if (mode === 'wait-for-signal') {
     fs.writeFileSync(output, 'partial archive');
     console.error('SAVE_WAITING');
+      // 保持模拟导出进程运行，直到测试发出中断以验证部分归档清理。
     setInterval(() => {}, 1000);
   } else {
     if (mode === 'extra-tag') tags.push('postgres:17-alpine');
@@ -176,8 +177,10 @@ if (tool === 'rustc') {
       if (mode === 'zigbuild-ignore-signal') {
         // 包装进程在忽略模式中记录信号但继续运行，验证强制终止路径。
         process.on('SIGTERM', () => console.error('ZIGBUILD_WRAPPER_RECEIVED_SIGTERM'));
+        // 若包装进程没有被强制结束，超时后输出失败标记供测试识别。
         setTimeout(() => { console.error('ZIGBUILD_WRAPPER_SURVIVED'); process.exit(2); }, 3500);
       }
+      // 保持包装进程存活，使中断测试能检查进程组中的父子清理。
       setInterval(() => {}, 1000);
     } else if (mode !== 'binary-missing') {
       fs.mkdirSync(path.dirname(binary), { recursive: true });

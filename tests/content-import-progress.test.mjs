@@ -123,6 +123,7 @@ test("rename failure preserves the formal file and removes only its temporary fi
   const originalBytes = await readFile(path);
   const failingFs = {
     ...await import("node:fs/promises"),
+    // 在最终替换阶段注入重命名失败，供核对旧进度保留和临时文件清理。
     rename: async () => { throw new Error("simulated rename failure"); },
   };
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity, fs: failingFs });
@@ -141,6 +142,7 @@ test("chmod failure preserves the formal file and removes the temporary file", a
   const originalBytes = await readFile(path);
   const failingFs = {
     ...await import("node:fs/promises"),
+    // 在发布前注入权限设置失败，确认旧进度不会被覆盖。
     chmod: async () => { throw new Error("simulated chmod failure"); },
   };
   const store = await openProgressStore({ path, targetOrigin, sourceIdentity, fs: failingFs });

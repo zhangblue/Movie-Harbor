@@ -328,6 +328,7 @@ async function main(args) {
       if (imagePlatform !== platform) throw new Error(`Expected ${tag} to use ${platform}, found ${imagePlatform}`);
     }
 
+    // 先在临时目录组装交付清单，避免未完成内容出现在最终发布路径。
     staging = await mkdtemp(join(tmpdir(), "movie-harbor-offline-"));
     const bundle = join(staging, "movie-harbor");
     await mkdir(bundle);
@@ -340,6 +341,7 @@ async function main(args) {
     await run("docker", ["image", "save", "--output", join(bundle, "images.tar"), ...tags], { signal, capture: false });
     await validateStaging(bundle, DELIVERY_FILES);
 
+    // 导出后核对镜像标签和文件清单，并写入校验和，防止错误或多余镜像进入归档。
     const manifest = JSON.parse(await run("tar", ["-xOf", join(bundle, "images.tar"), "manifest.json"], { signal }));
     if (!Array.isArray(manifest) || manifest.some(image => !Array.isArray(image?.RepoTags))) {
       throw new Error("images.tar manifest must contain RepoTags arrays");
@@ -351,6 +353,7 @@ async function main(args) {
     await validateStaging(bundle, [...DELIVERY_FILES, "SHA256SUMS"]);
 
     // Keep the completed archive on the destination filesystem for atomic publication.
+    // 在目标文件系统生成归档并核对条目，确保发布前内容完整且可原子链接。
     archiveDirectory = await mkdtemp(join(outputDirectory, ".package-"));
     const archive = join(archiveDirectory, "bundle.tar.gz");
     await run("tar", ["-czf", archive, "-C", staging, "movie-harbor"], { signal, capture: false });
@@ -358,6 +361,7 @@ async function main(args) {
     requireExactEntries(entries, ["movie-harbor/", ...DELIVERY_FILES.map(file => `movie-harbor/${file}`), "movie-harbor/SHA256SUMS"], "archive entries");
     signal.throwIfAborted();
     // link atomically creates the final name and fails with EEXIST, including races.
+    // 以硬链接原子创建最终名称；并发出现同名产物时失败而不覆盖。
     await link(archive, destination);
     console.log(`Created ${destination}`);
   } finally {

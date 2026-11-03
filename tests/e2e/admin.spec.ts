@@ -4,10 +4,12 @@ import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublish
 
 // 验证用户管理保留 Unicode 用户名，改密或删除撤销全部会话。
 test("user management preserves Unicode usernames and resets or deletes every viewer session", async ({ page, playwright }) => {
+  // 管理 API 会话用于核对浏览器操作结果，并为私密媒体断言准备内容。
   const api = await AdminApi.login(playwright);
   const name = `ui-viewer-${Date.now()}`;
   // U+FEFF is not Unicode White_Space: backend normalization preserves it.
   const username = `\uFEFF${name}\uFEFF`;
+  // 通过浏览器单独登录，才能覆盖真实用户管理界面和会话流程。
   await page.goto("/admin/");
   await page.getByLabel("管理员名称").fill(adminName);
   await page.getByLabel("密码").fill(initialPassword);
@@ -20,6 +22,7 @@ test("user management preserves Unicode usernames and resets or deletes every vi
   await expect(page.getByText("用户已添加。", { exact: true })).toBeVisible();
   const users = await api.get<{ items: ViewerUser[] }>(`/api/admin/users?q=${name}`);
   expect(users.items[0].username).toBe(username);
+  // 建立两个普通用户会话，验证改密会同时撤销它们。
   const first = await ViewerApi.login(playwright, username);
   const second = await ViewerApi.login(playwright, username);
   try {
@@ -64,6 +67,7 @@ test("user management preserves Unicode usernames and resets or deletes every vi
 
 // 验证空部署初始化管理员及电影完整生命周期。
 test("empty deployment initializes the admin and a movie completes its lifecycle", async ({ page, playwright, request }) => {
+  // 通过管理界面登录以覆盖首次部署的认证及后续生命周期操作。
   await page.goto("/admin/");
   await page.getByLabel("管理员名称").fill(adminName);
   await page.getByLabel("密码").fill(initialPassword);
@@ -76,6 +80,7 @@ test("empty deployment initializes the admin and a movie completes its lifecycle
   await page.getByRole("button", { name: "新增题材" }).click();
   await expect(page.getByRole("row", { name: new RegExp(genreName) })).toBeVisible();
 
+  // 单独创建 API 会话，供比较界面写入与后台状态及公开访问结果。
   const api = await AdminApi.login(playwright);
   const genres = await api.get<Array<{ name: string }>>("/api/admin/genres");
   expect(genres.some((genre) => genre.name === genreName)).toBe(true);
@@ -90,17 +95,21 @@ test("empty deployment initializes the admin and a movie completes its lifecycle
   await page.getByLabel("时长（分钟）").fill("0.02");
   await page.getByLabel("简介").fill(`${name} searchable synopsis`);
   await page.getByLabel("题材").selectOption({ label: genreName });
+  // 海报上传前记录文件快照，稍后通过差集确定本次创建的物理文件。
   const beforePoster = snapshotMediaFiles();
   await page.getByLabel("海报文件").setInputFiles(poster);
   await page.getByRole("button", { name: "保存草稿" }).click();
   await expect(page.getByRole("status")).toHaveText("草稿已保存。");
+  // 比较上传前后的文件集合，避免把已有媒体误当成本次海报。
   const moviePosterFiles = uploadedSince(beforePoster);
   expect(moviePosterFiles).toHaveLength(1);
 
+  // 视频上传前再次记录快照，将视频与之前上传的海报区分开。
   const beforeVideo = snapshotMediaFiles();
   await page.getByLabel("视频文件").setInputFiles(video());
   await page.getByRole("button", { name: "发布", exact: true }).click();
   await expect(page.getByRole("heading", { name: "查看电影" })).toBeVisible();
+  // 记录新增视频文件，供永久删除后验证文件确实消失。
   const movieVideoFiles = uploadedSince(beforeVideo);
   expect(movieVideoFiles).toHaveLength(1);
   let movie = (await api.get<Movie[]>(`/api/admin/movies?name=${encodeURIComponent(name)}`)).find((item) => item.name === name)!;

@@ -66,7 +66,7 @@ export async function probeMedia(inputPath, options = {}) {
 // 转换前检查计划所需编码器，缺失时及早失败避免生成不完整文件。
 export async function verifyRequiredEncoders(requiredEncoders, options = {}) {
   if (requiredEncoders.length === 0) return;
-  // 先运行 FFmpeg 写入临时文件；进程失败时不会执行发布。
+  // 运行 FFmpeg 的 -encoders 枚举可用编码器；缺失时在转换开始前报错。
   const output = await runProcess(options.ffmpeg ?? "ffmpeg", ["-hide_banner", "-encoders"], options);
   const available = new Set(output.split(/\r?\n/).map((line) => line.match(/^\s*[VAS][A-Z.]{5}\s+(\S+)\s/)?.[1]).filter(Boolean));
   const missing = requiredEncoders.filter((encoder) => !available.has(encoder));

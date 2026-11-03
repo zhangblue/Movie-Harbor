@@ -85,7 +85,7 @@ function saveMovieStep(progress, name, changes) {
   return progress.save();
 }
 
-// 按元数据、媒体和发布步骤导入电影，并在每一步保存进度。
+// 创建电影草稿并导入元数据和媒体；每步持久化检查点供中断后续传。
 async function importMovie({ movie, client, progress, genreIds, logger }) {
   const name = movie.name;
   let state = ownEntry(progress.state.movies, name);
@@ -218,6 +218,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
     const seasonKey = String(episode.seasonNumber);
     let savedSeason = ownEntry(state.seasons ?? {}, seasonKey);
     if (!savedSeason) {
+      // 季创建使用当前剧集版本，成功后保存返回的父版本，供后续层级写入和续传校验。
       const updated = await client.json("POST", `${seriesPath}/seasons`, { version: state.version, number: episode.seasonNumber });
       const createdSeason = updated.seasons?.find((season) => season.number === episode.seasonNumber);
       if (!createdSeason) throw fatal(`created season missing from response: ${name} season ${seasonKey}`);
@@ -229,6 +230,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
     const episodeKey = String(episode.episodeNumber);
     let savedEpisode = ownEntry(savedSeason.episodes ?? {}, episodeKey);
     if (!savedEpisode) {
+      // 单集创建使用最新剧集版本；将新单集标识与父版本一起落盘，避免续传时重复创建。
       const updated = await client.json("POST", `${seriesPath}/seasons/${encodeURIComponent(savedSeason.id)}/episodes`, {
         version: state.version, number: episode.episodeNumber, name: episode.name,
       });
@@ -241,6 +243,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
       await saveSeriesStep(progress, name, { version: updated.version });
     }
     if (!savedEpisode.metadataUpdated) {
+      // 单集元数据更新使用单集版本，成功后同时保存返回的单集和剧集版本。
       const updated = await client.json("PATCH", `${seriesPath}/seasons/${encodeURIComponent(savedSeason.id)}/episodes/${encodeURIComponent(savedEpisode.id)}`, {
         version: savedEpisode.version, duration_seconds: episode.durationSeconds,
       });
@@ -249,11 +252,13 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
     }
     if (episode.video && !savedEpisode.videoUploaded) {
       logger?.info?.(`UPLOAD episode ${name} ${seasonKey}x${episodeKey} video`);
+      // 上传使用最新单集版本；保存返回的父子版本与完成标记，续传不再重复上传。
       const uploaded = await client.upload(`/api/admin/media/episodes/${encodeURIComponent(savedEpisode.id)}/video?version=${savedEpisode.version}`, episode.video);
       await saveEpisodeStep(progress, name, seasonKey, episodeKey, uploaded.series_version,
         { version: uploaded.version, videoUploaded: true });
     }
     if (!savedEpisode.completed) {
+      // 所需步骤均完成后落盘完成标记和当前剧集版本，供续传核对整个层级。
       await saveEpisodeStep(progress, name, seasonKey, episodeKey, state.version, { completed: true });
     }
   }
