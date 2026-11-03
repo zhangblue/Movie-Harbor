@@ -24,13 +24,16 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 use uuid::Uuid;
 
+/// 上传写入阶段使用的分块来源接口，让存储层逐块消费请求体或测试数据。
 pub trait ChunkSource {
+    /// 存储循环需要更多数据时返回下一块；None 表示结束，错误使本次上传退出。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>>;
 }
 
 impl ChunkSource for axum::extract::multipart::Field<'_> {
+    /// 存储层读取 multipart 字段时转发下一块，并把请求体超限归一为媒体大小错误。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
@@ -46,6 +49,7 @@ impl ChunkSource for axum::extract::multipart::Field<'_> {
     }
 }
 
+/// 存储操作经过同步、移动和提交边界时发出的事件，供钩子观察或注入测试故障。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StorageEvent {
     FileSynced(String),
@@ -62,7 +66,9 @@ pub enum StorageEvent {
     RecoveryCycleCompleted,
 }
 
+/// 存储流程在关键阶段调用的观察与故障注入接口；默认实现不干预操作。
 pub trait StorageHooks: Send + Sync {
+    /// 关键存储事件发生时接收通知；默认成功，覆写返回错误时由所在调用路径处理。
     fn on_event(&self, _event: &StorageEvent) -> io::Result<()> {
         Ok(())
     }
@@ -80,9 +86,11 @@ pub trait StorageHooks: Send + Sync {
     }
 }
 
+/// 常规初始化时安装的空钩子，沿用所有默认行为。
 struct NoopHooks;
 impl StorageHooks for NoopHooks {}
 
+/// 应用初始化后共用的本地媒体存储句柄，持有受控目录描述符、变更锁和事件钩子。
 #[derive(Clone)]
 pub struct LocalMediaStorage {
     root: Arc<PathBuf>,
@@ -95,6 +103,7 @@ pub struct LocalMediaStorage {
     hooks: Arc<dyn StorageHooks>,
 }
 
+/// 删除预检后保存的正式文件位置与身份，供后续暂存和回滚使用。
 pub(crate) struct RemovalSource {
     pub storage_key: String,
     leaf: Arc<OwnedFd>,
@@ -103,17 +112,20 @@ pub(crate) struct RemovalSource {
     inode: u64,
 }
 
+/// 删除或替换期间使用的持久操作目录句柄，承载清单与暂存文件。
 pub(crate) struct RemovalOperation {
     pub(crate) name: String,
     directory: Arc<OwnedFd>,
 }
 
+/// 启动恢复枚举出的操作目录及清单原始字节，由上层解析并作数据库引用决策。
 pub(crate) struct PersistedRemovalOperation {
     pub operation: RemovalOperation,
     pub manifest: Vec<u8>,
 }
 
 impl std::fmt::Debug for LocalMediaStorage {
+    /// 日志或调试格式化存储句柄时仅展示根路径，不展开内部描述符与钩子。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("LocalMediaStorage")
@@ -122,6 +134,7 @@ impl std::fmt::Debug for LocalMediaStorage {
     }
 }
 
+/// 上传提升成功后返回的媒体元数据及清理责任，供调用方完成数据库登记。
 #[derive(Debug)]
 pub struct StoredFile {
     pub storage_key: String,
@@ -132,6 +145,7 @@ pub struct StoredFile {
 }
 
 impl StoredFile {
+    /// 替换流程衔接旧媒体暂存时取走上传持有的变更锁；缺少守卫时拒绝继续。
     pub(crate) fn take_mutation_guard(&mut self) -> Result<OwnedMutexGuard<()>, MediaError> {
         // 替换流程接走已有锁守卫，连续保护新文件登记与旧文件暂存，无需释放后重新抢锁。
         self.cleanup
@@ -140,6 +154,7 @@ impl StoredFile {
             .ok_or_else(|| io::Error::other("stored file has no mutation guard").into())
     }
 
+    /// 替换流程交还锁责任时把守卫放回上传清理对象，拒绝缺少对象或重复持锁的状态。
     pub(crate) fn return_mutation_guard(
         &mut self,
         guard: OwnedMutexGuard<()>,
@@ -155,6 +170,7 @@ impl StoredFile {
         Ok(())
     }
 
+    /// 开始数据库登记前禁用析构中的正式文件删除，保留提交结果未知时的恢复依据。
     pub(crate) fn begin_database_write(&mut self) {
         // 数据库写入开始后，取消或连接错误可能使结果未知；Drop 必须保留正式文件及恢复标记。
         if let Some(cleanup) = &mut self.cleanup {
@@ -162,6 +178,7 @@ impl StoredFile {
         }
     }
 
+    /// 调用方确认数据库写入失败后重新允许析构清理本次未登记文件。
     pub(crate) fn database_failure_is_known(&mut self) {
         // 只有调用方已确认数据库失败，才重新允许 Drop 删除本次未登记的正式文件。
         if let Some(cleanup) = &mut self.cleanup {
@@ -169,6 +186,7 @@ impl StoredFile {
         }
     }
 
+    /// 数据库提交已确认后通知存储钩子；通知错误返回调用方，不撤销已发生的提交。
     pub(crate) fn notify_database_committed(&self) -> Result<(), MediaError> {
         if let Some(cleanup) = &self.cleanup {
             cleanup
@@ -178,6 +196,7 @@ impl StoredFile {
         Ok(())
     }
 
+    /// 登记收尾时解除正式文件清理责任并移除上传恢复标记。
     pub(crate) fn mark_registered(&mut self) -> Result<(), MediaError> {
         if let Some(mut cleanup) = self.cleanup.take() {
             // 登记成功后先解除正式文件的清理责任；即使移除标记失败，也不能删除数据库已引用的文件。
@@ -188,12 +207,14 @@ impl StoredFile {
     }
 }
 
+/// 上传恢复枚举时返回的受控暂存项，供上层按名称和修改时间筛选。
 #[derive(Debug)]
 pub(crate) struct IncomingEntry {
     pub name: String,
     pub modified_unix_seconds: i64,
 }
 
+/// 上传提升后记录的正式文件清理目标，析构清理时据此核对文件身份。
 struct FormalCleanup {
     directory: Arc<OwnedFd>,
     file_name: String,
@@ -204,6 +225,7 @@ struct FormalCleanup {
     checksum_sha256: String,
 }
 
+/// 上传期间持有的析构清理状态，随提升和数据库登记阶段切换责任并保持变更锁。
 struct PendingCleanup {
     incoming: Arc<OwnedFd>,
     quarantine: Arc<OwnedFd>,
@@ -216,6 +238,7 @@ struct PendingCleanup {
 }
 
 impl std::fmt::Debug for PendingCleanup {
+    /// 调试上传清理状态时展示临时名、标记名和正式键，不展开底层资源。
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PendingCleanup")
@@ -230,6 +253,7 @@ impl std::fmt::Debug for PendingCleanup {
 }
 
 impl PendingCleanup {
+    /// 上传已取锁、尚未写临时文件时创建清理守卫，确保提前退出仍能尝试收尾。
     fn new(
         incoming: Arc<OwnedFd>,
         quarantine: Arc<OwnedFd>,
@@ -249,6 +273,7 @@ impl PendingCleanup {
         }
     }
 
+    /// 临时文件成功重命名后把清理目标切换到正式位置，并保存提升前核验的身份。
     fn promoted(
         &mut self,
         directory: Arc<OwnedFd>,
@@ -269,6 +294,7 @@ impl PendingCleanup {
         });
     }
 
+    /// 上传收尾允许撤除恢复依据时移除标记并同步暂存目录，失败交给调用方处理。
     fn remove_marker(&mut self) -> Result<(), MediaError> {
         if let Some(name) = self.marker_name.take() {
             remove_if_present(&self.incoming, &name)?;
@@ -281,6 +307,7 @@ impl PendingCleanup {
 }
 
 impl Drop for PendingCleanup {
+    /// 上传清理守卫离开作用域时尽力删除临时项，并按数据库结果是否明确决定正式文件清理。
     fn drop(&mut self) {
         // 析构只能尽力收尾，不能向调用方返回错误或改写数据库结果；正式文件清理还取决于结果是否明确。
         if let Some(name) = self.temp_name.take() {
@@ -315,6 +342,7 @@ impl Drop for PendingCleanup {
     }
 }
 
+/// 元数据校验通过后传给流式写入阶段的上传参数，固定格式、用途和大小上限。
 struct StoreSpec<'a> {
     resource_id: Uuid,
     kind: MediaKind,
@@ -323,6 +351,7 @@ struct StoreSpec<'a> {
     max_bytes: u64,
 }
 
+/// 正式提升前持久化的上传恢复标记，恢复时结合数据库登记和文件身份决定是否清理。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PendingMarker {
     version: u8,
@@ -333,6 +362,7 @@ pub(crate) struct PendingMarker {
     checksum_sha256: String,
 }
 
+/// 按归属清理文件时使用的预期身份，要求大小与摘要匹配，并可追加设备和 inode 约束。
 struct DeletionIdentity<'a> {
     device: Option<u64>,
     inode: Option<u64>,
@@ -340,6 +370,7 @@ struct DeletionIdentity<'a> {
     checksum_sha256: &'a str,
 }
 
+/// 文件移入隔离区前持久化的归属记录，供删除中断后的恢复或标记清理使用。
 #[derive(Debug, Deserialize, Serialize)]
 struct QuarantineClaim {
     version: u8,
@@ -351,14 +382,17 @@ struct QuarantineClaim {
 }
 
 impl LocalMediaStorage {
+    /// 上层需要校验持久化键时检查受控路径语法，不检查文件是否存在。
     pub(crate) fn validate_storage_key(&self, storage_key: &str) -> Result<(), MediaError> {
         parse_storage_key(storage_key).map(|_| ())
     }
 
+    /// 应用启动时以默认空钩子初始化目录句柄，并执行隔离记录恢复。
     pub async fn initialize(root: impl AsRef<Path>) -> Result<Self, MediaError> {
         Self::initialize_with_hooks(root, Arc::new(NoopHooks)).await
     }
 
+    /// 需要观察或注入存储事件时初始化带钩子的实例；目录准备和隔离恢复失败会阻止返回。
     pub async fn initialize_with_hooks(
         root: impl AsRef<Path>,
         hooks: Arc<dyn StorageHooks>,
@@ -414,11 +448,12 @@ impl LocalMediaStorage {
         })
     }
 
+    /// 上层需要存储根路径时返回初始化阶段得到的规范路径。
     pub fn root(&self) -> &Path {
         self.root.as_ref()
     }
 
-    /// 通过目录描述符逐级解析持久化存储键，并验证目标是可读的普通文件。
+    /// 发布检查需要确认文件可用时，通过目录描述符逐级解析键并检查可读普通文件。
     /// 此过程不跟随符号链接，也不信任直接拼接的路径。
     pub fn is_accessible_regular_file(&self, storage_key: &str) -> Result<bool, MediaError> {
         let (kind, shard, file) = parse_storage_key(storage_key)?;
@@ -446,6 +481,7 @@ impl LocalMediaStorage {
         Ok(rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile)
     }
 
+    /// 上传入口校验元数据后流式写入并提升文件，返回仍需调用方登记到数据库的结果。
     pub async fn store<S: ChunkSource + Send>(
         &self,
         resource_id: Uuid,
@@ -455,6 +491,7 @@ impl LocalMediaStorage {
         policy: &UploadPolicy,
         mut source: S,
     ) -> Result<StoredFile, MediaError> {
+        // 写文件前先拒绝非法名称、格式声明与策略组合，避免为已知无效请求创建临时数据。
         let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
         // 锁随清理责任移入 StoredFile，覆盖流式写入、正式落盘及调用方随后的数据库登记。
         let mutation_guard = self.mutations.clone().lock_owned().await;
@@ -477,6 +514,7 @@ impl LocalMediaStorage {
             .await
     }
 
+    /// 上传已校验元数据并持锁时写入受控临时文件，校验内容后持久化标记并提升到正式目录。
     async fn write_and_promote<S: ChunkSource + Send>(
         &self,
         temp_name: &str,
@@ -493,6 +531,7 @@ impl LocalMediaStorage {
         let kind_fd = self.open_or_create_child(&self.root_fd, kind, "")?;
         let shard_fd = Arc::new(self.open_or_create_child(&kind_fd, shard, kind)?);
 
+        // 相对暂存目录独占创建文件且拒绝符号链接；名字冲突或打开失败时停止本次上传。
         let temp_fd = openat(
             &self.incoming_fd,
             temp_name,
@@ -521,6 +560,7 @@ impl LocalMediaStorage {
         self.hooks
             .on_event(&StorageEvent::FileSynced(format!(".incoming/{temp_name}")))?;
         let mut file = file.into_std().await;
+        // 已落盘的数据还须通过对应格式解析；失败会由清理守卫收尾，不能进入正式提升。
         validation::validate_content(spec.format, &mut file, byte_size)?;
         let validated_stat = rustix::fs::fstat(&file).map_err(io::Error::from)?;
         if rustix::fs::FileType::from_raw_mode(validated_stat.st_mode)
@@ -552,6 +592,7 @@ impl LocalMediaStorage {
         {
             return Err(MediaError::InvalidStorageKey);
         }
+        // 使用已持有的两侧目录描述符移动，NOREPLACE 使同名正式文件存在时失败而非被覆盖。
         renameat_with(
             &self.incoming_fd,
             temp_name,
@@ -599,6 +640,7 @@ impl LocalMediaStorage {
         })
     }
 
+    /// 文件提升前以临时写入和不可覆盖发布方式持久化恢复标记，失败时尝试清理临时标记。
     fn write_marker(&self, name: &str, marker: &PendingMarker) -> Result<(), MediaError> {
         // 先写入并同步独占临时文件，再以不可覆盖的重命名发布标记，避免恢复读取半份 JSON。
         let temporary_name = format!("{}.part", Uuid::new_v4().simple());
@@ -639,6 +681,7 @@ impl LocalMediaStorage {
         result
     }
 
+    /// 上传准备用途或分片目录时打开既有目录；缺失则创建并同步父目录后再打开。
     fn open_or_create_child<F: AsFd>(
         &self,
         parent: &F,
@@ -656,6 +699,7 @@ impl LocalMediaStorage {
         }
     }
 
+    /// 上传需要持久化目录项时在同步前后发出事件，任一失败均返回当前存储流程。
     fn sync_directory<F: AsFd>(&self, fd: &F, label: String) -> Result<(), MediaError> {
         self.hooks
             .on_event(&StorageEvent::BeforeDirectorySync(label.clone()))?;
@@ -664,12 +708,14 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 删除或清单恢复开始时获取共享变更锁，由调用方跨数据库决策和文件收尾持有。
     pub(crate) async fn lock_removal(&self) -> Result<OwnedMutexGuard<()>, MediaError> {
         // 删除和操作清单恢复由调用方持有同一把锁，贯穿暂存、数据库决策以及恢复或最终清理。
         self.hooks.on_event(&StorageEvent::BeforeRemovalLock)?;
         Ok(self.mutations.clone().lock_owned().await)
     }
 
+    /// 删除暂存前打开正式文件并记录身份；缺失返回 None，非法路径或文件类型使预检失败。
     pub(crate) fn prepare_removal(
         &self,
         storage_key: &str,
@@ -709,6 +755,7 @@ impl LocalMediaStorage {
         }))
     }
 
+    /// 首个文件暂存前创建操作目录并持久化清单，成功后调用方才能据清单执行移动。
     pub(crate) fn create_removal_operation(
         &self,
         operation_id: Uuid,
@@ -743,6 +790,7 @@ impl LocalMediaStorage {
         Ok(RemovalOperation { name, directory })
     }
 
+    /// 操作清单已发布后把预检文件移入操作目录，校验身份并同步两侧目录。
     pub(crate) fn stage_removal_source(
         &self,
         operation: &RemovalOperation,
@@ -784,6 +832,7 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 删除或替换需回滚时把当前操作的暂存文件放回正式位置，不覆盖同名文件。
     pub(crate) fn restore_removal_source(
         &self,
         operation: &RemovalOperation,
@@ -808,6 +857,7 @@ impl LocalMediaStorage {
         }
     }
 
+    /// 上层确认数据库已提交或已无引用后删除操作中的暂存普通文件，并同步目录。
     pub(crate) fn finish_removal_source(
         &self,
         operation: &RemovalOperation,
@@ -833,6 +883,7 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 操作数据已处理完毕时移除清单和操作目录；发现暂存数据或未知条目则保留并报错。
     pub(crate) fn close_removal_operation(
         &self,
         operation: &RemovalOperation,
@@ -861,6 +912,7 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 启动删除恢复时枚举受控操作目录并限量读取清单，交由上层结合数据库引用处理。
     pub(crate) fn persisted_removal_operations(
         &self,
     ) -> Result<Vec<PersistedRemovalOperation>, MediaError> {
@@ -915,6 +967,7 @@ impl LocalMediaStorage {
         Ok(operations)
     }
 
+    /// 恢复遇到尚未发布清单的操作目录时，只清理空目录或唯一的普通 manifest.part。
     fn clean_unpublished_removal_operation(
         &self,
         name: &str,
@@ -955,6 +1008,7 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 恢复清单条目前核对暂存名语法及普通文件类型，缺失返回 false，非法项返回错误。
     pub(crate) fn validate_persisted_removal_entry(
         &self,
         operation: &RemovalOperation,
@@ -980,6 +1034,7 @@ impl LocalMediaStorage {
         Ok(true)
     }
 
+    /// 启动恢复确认数据库仍有引用时恢复暂存文件，副本缺失则检查正式位置已有普通文件。
     pub(crate) fn restore_persisted_removal(
         &self,
         operation: &RemovalOperation,
@@ -1027,6 +1082,7 @@ impl LocalMediaStorage {
         }
     }
 
+    /// 上传恢复确认没有数据库登记后重读标记，仅对仍匹配的标记执行按身份清理。
     pub(crate) async fn remove_pending_owned(
         &self,
         marker: &PendingMarker,
@@ -1055,6 +1111,7 @@ impl LocalMediaStorage {
         Ok(true)
     }
 
+    /// 上传恢复需要清理正式位置时解析受控目录，并将归属检查与隔离删除交给底层辅助函数。
     fn remove_registered_if_owned(
         &self,
         storage_key: &str,
@@ -1081,6 +1138,7 @@ impl LocalMediaStorage {
         )
     }
 
+    /// 启动上传恢复时收集受控暂存名称的普通文件及修改时间，供上层筛选处理。
     pub(crate) fn incoming_entries(&self) -> Result<Vec<IncomingEntry>, MediaError> {
         // 启动上传恢复只看到受控名称的普通文件，由上层按年龄和数据库登记状态处理，不扫描正式目录。
         let directory = rustix::fs::Dir::read_from(&self.incoming_fd).map_err(io::Error::from)?;
@@ -1106,6 +1164,7 @@ impl LocalMediaStorage {
         Ok(entries)
     }
 
+    /// 上传恢复读取标记时限制内容大小，并核对版本、摘要格式和存储键与标记名的关系。
     pub(crate) fn read_pending_marker(&self, name: &str) -> Result<PendingMarker, MediaError> {
         // 名称、长度、版本、摘要格式和资源 ID 必须共同匹配，任何不可信标记都不能成为删除授权。
         if !is_pending_name(name) {
@@ -1140,6 +1199,7 @@ impl LocalMediaStorage {
         Ok(marker)
     }
 
+    /// 上传恢复决定清理暂存项时持锁删除受控名称并同步目录，缺失项按幂等处理。
     pub(crate) async fn remove_incoming(&self, name: &str) -> Result<(), MediaError> {
         let _mutation_guard = self.mutations.lock().await;
         if !is_controlled_incoming_name(name) {
@@ -1152,12 +1212,14 @@ impl LocalMediaStorage {
         Ok(())
     }
 
+    /// 上层完成一轮上传恢复后通知钩子，便于观察该轮完成边界并传播钩子错误。
     pub(crate) fn notify_recovery_cycle_completed(&self) -> Result<(), MediaError> {
         self.hooks.on_event(&StorageEvent::RecoveryCycleCompleted)?;
         Ok(())
     }
 }
 
+/// 初始化时打开根目录，或相对父描述符打开受控子目录；要求目录类型且拒绝末级符号链接。
 fn open_directory<F: AsFd>(parent: &F, name: &OsStr) -> io::Result<OwnedFd> {
     // 受控子目录逐级相对已打开的父目录解析；要求目录类型并拒绝符号链接，避免跳出受控层级。
     openat(
@@ -1169,6 +1231,7 @@ fn open_directory<F: AsFd>(parent: &F, name: &OsStr) -> io::Result<OwnedFd> {
     .map_err(Into::into)
 }
 
+/// Unix 初始化阶段核对目录所有者与写权限；私有目录还必须具有精确的 0700 权限。
 #[cfg(unix)]
 fn verify_exclusive_directory(directory: &OwnedFd, require_private_mode: bool) -> io::Result<()> {
     let stat = rustix::fs::fstat(directory).map_err(io::Error::from)?;
@@ -1186,6 +1249,7 @@ fn verify_exclusive_directory(directory: &OwnedFd, require_private_mode: bool) -
     }
 }
 
+/// 存储初始化时根据有效隔离记录恢复身份匹配的副本，只在正式位置空缺时移动回去。
 fn recover_quarantine_claims(root: &OwnedFd, quarantine: &OwnedFd) -> Result<(), MediaError> {
     // 只处理有合法 claim 的隔离副本；设备、inode、大小和内容摘要均匹配且原位置空缺才恢复。
     // 无关、损坏或身份不符的条目原地保留，不能把启动恢复变成对隔离区的无差别清理。
@@ -1256,6 +1320,7 @@ fn recover_quarantine_claims(root: &OwnedFd, quarantine: &OwnedFd) -> Result<(),
     Ok(())
 }
 
+/// 隔离恢复或清理时限量读取 claim，格式或版本无效返回 None，读取错误继续上报。
 fn read_quarantine_claim(
     quarantine: &OwnedFd,
     name: &str,
@@ -1279,6 +1344,7 @@ fn read_quarantine_claim(
     Ok((claim.version == 1 && valid_sha256(&claim.checksum_sha256)).then_some(claim))
 }
 
+/// 枚举操作目录和隔离 claim 时识别 32 位小写十六进制基名，排除未知命名条目。
 fn valid_claim_base(base: &str) -> bool {
     // 操作目录和 claim 基名限定为系统生成的 UUID 简写，不接管其他名称的文件或目录。
     base.len() == 32
@@ -1287,6 +1353,7 @@ fn valid_claim_base(base: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// 恢复清单条目前检查暂存名是否为八位十进制序号加 .data。
 fn is_staged_removal_name(name: &str) -> bool {
     // 清单中的暂存名只允许八位十进制序号加 .data，拒绝路径分量和未知命名格式。
     name.len() == 13
@@ -1294,11 +1361,13 @@ fn is_staged_removal_name(name: &str) -> bool {
         && name[..8].bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// 非 Unix 构建中的初始化占位实现，直接成功且不执行 Unix 所有者或权限检查。
 #[cfg(not(unix))]
 fn verify_exclusive_directory(_directory: &OwnedFd, _require_private_mode: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// 上传提升前比较目录名称当前对象与已打开描述符的身份，发现替换则让调用方拒绝提升。
 fn same_named_directory<F: AsFd>(
     parent: &F,
     name: &str,
@@ -1310,18 +1379,22 @@ fn same_named_directory<F: AsFd>(
     Ok(named.st_dev == held.st_dev && named.st_ino == held.st_ino)
 }
 
+/// 文件或目录操作需要持久化描述符状态时执行 fsync，并把失败返回当前流程。
 fn sync_fd<F: AsFd>(fd: &F) -> io::Result<()> {
     fsync(fd).map_err(Into::into)
 }
 
+/// 创建临时数据、标记和清单时提供仅所有者可读写的请求权限。
 fn file_mode() -> Mode {
     Mode::RUSR | Mode::WUSR
 }
 
+/// 创建受控目录或核对私有目录权限时提供仅所有者可读写执行的模式。
 fn directory_mode() -> Mode {
     Mode::RUSR | Mode::WUSR | Mode::XUSR
 }
 
+/// 清理临时项或恢复标记时相对父目录删除名称，已不存在视为成功，其余错误上报。
 fn remove_if_present<F: AsFd>(parent: &F, name: &str) -> io::Result<()> {
     match unlinkat(parent, name, AtFlags::empty()) {
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
@@ -1329,6 +1402,7 @@ fn remove_if_present<F: AsFd>(parent: &F, name: &str) -> io::Result<()> {
     }
 }
 
+/// 上传析构或恢复需要删除正式文件时核对身份与摘要，再隔离、重检、删除并同步目录。
 fn remove_owned_from_leaf<F: AsFd>(
     leaf: &F,
     file: &str,
@@ -1341,6 +1415,7 @@ fn remove_owned_from_leaf<F: AsFd>(
         .rsplit_once('/')
         .map(|(directory, _)| directory)
         .ok_or(MediaError::InvalidStorageKey)?;
+    // 正式名称已缺失时仍同步所在目录，并经钩子报告该次幂等清理的持久化结果。
     let sync_leaf = || -> Result<(), MediaError> {
         hooks.on_event(&StorageEvent::BeforeDirectorySync(
             directory_label.to_owned(),
@@ -1460,6 +1535,7 @@ fn remove_owned_from_leaf<F: AsFd>(
     Ok(())
 }
 
+/// 删除归属检查或隔离恢复时从已打开文件头分块计算 SHA-256，读失败则终止归属判断。
 fn hash_opened_file(file: &mut std::fs::File) -> Result<String, MediaError> {
     file.seek(std::io::SeekFrom::Start(0))?;
     let mut digest = Sha256::new();
@@ -1474,6 +1550,7 @@ fn hash_opened_file(file: &mut std::fs::File) -> Result<String, MediaError> {
     Ok(format!("{:x}", digest.finalize()))
 }
 
+/// 正式文件进入隔离区前持久化归属记录，发布失败则尝试清理未发布的临时记录。
 fn write_quarantine_claim(
     quarantine: &OwnedFd,
     name: &str,
@@ -1511,6 +1588,7 @@ fn write_quarantine_claim(
     result
 }
 
+/// 幂等删除发现正式文件已不存在时，只移除该存储键下已无隔离数据的有效 claim。
 fn clear_completed_quarantine_claims(
     quarantine: &OwnedFd,
     storage_key: &str,
@@ -1543,6 +1621,7 @@ fn clear_completed_quarantine_claims(
     Ok(())
 }
 
+/// 读取恢复记录时检查摘要是否为 64 位小写十六进制，拒绝异常格式参与文件匹配。
 fn valid_sha256(checksum: &str) -> bool {
     // 摘要只接受完整的小写十六进制，非法格式不能参与恢复时的所有权证明。
     checksum.len() == 64
@@ -1551,18 +1630,22 @@ fn valid_sha256(checksum: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// 枚举或删除暂存目录项时，仅接受受控的临时文件名和上传标记名。
 fn is_controlled_incoming_name(name: &str) -> bool {
     is_part_name(name) || is_pending_name(name)
 }
 
+/// 筛选暂存目录项时识别 UUID 简写加 .part 的临时文件名。
 fn is_part_name(name: &str) -> bool {
     is_uuid_suffix(name, ".part")
 }
 
+/// 读取或筛选上传恢复标记时识别 UUID 简写加 .pending 的文件名。
 fn is_pending_name(name: &str) -> bool {
     is_uuid_suffix(name, ".pending")
 }
 
+/// 临时名和标记名校验共用的语法检查，要求指定后缀前是 32 位小写十六进制。
 fn is_uuid_suffix(name: &str, suffix: &str) -> bool {
     // 仅接收系统生成的 32 位小写十六进制名及指定后缀，不把任意临时目录条目纳入清理。
     let Some(stem) = name.strip_suffix(suffix) else {
@@ -1574,6 +1657,7 @@ fn is_uuid_suffix(name: &str, suffix: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+/// 存储操作访问正式文件前解析用途、分片和文件名，并把非法路径或组合映射为键错误。
 fn parse_storage_key(key: &str) -> Result<(&str, &str, &str), MediaError> {
     // 失败关闭：只接受解析为三个普通路径分量的键，拒绝绝对路径、父目录穿越、反斜杠和空字符。
     if key.contains(['\\', '\0']) {
@@ -1595,12 +1679,14 @@ fn parse_storage_key(key: &str) -> Result<(&str, &str, &str), MediaError> {
     Ok((kind, shard, file))
 }
 
+/// 受控键拆分后核对用途、分片、资源 ID 与扩展名关系，避免把任意文件纳入存储操作。
 fn validate_storage_key_parts(kind: &str, shard: &str, file: &str) -> Result<(), MediaError> {
     // 用途、分片前缀、资源 ID 与扩展名必须相互匹配，不能把任意根目录内文件当作媒体处理。
     if !matches!(kind, "poster" | "video") {
         return Err(MediaError::InvalidStorageKey);
     }
     let (stem, extension) = file.rsplit_once('.').ok_or(MediaError::InvalidStorageKey)?;
+    // 分片和资源 ID 共用固定长度小写十六进制规则，任一不符都会使整个键失效。
     let valid_hex = |value: &str, length| {
         value.len() == length
             && value

@@ -17,6 +17,7 @@ use std::{
     path::{Component, Path},
 };
 
+/// 上传入口指定的媒体用途，用于选择允许格式、存储目录和数据库用途值。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MediaKind {
     Poster,
@@ -24,6 +25,7 @@ pub enum MediaKind {
 }
 
 impl MediaKind {
+    /// 生成存储键时把媒体用途转换为受控的一级目录名。
     pub(crate) fn directory(self) -> &'static str {
         match self {
             Self::Poster => "poster",
@@ -31,11 +33,13 @@ impl MediaKind {
         }
     }
 
+    /// 登记媒体资产时返回与存储目录一致的用途值。
     pub(crate) fn purpose(self) -> &'static str {
         self.directory()
     }
 }
 
+/// 上传前由配置构造的大小与视频 MIME 策略，供元数据检查和流式写入共同使用。
 #[derive(Clone, Debug)]
 pub struct UploadPolicy {
     max_bytes: u64,
@@ -43,6 +47,7 @@ pub struct UploadPolicy {
 }
 
 impl UploadPolicy {
+    /// 加载上传配置时校验大小上限及视频类型白名单，拒绝空集合或当前不支持的类型。
     pub fn new<I, S>(max_bytes: u64, allowed_video_mime_types: I) -> Result<Self, MediaError>
     where
         I: IntoIterator<Item = S>,
@@ -69,17 +74,20 @@ impl UploadPolicy {
         })
     }
 
+    /// 存储层开始写入前读取已验证的大小上限，用于逐块累计检查。
     pub(crate) fn max_bytes(&self) -> u64 {
         self.max_bytes
     }
 }
 
+/// 元数据通过后得到的规范扩展名和 MIME，供正式命名及实际内容校验使用。
 #[derive(Clone, Copy)]
 pub(crate) struct ExpectedFormat {
     pub extension: &'static str,
     pub mime_type: &'static str,
 }
 
+/// 写入临时文件前检查上传名称、用途、扩展名和 MIME 策略，返回后续应验证的格式。
 pub(crate) fn validate_metadata(
     kind: MediaKind,
     original_name: &str,
@@ -135,6 +143,7 @@ pub(crate) fn validate_metadata(
     Ok(expected)
 }
 
+/// 临时文件写入完成后按预期格式检查实际字节，空文件或解析失败会阻止正式提升。
 pub(crate) fn validate_content(
     format: ExpectedFormat,
     file: &mut File,
@@ -161,6 +170,7 @@ const MAX_DIMENSION: u32 = 16_384;
 const MAX_PARSE_DEPTH: usize = 8;
 const MAX_IMAGE_ALLOCATION_BYTES: u64 = 64 * 1024 * 1024;
 
+/// 图片结构检查通过后用受限解码器复核像素数据，打开、定位或解码失败均拒绝该图片。
 fn decode_image(file: &File, format: ImageFormat) -> bool {
     let Ok(mut cloned) = file.try_clone() else {
         return false;
@@ -173,16 +183,19 @@ fn decode_image(file: &File, format: ImageFormat) -> bool {
     limits.max_image_width = Some(MAX_DIMENSION);
     limits.max_image_height = Some(MAX_DIMENSION);
     limits.max_alloc = Some(MAX_IMAGE_ALLOCATION_BYTES);
+    // 在执行解码前设置尺寸与分配限制；结构检查不能代替解码，解码错误也必须拒绝上传。
     reader.limits(limits);
     reader
         .decode()
         .is_ok_and(|image| image.width() > 0 && image.height() > 0)
 }
 
+/// 各格式解析器读取固定宽度字段时统一把短读或 I/O 错误转为 false，交给上层拒绝输入。
 fn read_exact<R: Read>(reader: &mut R, bytes: &mut [u8]) -> bool {
     reader.read_exact(bytes).is_ok()
 }
 
+/// PNG 内容校验阶段检查签名、块边界、CRC 和必要结构，成功后仍需图片解码复核。
 fn validate_png(file: &mut File, byte_size: u64) -> bool {
     // 先核对 PNG 签名，再逐 chunk 检查长度、CRC 和必要结构；像素流由后续解码器复核。
     let mut signature = [0; 8];
@@ -250,6 +263,7 @@ fn validate_png(file: &mut File, byte_size: u64) -> bool {
     false
 }
 
+/// PNG 逐块读取类型和数据时增量更新 CRC 状态，由调用方取反并与块尾校验值比较。
 fn png_crc_update(mut crc: u32, bytes: &[u8]) -> u32 {
     for byte in bytes {
         crc ^= u32::from(*byte);
@@ -264,6 +278,7 @@ fn png_crc_update(mut crc: u32, bytes: &[u8]) -> u32 {
     crc
 }
 
+/// JPEG 内容校验阶段遍历段与扫描区，要求合法尺寸、帧和扫描记录及精确位于末尾的 EOI。
 fn validate_jpeg(file: &mut File, byte_size: u64) -> bool {
     // 从 SOI 逐段寻找帧头和扫描段；EOI 只有在两者均出现且恰好位于文件末尾时才接受。
     let mut soi = [0; 2];
@@ -336,6 +351,7 @@ fn validate_jpeg(file: &mut File, byte_size: u64) -> bool {
     }
 }
 
+/// JPEG 普通段之间读取下一个非填充标记，拒绝缺少 FF 前导、零标记或读取失败。
 fn next_jpeg_marker<R: Read>(reader: &mut R) -> Option<u8> {
     let mut byte = [0];
     reader.read_exact(&mut byte).ok()?;
@@ -350,6 +366,7 @@ fn next_jpeg_marker<R: Read>(reader: &mut R) -> Option<u8> {
     }
 }
 
+/// JPEG 进入扫描数据后跳过转义、填充和重启标记，返回结束当前扫描区的标记。
 fn next_entropy_marker<R: Read>(reader: &mut R) -> Option<u8> {
     // 熵编码区的 FF 00 是转义数据，FF D0–D7 是重启标记，连续 FF 是填充；其余值结束扫描区。
     let mut byte = [0];
@@ -370,6 +387,7 @@ fn next_entropy_marker<R: Read>(reader: &mut R) -> Option<u8> {
     }
 }
 
+/// WebP 内容校验阶段核对 RIFF 边界及图像前缀和尺寸，成功后交给图片解码器复核。
 fn validate_webp(file: &mut File, byte_size: u64) -> bool {
     // RIFF 声明长度不含起始八字节，加回后必须等于文件大小；VP8X 本身不算图像数据。
     let mut header = [0; 12];
@@ -444,6 +462,7 @@ const MAX_CONTAINER_ELEMENTS: usize = 100_000;
 const MAX_HEVC_CONFIGURATION_ARRAYS: usize = 64;
 const MAX_HEVC_NAL_UNITS: usize = 10_000;
 
+/// MP4 容器遍历时累计品牌、媒体区间、轨道与共享 box 数量，供最终轨道检查使用。
 #[derive(Default)]
 struct Mp4State {
     ftyp: bool,
@@ -452,6 +471,7 @@ struct Mp4State {
     boxes_seen: usize,
 }
 
+/// MP4 轨道解析期间收集的配置与采样表，用于随后交叉核对样本数量、位置和内容前缀。
 #[derive(Default)]
 struct Mp4Track {
     video_handler: bool,
@@ -463,17 +483,20 @@ struct Mp4Track {
     timed_sample_count: Option<u64>,
 }
 
+/// avcC 通过校验后保存的 NAL 长度宽度和参数集上下文，供 H.264 样本引用检查使用。
 struct H264Configuration {
     nal_length_bytes: usize,
     context: H264Context,
 }
 
+/// 视频样本描述解析后保留的受支持编码配置，决定后续采用 H.264 或 HEVC 检查路径。
 enum Mp4CodecConfiguration {
     H264(H264Configuration),
     Hevc { nal_length_bytes: usize },
 }
 
 impl Mp4CodecConfiguration {
+    /// 遍历 MP4 样本前读取该轨道配置的 NAL 长度前缀宽度。
     fn nal_length_bytes(&self) -> usize {
         match self {
             Self::H264(config) => config.nal_length_bytes,
@@ -482,6 +505,7 @@ impl Mp4CodecConfiguration {
     }
 }
 
+/// stsz 解析后保存的样本大小形式，轨道检查时统一读取固定或逐项声明的大小。
 #[derive(Default)]
 enum Mp4SampleSizes {
     #[default]
@@ -494,6 +518,7 @@ enum Mp4SampleSizes {
 }
 
 impl Mp4SampleSizes {
+    /// 轨道交叉校验时返回已声明样本数，缺失 stsz 时返回零以使完整性检查失败。
     fn len(&self) -> usize {
         match self {
             Self::Missing => 0,
@@ -502,6 +527,7 @@ impl Mp4SampleSizes {
         }
     }
 
+    /// 按 chunk 遍历样本时读取指定索引的大小，缺失或越界返回 None 以拒绝不一致的表。
     fn get(&self, index: usize) -> Option<u32> {
         match self {
             Self::Missing => None,
@@ -511,6 +537,7 @@ impl Mp4SampleSizes {
     }
 }
 
+/// MP4 内容校验入口解析容器并寻找至少一个通过配置、采样表和样本结构检查的视频轨道。
 fn validate_mp4(file: &mut File, byte_size: u64) -> bool {
     // 容器解析收集媒体区间与轨道；必须至少有一个视频轨道通过配置、采样表和样本校验。
     let mut state = Mp4State::default();
@@ -523,6 +550,7 @@ fn validate_mp4(file: &mut File, byte_size: u64) -> bool {
             .any(|track| validate_mp4_track(file, track, &state.mdat_ranges))
 }
 
+/// MP4 容器遍历时读取顶层或 moov 内 box，收集品牌、媒体区间并解析各轨道。
 fn parse_mp4_boxes(
     file: &mut File,
     start: u64,
@@ -616,6 +644,7 @@ fn parse_mp4_boxes(
     position == end
 }
 
+/// 遇到 trak 后在指定轨道容器内递归收集处理器、样本描述位置和采样表。
 fn parse_mp4_track_boxes(
     file: &mut File,
     start: u64,
@@ -676,6 +705,7 @@ fn parse_mp4_track_boxes(
     position == end
 }
 
+/// 轨道遍历遇到 hdlr 时读取处理器标识，记录是否为视频轨道以决定后续配置解析。
 fn parse_mp4_handler(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     let mut payload = [0; 12];
     if end - start < payload.len() as u64 || !read_exact(file, &mut payload) {
@@ -685,6 +715,7 @@ fn parse_mp4_handler(file: &mut File, start: u64, end: u64, track: &mut Mp4Track
     true
 }
 
+/// 确认视频轨道后解析唯一的样本描述，核对尺寸并保存通过检查的编码配置。
 fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     // 仅接受一个视频样本描述；跳过 86 字节样本项头后，在该样本项边界内寻找编码配置。
     let mut header = [0; 8];
@@ -716,6 +747,7 @@ fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
         return false;
     }
+    // 配置缺失或解析失败会拒绝该描述；H.264 还检查已解析 SPS 的像素尺寸，HEVC 不做此复核。
     let configuration =
         validate_mp4_codec_configuration(file, &entry[4..8], entry_start + 86, entry_end);
     if configuration
@@ -735,6 +767,7 @@ fn parse_mp4_stsd(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     track.codec_configuration.is_some()
 }
 
+/// 读取 MP4 定宽采样表前校验表项数量及容器容量，防止按无效数量继续读取或分配。
 fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Option<usize> {
     // 在读取表项或分配向量前核对数量上限及“八字节表头 + 数量 × 表项宽度”的最小空间。
     let mut header = [0; 8];
@@ -745,6 +778,7 @@ fn read_mp4_entry_count(file: &mut File, start: u64, end: u64, width: u64) -> Op
         .then_some(count)
 }
 
+/// 轨道遍历遇到 stts 时累计有效计时样本数，供随后与 stsz 的样本数核对。
 fn parse_mp4_stts(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     // stts 每项给出样本数与单样本时长；这里只要求两者非零并累计样本数，不换算实际播放秒数。
     let Some(count) = read_mp4_entry_count(file, start, end, 8) else {
@@ -770,6 +804,7 @@ fn parse_mp4_stts(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     true
 }
 
+/// 轨道遍历遇到 stsc 时读取 chunk 到样本的映射，顺序与引用约束留待轨道交叉校验。
 fn parse_mp4_stsc(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     let Some(count) = read_mp4_entry_count(file, start, end, 12) else {
         return false;
@@ -789,6 +824,7 @@ fn parse_mp4_stsc(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     true
 }
 
+/// 轨道遍历遇到 stsz 时读取固定或逐项样本大小，并在分配前限制数量与表边界。
 fn parse_mp4_stsz(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -> bool {
     let mut header = [0; 12];
     if end - start < 12 || !read_exact(file, &mut header) {
@@ -827,6 +863,7 @@ fn parse_mp4_stsz(file: &mut File, start: u64, end: u64, track: &mut Mp4Track) -
     true
 }
 
+/// 轨道遍历遇到 stco 或 co64 时读取 chunk 的绝对文件偏移，供后续定位样本。
 fn parse_mp4_chunk_offsets(
     file: &mut File,
     start: u64,
@@ -854,6 +891,7 @@ fn parse_mp4_chunk_offsets(
     true
 }
 
+/// MP4 容器收集完成后交叉校验视频轨道采样表，并逐样本检查媒体区间和编码结构。
 fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -> bool {
     // stts 与 stsz 样本数须一致；stsc 从第一个 chunk 起递增，且只能引用唯一的样本描述。
     let Some(configuration) = track.codec_configuration.as_ref() else {
@@ -931,6 +969,7 @@ fn validate_mp4_track(file: &mut File, track: &Mp4Track, mdats: &[(u64, u64)]) -
     sample_index == track.sample_sizes.len()
 }
 
+/// 遍历 HEVC 轨道样本时按长度前缀检查 NAL 边界和两字节头，并要求至少一个 VCL 单元。
 fn validate_hevc_sample(file: &mut File, offset: u64, size: u32, width: usize) -> bool {
     // 按配置给出的长度前缀逐 NAL 检查边界，并限制数量；这里只读取两字节头，不解码 HEVC 负载。
     let Some(sample_end) = offset.checked_add(u64::from(size)) else {
@@ -972,6 +1011,7 @@ fn validate_hevc_sample(file: &mut File, offset: u64, size: u32, width: usize) -
     cursor == sample_end && saw_vcl
 }
 
+/// 遍历 H.264 轨道样本时检查 NAL 边界、头和切片参数集引用，不完整解码视频切片。
 fn validate_length_prefixed_sample(
     file: &mut File,
     offset: u64,
@@ -1037,6 +1077,7 @@ fn validate_length_prefixed_sample(
     cursor == sample_end && saw_video_slice
 }
 
+/// 样本检查遇到 H.264 非分区切片时读取必要前缀，确认切片类型及 PPS、SPS 引用存在。
 fn validate_slice_parameter_set(nal: &RefNal<'_>, context: &H264Context) -> bool {
     // 切片类型须在允许范围内，且其 PPS 与 PPS 指向的 SPS 都必须已登记；这里不完整解析切片。
     let mut bits = nal.rbsp_bits();
@@ -1061,6 +1102,7 @@ fn validate_slice_parameter_set(nal: &RefNal<'_>, context: &H264Context) -> bool
         .is_some()
 }
 
+/// 解析 ftyp 的主品牌或兼容品牌时判断是否属于当前接受的 MP4 品牌集合。
 fn supported_mp4_brand(brand: &[u8]) -> bool {
     matches!(
         brand,
@@ -1068,6 +1110,7 @@ fn supported_mp4_brand(brand: &[u8]) -> bool {
     )
 }
 
+/// 解析视频样本描述时按编码类型查找 avcC 或 hvcC，并在受限大小内读取和验证配置。
 fn validate_mp4_codec_configuration(
     file: &mut File,
     codec: &[u8],
@@ -1113,6 +1156,7 @@ fn validate_mp4_codec_configuration(
     None
 }
 
+/// hvcC 配置读取后检查固定头、数组与 NAL 头边界，成功返回长度前缀宽度，不解析参数集负载。
 fn validate_hvcc(payload: &[u8]) -> Option<usize> {
     // 固定头至少 23 字节，指定保留位必须为一；长度前缀宽度取低两位加一，拒绝三字节形式。
     if payload.len() < 23
@@ -1185,6 +1229,7 @@ fn validate_hvcc(payload: &[u8]) -> Option<usize> {
     (cursor == payload.len() && saw_vps && saw_sps && saw_pps).then_some(width)
 }
 
+/// avcC 配置读取后检查参数集和可选扩展边界，并构建供后续切片检查使用的 H.264 上下文。
 fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
     // 先核对固定头、保留位和一/二/四字节 NAL 长度前缀，再逐一检查非空 SPS/PPS 的声明边界。
     if payload.len() < 7
@@ -1261,6 +1306,7 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
     if cursor != payload.len() {
         return None;
     }
+    // 手工边界检查通过后再交给配置解析器和参数集解析；任何失败都不会产生可用轨道配置。
     let avcc = AvcDecoderConfigurationRecord::try_from(payload).ok()?;
     let context = build_validated_h264_context(&avcc)?;
     // 解析后的参数集数量须与声明一致，防止重复 ID 覆盖后悄悄丢失参数集。
@@ -1272,6 +1318,7 @@ fn validate_avcc(payload: &[u8]) -> Option<H264Configuration> {
     })
 }
 
+/// avcC 边界检查后先解析 SPS 再解析依赖它的 PPS，建立用于样本引用检查的上下文。
 fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Option<H264Context> {
     // 第三方 SPS/PPS 解析的错误及可展开 panic 都转为拒绝，不让畸形参数集沿该路径传播 panic。
     let mut context = H264Context::new();
@@ -1305,6 +1352,7 @@ fn build_validated_h264_context(avcc: &AvcDecoderConfigurationRecord<'_>) -> Opt
     Some(context)
 }
 
+/// SPS 解出后、登记到 PPS 解析上下文前检查宏块数量计算和像素尺寸是否处于限制内。
 fn safe_sps_for_dependent_parsing(sps: &SeqParameterSet) -> bool {
     // 同时限制宏块轴长、面积计算和最终像素尺寸，避免异常 SPS 放大后续 PPS 解析的资源需求。
     let Some(width_in_mbs) = sps.pic_width_in_mbs_minus1.checked_add(1) else {
@@ -1325,6 +1373,7 @@ fn safe_sps_for_dependent_parsing(sps: &SeqParameterSet) -> bool {
     })
 }
 
+/// 调用完整 PPS 解析器前预检参数集引用及 slice-group 参数，拒绝超出受限图像规模的值。
 fn prevalidate_pps_slice_groups(nal: &RefNal<'_>, context: &H264Context) -> bool {
     // 在完整 PPS 解析前核对 SPS 引用、最多八个 slice group，以及各 map 类型中与图像大小相关的参数。
     let mut bits = nal.rbsp_bits();
@@ -1401,6 +1450,7 @@ fn prevalidate_pps_slice_groups(nal: &RefNal<'_>, context: &H264Context) -> bool
     }
 }
 
+/// avcC 核心参数集读取结束后判断是否允许继续解释 High Profile 扩展字段。
 fn is_high_avc_profile(profile: u8) -> bool {
     matches!(
         profile,
@@ -1408,10 +1458,12 @@ fn is_high_avc_profile(profile: u8) -> bool {
     )
 }
 
+/// 配置解析器的回归测试模块，运行单元测试时覆盖兼容输入、畸形边界与 panic 防护。
 #[cfg(test)]
 mod tests {
     use super::{validate_avcc, validate_hvcc};
 
+    /// HEVC 配置测试准备输入时构造仅含所需头字段与指定类型 NAL 头的最小夹具。
     fn minimal_hvcc(length_size_minus_one: u8, parameter_set_types: &[u8]) -> Vec<u8> {
         let mut payload = vec![
             0x01,
@@ -1447,6 +1499,7 @@ mod tests {
         payload
     }
 
+    /// 运行配置测试时确认 HEVC 支持一、二、四字节 NAL 长度前缀。
     #[test]
     fn accepts_hvcc_with_one_two_or_four_byte_nal_lengths() {
         for (length_size_minus_one, expected_width) in [(0, 1), (1, 2), (3, 4)] {
@@ -1455,12 +1508,14 @@ mod tests {
         }
     }
 
+    /// 运行配置测试时确认保留的三字节 HEVC NAL 长度前缀被拒绝。
     #[test]
     fn rejects_reserved_three_byte_hevc_nal_length_prefix() {
         let payload = minimal_hvcc(2, &[32, 33, 34]);
         assert_eq!(validate_hvcc(&payload), None);
     }
 
+    /// 运行配置测试时逐一缺少 VPS、SPS 或 PPS，验证必要类型检查不会遗漏。
     #[test]
     fn rejects_hvcc_missing_vps_sps_or_pps() {
         for parameter_set_types in [&[33, 34][..], &[32, 34], &[32, 33]] {
@@ -1469,6 +1524,7 @@ mod tests {
         }
     }
 
+    /// 运行配置测试时覆盖截断、越界 NAL 长度和尾随字节，确认 hvcC 必须完整消费。
     #[test]
     fn rejects_truncated_or_not_fully_consumed_hvcc_arrays() {
         let valid = minimal_hvcc(3, &[32, 33, 34]);
@@ -1485,6 +1541,7 @@ mod tests {
         assert_eq!(validate_hvcc(&trailing), None);
     }
 
+    /// 运行配置测试时确认数组声明类型与实际 NAL 头类型不一致会被拒绝。
     #[test]
     fn rejects_hvcc_array_type_that_differs_from_nal_header() {
         let mut payload = minimal_hvcc(3, &[32, 33, 34]);
@@ -1492,6 +1549,7 @@ mod tests {
         assert_eq!(validate_hvcc(&payload), None);
     }
 
+    /// 运行配置测试时检查 HEVC 参数集 NAL 的禁止位和 temporal_id_plus1 约束。
     #[test]
     fn rejects_invalid_hevc_parameter_set_nal_headers() {
         let valid = minimal_hvcc(3, &[32, 33, 34]);
@@ -1504,6 +1562,7 @@ mod tests {
         assert_eq!(validate_hvcc(&missing_temporal_id), None);
     }
 
+    /// 运行配置测试时破坏固定头或数组头保留位，验证解析器拒绝这些异常字段。
     #[test]
     fn rejects_invalid_hvcc_reserved_bits() {
         for index in [13, 15, 16, 17, 18] {
@@ -1517,6 +1576,7 @@ mod tests {
         assert_eq!(validate_hvcc(&array_reserved_bit), None);
     }
 
+    /// 运行配置测试时确认 temporal layer 数为未知值不会误拒绝其余字段有效的 hvcC。
     #[test]
     fn accepts_hvcc_with_unknown_temporal_layers() {
         for (length_size_minus_one, expected_width) in [(0, 1), (1, 2), (3, 4)] {
@@ -1526,6 +1586,7 @@ mod tests {
         }
     }
 
+    /// 运行配置测试时构造超量数组和 NAL，验证解析预算在计数超限时拒绝输入。
     #[test]
     fn rejects_hvcc_with_excessive_array_or_nal_counts() {
         let mut array_types = vec![32, 33, 34];
@@ -1547,6 +1608,7 @@ mod tests {
         assert_eq!(validate_hvcc(&payload), None);
     }
 
+    /// 运行配置测试时遍历确定生成的畸形 hvcC 样本，确认这些输入不会传播可展开 panic。
     #[test]
     fn malformed_hvcc_never_panics() {
         for length in 0..512_usize {
@@ -1557,6 +1619,7 @@ mod tests {
         }
     }
 
+    /// 运行 H.264 回归测试时验证 FFmpeg 生成的 High Profile avcC 扩展仍被接受。
     #[test]
     fn accepts_ffmpeg_high_profile_avcc_extensions() {
         let avcc = [
@@ -1571,6 +1634,7 @@ mod tests {
         );
     }
 
+    /// 运行 H.264 回归测试时区分省略扩展与扩展头截断，保持既有兼容范围和完整性检查。
     #[test]
     fn accepts_high_profile_avcc_without_extensions_but_rejects_partial_extensions() {
         let avcc = [
@@ -1589,6 +1653,7 @@ mod tests {
         }
     }
 
+    /// 运行 H.264 回归测试时覆盖扩展长度、NAL 类型、禁止位和保留位等畸形组合。
     #[test]
     fn rejects_malformed_high_profile_avcc_extensions() {
         let avcc = [
@@ -1631,6 +1696,7 @@ mod tests {
         }
     }
 
+    /// 运行 H.264 回归测试时确认只有类型字节或置位禁止位的参数集不会形成有效上下文。
     #[test]
     fn rejects_type_only_or_forbidden_h264_parameter_sets() {
         for avcc in [
@@ -1646,6 +1712,7 @@ mod tests {
         }
     }
 
+    /// 运行配置测试时遍历确定生成的畸形 avcC 样本，确认这些输入不会传播可展开 panic。
     #[test]
     fn malformed_avcc_never_panics() {
         for length in 0..512_usize {
@@ -1657,6 +1724,7 @@ mod tests {
     }
 }
 
+/// WebM 解析过程中累计文档、轨道和块状态；每个 TrackEntry 另建实例以隔离轨道字段。
 #[derive(Default)]
 struct WebmState {
     doc_type: bool,
@@ -1670,6 +1738,7 @@ struct WebmState {
     pixel_height: Option<u64>,
 }
 
+/// WebM 内容校验入口要求文档类型、有效视频轨道及对应 SimpleBlock，不解码视频负载。
 fn validate_webm(file: &mut File, byte_size: u64) -> bool {
     // 必须识别 webm 文档类型、受支持的视频轨道，以及引用该轨道的 SimpleBlock；不解码视频帧。
     let mut state = WebmState::default();
@@ -1680,6 +1749,7 @@ fn validate_webm(file: &mut File, byte_size: u64) -> bool {
         && state.block
 }
 
+/// WebM 容器遍历时递归解析受支持的 EBML 元素，收集轨道字段并检查块与轨道的关联。
 fn parse_ebml_elements(
     file: &mut File,
     start: u64,
@@ -1839,6 +1909,7 @@ fn parse_ebml_elements(
     position == end
 }
 
+/// 解析 EBML 像素尺寸等无符号整数时读取一至八字节大端值，非法宽度或短读返回 None。
 fn read_ebml_uint<R: Read>(reader: &mut R, size: u64) -> Option<u64> {
     if size == 0 || size > 8 {
         return None;
@@ -1852,6 +1923,7 @@ fn read_ebml_uint<R: Read>(reader: &mut R, size: u64) -> Option<u64> {
     )
 }
 
+/// 解析 TrackNumber 时记录编号；与当前已记录值相冲突则清空，留待轨道有效性检查判断。
 fn track_number_set(state: &mut WebmState, number: u64) {
     state.track_number = match state.track_number {
         None => Some(number),
@@ -1860,6 +1932,7 @@ fn track_number_set(state: &mut WebmState, number: u64) {
     };
 }
 
+/// 解析 EBML 元素 ID、长度或块轨道号时读取变长整数，并按调用模式保留或去除宽度标志。
 fn read_ebml_vint<R: Read>(reader: &mut R, keep_marker: bool) -> Option<(u64, usize)> {
     // 首个值为 1 的位确定 VINT 宽度；元素 ID 保留该位且最多四字节，数值去掉该位且最多八字节。
     let mut first = [0];
