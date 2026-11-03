@@ -23,8 +23,10 @@ const TABLES: [&str; 14] = [
     "mcp_staged_poster",
 ];
 
+/// 验证旧内容升级后默认公开，以及私密字段和用户表可回滚。
 #[tokio::test]
 async fn private_content_upgrade_preserves_public_defaults_and_is_reversible() {
+    // 停在私密内容迁移前并写入旧数据，才能检验升级默认值。
     let db = support::TestDatabase::at_migration("private_upgrade", Some(5)).await;
     db.execute_unprepared("INSERT INTO movie (id, name) VALUES ('10000000-0000-0000-0000-000000000001', 'Existing'); INSERT INTO series (id, name) VALUES ('20000000-0000-0000-0000-000000000001', 'Existing')").await.unwrap();
     migration::Migrator::up(&*db, Some(1)).await.unwrap();
@@ -82,6 +84,7 @@ async fn private_content_upgrade_preserves_public_defaults_and_is_reversible() {
     migration::Migrator::up(&*db, None).await.unwrap();
 }
 
+/// 验证普通用户名、会话约束和删除用户时的级联行为。
 #[tokio::test]
 async fn private_viewer_schema_enforces_uniqueness_checks_and_session_cascade() {
     use movie_harbor_api::entities::{viewer_session, viewer_user};
@@ -141,6 +144,7 @@ async fn private_viewer_schema_enforces_uniqueness_checks_and_session_cascade() 
     db.rollback().await.unwrap();
 }
 
+/// 在迁移测试准备时创建事务内的独立 schema，回滚即可丢弃测试结构。
 async fn isolated_database() -> DatabaseTransaction {
     let url = std::env::var("TEST_DATABASE_URL").expect(
         "TEST_DATABASE_URL is required; start PostgreSQL with docker compose -f docker-compose.test.yml up -d postgres",
@@ -148,6 +152,7 @@ async fn isolated_database() -> DatabaseTransaction {
     let db = Database::connect(url).await.unwrap();
     let tx = db.begin().await.unwrap();
     let schema = format!("migration_test_{}", Uuid::new_v4().simple());
+    // 将 search_path 限定到独立 schema，避免并行测试互相覆盖表结构。
     tx.execute_unprepared(&format!(
         "CREATE SCHEMA {schema}; SET LOCAL search_path TO {schema}"
     ))
@@ -156,11 +161,14 @@ async fn isolated_database() -> DatabaseTransaction {
     tx
 }
 
+/// 在迁移测试准备和验证阶段执行预期成功的 SQL。
 async fn sql(db: &DatabaseTransaction, statement: &str) {
     db.execute_unprepared(statement).await.unwrap();
 }
 
+/// 对预期违反约束的 SQL 检查 PostgreSQL 错误码，并保留外层事务。
 async fn rejects(db: &DatabaseTransaction, statement: &str, code: &str) {
+    // 使用保存点隔离预期错误，否则事务会进入失败状态而阻断后续断言。
     let savepoint = db.begin().await.unwrap();
     let error = savepoint.execute_unprepared(statement).await.unwrap_err();
     let sea_orm::DbErr::Exec(sea_orm::RuntimeErr::SqlxError(error)) = error else {
@@ -173,6 +181,7 @@ async fn rejects(db: &DatabaseTransaction, statement: &str, code: &str) {
     savepoint.rollback().await.unwrap();
 }
 
+/// 验证核心表经过完整升级、回滚和再次升级后仍按预期存在。
 #[tokio::test]
 async fn core_schema_is_reversible() {
     let db = isolated_database().await;
@@ -200,6 +209,7 @@ async fn core_schema_is_reversible() {
     db.rollback().await.unwrap();
 }
 
+/// 验证带旧简介数据的单集可升级，并可回滚重建简介列。
 #[tokio::test]
 async fn episode_synopsis_migration_is_reversible() {
     let db = isolated_database().await;
@@ -220,6 +230,7 @@ async fn episode_synopsis_migration_is_reversible() {
     db.rollback().await.unwrap();
 }
 
+/// 验证旧版存在待处理清理任务时媒体所有权迁移会拒绝升级。
 #[tokio::test]
 async fn media_ownership_migration_rejects_pending_cleanup_jobs() {
     let db = isolated_database().await;
@@ -237,6 +248,7 @@ async fn media_ownership_migration_rejects_pending_cleanup_jobs() {
     db.rollback().await.unwrap();
 }
 
+/// 验证旧版存在共享媒体时媒体所有权迁移会拒绝升级。
 #[tokio::test]
 async fn media_ownership_migration_rejects_shared_assets() {
     let db = isolated_database().await;
@@ -254,6 +266,7 @@ async fn media_ownership_migration_rejects_shared_assets() {
     db.rollback().await.unwrap();
 }
 
+/// 验证升级后的跨槽位独占约束及回滚后旧清理表的恢复。
 #[tokio::test]
 async fn media_ownership_migration_enforces_exclusive_assets_and_is_reversible() {
     let db = isolated_database().await;
@@ -291,11 +304,13 @@ async fn media_ownership_migration_enforces_exclusive_assets_and_is_reversible()
     db.rollback().await.unwrap();
 }
 
+/// 验证电影和剧集并发争用同一媒体时只有一个所有者能提交。
 #[tokio::test]
 async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
     let database = support::TestDatabase::migrated("ownership_concurrent").await;
     let db = database.connection();
     db.execute_unprepared("INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000004', 'poster/10/10000000000000000000000000000004.png', 'poster.png', 'image/png', 32, 'poster'); INSERT INTO series (id, name) VALUES ('30000000-0000-0000-0000-000000000004', 'Concurrent series')").await.unwrap();
+    // 先在未提交事务中占用媒体，使另一连接触发真实的唯一约束竞争。
     let first = db.begin().await.unwrap();
     first.execute_unprepared("INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000004', 'Concurrent movie', '10000000-0000-0000-0000-000000000004')").await.unwrap();
 
@@ -304,6 +319,7 @@ async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
         competing_db.execute_unprepared("UPDATE series SET poster_asset_id='10000000-0000-0000-0000-000000000004' WHERE id='30000000-0000-0000-0000-000000000004'").await
     });
     tokio::task::yield_now().await;
+    // 提交首个所有者以释放等待者，再检查竞争写入被唯一约束拒绝。
     first.commit().await.unwrap();
     let error = tokio::time::timeout(std::time::Duration::from_secs(5), competing)
         .await
@@ -319,12 +335,14 @@ async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
     );
 }
 
+/// 验证旧版写入无法穿过迁移预检与安装约束之间的窗口。
 #[tokio::test]
 async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_installation() {
     const MIGRATION_BARRIER: i64 = 0x4d48_4d45_4449_4135;
     let database = support::TestDatabase::at_migration("ownership_upgrade_lock", Some(4)).await;
     let db = database.connection();
     db.execute_unprepared("INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('10000000-0000-0000-0000-000000000005', 'poster/10/10000000000000000000000000000005.png', 'poster.png', 'image/png', 32, 'poster'); INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000005', 'Existing owner', '10000000-0000-0000-0000-000000000005'); INSERT INTO series (id, name) VALUES ('30000000-0000-0000-0000-000000000005', 'Competing owner')").await.unwrap();
+    // 持有迁移的咨询锁，让迁移在取得旧表锁后停住，构造可控竞争窗口。
     let blocker = db.begin().await.unwrap();
     blocker
         .execute_unprepared(&format!(
@@ -348,6 +366,7 @@ async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_install
         }
     }).await.expect("migration never acquired its v4 table locks");
 
+    // 在迁移持锁期间发起两种旧版写入，超时断言确认它们尚未穿过锁。
     let cleanup_db = db.clone();
     let mut cleanup_write = tokio::spawn(async move {
         cleanup_db.execute_unprepared("INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000005')").await
@@ -367,6 +386,7 @@ async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_install
             .is_err()
     );
 
+    // 释放屏障后等待迁移安装约束，再确认旧写入均失败。
     blocker.rollback().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), &mut migration)
         .await
@@ -377,6 +397,7 @@ async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_install
     assert!(shared_write.await.unwrap().is_err());
 }
 
+/// 验证完整迁移后目录层级和字段约束拒绝无效记录。
 #[tokio::test]
 async fn core_schema_enforces_catalog_constraints() {
     let db = isolated_database().await;
@@ -425,6 +446,7 @@ async fn core_schema_enforces_catalog_constraints() {
     db.rollback().await.unwrap();
 }
 
+/// 验证媒体仍被内容引用时外键阻止破坏引用完整性的操作。
 #[tokio::test]
 async fn foreign_keys_protect_media_references() {
     let db = isolated_database().await;
@@ -468,6 +490,7 @@ async fn foreign_keys_protect_media_references() {
     db.rollback().await.unwrap();
 }
 
+/// 验证迁移后的实体关联可读取目录层级、题材、媒体和会话。
 #[tokio::test]
 async fn entities_load_catalog_hierarchy_genres_media_and_sessions() {
     use movie_harbor_api::entities::{

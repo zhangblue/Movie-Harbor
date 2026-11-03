@@ -1,10 +1,12 @@
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
+/// 注册媒体独占关系迁移，供迁移器按版本执行。
 pub struct Migration;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// 升级时锁定旧写入并检查存量数据，再回填所有权和安装约束。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
@@ -97,6 +99,7 @@ CREATE TRIGGER episode_media_ownership_delete AFTER DELETE ON episode FOR EACH R
         Ok(())
     }
 
+    /// 回滚时撤销所有权表及相关触发器，恢复旧版清理任务结构。
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()

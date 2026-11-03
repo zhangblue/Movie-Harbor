@@ -6,6 +6,7 @@ use movie_harbor_api::content::{
 };
 use movie_harbor_api::route_params::parse_uuid;
 
+/// 验证路由 UUID 解析成功及输入无效时保留调用者提供的错误。
 #[test]
 fn uuid_parser_preserves_the_callers_error_value() {
     let valid = parse_uuid(
@@ -19,6 +20,7 @@ fn uuid_parser_preserves_the_callers_error_value() {
     assert_eq!(parse_uuid("bad".to_string(), "invalid"), Err("invalid"));
 }
 
+/// 验证内容字段去空白、正数检查和版本冲突规则。
 #[test]
 fn normalizes_shared_content_fields() {
     assert_eq!(normalize_required("  片名  ".into()).unwrap(), "片名");
@@ -33,6 +35,7 @@ fn normalizes_shared_content_fields() {
     assert_eq!(require_version(4, 3), Err(ContentRuleError::Conflict));
 }
 
+/// 验证 UUID 列表接受不同标识并拒绝重复或格式错误的值。
 #[test]
 fn parses_only_unique_uuid_lists() {
     let first = "00000000-0000-0000-0000-000000000001".to_string();
@@ -53,6 +56,7 @@ fn parses_only_unique_uuid_lists() {
     );
 }
 
+/// 验证字段补丁与生命周期转换在缺失、空值和非法转换下的行为。
 #[test]
 fn applies_patch_and_lifecycle_rules() {
     let mut text = "old".to_string();

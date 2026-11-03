@@ -1,10 +1,12 @@
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
+/// 注册公开目录索引迁移，供迁移器按版本执行。
 pub struct Migration;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// 升级时安装查询所需扩展并创建公开目录及搜索索引。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
@@ -52,6 +54,7 @@ CREATE INDEX series_genre_genre_idx ON series_genre (genre_id);
         Ok(())
     }
 
+    /// 回滚时移除本迁移创建的索引，保留共享扩展。
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()

@@ -16,6 +16,7 @@ mod support;
 
 const SECRET: &str = "media-authorization-test-proxy-secret";
 
+/// 在媒体授权测试前准备隔离数据库、代理配置及用户和管理员会话。
 async fn setup() -> (support::TestDatabase, Router, String, String) {
     let db = support::TestDatabase::migrated("media_auth").await;
     db.execute_unprepared("INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES ('70000000-0000-0000-0000-000000000001', 'Viewer', 'viewer', 'unused')").await.unwrap();
@@ -35,7 +36,7 @@ async fn setup() -> (support::TestDatabase, Router, String, String) {
         admin_initial_password: Some("admin-password".into()),
     };
     let app = app::build(db.connection(), &cfg).await.unwrap();
-    // Authorization deliberately has no files to consult: ownership, not file existence, grants access.
+    // 删除物理目录，使授权结果只取决于所有权与状态，而不依赖文件存在。
     std::fs::remove_dir_all(&cfg.media_dir).unwrap();
     let viewer = viewer_user::Entity::find()
         .one(&*db)
@@ -56,21 +57,26 @@ async fn setup() -> (support::TestDatabase, Router, String, String) {
     )
 }
 
+/// 按测试编号生成可预测的资产或内容标识。
 fn id(number: u32) -> String {
     format!("71000000-0000-0000-0000-{number:012}")
 }
+/// 按测试编号和媒体类型生成符合规则的存储键。
 fn key(number: u32, kind: &str) -> String {
     format!(
         "{kind}/ab/ab{number:030x}.{}",
         if kind == "poster" { "png" } else { "mp4" }
     )
 }
+/// 在授权矩阵准备阶段插入指定类型的媒体资产。
 async fn asset(db: &support::TestDatabase, number: u32, kind: &str) {
     db.execute_unprepared(&format!("INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES ('{}', '{}', 'fixture', '{}', 2, '{kind}')", id(number), key(number, kind), if kind == "poster" { "image/png" } else { "video/mp4" })).await.unwrap();
 }
+/// 以有效代理凭据发送授权请求，供正常授权场景使用。
 async fn authorize(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     request(app, uri, cookie, &[("x-movie-harbor-proxy-token", SECRET)]).await
 }
+/// 使用指定 Cookie 和请求头调用授权路由，供代理凭据异常场景复用。
 async fn request(
     app: &Router,
     uri: &str,
@@ -91,6 +97,7 @@ async fn request(
         .await
         .unwrap()
 }
+/// 在每个授权矩阵场景检查允许或隐藏结果及私有缓存策略。
 async fn expect(app: &Router, uri: &str, cookie: Option<&str>, allowed: bool) {
     let response = authorize(app, uri, cookie).await;
     assert_eq!(
@@ -106,7 +113,7 @@ async fn expect(app: &Router, uri: &str, cookie: Option<&str>, allowed: bool) {
     assert_eq!(response.headers()["cache-control"], "private, no-store");
 }
 
-// Catches missing owner lifecycle/privacy checks, including incomplete publication metadata.
+/// 验证电影、剧集和单集媒体在不同生命周期、隐私范围及会话下的授权矩阵。
 #[tokio::test]
 async fn movie_and_series_media_follow_complete_authorization_matrix() {
     let (db, app, viewer, admin) = setup().await;
@@ -156,7 +163,7 @@ async fn movie_and_series_media_follow_complete_authorization_matrix() {
     }
 }
 
-// Catches accepting unowned/misattached assets, forged proxy headers or normalized unsafe paths.
+/// 验证无所有者、错误关联、不安全路径和伪造代理凭据对管理员也被拒绝。
 #[tokio::test]
 async fn invalid_paths_ownership_and_proxy_credentials_are_denied_even_for_admin() {
     let (db, app, viewer, admin) = setup().await;
@@ -201,7 +208,7 @@ async fn invalid_paths_ownership_and_proxy_credentials_are_denied_even_for_admin
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         assert_eq!(response.headers()["cache-control"], "private, no-store");
     }
-    // Database purpose mismatch cannot be bypassed by admin preview.
+    // 修改数据库用途和所有者后重新请求，验证管理员预览也不能绕过关联检查。
     db.execute_unprepared(&format!(
         "UPDATE media_asset SET purpose = 'poster' WHERE id = '{}'",
         id(1)
@@ -213,7 +220,7 @@ async fn invalid_paths_ownership_and_proxy_credentials_are_denied_even_for_admin
     expect(&app, &valid, Some(&admin), false).await;
 }
 
-// Catches cached decisions after privacy/lifecycle changes, expiration, revocation or user deletion.
+/// 验证隐私、生命周期及会话变更后的后续请求重新判断权限。
 #[tokio::test]
 async fn subsequent_requests_recheck_privacy_lifecycle_and_sessions() {
     let (db, app, viewer, admin) = setup().await;
@@ -257,6 +264,7 @@ async fn subsequent_requests_recheck_privacy_lifecycle_and_sessions() {
     expect(&app, &uri, None, false).await;
 }
 
+/// 验证未启用代理信任或未配置密钥时授权请求被拒绝。
 #[tokio::test]
 async fn authorization_requires_enabled_proxy_trust_and_a_configured_secret() {
     let (db, _, _, admin) = setup().await;

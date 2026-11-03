@@ -1,10 +1,12 @@
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
+/// 注册私密内容和普通用户迁移，供迁移器按版本执行。
 pub struct Migration;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// 升级时添加默认公开的访问范围、普通用户及会话结构。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
@@ -40,6 +42,7 @@ CREATE INDEX series_public_catalog_idx ON series (published_at DESC, id) WHERE s
         Ok(())
     }
 
+    /// 回滚时移除访问范围、普通用户及会话结构和相应数据。
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()

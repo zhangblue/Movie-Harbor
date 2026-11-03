@@ -21,6 +21,7 @@ mod support;
 
 const KEY: &str = "mcp-series-test-key";
 
+/// 在 MCP 剧集测试前创建隔离数据库、鉴权路由和临时媒体目录。
 async fn setup() -> (support::TestDatabase, Router, std::path::PathBuf) {
     let db = support::TestDatabase::migrated("mcp_series").await;
     let root = std::env::temp_dir().join(format!("mcp_series_{}", Uuid::new_v4()));
@@ -43,6 +44,7 @@ async fn setup() -> (support::TestDatabase, Router, std::path::PathBuf) {
     (db, app, root)
 }
 
+/// 在测试中携带 MCP 凭据发送 JSON 创建请求。
 async fn send(app: &Router, path: &str, payload: Value) -> Response {
     let mut request = Request::builder()
         .method("POST")
@@ -58,10 +60,12 @@ async fn send(app: &Router, path: &str, payload: Value) -> Response {
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 按测试指定的状态与版本准备私密剧集。
 async fn insert_series(db: &support::TestDatabase, status: &str, version: i64) -> series::Model {
     series::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -77,6 +81,7 @@ async fn insert_series(db: &support::TestDatabase, status: &str, version: i64) -
     .unwrap()
 }
 
+/// 在子集创建测试前为指定剧集准备第一季。
 async fn insert_season(db: &support::TestDatabase, series_id: Uuid) -> season::Model {
     season::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -88,13 +93,14 @@ async fn insert_season(db: &support::TestDatabase, series_id: Uuid) -> season::M
     .unwrap()
 }
 
-// Catches either MCP creation path mutating an archived parent before checking its locked state.
+/// 验证归档剧集拒绝通过 MCP 新建季或单集，且层级和版本不变。
 #[tokio::test]
 async fn mcp_rejects_archived_series_child_creation_without_versions_or_children_changing() {
     let (db, app, root) = setup().await;
     let archived = insert_series(&db, "archived", 7).await;
     let existing_season = insert_season(&db, archived.id).await;
 
+    // 在已有季的归档剧集上分别尝试两条创建路径，以便检查双方均未修改数据。
     let season_response = send(
         &app,
         &format!("/api/admin/series/{}/seasons", archived.id),
@@ -134,7 +140,7 @@ async fn mcp_rejects_archived_series_child_creation_without_versions_or_children
     let _ = std::fs::remove_dir_all(root);
 }
 
-// Catches accidentally applying the archived MCP gate to the supported published-series workflow.
+/// 验证已发布剧集仍可通过 MCP 新增季与草稿单集，并递增父级版本。
 #[tokio::test]
 async fn mcp_keeps_published_series_open_for_new_draft_seasons_and_episodes() {
     let (db, app, root) = setup().await;

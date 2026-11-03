@@ -1,10 +1,12 @@
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
+/// 注册核心表结构迁移，供迁移器按版本执行。
 pub struct Migration;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// 升级到初始版本时创建核心表及其 PostgreSQL 约束。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         // PostgreSQL is the supported database. Keep its constraints alongside the columns.
         manager
@@ -121,6 +123,7 @@ CREATE TABLE file_cleanup_job (
         Ok(())
     }
 
+    /// 回滚初始版本时移除核心表及依赖的数据。
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager.get_connection().execute_unprepared(
             "DROP TABLE file_cleanup_job, movie_genre, series_genre, episode, season, series, movie, media_asset, genre, admin_session, admin_user;",

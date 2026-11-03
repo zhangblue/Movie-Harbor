@@ -1,10 +1,12 @@
 use sea_orm_migration::prelude::*;
 
 #[derive(DeriveMigrationName)]
+/// 注册默认题材数据迁移，供迁移器按版本执行。
 pub struct Migration;
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
+    /// 升级时插入固定标识和排序的默认题材。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()
@@ -29,6 +31,7 @@ INSERT INTO genre (id, name, sort_order) VALUES
         Ok(())
     }
 
+    /// 回滚时删除本迁移引入的默认题材。
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         manager
             .get_connection()

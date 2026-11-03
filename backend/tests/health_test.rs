@@ -5,6 +5,7 @@ use axum::{
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
+/// 验证健康检查请求返回成功状态和固定 JSON 响应体。
 #[tokio::test]
 async fn health_returns_ok() {
     let response = movie_harbor_api::app::test_router()
