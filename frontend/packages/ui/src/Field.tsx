@@ -1,13 +1,13 @@
 import { cloneElement, useId, type ReactElement, type ReactNode } from "react";
 
-// 定义表单字段控件属性，供相关请求、状态或组件使用。
+// 表单字段注入子控件的标识及无障碍描述和无效状态。
 type FieldControlProps = {
   id?: string;
   "aria-describedby"?: string;
   "aria-invalid"?: boolean | "true" | "false";
 };
 
-// 定义表单字段属性，供相关请求、状态或组件使用。
+// 共享表单字段的标签、子控件及可选帮助和错误内容。
 export interface FieldProps {
   label: ReactNode;
   children: ReactElement<FieldControlProps>;

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ApiError, normalizeError, type CaughtValue } from "@movie-harbor/api-client";
 import { useViewer } from "../auth/ViewerContext";
 
-// 定义结果，供相关请求、状态或组件使用。
+// 公开请求的加载、成功数据或错误状态，供页面选择加载、内容和重试界面。
 type Result<T> =
   | { status: "loading" }
   | { status: "ready"; data: T }
@@ -22,6 +22,7 @@ export function usePublicRequest<T>(load: () => Promise<T>) {
       if (ignore) return;
       const data = await load();
       if (!ignore) {
+        // 记录已加载详情的访问范围，身份切换时根组件据此关闭私密页面。
         if (typeof data === "object" && data !== null && "is_private" in data) recordScope(data.is_private === true);
         setResult({ load, attempt, revision, value: { status: "ready", data } });
       }
@@ -41,6 +42,7 @@ export function usePublicRequest<T>(load: () => Promise<T>) {
   let state: Result<T> = result?.load === load && result.attempt === attempt && result.revision === revision ? result.value : { status: "loading" };
   if (state.status === "ready" && !authenticated && typeof state.data === "object" && state.data !== null
     && "is_private" in state.data && state.data.is_private === true) {
+    // 身份发现期间先等待；确认匿名后隐藏残留私密数据并统一表现为 404。
     state = discoveryPending ? { status: "loading" } : { status: "error", error: new ApiError(404, "Not Found", "content not found", undefined) };
   }
   return { state, retry: () => setAttempt((value) => value + 1) };

@@ -1,29 +1,29 @@
 import { isJsonObject, normalizeError, type CaughtValue, type JsonObject, type JsonValue } from "./dataTypes";
 
-// 定义查询值，供相关请求、状态或组件使用。
+// API 查询参数允许的标量；空值由 URL 构造器省略。
 export type QueryValue = string | number | boolean | null | undefined;
-// 定义查询，供相关请求、状态或组件使用。
+// API 查询参数的键值映射，支持多值并由 URL 构造器编码。
 export type Query = Record<string, QueryValue | readonly QueryValue[]>;
 
-// 定义API请求初始化参数，供相关请求、状态或组件使用。
+// 普通 API 请求支持原生请求选项以及互斥的 body、json 和查询参数。
 export interface ApiRequestInit<JsonBody extends object = Record<string, never>> extends Omit<RequestInit, "body"> {
   body?: BodyInit | null;
   json?: JsonBody;
   query?: Query;
 }
 
-// 定义API下载，供相关请求、状态或组件使用。
+// 管理导出下载结果，包含文件内容和经过校验的文件名。
 export interface ApiDownload {
   blob: Blob;
   filename: string;
 }
 
-// 定义API上传进度，供相关请求、状态或组件使用。
+// 上传回调的两个阶段：传输时百分比可未知，服务端处理时为 100。
 export type ApiUploadProgress =
   | { phase: "uploading"; percent: number | null }
   | { phase: "processing"; percent: 100 };
 
-// 定义API上传初始化参数，供相关请求、状态或组件使用。
+// 带进度的媒体上传所需 POST 表单、查询参数和进度回调。
 export interface ApiUploadInit {
   method: "POST";
   body: FormData;
@@ -31,7 +31,7 @@ export interface ApiUploadInit {
   onProgress: (progress: ApiUploadProgress) => void;
 }
 
-// 定义API错误，供相关请求、状态或组件使用。
+// HTTP 失败响应的状态、消息和可选 JSON 详情，供页面按状态处理。
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
@@ -47,7 +47,7 @@ export class ApiError extends Error {
   }
 }
 
-// 定义API网络错误，供相关请求、状态或组件使用。
+// 网络或读取失败的原因及中止标记，供调用方区分网络异常。
 export class ApiNetworkError extends Error {
   readonly aborted: boolean;
   override readonly cause: Error;
@@ -62,7 +62,7 @@ export class ApiNetworkError extends Error {
   }
 }
 
-// 定义API响应解析错误，供相关请求、状态或组件使用。
+// 成功响应的 JSON 无法解析时携带 HTTP 状态和原始原因。
 export class ApiResponseParseError extends Error {
   readonly status: number;
   override readonly cause: Error;
@@ -178,6 +178,7 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
       reject(new ApiNetworkError(normalizeError(cause)));
     };
 
+    // 传输期间先报告不可计算进度；一旦得到百分比就保持单调，避免界面倒退。
     xhr.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable || event.total <= 0) {
         if (!hasComputableProgress) init.onProgress({ phase: "uploading", percent: null });
@@ -187,12 +188,15 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
       lastPercent = Math.max(lastPercent ?? 0, Math.min(100, Math.floor(event.loaded / event.total * 100)));
       init.onProgress({ phase: "uploading", percent: lastPercent });
     });
+    // 请求体传完不代表服务端已处理完成；切换阶段让界面继续等待最终响应。
     xhr.upload.addEventListener("load", () => init.onProgress({ phase: "processing", percent: 100 }));
+    // 服务端响应到达后才解析结果或错误并完成 Promise，避免把传输完成误当作成功。
     xhr.addEventListener("load", () => {
       if (settled) return;
       settled = true;
       void resolveXhrResponse<T>(xhr).then(resolve, reject);
     });
+    // 网络错误、超时和中止均通过同一完成保护拒绝，交给调用方展示失败。
     xhr.addEventListener("error", () => rejectNetwork(new TypeError("XMLHttpRequest error")));
     xhr.addEventListener("timeout", () => rejectNetwork(new TypeError("XMLHttpRequest timeout")));
     xhr.addEventListener("abort", () => rejectNetwork(new DOMException("Request was aborted", "AbortError")));

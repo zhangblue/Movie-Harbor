@@ -70,6 +70,7 @@ async function login(username = "Summer") {
   return user;
 }
 
+// 验证：初始会话返回 401 时匿名目录仍可使用。
 it("keeps the anonymous catalog usable when the initial session returns 401", async () => {
   const state = server(); render(<App />);
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
@@ -78,6 +79,7 @@ it("keeps the anonymous catalog usable when the initial session returns 401", as
   expect(screen.queryByText("私密")).not.toBeInTheDocument();
 });
 
+// 验证：焦点触发匿名身份发现失败时保持退出状态且不打扰访客。
 it.each(["401", "network error"] as const)("silently keeps an anonymous viewer signed out when focus discovery has a %s", async (failure) => {
   const state = server(); render(<App />);
   await screen.findByRole("link", { name: "查看远方来信详情" });
@@ -92,6 +94,7 @@ it.each(["401", "network error"] as const)("silently keeps an anonymous viewer s
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
 
+// 验证：公开海报加载失败时不重新校验匿名访客。
 it("does not revalidate an anonymous viewer when a public poster fails", async () => {
   const state = server(); render(<App />);
   await screen.findByRole("button", { name: "登录" });
@@ -105,6 +108,7 @@ it("does not revalidate an anonymous viewer when a public poster fails", async (
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
 
+// 验证：初始会话返回 401 后丢弃身份发现前的私密目录。
 it("discards a pre-discovery private catalog after the initial session returns 401", async () => {
   const state = server();
   const session = deferred<Response>(); const old = deferred<Response>();
@@ -121,6 +125,7 @@ it("discards a pre-discovery private catalog after the initial session returns 4
   expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog")).toHaveLength(2);
 });
 
+// 验证：其他标签页切换用户后忽略旧请求的不同失败状态。
 it.each([ ["logout", 204], ["logout", 401], ["password", 204], ["password", 401] ] as const)(
   "ignores old %s status %s after another tab switches to Winter", async (operation, status) => {
     const state = server(true); const user = userEvent.setup(); render(<App />);
@@ -150,6 +155,7 @@ it.each([ ["logout", 204], ["logout", 401], ["password", 204], ["password", 401]
   },
 );
 
+// 验证：会话发现网络失败时仍允许匿名浏览。
 it("keeps anonymous browsing available when session discovery has a network error", async () => {
   const state = server(); state.sessionNetworkError = true; render(<App />);
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
@@ -157,6 +163,7 @@ it("keeps anonymous browsing available when session discovery has a network erro
   expect(screen.getByText("暂时无法确认登录状态，请稍后重试。")).toBeInTheDocument();
 });
 
+// 验证：登录后刷新当前目录查询并显示用户名及账号操作。
 it("logs in, refreshes the current catalog query, and exposes username and account actions", async () => {
   window.history.replaceState(null, "", "/?kind=series&q=星&page=2");
   const state = server(); render(<App />); await login();
@@ -173,6 +180,7 @@ it("logs in, refreshes the current catalog query, and exposes username and accou
   expect(JSON.parse(String(write.init?.body))).toEqual({ username: "Summer", password: "old-password" });
 });
 
+// 验证：后端返回不同登录凭据错误时展示统一提示。
 it.each([401, 400])("uses the same login credential error for backend status %s", async (status) => {
   const state = server(); state.loginStatus = status; render(<App />); await login();
   expect(await screen.findByRole("alert")).toHaveTextContent("用户名或密码错误");
@@ -180,6 +188,7 @@ it.each([401, 400])("uses the same login credential error for backend status %s"
   expect(screen.getByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
+// 验证：退出登录后清除私密目录数据和 CSRF 令牌。
 it("clears private catalog data and CSRF after logout", async () => {
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
@@ -192,6 +201,7 @@ it("clears private catalog data and CSRF after logout", async () => {
   expect(new Headers(logout.init?.headers).get("x-csrf-token")).toBe("viewer-csrf");
 });
 
+// 验证：拒绝少于八个 Unicode 字符的密码并在有效改密后撤销会话。
 it("rejects passwords shorter than eight Unicode code points and revokes the session after a valid password change", async () => {
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await user.click(screen.getByRole("button", { name: "修改密码" }));
@@ -211,6 +221,7 @@ it("rejects passwords shorter than eight Unicode code points and revokes the ses
   expect(JSON.parse(String(write.init?.body))).toEqual({ current_password: "old-password", new_password: "😀😀😀😀😀😀😀😀" });
 });
 
+// 验证：改密被拒绝时显示本地化错误并保持登录。
 it("shows the localized password rejection and keeps the user signed in", async () => {
   const state = server(true); state.passwordStatus = 400; const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await user.click(screen.getByRole("button", { name: "修改密码" }));
@@ -222,6 +233,7 @@ it("shows the localized password rejection and keeps the user signed in", async 
   expect(screen.getByText("Summer")).toBeInTheDocument();
 });
 
+// 验证：从不同私密内容路径退出时立即关闭内容。
 it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
   "closes private content at %s immediately after logout", async (path) => {
     window.history.replaceState(null, "", path);
@@ -236,6 +248,7 @@ it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series
   },
 );
 
+// 验证：焦点校验发现会话撤销后移除私密数据并忽略旧响应。
 it("removes private data after a revoked session on focus and ignores an old authenticated response", async () => {
   const state = server(true); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
@@ -250,6 +263,7 @@ it("removes private data after a revoked session on focus and ignores an old aut
   expect(screen.queryByRole("link", { name: "查看群星之间详情" })).not.toBeInTheDocument();
 });
 
+// 验证：会话重新校验遇到网络错误时不注销已登录用户。
 it("does not sign out an authenticated viewer because session revalidation has a network error", async () => {
   const state = server(true); render(<App />); await screen.findByText("Summer");
   state.sessionNetworkError = true; act(() => window.dispatchEvent(new Event("focus")));
@@ -259,6 +273,7 @@ it("does not sign out an authenticated viewer because session revalidation has a
   expect(await screen.findByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
 });
 
+// 验证：内容请求前发现会话过期后恢复匿名目录。
 it("restores anonymous catalog after session expiration discovered before a content request", async () => {
   const state = server(true); render(<App />); await screen.findByText("Summer"); await screen.findByText("私密");
   state.authenticated = false;
@@ -268,11 +283,13 @@ it("restores anonymous catalog after session expiration discovered before a cont
   expect(screen.queryByText("私密")).not.toBeInTheDocument();
 });
 
+// 验证：私密详情页展示访问范围标记。
 it.each(["/movies/movie-1", "/series/series-1"])("labels private details at %s", async (path) => {
   window.history.replaceState(null, "", path); server(true); render(<App />);
   expect(await screen.findByText("私密")).toBeInTheDocument();
 });
 
+// 验证：媒体加载失败时检查撤销的会话并关闭私密播放器。
 it("checks revoked sessions on media failure and removes the private player", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   const state = server(true); render(<App />); await screen.findByText("Summer");
@@ -284,6 +301,7 @@ it("checks revoked sessions on media failure and removes the private player", as
   expect(location.pathname).toBe("/");
 });
 
+// 验证：初始会话确认前不展示私密内容。
 it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
   "withholds private content at %s until the initial session is confirmed", async (path) => {
     window.history.replaceState(null, "", path);
@@ -298,6 +316,7 @@ it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series
   },
 );
 
+// 验证：切换单集后仍能在会话失效时关闭私密剧集播放器。
 it("continues closing a private series player after changing episodes", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-1");
   server(true); const user = userEvent.setup(); render(<App />);
@@ -309,6 +328,7 @@ it("continues closing a private series player after changing episodes", async ()
   expect(screen.queryByTestId("native-video")).not.toBeInTheDocument();
 });
 
+// 验证：焦点和可见性事件同时发生时复用进行中的会话检查。
 it("reuses an in-flight session check when focus and visibility events arrive together", async () => {
   const state = server(true); render(<App />); await screen.findByText("私密");
   const pending = deferred<Response>(); state.sessionResponse = pending.promise;
@@ -319,6 +339,7 @@ it("reuses an in-flight session check when focus and visibility events arrive to
   await act(async () => pending.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
 });
 
+// 验证：退出失败后恢复令牌以允许重试。
 it("restores CSRF so a failed logout can be retried", async () => {
   const state = server(true); state.logoutStatus = 500; const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer");
@@ -328,6 +349,7 @@ it("restores CSRF so a failed logout can be retried", async () => {
   expect(await screen.findByRole("button", { name: "登录" })).toBeInTheDocument();
 });
 
+// 验证：私密海报失败时发现已撤销的普通用户会话。
 it("detects a revoked viewer session when a private poster fails", async () => {
   window.history.replaceState(null, "", "/movies/movie-1");
   const state = server(true); render(<App />);
@@ -337,6 +359,7 @@ it("detects a revoked viewer session when a private poster fails", async () => {
   expect(location.pathname).toBe("/");
 });
 
+// 验证：原用户私密海报失败导致会话过期后在焦点恢复时发现新用户。
 it("rediscovers Winter on focus after Summer's private poster failure expires the session", async () => {
   window.history.replaceState(null, "", "/movies/movie-1");
   const state = server(true); render(<App />);
@@ -361,6 +384,7 @@ it("rediscovers Winter on focus after Summer's private poster failure expires th
   expect(screen.queryByRole("status")).not.toBeInTheDocument();
 });
 
+// 验证：其他标签页切换账号后接受新用户并清除旧私密页面。
 it.each(["/", "/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series/series-1/play/ep-1"])(
   "accepts a different viewer from another tab and clears the previous private view at %s", async (path) => {
     window.history.replaceState(null, "", path);
@@ -381,6 +405,7 @@ it.each(["/", "/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/s
   },
 );
 
+// 验证：改密和重新登录后旧会话响应不能替换新用户令牌。
 it("does not let a previous viewer session response replace the new viewer's CSRF after password change and login", async () => {
   const state = server(true); state.csrfToken = "summer-csrf";
   const user = userEvent.setup(); render(<App />); await screen.findByText("Summer"); await screen.findByText("私密");
@@ -407,6 +432,7 @@ it("does not let a previous viewer session response replace the new viewer's CSR
 });
 
 
+// 验证：已登录目录按私密内容筛选并从 URL 恢复筛选。
 it("filters the authenticated catalog to private content and restores it from the URL", async () => {
   window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
   const state = server(true); const user = userEvent.setup(); render(<App />);
@@ -436,6 +462,7 @@ it("filters the authenticated catalog to private content and restores it from th
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
+// 验证：身份变化时清除私密筛选与页码并保留搜索词。
 it.each(["logout", "password", "expired"] as const)("clears private filtering and page but preserves the query after %s", async (operation) => {
   window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&privacy=private");
   const state = server(true); const user = userEvent.setup(); render(<App />);
@@ -461,6 +488,7 @@ it.each(["logout", "password", "expired"] as const)("clears private filtering an
   expect(screen.queryByRole("checkbox", { name: "只看私密" })).not.toBeInTheDocument();
 });
 
+// 验证：切换私密筛选后忽略迟到的普通目录响应。
 it("ignores a delayed ordinary catalog after switching to the private filter", async () => {
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
@@ -475,6 +503,7 @@ it("ignores a delayed ordinary catalog after switching to the private filter", a
   expect(screen.getByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
 });
 
+// 验证：会话发现完成前私密筛选深链保持加载状态。
 it("keeps a private filter deep link loading until session discovery finishes", async () => {
   window.history.replaceState(null, "", "/?privacy=private");
   const state = server(true); const session = deferred<Response>(); state.sessionResponse = session.promise;
@@ -491,6 +520,7 @@ it("keeps a private filter deep link loading until session discovery finishes", 
 });
 
 
+// 验证：身份变化时即使匿名目录有多页也清除旧页码。
 it.each(["logout", "password", "expired"] as const)("clears the ordinary catalog page after %s even when the anonymous catalog has multiple pages", async (operation) => {
   window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
   const state = server(true); state.catalogTotal = 41;
@@ -513,6 +543,7 @@ it.each(["logout", "password", "expired"] as const)("clears the ordinary catalog
   expect(new URLSearchParams(location.search).get("q")).toBe("星");
 });
 
+// 验证：保留初始匿名目录的分页深链。
 it("preserves an initial anonymous catalog page deep link", async () => {
   window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
   const state = server(); state.catalogTotal = 41; render(<App />);

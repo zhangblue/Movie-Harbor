@@ -8,13 +8,14 @@ export function ViewerLoginDialog({ onClose, onLogin }: { onClose: () => void; o
   const [password, setPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
-  // 提交表单时阻止重复请求，并将结果或错误反馈给用户。
+  // 用户提交普通用户登录表单时阻止重复请求，恢复会话或展示登录错误。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending) return;
     setPending(true); setError("");
     try { await viewerLogin({ username, password }, onLogin); }
     catch (cause) {
+      // 凭据错误统一提示，其他失败保留重试入口，避免向界面暴露服务端细节。
       setError(cause instanceof ApiError && [400, 401].includes(cause.status)
         ? "用户名或密码错误" : "登录失败，请稍后重试。");
     } finally { setPending(false); }

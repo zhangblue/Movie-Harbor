@@ -25,7 +25,7 @@ function respond(body: string | null, init: ResponseInit = {}) {
   return new Response(body, init);
 }
 
-// 定义模拟网络请求，供测试中模拟相关行为。
+// HTTP 上传测试中记录请求并触发网络事件的模拟请求。
 class FakeXMLHttpRequest extends EventTarget {
   readonly upload = new EventTarget();
   readonly headers = new Map<string, string>();
@@ -108,6 +108,7 @@ function installFakeXhr(): FakeXMLHttpRequest {
   });
 }
 
+// 验证：有响应体时返回原值，无响应体时拒绝。
 it("requiredResponse preserves values and rejects an absent body", () => {
   expect(requiredResponse({ id: "movie-1" })).toEqual({ id: "movie-1" });
   expect(() => requiredResponse(undefined)).toThrowError(
@@ -116,13 +117,16 @@ it("requiredResponse preserves values and rejects an absent body", () => {
   expect(requiredResponse(null)).toBeNull();
 });
 
+// 验证：分组验证 API 路径和查询构造。
 describe("buildApiUrl", () => {
+  // 验证：编码查询值且不允许查询值改变路径。
   it("encodes query values without allowing them to change the path", () => {
     expect(buildApiUrl("/api/catalog", { q: "Alien & /? #", kind: "movie", empty: undefined })).toBe(
       "/api/catalog?q=Alien+%26+%2F%3F+%23&kind=movie",
     );
   });
 
+  // 验证：逐个拒绝非 API 路径和跨域地址。
   it.each([
     "https://evil.example/api",
     "//evil.example/api",
@@ -136,7 +140,9 @@ describe("buildApiUrl", () => {
   );
 });
 
+// 验证：分组验证普通 API 请求和错误转换。
 describe("apiRequest", () => {
+  // 验证：使用同源相对路径发送浏览器会话。
   it("uses a relative same-origin API URL and sends the browser session", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       respond('{"items":[]}', { headers: { "content-type": "application/json" } }),
@@ -149,6 +155,7 @@ describe("apiRequest", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ credentials: "same-origin" });
   });
 
+  // 验证：保留调用方请求头并补充 JSON 默认值。
   it("preserves caller headers while applying JSON defaults", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       respond('{"ok":true}', { headers: { "content-type": "application/json" } }),
@@ -169,6 +176,7 @@ describe("apiRequest", () => {
     expect(init.body).toBe('{"name":"Moon"}');
   });
 
+  // 验证：序列化失败时不误报为网络错误。
   it.each([
     ["cyclic JSON", (() => { const value: JsonObject = {}; value.self = value; return value; })()],
     ["BigInt JSON", { value: 1n }],
@@ -184,6 +192,7 @@ describe("apiRequest", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // 验证：只为管理员不安全方法添加 CSRF 且保留显式请求头。
   it("adds CSRF only to unsafe admin methods and never overwrites a caller header", async () => {
     setCsrfToken("session-csrf");
     const headers: Array<Headers> = [];
@@ -209,11 +218,13 @@ describe("apiRequest", () => {
     ]);
   });
 
+  // 验证：204 响应直接返回空值而不解析响应体。
   it("returns undefined for a 204 response without trying to parse it", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => respond(null, { status: 204 })));
     await expect(apiRequest("/api/admin/logout", { method: "POST" })).resolves.toBeUndefined();
   });
 
+  // 验证：普通用户写请求附加令牌，安全方法及无关路径不附加。
   it("adds CSRF to viewer writes, preserves explicit headers, and excludes safe and unrelated paths", async () => {
     setCsrfToken("viewer-csrf");
     const headers: Headers[] = [];
@@ -234,6 +245,7 @@ describe("apiRequest", () => {
       .toEqual([null, null, null, "viewer-csrf", "explicit", null, null]);
   });
 
+  // 验证：解析 JSON 和纯文本成功响应。
   it("parses JSON and plain-text successful responses", async () => {
     const responses = [
       respond('{"name":"admin"}', { headers: { "content-type": "application/json; charset=utf-8" } }),
@@ -245,6 +257,7 @@ describe("apiRequest", () => {
     await expect(apiRequest("/api/health")).resolves.toBe("ready");
   });
 
+  // 验证：保留结构化 JSON 错误的字段详情。
   it("exposes structured JSON errors without losing field details", async () => {
     vi.stubGlobal(
       "fetch",
@@ -267,6 +280,7 @@ describe("apiRequest", () => {
     });
   });
 
+  // 验证：非 JSON 或损坏 JSON 错误使用有长度限制的有效消息。
   it("uses a useful bounded message for non-JSON and malformed JSON errors", async () => {
     const responses = [
       respond("proxy unavailable", { status: 502, statusText: "Bad Gateway" }),
@@ -282,6 +296,7 @@ describe("apiRequest", () => {
     await expect(apiRequest("/api/health")).rejects.toMatchObject({ message: "Internal Server Error" });
   });
 
+  // 验证：区分请求中止和其他网络失败。
   it("distinguishes aborts from other network failures", async () => {
     const abort = new DOMException("cancelled", "AbortError");
     const fetchMock = vi.fn().mockRejectedValueOnce(abort).mockRejectedValueOnce(new TypeError("offline"));
@@ -298,6 +313,7 @@ describe("apiRequest", () => {
     });
   });
 
+  // 验证：响应流读取失败时报告网络错误。
   it("reports a response stream failure as a network failure", async () => {
     const stream = new ReadableStream({
       // 在测试构造响应流时执行控制器逻辑。
@@ -314,7 +330,9 @@ describe("apiRequest", () => {
   });
 });
 
+// 验证：分组验证带进度的上传请求。
 describe("apiUpload", () => {
+  // 验证：上传进度单调递增并进入服务端处理阶段。
   it("reports monotonic upload progress and a processing phase", async () => {
     const xhr = installFakeXhr();
     setCsrfToken("session-csrf");
@@ -346,6 +364,7 @@ describe("apiUpload", () => {
     expect(xhr.body).toBeInstanceOf(FormData);
   });
 
+  // 验证：只有可计算进度出现前才报告未知百分比。
   it("reports unknown progress only until a computable percentage is available", async () => {
     const xhr = installFakeXhr();
     const events: ApiUploadProgress[] = [];
@@ -369,6 +388,7 @@ describe("apiUpload", () => {
     ]);
   });
 
+  // 验证：已有可计算的零进度时不改报未知进度。
   it("does not replace a computable zero percent with unknown progress", async () => {
     const xhr = installFakeXhr();
     const events: ApiUploadProgress[] = [];
@@ -389,6 +409,7 @@ describe("apiUpload", () => {
     ]);
   });
 
+  // 验证：上传响应保留 API 错误和解析错误的区别。
   it("preserves API response error and parse error semantics", async () => {
     const unsupportedXhr = installFakeXhr();
     const unsupported = apiUpload("/api/admin/media/movies/movie-1/video", {
@@ -407,6 +428,7 @@ describe("apiUpload", () => {
     await expect(malformed).rejects.toBeInstanceOf(ApiResponseParseError);
   });
 
+  // 验证：将不同 XHR 失败事件转换为网络错误。
   it.each([
     ["error", false],
     ["timeout", false],
@@ -423,7 +445,9 @@ describe("apiUpload", () => {
   });
 });
 
+// 验证：分组验证 JSON 导出下载。
 describe("apiDownload", () => {
+  // 验证：通过同源认证 API 下载 JSON 导出。
   it("downloads the JSON export through the same-origin authenticated API boundary", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
       respond('{"movies":[]}', {
@@ -443,6 +467,7 @@ describe("apiDownload", () => {
     expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({ credentials: "same-origin" });
   });
 
+  // 验证：下载失败保留 API 错误语义并转换网络错误。
   it("preserves API error semantics and maps network failures", async () => {
     const responses = [
       respond('{"error":"authentication failed"}', { status: 401, headers: { "content-type": "application/json" } }),
@@ -461,6 +486,7 @@ describe("apiDownload", () => {
     await expect(apiDownload("/api/admin/contents/export")).rejects.toBeInstanceOf(ApiNetworkError);
   });
 
+  // 验证：拒绝非 JSON 成功响应并对文件名使用安全回退。
   it("uses a fixed safe filename and rejects non-JSON success responses", async () => {
     const responses = [
       respond('{"movies":[]}', {
@@ -479,6 +505,7 @@ describe("apiDownload", () => {
     await expect(apiDownload("/api/admin/contents/export")).rejects.toBeInstanceOf(ApiResponseParseError);
   });
 
+  // 验证：读取下载内容流失败时转换为网络错误。
   it("maps a response blob stream failure to ApiNetworkError", async () => {
     const stream = new ReadableStream({
       // 在测试构造响应流时执行控制器逻辑。

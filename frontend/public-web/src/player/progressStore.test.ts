@@ -8,7 +8,7 @@ import {
   setRecentEpisode,
 } from "./progressStore";
 
-// 定义内存存储，供测试中模拟相关行为。
+// 播放测试中模拟浏览器 Storage 的内存实现，隔离测试记录。
 class MemoryStorage implements Storage {
   #items = new Map<string, string>();
   // 读取内存存储的条目数，供测试检查存储状态。
@@ -25,10 +25,12 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string) { this.#items.set(key, value); }
 }
 
+// 验证：分组验证播放进度的本地持久化。
 describe("playback progress storage", () => {
   beforeEach(() => vi.stubGlobal("localStorage", new MemoryStorage()));
   beforeEach(() => localStorage.clear());
 
+  // 验证：电影和单集进度在同一版本化存储中按键隔离。
   it("isolates movie and episode progress in one versioned namespace", () => {
     saveProgress("movie:same-id", 61, 600);
     saveProgress("episode:same-id", 122, 900);
@@ -39,6 +41,7 @@ describe("playback progress storage", () => {
     expect(JSON.parse(localStorage.getItem(PROGRESS_STORAGE_KEY)!)).toMatchObject({ version: 1 });
   });
 
+  // 验证：清除已完成内容时不影响其他内容进度。
   it("clears a completed item without disturbing another content key", () => {
     saveProgress("movie:one", 60, 600);
     saveProgress("movie:two", 80, 600);
@@ -48,11 +51,13 @@ describe("playback progress storage", () => {
     expect(getProgress("movie:two")?.position).toBe(80);
   });
 
+  // 验证：播放刚开始时不创建恢复位置。
   it("does not create a resume point at the beginning", () => {
     saveProgress("movie:one", 0, 600);
     expect(getProgress("movie:one")).toBeNull();
   });
 
+  // 验证：损坏或不兼容的本地数据按空状态处理。
   it.each([
     "not json",
     JSON.stringify({ version: 2, progress: {}, recentEpisodes: {} }),
@@ -64,6 +69,7 @@ describe("playback progress storage", () => {
     expect(getRecentEpisode("series:one")).toBeNull();
   });
 
+  // 验证：存储操作抛错时安全回退并继续播放。
   it("falls back safely when storage operations throw", () => {
     const unavailable: Storage = {
       // 模拟受限存储读取条目数时抛错，供降级测试使用。
@@ -87,6 +93,7 @@ describe("playback progress storage", () => {
     expect(getRecentEpisode("series:one", unavailable)).toBeNull();
   });
 
+  // 验证：按剧集记录和清除最近观看的单集。
   it("records and clears the most recently watched episode per series", () => {
     setRecentEpisode("series:one", "ep-1");
     setRecentEpisode("series:two", "ep-2");

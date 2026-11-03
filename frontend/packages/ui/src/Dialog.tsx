@@ -1,7 +1,7 @@
 import { createPortal } from "react-dom";
 import { useEffect, useEffectEvent, useId, useRef, type ReactNode } from "react";
 
-// 定义对话框属性，供相关请求、状态或组件使用。
+// 模态对话框的显示状态、标题、内容和关闭回调等输入。
 export interface DialogProps {
   open: boolean;
   title: ReactNode;

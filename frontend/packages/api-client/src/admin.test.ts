@@ -14,7 +14,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// 定义模拟上传网络请求，供测试中模拟相关行为。
+// 管理上传测试中可主动触发进度和响应的模拟请求。
 class FakeUploadXMLHttpRequest extends EventTarget {
   readonly upload = new EventTarget();
   url: string | undefined;
@@ -77,6 +77,7 @@ function installFakeUploadXhr(): FakeUploadXMLHttpRequest {
   });
 }
 
+// 验证：恢复管理员会话后保存 CSRF 令牌，供后续写请求使用。
 it("acquires the session CSRF token in memory for later admin writes", async () => {
   const requests: RequestInit[] = [];
   const responses = [
@@ -100,6 +101,7 @@ it("acquires the session CSRF token in memory for later admin writes", async () 
   expect(new Headers(requests[1]?.headers).get("x-csrf-token")).toBe("from-session");
 });
 
+// 验证：密码修改被拒绝时保留管理员会话令牌。
 it("keeps the session CSRF token when a password change is rejected", async () => {
   const requests: RequestInit[] = [];
   const responses = [
@@ -127,6 +129,7 @@ it("keeps the session CSRF token when a password change is rejected", async () =
   expect(new Headers(requests[2]?.headers).get("x-csrf-token")).toBe("still-valid");
 });
 
+// 验证：删除前读取权威影响并验证成功响应的同步删除数量。
 it("uses the authoritative delete-impact endpoint and returns synchronous deletion counts", async () => {
   const urls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
@@ -145,6 +148,7 @@ it("uses the authoritative delete-impact endpoint and returns synchronous deleti
   ]);
 });
 
+// 验证：按所属路径读取季和单集的删除影响。
 it("loads authoritative season and episode deletion impact from scoped paths", async () => {
   const urls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
@@ -161,6 +165,7 @@ it("loads authoritative season and episode deletion impact from scoped paths", a
   ]);
 });
 
+// 验证：仅从对象详情中的字符串字段读取稳定错误码。
 it("reads stable API error codes only from object details with a string code", () => {
   expect(apiErrorCode(new ApiError(500, "Error", "failed", { code: "media_delete_failed" }))).toBe("media_delete_failed");
   for (const details of [undefined, null, "media_delete_failed", 1, { code: 1 }, { code: null }]) {
@@ -168,6 +173,7 @@ it("reads stable API error codes only from object details with a string code", (
   }
 });
 
+// 验证：按筛选条件加载统一管理内容分页。
 it("loads the unified admin content page with filters", async () => {
   const urls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
@@ -182,6 +188,7 @@ it("loads the unified admin content page with filters", async () => {
   expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
 });
 
+// 验证：忽略运行时传入的未知查询字段。
 it("does not forward unknown runtime query fields", async () => {
   const urls: string[] = [];
   vi.stubGlobal("fetch", vi.fn(async (url: RequestInfo | URL) => {
@@ -197,6 +204,7 @@ it("does not forward unknown runtime query fields", async () => {
   expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
 });
 
+// 验证：未提供进度回调时使用普通请求上传海报。
 it("keeps poster uploads on fetch when no progress callback is supplied", async () => {
   const fetchMock = vi.fn(async (_url: RequestInfo | URL) => new Response('{"id":"media-1","url":"/media/poster.jpg"}', {
     headers: { "content-type": "application/json" },
@@ -212,6 +220,7 @@ it("keeps poster uploads on fetch when no progress callback is supplied", async 
   expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/admin/media/movies/movie%2F1/poster?version=7");
 });
 
+// 验证：上传视频时转发进度上传边界的事件。
 it("uses the progress upload boundary for video uploads and forwards its events", async () => {
   const xhr = installFakeUploadXhr();
   const events: Array<{ phase: string; percent: number | null }> = [];
@@ -271,6 +280,7 @@ function jsonResponse(value: JsonValue | ViewerUserPage | ViewerUserSummary, sta
   return new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
 }
 
+// 验证：普通用户通过独立登录接口登录并在写请求前取得令牌。
 it("logs viewers in through their own route and acquires CSRF before the next write", async () => {
   setCsrfToken("stale-admin-csrf");
   const requests = recordRequests([
@@ -290,6 +300,7 @@ it("logs viewers in through their own route and acquires CSRF before the next wr
   ]);
 });
 
+// 验证：恢复普通用户会话并在本人改密成功后清除令牌。
 it("restores viewer session and clears CSRF after successful self password change", async () => {
   const requests = recordRequests([
     jsonResponse({ username: "Summer", csrf_token: "viewer-csrf" }),
@@ -304,6 +315,7 @@ it("restores viewer session and clears CSRF after successful self password chang
   expect(requests[2]?.csrf).toBeNull();
 });
 
+// 验证：身份持有者拒绝旧会话结果时不覆盖当前令牌。
 it("does not overwrite current CSRF when a viewer session is rejected by its identity owner", async () => {
   setCsrfToken("winter-csrf");
   const requests = recordRequests([
@@ -315,6 +327,7 @@ it("does not overwrite current CSRF when a viewer session is rejected by its ide
   expect(requests[1]?.csrf).toBe("winter-csrf");
 });
 
+// 验证：本人改密被拒绝时保留普通用户令牌。
 it("preserves viewer CSRF when a self password change is rejected", async () => {
   const requests = recordRequests([
     jsonResponse({ username: "Summer", csrf_token: "still-valid" }),
@@ -328,6 +341,7 @@ it("preserves viewer CSRF when a self password change is rejected", async () => 
   expect(requests[2]?.csrf).toBe("still-valid");
 });
 
+// 验证：身份持有者拒绝过时操作结果时保留当前令牌。
 it.each(["logout", "password"])("keeps current CSRF when the identity owner rejects an old %s completion", async (operation) => {
   setCsrfToken("winter-csrf");
   const requests = recordRequests([new Response(null, { status: 204 }), new Response(null, { status: 204 })]);
@@ -337,6 +351,7 @@ it.each(["logout", "password"])("keeps current CSRF when the identity owner reje
   expect(requests[1]?.csrf).toBe("winter-csrf");
 });
 
+// 验证：退出接口返回不同结果后清除普通用户令牌。
 it.each([204, 500])("clears viewer CSRF after logout responds with %s", async (status) => {
   setCsrfToken("viewer-csrf");
   const requests = recordRequests([
@@ -350,6 +365,7 @@ it.each([204, 500])("clears viewer CSRF after logout responds with %s", async (s
   expect(requests.map((request) => request.csrf)).toEqual(["viewer-csrf", null]);
 });
 
+// 验证：普通用户登录失败前清除旧令牌且不读取会话。
 it("clears old CSRF before a rejected viewer login and does not read a session", async () => {
   setCsrfToken("stale-csrf");
   const requests = recordRequests([
@@ -362,6 +378,7 @@ it("clears old CSRF before a rejected viewer login and does not read a session",
   ]);
 });
 
+// 验证：限定普通用户列表查询字段并保留概览响应。
 it("lists viewer users with a bounded query and preserves the overview response", async () => {
   const page = { page: 2, size: 20, total: 21, items: [viewer], summary: { total_users: 21, active_users: 2, latest_user: viewer } };
   const requests = recordRequests([jsonResponse(page)]);
@@ -370,6 +387,7 @@ it("lists viewer users with a bounded query and preserves the overview response"
   expect(requests[0]).toMatchObject({ url: "/api/admin/users?q=Sum+mer&page=2&size=20", method: "GET", csrf: null });
 });
 
+// 验证：创建、重置密码和删除用户时使用管理员路径及版本。
 it("uses administrator routes for viewer creation, password reset and deletion with versions", async () => {
   setCsrfToken("admin-csrf");
   const requests = recordRequests([jsonResponse(viewer, 201), jsonResponse({ ...viewer, version: 4 }), new Response(null, { status: 204 })]);
@@ -383,12 +401,14 @@ it("uses administrator routes for viewer creation, password reset and deletion w
   ]);
 });
 
+// 验证：管理内容查询转发指定访问范围筛选。
 it.each(["public", "private"] as const)("forwards the %s admin content privacy filter", async (privacy) => {
   const requests = recordRequests([jsonResponse({ page: 1, size: 20, total: 0, items: [] })]);
   await client.listAdminContent({ privacy, page: 1 });
   expect(requests[0]?.url).toBe(`/api/admin/contents?privacy=${privacy}&page=1`);
 });
 
+// 验证：使用带版本的专用接口切换电影和剧集访问范围。
 it("switches movie and series privacy through dedicated versioned PUT endpoints", async () => {
   const requests = recordRequests([jsonResponse(movie), jsonResponse(series)]);
   await expect(client.setMoviePrivacy("movie/1", 3, true)).resolves.toEqual(movie);
@@ -399,6 +419,7 @@ it("switches movie and series privacy through dedicated versioned PUT endpoints"
   ]);
 });
 
+// 验证：创建电影和剧集时显式传递公开或私密范围。
 it.each([false, true])("creates movie and series with explicit is_private=%s", async (isPrivate) => {
   const requests = recordRequests([jsonResponse({ ...movie, is_private: isPrivate }, 201), jsonResponse({ ...series, is_private: isPrivate }, 201)]);
   await client.createMovie("Movie", isPrivate);
@@ -409,6 +430,7 @@ it.each([false, true])("creates movie and series with explicit is_private=%s", a
   ]);
 });
 
+// 验证：共享包导出普通用户及访问范围所需的数据契约。
 it("exports required viewer and privacy DTO contracts from the package", () => {
   expectTypeOf<ViewerSessionResponse>().toEqualTypeOf<{ username: string; csrf_token: string }>();
   expectTypeOf<ViewerUserSummary>().toEqualTypeOf<{

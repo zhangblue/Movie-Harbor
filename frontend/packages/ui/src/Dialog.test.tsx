@@ -7,6 +7,7 @@ import { Dialog } from "./Dialog";
 
 afterEach(cleanup);
 
+// 验证：打开对话框时提供模态语义、标题并聚焦首个控件。
 it("has modal semantics, an accessible title, and focuses the first control", () => {
   render(
     <Dialog open title="删除确认" onClose={() => undefined}>
@@ -17,6 +18,7 @@ it("has modal semantics, an accessible title, and focuses the first control", ()
   expect(screen.getByRole("textbox", { name: "输入内容名称" })).toHaveFocus();
 });
 
+// 验证：按 Escape 关闭后将焦点恢复到打开者。
 it("closes on Escape and restores focus to the opener", async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();
@@ -45,6 +47,7 @@ it("closes on Escape and restores focus to the opener", async () => {
   expect(opener).toHaveFocus();
 });
 
+// 验证：只有直接点击遮罩时才关闭对话框。
 it("closes only when the backdrop itself is pressed", () => {
   const onClose = vi.fn();
   render(<Dialog open title="详情" onClose={onClose}><p>正文</p></Dialog>);
@@ -54,6 +57,7 @@ it("closes only when the backdrop itself is pressed", () => {
   expect(onClose).toHaveBeenCalledOnce();
 });
 
+// 验证：在模态对话框内循环键盘焦点。
 it("cycles keyboard focus within the modal", async () => {
   const user = userEvent.setup();
   render(
@@ -71,6 +75,7 @@ it("cycles keyboard focus within the modal", async () => {
   expect(screen.getByRole("button", { name: "第一个" })).toHaveFocus();
 });
 
+// 验证：同名单选组后续选项被选中时双向 Tab 均留在对话框内。
 it("keeps both Tab directions inside when a later radio in a same-name group is checked", async () => {
   const user = userEvent.setup();
   render(
@@ -93,6 +98,7 @@ it("keeps both Tab directions inside when a later radio in a same-name group is 
   expect(checkedRadio).toHaveFocus();
 });
 
+// 验证：未选中同名单选组时按顺序进入首项。
 it("uses the first same-name radio in tab order when none is checked", () => {
   render(
     <Dialog open title="未选择" onClose={() => undefined}>
@@ -103,6 +109,7 @@ it("uses the first same-name radio in tab order when none is checked", () => {
   expect(screen.getByRole("radio", { name: "Tab 顺序靠前" })).toHaveFocus();
 });
 
+// 验证：未选中单选组连续反向 Tab 时焦点不逸出。
 it("keeps repeated Shift+Tab inside an unchecked radio group", async () => {
   const user = userEvent.setup();
   render(
@@ -124,6 +131,7 @@ it("keeps repeated Shift+Tab inside an unchecked radio group", async () => {
   expect(close).toHaveFocus();
 });
 
+// 验证：正 tabindex 的未选中单选组双向循环焦点。
 it("traps both directions when an unchecked radio group uses positive tabindex", async () => {
   const user = userEvent.setup();
   render(
@@ -151,6 +159,7 @@ it("traps both directions when an unchecked radio group uses positive tabindex",
   expect(close).toHaveFocus();
 });
 
+// 验证：不同表单及无表单的同名单选按钮不合并分组。
 it("does not merge same-name radios with different form owners, including no form", () => {
   render(
     <Dialog open title="不同表单" onClose={() => undefined}>
@@ -163,6 +172,7 @@ it("does not merge same-name radios with different form owners, including no for
   expect(screen.getByRole("radio", { name: "表单一" })).toBeChecked();
 });
 
+// 验证：空名称单选按钮各自作为独立焦点位置。
 it("treats radios with an empty name as independent tab stops", () => {
   render(
     <Dialog open title="空名称" onClose={() => undefined}>
@@ -173,6 +183,7 @@ it("treats radios with an empty name as independent tab stops", () => {
   expect(screen.getByRole("radio", { name: "第一个空名称" })).toHaveFocus();
 });
 
+// 验证：父组件重渲染导致关闭回调变化时不重置焦点。
 it("does not reset focus when an inline onClose callback changes during a parent rerender", () => {
   const firstClose = vi.fn();
   const secondClose = vi.fn();
@@ -220,6 +231,7 @@ it("does not reset focus when an inline onClose callback changes during a parent
   expect(focusSpy).toHaveBeenCalledOnce();
 });
 
+// 验证：焦点遍历跳过隐藏、不可交互、禁用及负 tabindex 控件。
 it("skips hidden, inert, aria-hidden, disabled, and negative-tabindex controls", () => {
   render(
     <Dialog open title="筛选焦点" onClose={() => undefined}>
@@ -236,6 +248,7 @@ it("skips hidden, inert, aria-hidden, disabled, and negative-tabindex controls",
   expect(screen.getByRole("textbox", { name: "第一个可用字段" })).toHaveFocus();
 });
 
+// 验证：焦点遍历跳过自身或祖先计算样式隐藏的控件。
 it("skips controls hidden by their own or an ancestor's computed style", () => {
   render(
     <Dialog open title="样式可见性" onClose={() => undefined}>
@@ -247,6 +260,7 @@ it("skips controls hidden by their own or an ancestor's computed style", () => {
   expect(screen.getByRole("button", { name: "可见按钮" })).toHaveFocus();
 });
 
+// 验证：正 tabindex 控件按浏览器顺序而非 DOM 顺序遍历。
 it("uses browser tab order rather than DOM order for positive tabindex values", () => {
   render(
     <Dialog open title="显式顺序" onClose={() => undefined}>
@@ -258,6 +272,7 @@ it("uses browser tab order rather than DOM order for positive tabindex values", 
   expect(screen.getByRole("button", { name: "第一顺位" })).toHaveFocus();
 });
 
+// 验证：Tab 从面板外开始时将焦点移回对话框内。
 it("moves focus back inside when Tab starts outside the panel", async () => {
   const user = userEvent.setup();
   render(
@@ -285,6 +300,7 @@ it("moves focus back inside when Tab starts outside the panel", async () => {
   }
 });
 
+// 验证：对话框内容无可聚焦元素时 Tab 保持在关闭按钮。
 it("keeps Tab on the close control when the dialog body has no tabbable content", async () => {
   const user = userEvent.setup();
   render(<Dialog open title="空对话框" onClose={() => undefined}><p>仅说明文字</p></Dialog>);

@@ -1,6 +1,6 @@
 import { Button, paginationItems } from "@movie-harbor/ui";
 
-// 定义属性，供相关请求、状态或组件使用。
+// 目录分页控件所需的当前页、总数、禁用状态和页码回调。
 type Props = {
   page: number;
   size: number;

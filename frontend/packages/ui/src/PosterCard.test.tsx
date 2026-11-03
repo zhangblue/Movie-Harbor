@@ -54,6 +54,7 @@ function resize() {
   act(() => resizeCallback?.([], {} as ResizeObserver));
 }
 
+// 验证：海报卡片提供可访问详情链接并最多显示三个题材。
 it("renders an accessible details link and at most three genre badges", () => {
   render(
     <PosterCard
@@ -81,6 +82,7 @@ it("renders an accessible details link and at most three genre badges", () => {
   expect(screen.getAllByText("剧情").filter((node) => !node.closest('[aria-hidden="true"]'))).toHaveLength(1);
 });
 
+// 验证：忽略空题材并将类似标记的内容作为文本渲染。
 it("ignores empty genres and safely renders text that resembles markup", () => {
   render(
     <PosterCard
@@ -97,6 +99,7 @@ it("ignores empty genres and safely renders text that resembles markup", () => {
   expect(screen.getByText("剧集 · 年份未知")).toBeInTheDocument();
 });
 
+// 验证：海报缺失或加载失败时显示相同的无障碍隐藏占位。
 it("shows an aria-hidden blank poster when the poster is missing or fails", () => {
   const { rerender } = render(
     <PosterCard href="/movies/1" title="无海报电影" kind="movie" year={2020} genres={[]} />,
@@ -125,6 +128,7 @@ it("shows an aria-hidden blank poster when the poster is missing or fails", () =
   expect(screen.queryByRole("img")).not.toBeInTheDocument();
 });
 
+// 验证：可用宽度缩小时减少题材名称并准确统计溢出数量。
 it("shows fewer names and an accurate overflow count when the measured row narrows", () => {
   availableWidth = 140;
   chipWidths = { 剧情: 30, 悬疑: 30, 科幻: 30, 犯罪: 30, "+2": 24, "+3": 24, "+4": 24, "+5": 24 };
@@ -141,6 +145,7 @@ it("shows fewer names and an accurate overflow count when the measured row narro
   expect(screen.getAllByTestId("genre-badge").map((badge) => badge.textContent)).toEqual(["剧情", "+4"]);
 });
 
+// 验证：按长题材实际宽度测量，连溢出标签也放不下时不显示标签。
 it("uses measured long-tag width and can render no badge when even the overflow does not fit", () => {
   availableWidth = 55;
   chipWidths = { "一段非常长的题材名称": 120, 剧情: 30, 科幻: 30, "+3": 24, "+2": 24, "+1": 24 };
@@ -155,6 +160,7 @@ it("uses measured long-tag width and can render no badge when even the overflow 
   expect(screen.queryAllByTestId("genre-badge")).toHaveLength(0);
 });
 
+// 验证：修正不一致总数并根据实际展示名称重新计算溢出数量。
 it("clamps inconsistent totals and recomputes overflow from the names actually shown", () => {
   const { rerender } = render(
     <PosterCard href="/movies/1" title="计数" kind="movie" year={2026}
@@ -171,6 +177,7 @@ it("clamps inconsistent totals and recomputes overflow from the names actually s
   expect(screen.getAllByTestId("genre-badge").map((badge) => badge.textContent)).toEqual(["剧情", "+98"]);
 });
 
+// 验证：尺寸观察器不可用时稳定回退为最多三个名称。
 it("uses the deterministic three-name fallback when ResizeObserver is unavailable", () => {
   vi.stubGlobal("ResizeObserver", undefined);
   render(

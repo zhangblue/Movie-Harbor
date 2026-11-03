@@ -7,6 +7,7 @@ import { Button } from "./Button";
 
 afterEach(cleanup);
 
+// 验证：原生按钮可通过键盘到达并激活。
 it("is reached and activated with the keyboard as a native button", async () => {
   const user = userEvent.setup();
   const onClick = vi.fn();
@@ -18,11 +19,13 @@ it("is reached and activated with the keyboard as a native button", async () => 
   expect(onClick).toHaveBeenCalledOnce();
 });
 
+// 验证：危险样式不改变按钮的无障碍名称。
 it("exposes danger styling without making color the accessible name", () => {
   render(<Button variant="danger">永久删除</Button>);
   expect(screen.getByRole("button", { name: "永久删除" })).toHaveClass("mh-button--danger");
 });
 
+// 验证：默认按钮不提交表单且禁用时不可操作。
 it("defaults to a non-submitting button and honors disabled behavior", async () => {
   const user = userEvent.setup();
   const onClick = vi.fn();

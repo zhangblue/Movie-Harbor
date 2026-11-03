@@ -1,7 +1,7 @@
-// 定义提示样式，供相关请求、状态或组件使用。
+// 共享提示支持的信息、成功和错误状态，决定样式与播报方式。
 export type ToastVariant = "info" | "success" | "error";
 
-// 定义提示属性，供相关请求、状态或组件使用。
+// 共享提示的消息、状态样式和可选类名。
 export interface ToastProps {
   message: string;
   variant?: ToastVariant;

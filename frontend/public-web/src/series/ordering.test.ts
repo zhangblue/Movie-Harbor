@@ -1,6 +1,7 @@
 import { expect, test } from "vitest";
 import { orderEpisodes, orderedPlayableEpisodes, orderSeasons } from "./ordering";
 
+// 验证：按季和集排序且不修改 API 原始数据。
 test("orders seasons and episodes without mutating API data", () => {
   const seasons = [
     { id: "s2", number: 2, episodes: [{ id: "e2", number: 2, name: "二", duration_seconds: null, video_url: "/2" }] },
@@ -13,6 +14,7 @@ test("orders seasons and episodes without mutating API data", () => {
   expect(orderedPlayableEpisodes(seasons).map((episode) => episode.id)).toEqual(["e1", "e2"]);
 });
 
+// 验证：详情排序保留无视频单集，播放列表排除不可播放单集。
 test("keeps unavailable episodes in detail ordering but excludes them from playback", () => {
   const episodes = [
     { id: "unavailable", number: 2, name: "暂无视频", duration_seconds: null, video_url: null },

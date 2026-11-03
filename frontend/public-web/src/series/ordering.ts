@@ -1,6 +1,6 @@
 import type { PublicEpisode, PublicSeason } from "@movie-harbor/api-client";
 
-// 定义已排序单集，供相关请求、状态或组件使用。
+// 可播放单集附带所属季的标识和序号，供选集及前后集导航使用。
 export interface OrderedEpisode extends PublicEpisode {
   seasonId: string;
   seasonNumber: number;

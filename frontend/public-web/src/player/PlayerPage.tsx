@@ -7,7 +7,7 @@ import { orderedPlayableEpisodes, type OrderedEpisode } from "../series/ordering
 import { getRecentEpisode, setRecentEpisode } from "./progressStore";
 import { VideoPlayer } from "./VideoPlayer";
 
-// 定义导航，供相关请求、状态或组件使用。
+// 公开站路由导航回调，支持替换当前浏览器历史记录。
 type Navigate = (href: string, replace?: boolean) => void;
 
 // 由电影播放路由渲染，加载详情并在存在视频时启动播放器。

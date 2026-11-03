@@ -16,6 +16,7 @@ document.head.append(styleElement);
 beforeEach(() => window.history.replaceState(null, "", "/"));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+// 验证：混合目录渲染可访问卡片、元数据和五列网格。
 it("renders the mixed public catalog with accessible cards, metadata and the five-column grid", async () => {
   serve((url) => url.pathname === "/api/catalog" && url.searchParams.get("kind") === "all"
     ? catalog([movieCard, seriesCard]) : json({}, 500));
@@ -31,6 +32,7 @@ it("renders the mixed public catalog with accessible cards, metadata and the fiv
   expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
 });
 
+// 验证：通过 API 切换电影和剧集并将选择保存在 URL。
 it("switches between movie and series through the API and preserves the selection in the URL", async () => {
   serve((url) => catalog(url.searchParams.get("kind") === "movie" ? [movieCard]
     : url.searchParams.get("kind") === "series" ? [seriesCard] : [movieCard, seriesCard]));
@@ -46,6 +48,7 @@ it("switches between movie and series through the API and preserves the selectio
   expect(screen.queryByRole("link", { name: "查看远方来信详情" })).not.toBeInTheDocument();
 });
 
+// 验证：通过 API 搜索简介匹配并显示空结果。
 it("searches the API including synopsis matches and renders an empty result", async () => {
   serve((url) => catalog(url.searchParams.get("q") === "山海" ? [movieCard]
     : url.searchParams.get("q") ? [] : [movieCard, seriesCard]));
@@ -59,6 +62,7 @@ it("searches the API including synopsis matches and renders an empty result", as
   expect(screen.queryByRole("link", { name: /查看.*详情/ })).not.toBeInTheDocument();
 });
 
+// 验证：从查询深链和浏览器历史恢复目录。
 it("restores query deep links and browser navigation", async () => {
   window.history.replaceState(null, "", "/?kind=movie&q=山海");
   serve((url) => catalog(url.searchParams.get("kind") === "series" ? [seriesCard] : [movieCard]));
@@ -71,6 +75,7 @@ it("restores query deep links and browser navigation", async () => {
   expect(screen.getByRole("searchbox")).toHaveValue("");
 });
 
+// 验证：键盘激活电影详情并通过浏览器后退返回。
 it("enters movie details using keyboard activation and returns with browser back", async () => {
   serve((url) => url.pathname === "/api/catalog/movies/movie-1" ? json(movie) : catalog([movieCard]));
   const user = userEvent.setup();
@@ -84,6 +89,7 @@ it("enters movie details using keyboard activation and returns with browser back
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
+// 验证：切换内容类型后忽略旧请求结果。
 it("ignores a stale request after changing the content kind", async () => {
   const old = deferred<Response>();
   serve((url) => url.searchParams.get("kind") === "all" ? old.promise : catalog([seriesCard]));
@@ -97,6 +103,7 @@ it("ignores a stale request after changing the content kind", async () => {
   expect(screen.getByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
 });
 
+// 验证：显示可重试错误而不泄露后端错误详情。
 it("shows a recoverable error without leaking backend error details", async () => {
   let failed = true;
   serve(() => failed ? json({ error: "private database path" }, 500) : catalog([movieCard]));
@@ -110,6 +117,7 @@ it("shows a recoverable error without leaking backend error details", async () =
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
+// 验证：提供后续目录页并在筛选变化时重置页码。
 it("makes catalog pages after the first accessible and resets page when filtering", async () => {
   serve((url) => catalog(url.searchParams.get("page") === "2" ? [seriesCard] : [movieCard], 26,
     url.searchParams.get("page") === "2" ? 2 : 1));
@@ -126,6 +134,7 @@ it("makes catalog pages after the first accessible and resets page when filterin
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
+// 验证：公开目录请求固定每页二十条。
 it("requests a fixed public page size of 20", async () => {
   const requests: URL[] = [];
   serve((url) => {
@@ -137,6 +146,7 @@ it("requests a fixed public page size of 20", async () => {
   expect(requests[0]?.searchParams.get("size")).toBe("20");
 });
 
+// 验证：展示紧凑数字页码并直接跳转第六页。
 it("offers a compact numeric window and navigates directly to page 6", async () => {
   window.history.replaceState(null, "", "/?page=5");
   const requests: URL[] = [];
@@ -164,6 +174,7 @@ it("offers a compact numeric window and navigates directly to page 6", async () 
   expect(within(navigation).getAllByText("…")).toHaveLength(2);
 });
 
+// 验证：越界页替换为最后一页且不闪现空结果。
 it("replaces an out-of-range page with the last page without flashing an empty result", async () => {
   window.history.replaceState(null, "", "/?page=99");
   const replaceState = vi.spyOn(window.history, "replaceState");
@@ -186,6 +197,7 @@ it("replaces an out-of-range page with the last page without flashing an empty r
   expect(renderedText.some((text) => text.includes("没有找到匹配内容"))).toBe(false);
 });
 
+// 验证：空目录的越界地址替换为首页地址。
 it("replaces an out-of-range empty catalog URL with the first-page URL", async () => {
   window.history.replaceState(null, "", "/?page=99");
   const replaceState = vi.spyOn(window.history, "replaceState");
@@ -203,6 +215,7 @@ it("replaces an out-of-range empty catalog URL with the first-page URL", async (
   expect(await screen.findByText("没有找到匹配内容")).toBeInTheDocument();
 });
 
+// 验证：目录加载时保留桌面分页区域高度。
 it("reserves the full desktop pagination height while the catalog is loading", async () => {
   const response = deferred<Response>();
   serve(() => response.promise.then((value) => value.clone()));
@@ -222,6 +235,7 @@ it("reserves the full desktop pagination height while the catalog is loading", a
   expect(getComputedStyle(slot!).minHeight).toBe(loadingStyle.minHeight);
 });
 
+// 验证：窄屏下保留换行分页区域高度。
 it("reserves the wrapped pagination height on narrow screens", () => {
   const mediaRule = Array.from(document.styleSheets)
     .flatMap((sheet) => Array.from(sheet.cssRules))
@@ -231,12 +245,14 @@ it("reserves the wrapped pagination height on narrow screens", () => {
   expect(slotRule?.style.minHeight).toBe("96px");
 });
 
+// 验证：无法导航时禁用全部目录分页操作。
 it("disables every catalog pagination action when navigation is unavailable", () => {
   render(<CatalogPagination page={2} size={20} total={60} disabled onPage={() => undefined} />);
   const navigation = screen.getByRole("navigation", { name: "目录分页" });
   for (const button of within(navigation).getAllByRole("button")) expect(button).toBeDisabled();
 });
 
+// 验证：通过浏览器历史恢复第二页。
 it("restores page 2 from browser navigation", async () => {
   serve((url) => {
     const page = Number(url.searchParams.get("page") ?? 1);
@@ -254,6 +270,7 @@ it("restores page 2 from browser navigation", async () => {
   expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute("aria-current", "page");
 });
 
+// 验证：更改类型或搜索词时从 URL 移除页码。
 it("removes page from the URL when changing kind or search", async () => {
   window.history.replaceState(null, "", "/?page=2");
   serve((url) => {
@@ -278,6 +295,7 @@ it("removes page from the URL when changing kind or search", async () => {
   expect(new URLSearchParams(location.search).get("q")).toBe("山海");
 });
 
+// 验证：浏览器历史选中另一页后忽略迟到的旧页响应。
 it("ignores a stale page response after browser navigation selects another page", async () => {
   const pageTwo = deferred<Response>();
   serve((url) => url.searchParams.get("page") === "2"
@@ -300,6 +318,7 @@ it("ignores a stale page response after browser navigation selects another page"
 });
 
 
+// 验证：匿名访客看不到仅私密内容筛选。
 it("does not offer the private-only filter to anonymous visitors", async () => {
   serve(() => catalog([movieCard]));
   render(<App />);

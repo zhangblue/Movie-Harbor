@@ -8,9 +8,9 @@ import type {
   PrivacyRequest, ViewerUserListQuery, ViewerUserPage, ViewerUserSummary,
 } from "./types";
 
-// 定义列表查询，供相关请求、状态或组件使用。
+// 管理电影和剧集列表共用的状态及名称筛选条件。
 type ListQuery = { status?: ContentStatus; name?: string };
-// 定义生命周期操作，供相关请求、状态或组件使用。
+// 管理内容状态转换接口允许的发布、归档及转草稿操作。
 type LifecycleAction = "publish" | "archive" | "draft";
 
 // 从 API 错误详情读取稳定错误码，供管理操作处理失败时判断原因。
@@ -206,7 +206,7 @@ export async function getEpisodeDeleteImpact(seriesId: string, seasonId: string,
   return requiredResponse(await apiRequest<ChildDeleteImpactResponse>(`${episodePath(seriesId, seasonId, episodeId)}/delete-impact`));
 }
 
-// 定义媒体上传目标，供相关请求、状态或组件使用。
+// 管理媒体上传目标及其允许的槽位，区分电影、剧集和单集。
 type MediaUploadTarget =
   | { kind: "movies"; id: string; slot: "poster" | "video" }
   | { kind: "series"; id: string; slot: "poster" }
@@ -222,6 +222,7 @@ export async function uploadMedia(
   const form = new FormData();
   form.append("file", file);
   const path = apiPath("admin", "media", target.kind, target.id, target.slot);
+  // 只有需要进度反馈时使用 XHR；否则走普通请求，两条路径都将结果交给调用方。
   const response = onProgress
     ? await apiUpload<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form, onProgress })
     : await apiRequest<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form });

@@ -10,7 +10,7 @@ export function ViewerPasswordDialog({ onClose, onChanged, isCurrent }: { onClos
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const { expire } = useViewer();
-  // 提交表单时阻止重复请求，并将结果或错误反馈给用户。
+  // 提交普通用户改密表单时校验长度、阻止重复请求并处理身份变化。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending) return;
@@ -18,10 +18,12 @@ export function ViewerPasswordDialog({ onClose, onChanged, isCurrent }: { onClos
     setPending(true); setError("");
     try {
       await changeViewerPassword({ current_password: currentPassword, new_password: newPassword }, isCurrent);
+      // 改密撤销原会话；仅在身份未切换时通知根组件退出登录。
       if (isCurrent()) onChanged();
     }
     catch (cause) {
       if (!isCurrent()) return;
+      // 401 关闭已失效的会话；其他失败留在表单中供用户修正或重试。
       if (cause instanceof ApiError && cause.status === 401) expire();
       else setError(cause instanceof ApiError && cause.status === 400 ? cause.message : "密码修改失败，请稍后重试。");
     } finally { if (isCurrent()) setPending(false); }

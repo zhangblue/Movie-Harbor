@@ -34,7 +34,7 @@ export const series: SeriesDetail = {
     ] },
   ],
 };
-// 定义公开测试数据载荷，供测试中模拟相关行为。
+// 公开站测试响应允许使用的 JSON、目录或详情数据。
 type PublicFixturePayload = JsonValue | CatalogPage | MovieDetail | SeriesDetail;
 
 // 公开站测试中构造 JSON 响应。

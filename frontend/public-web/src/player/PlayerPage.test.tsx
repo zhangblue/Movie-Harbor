@@ -12,7 +12,7 @@ function setMediaTime(video: HTMLVideoElement, currentTime: number, duration = 6
   video.currentTime = currentTime;
 }
 
-// 定义内存存储，供测试中模拟相关行为。
+// 播放测试中模拟浏览器 Storage 的内存实现，隔离测试记录。
 class MemoryStorage implements Storage {
   #items = new Map<string, string>();
   // 读取内存存储的条目数，供测试检查存储状态。
@@ -44,6 +44,7 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
+// 验证：从电影详情进入播放并保留返回导航和公开媒体地址。
 it("opens movie playback from details, preserves back navigation, and uses the public media URL", async () => {
   window.history.replaceState(null, "", "/movies/movie-1");
   serve((url) => url.pathname === "/api/catalog/movies/movie-1" ? json(movie) : json({}, 404));
@@ -57,6 +58,7 @@ it("opens movie playback from details, preserves back navigation, and uses the p
   expect(screen.queryByText(/字幕|转码/)).not.toBeInTheDocument();
 });
 
+// 验证：提供继续或从头选择，仅在元数据就绪后安全恢复位置。
 it("offers continue or start over and restores only after metadata is ready with a safe clamp", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   saveProgress("movie:movie-1", 580, 900);
@@ -83,6 +85,7 @@ it("offers continue or start over and restores only after metadata is ready with
   expect(getProgress("movie:movie-1")).toBeNull();
 });
 
+// 验证：元数据先就绪、访客随后选择继续时仍恢复位置。
 it("restores when metadata becomes ready before the visitor chooses continue", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   saveProgress("movie:movie-1", 120, 900);
@@ -98,6 +101,7 @@ it("restores when metadata becomes ready before the visitor chooses continue", a
   expect(video.currentTime).toBe(120);
 });
 
+// 验证：访客选择恢复方式前保留旧进度并禁用原生控制。
 it("preserves saved progress and blocks native controls until a resume choice is made", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   saveProgress("movie:movie-1", 120, 900);
@@ -113,6 +117,7 @@ it("preserves saved progress and blocks native controls until a resume choice is
   expect(getProgress("movie:movie-1")?.position).toBe(120);
 });
 
+// 验证：播放时间更新每五秒持久化并在暂停或页面隐藏时立即保存。
 it("throttles timeupdate writes to five seconds and flushes on pause and pagehide", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   serve(() => json(movie));
@@ -138,6 +143,7 @@ it("throttles timeupdate writes to five seconds and flushes on pause and pagehid
   expect(getProgress("movie:movie-1")?.position).toBe(95);
 });
 
+// 验证：接近结尾及播放结束时清除进度。
 it("clears progress near the end and on ended", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   serve(() => json(movie));
@@ -151,6 +157,7 @@ it("clears progress near the end and on ended", async () => {
   expect(getProgress("movie:movie-1")).toBeNull();
 });
 
+// 验证：定位最近单集、隔离单集进度并按顺序和历史导航。
 it("deep-links to the recent episode, keeps episode keys isolated, and navigates ordered boundaries with history", async () => {
   window.history.replaceState(null, "", "/series/series-1/play");
   setRecentEpisode("series:series-1", "ep-2");
@@ -175,6 +182,7 @@ it("deep-links to the recent episode, keeps episode keys isolated, and navigates
   expect(await screen.findByRole("heading", { name: "第 3 集 · 灯塔" })).toBeInTheDocument();
 });
 
+// 验证：前后集存在时显示名称，同时保留边界按钮标签。
 it("shows each available adjacent episode name while retaining boundary labels", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-2");
   serve(() => json({ ...series, seasons: series.seasons.filter((season) => season.number === 1) }));
@@ -194,6 +202,7 @@ it("shows each available adjacent episode name while retaining boundary labels",
   expect(next).toHaveTextContent("下一集：第 3 集 · 灯塔");
 });
 
+// 验证：按季和集排序选集并在最后一集禁用下一集。
 it("selects episodes in season and episode order and disables the final next button", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-1");
   serve(() => json(series));
@@ -213,6 +222,7 @@ it("selects episodes in season and episode order and disables the final next but
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
 });
 
+// 验证：离开并返回单集时不恢复之前浏览的季筛选。
 it("does not revive a previously browsed season after navigating away and back to an episode", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-1");
   serve(() => json(series));
@@ -227,6 +237,7 @@ it("does not revive a previously browsed season after navigating away and back t
   expect(screen.getByRole("button", { name: "第 1 集 · 启程" })).toHaveAttribute("aria-current", "true");
 });
 
+// 验证：拒绝编码错误的单集深链，不替换为最近观看单集。
 it("rejects a malformed encoded episode deep link instead of replacing it with a recent episode", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/%");
   setRecentEpisode("series:series-1", "ep-2");
@@ -236,6 +247,7 @@ it("rejects a malformed encoded episode deep link instead of replacing it with a
   expect(window.location.pathname).toBe("/series/series-1/play/%");
 });
 
+// 验证：明确展示视频可播放状态和播放错误。
 it("shows explicit readiness and playback error messages", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   serve(() => json(movie));

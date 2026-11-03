@@ -14,7 +14,7 @@ import { ViewerPasswordDialog } from "../auth/ViewerPasswordDialog";
 const currentLocation = () => window.location.pathname + window.location.search;
 // 提取电影或剧集路径，在导航时判断是否离开当前内容。
 const contentPath = (path: string) => /^\/(movies|series)\/[^/]+/.exec(path)?.[0];
-// 定义普通用户状态，供相关请求、状态或组件使用。
+// 公开站当前身份的加载、匿名、已认证或错误状态及可选用户名。
 type ViewerState = { status: "loading" | "anonymous" | "authenticated" | "error"; username?: string };
 
 // 作为公开站根组件管理路由、普通用户身份和页面切换。
@@ -97,11 +97,15 @@ export function App() {
     if (startedStatus !== "authenticated" && !(discoverAnonymous && startedStatus === "anonymous")) return Promise.resolve(true);
     if (validation.current) return validation.current;
     const startedAt = identity.current;
+    // 校验结果只作用于发起时的身份；请求中的校验由并发调用复用。
     const request = getViewerSession((session) => acceptSession(session, startedAt)).then(
       () => startedAt === identity.current,
       (cause: CaughtValue) => {
+        // 身份已变化或匿名发现失败时返回 false，阻止依赖这次校验的后续操作。
         if (startedAt !== identity.current || startedStatus === "anonymous") return false;
+        // 明确的 401 代表会话已失效，关闭私密内容并阻止当前公开数据请求。
         if (cause instanceof ApiError && cause.status === 401) { expire(); return false; }
+        // 网络等非 401 失败无法证明会话失效：保留登录并允许公开请求继续，由其自身处理失败。
         setMessage("暂时无法确认登录状态，请稍后重试。");
         return true;
       },
@@ -115,6 +119,7 @@ export function App() {
     // 首次渲染时恢复已有会话；忽略卸载或身份切换后的迟到结果。
     getViewerSession((session) => !ignore && acceptSession(session, startedAt)).catch((cause: CaughtValue) => {
       if (ignore || startedAt !== identity.current) return;
+      // 初始发现得到 401 时转匿名；其他失败显示提示，匿名浏览仍可继续。
       if (cause instanceof ApiError && cause.status === 401) transitionViewer({ status: "anonymous" });
       else transitionViewer({ status: "error" }, "暂时无法确认登录状态，请稍后重试。");
     });

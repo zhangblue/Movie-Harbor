@@ -1,7 +1,7 @@
 import { apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken } from "./http";
 import type { CatalogKind, CatalogPage, ChangePasswordRequest, MovieDetail, SeriesDetail, ViewerLoginRequest, ViewerLoginResponse, ViewerSessionResponse } from "./types";
 
-// 定义目录查询，供相关请求、状态或组件使用。
+// 公开目录查询支持的内容类别、搜索、私密筛选和分页参数。
 export interface CatalogQuery {
   kind?: CatalogKind;
   q?: string;
@@ -21,7 +21,7 @@ export async function viewerLogin(input: ViewerLoginRequest, acceptSession?: (se
 // 恢复普通用户会话，仅在调用方确认结果仍有效时保存令牌。
 export async function getViewerSession(acceptSession: (session: ViewerSessionResponse) => boolean = () => true): Promise<ViewerSessionResponse> {
   const session = requiredResponse(await apiRequest<ViewerSessionResponse>("/api/viewer/session"));
-  // The identity owner must accept a response before it can replace the current CSRF token.
+  // 身份持有者确认响应属于当前用户后才写入令牌，避免迟到会话覆盖新身份。
   if (acceptSession(session)) setCsrfToken(session.csrf_token);
   return session;
 }

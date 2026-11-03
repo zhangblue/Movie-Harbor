@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
-// 定义海报卡片属性，供相关请求、状态或组件使用。
+// 海报卡片的详情链接、元数据、题材和可选展示样式。
 export interface PosterCardProps {
   href: string;
   title: string;

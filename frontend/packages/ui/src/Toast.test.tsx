@@ -6,6 +6,7 @@ import { Toast } from "./Toast";
 
 afterEach(cleanup);
 
+// 验证：信息和成功提示使用礼貌的无障碍播报。
 it("announces informational and success messages politely", () => {
   const { rerender } = render(<Toast message="草稿已保存" />);
   expect(screen.getByRole("status")).toHaveAttribute("aria-live", "polite");
@@ -14,6 +15,7 @@ it("announces informational and success messages politely", () => {
   expect(screen.getByRole("status")).toHaveClass("mh-toast--success");
 });
 
+// 验证：错误提示立即播报并将内容作为文本渲染。
 it("announces error messages assertively and renders content as text", () => {
   render(<Toast variant="error" message={'失败 <script>alert("x")</script>'} />);
   expect(screen.getByRole("alert")).toHaveAttribute("aria-live", "assertive");
@@ -21,6 +23,7 @@ it("announces error messages assertively and renders content as text", () => {
   expect(document.querySelector("script")).not.toBeInTheDocument();
 });
 
+// 验证：消息为空时不渲染提示。
 it("renders nothing for an empty message", () => {
   const { container } = render(<Toast message="" />);
   expect(container).toBeEmptyDOMElement();
