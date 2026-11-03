@@ -32,6 +32,7 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
         return false;
     };
     let segments: Vec<_> = relative.split('/').collect();
+    // 在匹配含资源标识的白名单路由时验证 UUID，任一标识无效都不能放行该路径。
     let uuid = |value: &str| Uuid::parse_str(value).is_ok();
     match *method {
         Method::GET => match segments.as_slice() {

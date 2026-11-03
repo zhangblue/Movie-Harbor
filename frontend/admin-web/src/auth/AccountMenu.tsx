@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@movie-harbor/ui";
 
-// 展示管理员账户菜单，支持键盘和外部点击关闭。
+// 在已认证后台页头渲染管理员账户菜单，支持键盘和外部点击关闭。
 export function AccountMenu({ name, onPassword, onLogout, disabled }: {
   name: string; onPassword: () => void; onLogout: () => void; disabled: boolean;
 }) {

@@ -99,7 +99,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
         onRename={(value) => { void mutate(() => renameGenre(genre.id, value), (updated) => replace(updated as GenreResponse), "题材名称已存在。"); }}
         onMove={(offset) => move(index, offset)}
         onDeactivate={() => { void mutate(() => deactivateGenre(genre.id), (updated) => replace(updated as GenreResponse), "题材状态已变化，请刷新后重试。"); }}
-        onDelete={() => { if (window.confirm(`确认永久删除题材“${genre.name}”？`)) void mutate(() => deleteGenre(genre.id), () => setGenres((items) => items.filter((item) => item.id !== genre.id)), "题材正在被内容引用，不能删除。"); }} />)}</tbody>
+        onDelete={() => { /* 点击删除时先确认；取消则不发请求，确认后经 mutate 异步删除，冲突时保留列表并展示引用提示。 */ if (window.confirm(`确认永久删除题材“${genre.name}”？`)) void mutate(() => deleteGenre(genre.id), /* 服务端删除成功且页面仍挂载时才移除对应题材，避免失败时提前隐藏。 */ () => setGenres((items) => items.filter((item) => item.id !== genre.id)), "题材正在被内容引用，不能删除。"); }} />)}</tbody>
     </table>{loading ? <p role="status" className="empty-state">正在加载题材…</p> : genres.length === 0 ? <p className="empty-state">尚无题材。</p> : null}</div>
   </section>;
 }

@@ -17,7 +17,7 @@ function response(body: JsonValue | ViewerUserPage | ViewerUserSummary, status =
 function page(items = [summer, robin], total = items.length, current = 1): ViewerUserPage {
   return { items, total, page: current, size: 20, summary: { total_users: total, active_users: 1, latest_user: robin } };
 }
-// 安装用户模拟服务并渲染页面，在用户管理测试开始时调用。
+// 设置会话 CSRF 令牌并安装用户模拟服务，在用户管理测试渲染页面前调用。
 function setup(handler?: Parameters<typeof server>[0]) {
   setCsrfToken("session-csrf");
   return server((request) => handler?.(request) ?? (request.method === "GET" && request.url.startsWith("/api/admin/users?") ? response(page()) : undefined));

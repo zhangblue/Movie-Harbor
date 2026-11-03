@@ -127,7 +127,7 @@ test("requires every contract field with its declared type", async (t) => {
     [(value) => { value.movies[0].duration_seconds = 1.5; }, /duration_seconds/],
     // 将 value.movies[0].video_path 改为 undefined，供该字段的非法值校验。
     [(value) => { value.movies[0].video_path = undefined; }, /video_path/],
-    // 将 value.series 改为 {，供该字段的非法值校验。
+    // 将剧集数组替换为空对象，验证预检拒绝 series 字段的错误类型。
     [(value) => { value.series = {}; }, /series/],
     // 将 value.exported_at 改为 "yesterday"，供该字段的非法值校验。
     [(value) => { value.exported_at = "yesterday"; }, /exported_at/],

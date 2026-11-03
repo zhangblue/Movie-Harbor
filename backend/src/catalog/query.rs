@@ -318,6 +318,7 @@ async fn list_on<C: ConnectionTrait>(
 ) -> Result<CatalogPage, DbErr> {
     let allow_public = !filter.private_only;
     let allow_private = include_private;
+    // 组装计数和分页查询参数时生成同一内容类型的绑定值，确保总数与条目使用一致筛选。
     let kind_value = || filter.kind.as_str().into();
     let (count_sql, count_values) = match &filter.search_pattern {
         Some(pattern) => (

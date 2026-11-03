@@ -208,6 +208,7 @@ test('client multipart rejects files changed before or during upload', async t =
   const current = await inspectAllowedFile(path, config.allowedRoots);
   let changed = false;
   await assert.rejects(client.upload('/api/admin/media/movies/id/video', current, 'video/mp4', () => {
+    // 首次收到上传进度时用等长内容改写源文件，注入传输期间变化，使上传后身份复检必须拒绝。
     if (!changed) { changed = true; writeFileSync(path, Buffer.alloc(256 * 1024, 0x62)); }
   }), { code: 'file_changed' });
 });
@@ -216,10 +217,12 @@ test('client multipart rejects files changed before or during upload', async t =
 // 验证分段上传收到响应进展时刷新空闲超时，而 JSON 请求使用总时限。
 test('client multipart refreshes inactivity on response progress while JSON keeps total deadline', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
+  // 收完请求后分段发送响应，让上传依靠持续进展刷新空闲时限，同时验证 JSON 请求仍受总时限约束。
   const { config, directory } = await fixture(t, async (req, res) => {
     for await (const _ of req) {}
     res.write('{');
     let ticks = 0;
+    // 每 15 毫秒推进一次响应；客户端超时断开或第十次写完 JSON 时停止定时器，避免测试遗留任务。
     const timer = setInterval(() => {
       if (res.destroyed) { clearInterval(timer); return; }
       if (++ticks === 10) { clearInterval(timer); res.end('}'); } else res.write(' ');

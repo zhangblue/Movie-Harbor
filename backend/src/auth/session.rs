@@ -69,6 +69,7 @@ pub async fn authenticate<C: ConnectionTrait>(
     db: &C,
     headers: &HeaderMap,
 ) -> Result<CurrentSession, AuthError> {
+    // 在 Cookie、令牌或关联记录校验失败时统一构造 401，终止本次管理员会话认证。
     let unauthorized = || AuthError(StatusCode::UNAUTHORIZED);
     // 从可能含多个 Cookie 的请求头中精确提取本应用会话，不能把其他同名片段当成凭据。
     let raw = headers

@@ -127,7 +127,7 @@ it("discards a pre-discovery private catalog after the initial session returns 4
   expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog")).toHaveLength(2);
 });
 
-// 验证：其他标签页切换用户后忽略旧请求的不同失败状态。
+// 验证：其他标签页切换用户后忽略旧请求迟到的成功（204）或失败（401）响应。
 it.each([ ["logout", 204], ["logout", 401], ["password", 204], ["password", 401] ] as const)(
   "ignores old %s status %s after another tab switches to Winter", async (operation, status) => {
     const state = server(true); const user = userEvent.setup(); render(<App />);
