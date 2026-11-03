@@ -1,11 +1,14 @@
+/// 在生成媒体链接或校验代理路径时从受控存储键构造公开 URL。
 pub(crate) fn controlled_media_url(storage_key: &str, expected_kind: &str) -> Option<String> {
     controlled_storage_key(storage_key, expected_kind).then(|| format!("/media/{storage_key}"))
 }
 
+/// 在管理响应中从受控存储键构造容器内媒体路径。
 pub(crate) fn controlled_media_path(storage_key: &str, expected_kind: &str) -> Option<String> {
     controlled_storage_key(storage_key, expected_kind).then(|| format!("/media/{storage_key}"))
 }
 
+/// 在生成媒体路径前验证键的用途、格式与目录边界。
 fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {
     // 受控键同时校验用途目录和系统文件名，公开 URL 与容器路径都不能接受任意相对路径。
     if key.contains(['\\', '\0']) {
@@ -46,6 +49,7 @@ mod tests {
     use super::{controlled_media_path, controlled_media_url};
 
     #[test]
+    /// 在路径单元测试中验证公开 URL 与容器路径使用各自的边界。
     fn builds_public_urls_and_container_paths_through_separate_boundaries() {
         let storage_key = "video/ab/ab000000000000000000000000000001.mp4";
         assert_eq!(

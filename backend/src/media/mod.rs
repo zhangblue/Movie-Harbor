@@ -19,6 +19,7 @@ pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
 
 /// 在发布边界同时检查已登记资产的用途、声明类型和受控键对应的可访问普通文件，拒绝符号链接和非普通文件。
+/// 在内容发布校验时检查媒体资产的用途和必要元数据。
 pub fn is_publishable_asset<S: AsRef<str>>(
     storage: &LocalMediaStorage,
     asset: Option<&crate::entities::media_asset::Model>,
@@ -38,6 +39,7 @@ pub fn is_publishable_asset<S: AsRef<str>>(
 }
 
 #[derive(Debug)]
+/// 媒体领域错误，供上传、授权和清理流程向调用方报告失败。
 pub enum MediaError {
     InvalidFileName,
     InvalidStorageKey,
@@ -58,6 +60,7 @@ pub enum MediaError {
 }
 
 impl fmt::Display for MediaError {
+    /// 在格式化错误信息时输出对应的可读描述。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::InvalidFileName => "invalid upload filename",
@@ -82,6 +85,7 @@ impl fmt::Display for MediaError {
 }
 
 impl std::error::Error for MediaError {
+    /// 在检查错误链时返回底层错误。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(error) => Some(error),
@@ -92,18 +96,21 @@ impl std::error::Error for MediaError {
 }
 
 impl From<io::Error> for MediaError {
+    /// 在文件操作失败时将 I/O 错误包装为媒体错误。
     fn from(error: io::Error) -> Self {
         Self::Io(error)
     }
 }
 
 impl From<sea_orm::DbErr> for MediaError {
+    /// 在媒体数据库操作失败时将数据库错误包装为媒体错误。
     fn from(error: sea_orm::DbErr) -> Self {
         Self::Database(error)
     }
 }
 
 impl IntoResponse for MediaError {
+    /// 在路由返回错误时转换为对应的 HTTP 响应。
     fn into_response(self) -> Response {
         if matches!(self, Self::ContentMismatch) {
             return (

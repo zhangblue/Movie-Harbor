@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::service::SeriesError;
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 pub async fn set_privacy(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -34,6 +35,7 @@ pub async fn set_privacy(
     Err(SeriesError::Conflict)
 }
 
+/// 在读取或校验内容时按标识查询记录，不存在时返回领域错误。
 pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<series::Model, SeriesError> {
     series::Entity::find_by_id(id)
         .one(db)
@@ -41,6 +43,7 @@ pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<series::Model,
         .ok_or(SeriesError::NotFound)
 }
 
+/// 在内容写事务开始时锁定记录，供后续状态与版本检查使用。
 pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<series::Model, SeriesError> {
     // 层级写入先锁定 series，随后才锁定 season 和 episode，以统一全局加锁顺序。
     series::Entity::find_by_id(id)
@@ -50,6 +53,7 @@ pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<series::M
         .ok_or(SeriesError::NotFound)
 }
 
+/// 在剧集写事务中按预期版本保存记录并递增版本，冲突时拒绝覆盖。
 pub async fn persist_series(
     tx: &DatabaseTransaction,
     value: &series::Model,
@@ -85,6 +89,7 @@ pub async fn persist_series(
     find(tx, value.id).await
 }
 
+/// 在子级发生变化后递增父剧集版本，使旧客户端的后续写入发生冲突。
 pub async fn bump_series(
     tx: &DatabaseTransaction,
     value: &series::Model,
@@ -92,6 +97,7 @@ pub async fn bump_series(
     persist_series(tx, value, value.version).await
 }
 
+/// 在删除剧集事务中按预期版本删除记录，版本不匹配时返回冲突。
 pub async fn delete_series(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -108,6 +114,7 @@ pub async fn delete_series(
     Ok(())
 }
 
+/// 在读取剧集详情时按季序号和标识稳定排序返回各季。
 pub async fn seasons<C: ConnectionTrait>(
     db: &C,
     series_id: Uuid,
@@ -120,6 +127,7 @@ pub async fn seasons<C: ConnectionTrait>(
         .await?)
 }
 
+/// 在锁定父剧集后锁定其所属季，供层级写入检查使用。
 pub async fn season_locked(
     tx: &DatabaseTransaction,
     series_id: Uuid,
@@ -135,6 +143,7 @@ pub async fn season_locked(
         .ok_or(SeriesError::NotFound)
 }
 
+/// 在读取季详情时按集序号和标识稳定排序返回单集。
 pub async fn episodes<C: ConnectionTrait>(
     db: &C,
     season_id: Uuid,
@@ -147,6 +156,7 @@ pub async fn episodes<C: ConnectionTrait>(
         .await?)
 }
 
+/// 在级联操作中按标识顺序锁定季内单集，保持一致的锁顺序。
 pub async fn episodes_locked(
     tx: &DatabaseTransaction,
     season_id: Uuid,
@@ -160,6 +170,7 @@ pub async fn episodes_locked(
         .await?)
 }
 
+/// 在锁定父剧集和季后锁定所属单集，供层级写入检查使用。
 pub async fn episode_locked(
     tx: &DatabaseTransaction,
     season_id: Uuid,
@@ -175,6 +186,7 @@ pub async fn episode_locked(
         .ok_or(SeriesError::NotFound)
 }
 
+/// 在单集写事务中按预期版本保存记录并递增版本，冲突时拒绝覆盖。
 pub async fn persist_episode(
     tx: &DatabaseTransaction,
     value: &episode::Model,
@@ -216,6 +228,7 @@ pub async fn persist_episode(
         .ok_or(SeriesError::Conflict)
 }
 
+/// 在删除单集事务中按预期版本删除记录，版本不匹配时返回冲突。
 pub async fn delete_episode(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -232,6 +245,7 @@ pub async fn delete_episode(
     Ok(())
 }
 
+/// 在组装内容响应时按稳定顺序读取关联题材。
 pub async fn genres<C: ConnectionTrait>(
     db: &C,
     series_id: Uuid,
@@ -254,6 +268,7 @@ pub async fn genres<C: ConnectionTrait>(
         .await?)
 }
 
+/// 在内容写事务中替换题材关联，使关系与内容更新一并提交。
 pub async fn replace_genres(
     tx: &DatabaseTransaction,
     series_id: Uuid,
@@ -274,6 +289,7 @@ pub async fn replace_genres(
     Ok(())
 }
 
+/// 在组装内容响应时按可选标识读取媒体资产。
 pub async fn asset<C: ConnectionTrait>(
     db: &C,
     id: Option<Uuid>,

@@ -26,12 +26,14 @@ use super::{
 };
 
 #[derive(Clone)]
+/// 剧集路由共享状态，供请求处理器访问数据库和媒体存储。
 struct SeriesState {
     db: DatabaseConnection,
     storage: LocalMediaStorage,
     allowed_video_mime_types: Vec<String>,
 }
 
+/// 在组装应用路由时注册当前领域的接口及共享状态。
 pub fn router(
     auth_state: AuthState,
     storage: LocalMediaStorage,
@@ -104,12 +106,14 @@ pub fn router(
         .with_state(state)
 }
 
+/// 在列表请求中读取符合筛选条件的内容并组装响应。
 async fn list(
     State(state): State<SeriesState>,
     Query(query): Query<SeriesListQuery>,
 ) -> Result<Json<Vec<SeriesResponse>>, SeriesError> {
     Ok(Json(service::list(&state.db, query).await?))
 }
+/// 在创建请求中建立初始内容并返回响应。
 async fn create(
     State(state): State<SeriesState>,
     Extension(principal): Extension<ManagementPrincipal>,
@@ -128,6 +132,7 @@ async fn create(
     ))
 }
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 async fn set_privacy(
     State(state): State<SeriesState>,
     Path(id): Path<String>,
@@ -144,6 +149,7 @@ async fn set_privacy(
     ))
 }
 
+/// 在详情请求中读取指定内容并组装关联数据。
 async fn detail(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -153,6 +159,7 @@ async fn detail(
     ))
 }
 
+/// 在编辑请求中校验状态和版本后保存内容。
 async fn update(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -168,6 +175,7 @@ async fn update(
     ))
 }
 
+/// 在创建季请求中校验父剧集和版本并建立季。
 async fn create_season(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -186,6 +194,7 @@ async fn create_season(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+/// 在修改季请求中检查父剧集版本及已发布单集约束后更新。
 async fn update_season(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
@@ -205,6 +214,7 @@ async fn update_season(
     ))
 }
 
+/// 在删除季请求中检查层级与状态并同步清理其媒体。
 async fn delete_season(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
@@ -224,6 +234,7 @@ async fn delete_season(
     ))
 }
 
+/// 在删除季前统计其单集与媒体影响。
 async fn season_delete_impact(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
@@ -238,6 +249,7 @@ async fn season_delete_impact(
     ))
 }
 
+/// 在创建单集请求中校验层级和版本后建立草稿。
 async fn create_episode(
     State(state): State<SeriesState>,
     Path((series_id, season_id)): Path<(String, String)>,
@@ -256,6 +268,7 @@ async fn create_episode(
     Ok((StatusCode::CREATED, Json(response)))
 }
 
+/// 在单集详情请求中验证所属层级并组装响应。
 async fn episode_detail(
     State(state): State<SeriesState>,
     Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
@@ -271,6 +284,7 @@ async fn episode_detail(
     ))
 }
 
+/// 在编辑单集请求中检查草稿状态及版本后保存。
 async fn update_episode(
     State(state): State<SeriesState>,
     Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
@@ -290,6 +304,7 @@ async fn update_episode(
     ))
 }
 
+/// 在整剧发布请求中委托剧集状态转换。
 async fn publish_series(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -298,6 +313,7 @@ async fn publish_series(
     transition_series(state, series_id, input, "published").await
 }
 
+/// 在整剧归档请求中委托剧集状态转换。
 async fn archive_series(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -306,6 +322,7 @@ async fn archive_series(
     transition_series(state, series_id, input, "archived").await
 }
 
+/// 在整剧转回草稿请求中委托剧集状态转换。
 async fn draft_series(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -314,6 +331,7 @@ async fn draft_series(
     transition_series(state, series_id, input, "draft").await
 }
 
+/// 在剧集状态转换请求中检查生命周期与版本并保存结果。
 async fn transition_series(
     state: SeriesState,
     series_id: String,
@@ -333,6 +351,7 @@ async fn transition_series(
     ))
 }
 
+/// 在单集发布请求中委托单集状态转换。
 async fn publish_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
@@ -341,6 +360,7 @@ async fn publish_episode(
     transition_episode(state, ids, input, "published").await
 }
 
+/// 在单集归档请求中委托单集状态转换。
 async fn archive_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
@@ -349,6 +369,7 @@ async fn archive_episode(
     transition_episode(state, ids, input, "archived").await
 }
 
+/// 在单集转回草稿请求中委托单集状态转换。
 async fn draft_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
@@ -357,6 +378,7 @@ async fn draft_episode(
     transition_episode(state, ids, input, "draft").await
 }
 
+/// 在单集状态转换请求中检查层级、生命周期与版本并保存结果。
 async fn transition_episode(
     state: SeriesState,
     ids: (String, String, String),
@@ -380,6 +402,7 @@ async fn transition_episode(
     ))
 }
 
+/// 在删除单集时按层级及版本约束执行删除和媒体清理。
 async fn delete_episode(
     State(state): State<SeriesState>,
     Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
@@ -399,6 +422,7 @@ async fn delete_episode(
     Ok(Json(result))
 }
 
+/// 在删除单集前统计其媒体影响。
 async fn episode_delete_impact(
     State(state): State<SeriesState>,
     Path((series_id, season_id, episode_id)): Path<(String, String, String)>,
@@ -414,6 +438,7 @@ async fn episode_delete_impact(
     ))
 }
 
+/// 在删除整剧时检查生命周期与版本并清理子级媒体。
 async fn delete_series(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,
@@ -430,6 +455,7 @@ async fn delete_series(
     ))
 }
 
+/// 在删除预览请求中统计受影响的内容与媒体。
 async fn delete_impact(
     State(state): State<SeriesState>,
     Path(series_id): Path<String>,

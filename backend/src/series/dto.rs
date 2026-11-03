@@ -7,6 +7,7 @@ use sea_orm::DbErr;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
+/// 创建剧集请求，供管理接口和 MCP 创建入口解析字段。
 pub struct CreateSeriesRequest {
     pub name: String,
     pub is_private: bool,
@@ -21,12 +22,14 @@ pub struct CreateSeriesRequest {
 }
 
 #[derive(Debug, Deserialize)]
+/// 访问范围变更请求，供路由读取预期版本与隐私设置。
 pub struct PrivacyRequest {
     pub version: i64,
     pub is_private: bool,
 }
 
 #[derive(Debug, Deserialize)]
+/// 剧集编辑请求，供草稿更新时解析字段补丁。
 pub struct UpdateSeriesRequest {
     pub version: i64,
     #[serde(default)]
@@ -39,11 +42,13 @@ pub struct UpdateSeriesRequest {
 }
 
 #[derive(Debug, Deserialize)]
+/// 版本请求，供状态转换和删除等并发校验使用。
 pub struct VersionRequest {
     pub version: i64,
 }
 
 #[derive(Debug, Serialize)]
+/// 子级删除影响响应，供删除季或单集前展示统计。
 pub struct ChildDeleteImpactResponse {
     pub display_name: String,
     pub version: i64,
@@ -53,18 +58,21 @@ pub struct ChildDeleteImpactResponse {
 }
 
 #[derive(Debug, Deserialize)]
+/// 创建季请求，供管理路由读取季序号及父版本。
 pub struct CreateSeasonRequest {
     pub version: i64,
     pub number: i32,
 }
 
 #[derive(Debug, Deserialize)]
+/// 修改季请求，供管理路由读取新序号及父版本。
 pub struct UpdateSeasonRequest {
     pub version: i64,
     pub number: i32,
 }
 
 #[derive(Debug, Deserialize)]
+/// 创建单集请求，供管理路由读取名称、序号和父版本。
 pub struct CreateEpisodeRequest {
     /// 所属剧集的版本；新建时尚无单集版本。
     pub version: i64,
@@ -75,6 +83,7 @@ pub struct CreateEpisodeRequest {
 }
 
 #[derive(Debug, Deserialize)]
+/// 修改单集请求，供草稿更新时解析字段补丁与版本。
 pub struct UpdateEpisodeRequest {
     pub version: i64,
     #[serde(default)]
@@ -86,12 +95,14 @@ pub struct UpdateEpisodeRequest {
 }
 
 #[derive(Debug, Default, Deserialize)]
+/// 剧集列表筛选参数，供列表请求解析查询条件。
 pub struct SeriesListQuery {
     pub status: Option<String>,
     pub name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// 单集响应，供剧集详情和单集接口展示。
 pub struct EpisodeResponse {
     pub id: String,
     pub season_id: String,
@@ -108,6 +119,7 @@ pub struct EpisodeResponse {
 }
 
 impl EpisodeResponse {
+    /// 在组装接口响应时把数据库模型及关联信息转换为响应对象。
     pub fn new(value: episode::Model, video: Option<media_asset::Model>) -> Result<Self, DbErr> {
         Ok(Self {
             id: value.id.to_string(),
@@ -129,6 +141,7 @@ impl EpisodeResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// 季响应，供剧集详情按层级展示单集。
 pub struct SeasonResponse {
     pub id: String,
     pub number: i32,
@@ -136,6 +149,7 @@ pub struct SeasonResponse {
 }
 
 impl SeasonResponse {
+    /// 在组装接口响应时把数据库模型及关联信息转换为响应对象。
     pub fn new(value: season::Model, episodes: Vec<EpisodeResponse>) -> Self {
         Self {
             id: value.id.to_string(),
@@ -146,6 +160,7 @@ impl SeasonResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// 剧集响应，供管理端读取剧集及关联层级。
 pub struct SeriesResponse {
     pub id: String,
     pub is_private: bool,
@@ -164,6 +179,7 @@ pub struct SeriesResponse {
 }
 
 impl SeriesResponse {
+    /// 在组装接口响应时把数据库模型及关联信息转换为响应对象。
     pub fn new(
         value: series::Model,
         genres: Vec<genre::Model>,
@@ -192,6 +208,7 @@ impl SeriesResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+/// 单集响应及父版本封装，供单集写入后更新客户端状态。
 pub struct EpisodeEnvelope {
     pub series_version: i64,
     pub episode: EpisodeResponse,

@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use super::service::MovieError;
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 pub async fn set_privacy(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -34,6 +35,7 @@ pub async fn set_privacy(
     Err(MovieError::Conflict)
 }
 
+/// 在读取或校验内容时按标识查询记录，不存在时返回领域错误。
 pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<movie::Model, MovieError> {
     movie::Entity::find_by_id(id)
         .one(db)
@@ -41,6 +43,7 @@ pub async fn find<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<movie::Model, 
         .ok_or(MovieError::NotFound)
 }
 
+/// 在内容写事务开始时锁定记录，供后续状态与版本检查使用。
 pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<movie::Model, MovieError> {
     // 行锁将同一电影的命令串行化；persist 仍以 version 作为写入条件，防止陈旧读取盲目覆盖新数据。
     movie::Entity::find_by_id(id)
@@ -50,6 +53,7 @@ pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<movie::Mo
         .ok_or(MovieError::NotFound)
 }
 
+/// 在写事务中按预期版本保存内容并递增版本，冲突时拒绝覆盖。
 pub async fn persist(
     tx: &DatabaseTransaction,
     value: &movie::Model,
@@ -90,6 +94,7 @@ pub async fn persist(
     find(tx, value.id).await
 }
 
+/// 在删除事务中按预期版本删除记录，版本不匹配时返回冲突。
 pub async fn delete(
     tx: &DatabaseTransaction,
     id: Uuid,
@@ -106,6 +111,7 @@ pub async fn delete(
     Ok(())
 }
 
+/// 在组装内容响应时按稳定顺序读取关联题材。
 pub async fn genres<C: ConnectionTrait>(
     db: &C,
     movie_id: Uuid,
@@ -128,6 +134,7 @@ pub async fn genres<C: ConnectionTrait>(
         .await?)
 }
 
+/// 在内容写事务中替换题材关联，使关系与内容更新一并提交。
 pub async fn replace_genres(
     tx: &DatabaseTransaction,
     movie_id: Uuid,
@@ -148,6 +155,7 @@ pub async fn replace_genres(
     Ok(())
 }
 
+/// 在组装内容响应时按可选标识读取媒体资产。
 pub async fn asset<C: ConnectionTrait>(
     db: &C,
     id: Option<Uuid>,

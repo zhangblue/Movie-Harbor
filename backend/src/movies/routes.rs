@@ -21,12 +21,14 @@ use super::{
 };
 
 #[derive(Clone)]
+/// 电影路由共享状态，供请求处理器访问数据库和媒体存储。
 struct MovieState {
     db: DatabaseConnection,
     storage: LocalMediaStorage,
     allowed_video_mime_types: Vec<String>,
 }
 
+/// 在组装应用路由时注册当前领域的接口及共享状态。
 pub fn router(
     auth_state: AuthState,
     storage: LocalMediaStorage,
@@ -55,6 +57,7 @@ pub fn router(
         .with_state(state)
 }
 
+/// 在列表请求中读取符合筛选条件的内容并组装响应。
 async fn list(
     State(state): State<MovieState>,
     Query(query): Query<MovieListQuery>,
@@ -62,6 +65,7 @@ async fn list(
     Ok(Json(service::list(&state.db, query).await?))
 }
 
+/// 在创建请求中建立初始内容并返回响应。
 async fn create(
     State(state): State<MovieState>,
     Extension(principal): Extension<ManagementPrincipal>,
@@ -80,6 +84,7 @@ async fn create(
     ))
 }
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 async fn set_privacy(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -96,6 +101,7 @@ async fn set_privacy(
     ))
 }
 
+/// 在详情请求中读取指定内容并组装关联数据。
 async fn detail(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -105,6 +111,7 @@ async fn detail(
     ))
 }
 
+/// 在编辑请求中校验状态和版本后保存内容。
 async fn update(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -115,6 +122,7 @@ async fn update(
     ))
 }
 
+/// 在发布请求中委托状态转换并返回更新后的内容。
 async fn publish(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -123,6 +131,7 @@ async fn publish(
     transition(state, id, input, "published").await
 }
 
+/// 在归档请求中委托状态转换并返回更新后的内容。
 async fn archive(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -131,6 +140,7 @@ async fn archive(
     transition(state, id, input, "archived").await
 }
 
+/// 在恢复草稿请求中委托状态转换并返回更新后的内容。
 async fn revert_to_draft(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -139,6 +149,7 @@ async fn revert_to_draft(
     transition(state, id, input, "draft").await
 }
 
+/// 在生命周期请求中校验目标状态和版本后执行转换。
 async fn transition(
     state: MovieState,
     id: String,
@@ -158,6 +169,7 @@ async fn transition(
     ))
 }
 
+/// 在电影删除请求中调用服务执行版本校验、删除及媒体清理。
 async fn delete_movie(
     State(state): State<MovieState>,
     Path(id): Path<String>,
@@ -174,6 +186,7 @@ async fn delete_movie(
     ))
 }
 
+/// 在删除预览请求中统计受影响的内容与媒体。
 async fn delete_impact(
     State(state): State<MovieState>,
     Path(id): Path<String>,

@@ -12,12 +12,14 @@ use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// 待删除的资产标识及存储键，供暂存和恢复流程定位文件。
 pub struct OwnedMedia {
     pub asset_id: Uuid,
     pub storage_key: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// 持久化删除清单，供中断后核验操作并恢复文件。
 struct Manifest {
     version: u8,
     operation_id: Uuid,
@@ -26,17 +28,20 @@ struct Manifest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// 删除清单中的文件条目，供恢复时核对原键与隔离名称。
 struct ManifestEntry {
     asset_id: Uuid,
     storage_key: String,
     staged_name: String,
 }
 
+/// 已隔离文件的运行时记录，供回滚或最终清理使用。
 struct StagedEntry {
     source: RemovalSource,
     staged_name: String,
 }
 
+/// 持有媒体变更锁的删除暂存结果，供事务结束后恢复或清理。
 pub struct StagedRemoval {
     storage: LocalMediaStorage,
     staged: StagedOperation,
@@ -44,6 +49,7 @@ pub struct StagedRemoval {
 }
 
 #[derive(Debug)]
+/// 删除收尾错误，供调用方区分操作、恢复、提交和清理失败。
 pub enum FinishDeleteError<E> {
     Operation(E),
     Restore,
@@ -51,28 +57,33 @@ pub enum FinishDeleteError<E> {
     Finalize,
 }
 
+/// 删除暂存操作，供持锁会话恢复或完成隔离文件。
 pub(crate) struct StagedOperation {
     _operation_id: Uuid,
     operation: RemovalOperation,
     entries: Vec<StagedEntry>,
 }
 
+/// 持有媒体变更锁的会话，供删除及替换流程协调暂存。
 pub(crate) struct RemovalSession {
     storage: LocalMediaStorage,
     guard: OwnedMutexGuard<()>,
 }
 
 impl StagedRemoval {
+    /// 在删除事务未成功时恢复隔离文件并关闭操作。
     pub async fn restore(self) -> Result<(), MediaError> {
         self.staged.restore(&self.storage)
     }
 
+    /// 在删除事务成功后移除隔离文件并关闭操作。
     pub async fn finish(self) -> Result<(), MediaError> {
         self.staged.finish(&self.storage)
     }
 }
 
 impl StagedOperation {
+    /// 在删除事务未成功时恢复隔离文件并关闭操作。
     pub(crate) fn restore(self, storage: &LocalMediaStorage) -> Result<(), MediaError> {
         for entry in self.entries.iter().rev() {
             storage.restore_removal_source(&self.operation, &entry.source, &entry.staged_name)?;
@@ -80,6 +91,7 @@ impl StagedOperation {
         storage.close_removal_operation(&self.operation)
     }
 
+    /// 在删除事务成功后移除隔离文件并关闭操作。
     pub(crate) fn finish(self, storage: &LocalMediaStorage) -> Result<(), MediaError> {
         for entry in &self.entries {
             storage.finish_removal_source(&self.operation, &entry.staged_name)?;
@@ -88,6 +100,7 @@ impl StagedOperation {
     }
 }
 
+/// 在删除或替换前获取变更锁并隔离受影响文件，供事务结束后处理。
 pub async fn stage(
     storage: &LocalMediaStorage,
     reason: &str,
@@ -97,6 +110,7 @@ pub async fn stage(
     acquire(storage).await?.stage(reason, assets)
 }
 
+/// 在删除或替换前按资产标识读取需暂存的媒体键。
 pub async fn load_owned_media<C: ConnectionTrait>(
     db: &C,
     ids: &[Uuid],
@@ -116,6 +130,7 @@ pub async fn load_owned_media<C: ConnectionTrait>(
         .collect())
 }
 
+/// 在删除事务中批量移除已暂存文件对应的资产记录。
 pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Result<(), DbErr> {
     if !ids.is_empty() {
         media_asset::Entity::delete_many()
@@ -126,6 +141,7 @@ pub async fn delete_media_assets<C: ConnectionTrait>(db: &C, ids: &[Uuid]) -> Re
     Ok(())
 }
 
+/// 在删除操作完成数据库写入后协调提交、文件恢复和最终清理。
 pub async fn finish_delete_transaction<E>(
     tx: DatabaseTransaction,
     staged: StagedRemoval,
@@ -152,6 +168,7 @@ pub async fn finish_delete_transaction<E>(
     Ok(deleted_media_count as u64)
 }
 
+/// 在应用启动时依据持久删除清单和数据库引用恢复或完成中断操作。
 pub async fn recover(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -191,6 +208,7 @@ pub async fn recover(
     Ok(())
 }
 
+/// 在删除恢复时核对资产及存储键是否仍被内容或暂存海报引用。
 async fn is_referenced(
     db: &DatabaseConnection,
     asset_id: Uuid,
@@ -218,6 +236,7 @@ async fn is_referenced(
         .map_err(MediaError::Database)
 }
 
+/// 在媒体删除或恢复开始时取得全局变更锁。
 pub(crate) async fn acquire(storage: &LocalMediaStorage) -> Result<RemovalSession, MediaError> {
     Ok(RemovalSession {
         storage: storage.clone(),
@@ -225,6 +244,7 @@ pub(crate) async fn acquire(storage: &LocalMediaStorage) -> Result<RemovalSessio
     })
 }
 
+/// 在附件替换已持有变更锁时延续删除会话，避免重复加锁。
 pub(crate) fn continue_with_guard(
     storage: &LocalMediaStorage,
     guard: OwnedMutexGuard<()>,
@@ -236,6 +256,7 @@ pub(crate) fn continue_with_guard(
 }
 
 impl RemovalSession {
+    /// 在删除或替换前获取变更锁并隔离受影响文件，供事务结束后处理。
     pub(crate) fn stage(
         self,
         reason: &str,
@@ -250,6 +271,7 @@ impl RemovalSession {
         })
     }
 
+    /// 在替换旧媒体时暂存文件并保留当前会话锁。
     pub(crate) fn stage_retaining(
         &self,
         reason: &str,
@@ -258,11 +280,13 @@ impl RemovalSession {
         stage_operation(&self.storage, reason, assets)
     }
 
+    /// 在删除会话结束或回退时交还其持有的媒体变更锁。
     pub(crate) fn into_guard(self) -> OwnedMutexGuard<()> {
         self.guard
     }
 }
 
+/// 在删除会话中持久化清单并隔离目标文件，失败时恢复已暂存项。
 fn stage_operation(
     storage: &LocalMediaStorage,
     reason: &str,

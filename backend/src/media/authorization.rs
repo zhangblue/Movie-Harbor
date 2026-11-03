@@ -35,10 +35,12 @@ JOIN series s ON s.id = se.series_id
 WHERE a.storage_key = $1 AND a.purpose = $2 AND o.slot = $2
 "#;
 
+/// 在代理请求媒体授权时返回允许或隐藏资源的结果，并禁止共享缓存。
 pub(super) async fn authorize(
     State(state): State<AuthState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    // 授权查询异常也按拒绝处理，避免数据库或请求头错误暴露媒体存在性。
     let allowed = is_allowed(&state, &headers).await.unwrap_or(false);
     (
         if allowed {
@@ -50,6 +52,7 @@ pub(super) async fn authorize(
     )
 }
 
+/// 在媒体授权请求中验证可信代理、归属、发布状态及访问会话。
 async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
     let token = single_header(headers, "x-movie-harbor-proxy-token")?;
     if !state.trust_proxy_headers
@@ -76,6 +79,7 @@ async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
         .await
         .ok()?;
     if rows.len() != 1 {
+        // 归属缺失或不唯一均无法证明槽位有效，不能继续授权。
         return None;
     }
     let owner = &rows[0];
@@ -99,6 +103,7 @@ async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
     )
 }
 
+/// 在检查代理请求头时只接受单个有效字符串值，歧义时拒绝。
 fn single_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let mut values = headers.get_all(name).iter();
     let value = values.next()?.to_str().ok()?;

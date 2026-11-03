@@ -12,6 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug)]
+/// 附件目标槽位，供上传流程选择内容类型及版本校验。
 pub enum AttachmentTarget {
     MoviePoster { id: Uuid, version: i64 },
     MovieVideo { id: Uuid, version: i64 },
@@ -20,6 +21,7 @@ pub enum AttachmentTarget {
 }
 
 impl AttachmentTarget {
+    /// 在准备附件上传时根据目标槽位选择海报或视频类型。
     fn kind(self) -> MediaKind {
         match self {
             Self::MoviePoster { .. } | Self::SeriesPoster { .. } => MediaKind::Poster,
@@ -27,6 +29,7 @@ impl AttachmentTarget {
         }
     }
 
+    /// 在准备附件上传时取得目标内容的预期版本。
     fn expected_version(self) -> i64 {
         match self {
             Self::MoviePoster { version, .. }
@@ -37,6 +40,7 @@ impl AttachmentTarget {
     }
 }
 
+/// 待提交附件，供文件保存后和事务切换之间保存上传上下文。
 pub(crate) struct PendingAttachment {
     id: Uuid,
     target: AttachmentTarget,
@@ -47,17 +51,20 @@ pub(crate) struct PendingAttachment {
     expected_version: i64,
 }
 
+/// 已提交附件结果，供路由返回资产与更新后的版本。
 pub(crate) struct CommittedAttachment {
     pub asset: media_asset::Model,
     pub version: i64,
     pub series_version: Option<i64>,
 }
 
+/// 槽位切换结果，供提交附件时传递更新后的版本。
 struct SwitchOutcome {
     version: i64,
     series_version: Option<i64>,
 }
 
+/// 在需要独立登记新媒体时写入文件并创建资产记录。
 pub async fn store_new_asset<S: ChunkSource + Send>(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -82,6 +89,7 @@ pub async fn store_new_asset<S: ChunkSource + Send>(
 
 /// Registers the asset and its caller-owned persistent reference atomically.
 #[allow(clippy::too_many_arguments)]
+/// 在新媒体需附带持久引用时将资产和调用方登记操作放入同一事务。
 pub async fn store_new_asset_with_registration<S, F>(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -103,9 +111,11 @@ where
 {
     let pending =
         prepare_new_asset(storage, kind, original_name, declared_mime, policy, source).await?;
+    // 文件校验成功后再登记数据库引用，登记失败由收尾流程保留或处理恢复标记。
     register_new_asset(db, pending, register).await
 }
 
+/// 待登记的新资产，供文件写入完成后进入数据库登记。
 pub(crate) struct PreparedNewAsset {
     id: Uuid,
     kind: MediaKind,
@@ -113,6 +123,7 @@ pub(crate) struct PreparedNewAsset {
     stored: StoredFile,
 }
 
+/// 在登记新媒体前流式写入并校验文件，返回待登记资产。
 pub(crate) async fn prepare_new_asset<S: ChunkSource + Send>(
     storage: &LocalMediaStorage,
     kind: MediaKind,
@@ -133,6 +144,7 @@ pub(crate) async fn prepare_new_asset<S: ChunkSource + Send>(
     })
 }
 
+/// 在文件准备完成后事务登记资产及引用，并根据提交结果保留或完成恢复标记。
 pub(crate) async fn register_new_asset<F>(
     db: &DatabaseConnection,
     pending: PreparedNewAsset,
@@ -183,6 +195,7 @@ where
 
 // 仅处理修改时间距今已达到年龄门槛的上传残留：临时文件可直接清理，已登记资产只清除恢复标记。
 // 未登记的正式文件须通过标记验证所有权后才能清理；无效或无法证明归属的标记保留。
+/// 在启动恢复时检查过期上传残留，只清理可确认归属的文件与标记。
 pub async fn recover_stale_uploads(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -231,6 +244,7 @@ pub async fn recover_stale_uploads(
     Ok(())
 }
 
+/// 在附件替换请求中准备新文件并提交槽位切换。
 pub async fn replace_attachment<S: ChunkSource + Send>(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -252,6 +266,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
     Ok(commit_attachment(db, pending).await?.asset)
 }
 
+/// 在槽位切换前验证版本并流式保存新文件，保留旧引用。
 pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     storage: &LocalMediaStorage,
     target: AttachmentTarget,
@@ -281,6 +296,7 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     })
 }
 
+/// 在新文件准备后协调锁、事务切换和旧文件清理，区分提交前后失败。
 pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
@@ -345,6 +361,7 @@ pub(crate) async fn commit_attachment(
     })
 }
 
+/// 在附件事务提交前登记新资产、切换引用并暂存旧资产。
 async fn replace_before_commit(
     tx: &DatabaseTransaction,
     pending: &PendingAttachment,
@@ -377,6 +394,7 @@ async fn replace_before_commit(
     Ok(committed)
 }
 
+/// 在媒体登记事务中根据已保存文件创建资产元数据。
 async fn insert_asset<C: sea_orm::ConnectionTrait>(
     db: &C,
     id: Uuid,
@@ -398,6 +416,7 @@ async fn insert_asset<C: sea_orm::ConnectionTrait>(
     .await?)
 }
 
+/// 在替换事务中锁定目标并检查版本，再切换槽位和删除旧资产记录。
 async fn switch_reference(
     tx: &DatabaseTransaction,
     target: AttachmentTarget,
@@ -583,6 +602,7 @@ async fn switch_reference(
     }
 }
 
+/// 在切换媒体引用前隔离旧文件，使事务失败时能够恢复。
 async fn stage_old_asset(
     tx: &DatabaseTransaction,
     removal: &RemovalSession,
@@ -611,6 +631,7 @@ async fn stage_old_asset(
     Ok(Some(old_id))
 }
 
+/// 在旧文件隔离且引用已切换后删除旧资产记录。
 async fn delete_old_asset(
     tx: &DatabaseTransaction,
     old_id: Option<Uuid>,

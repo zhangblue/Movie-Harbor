@@ -14,6 +14,7 @@ use sea_orm::DatabaseConnection;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
+/// 媒体路由共享状态，供上传处理器访问数据库、存储和策略。
 struct MediaState {
     db: DatabaseConnection,
     storage: LocalMediaStorage,
@@ -21,6 +22,7 @@ struct MediaState {
 }
 
 #[derive(Serialize)]
+/// 媒体上传响应，供客户端取得资产及更新后的版本。
 struct MediaAssetResponse {
     id: String,
     original_name: String,
@@ -32,11 +34,13 @@ struct MediaAssetResponse {
 }
 
 #[derive(Deserialize)]
+/// 媒体上传查询参数，供路由读取目标内容的预期版本。
 struct VersionQuery {
     version: i64,
 }
 
 impl MediaAssetResponse {
+    /// 在媒体上传完成后将资产及版本整理为接口响应。
     fn new(asset: media_asset::Model, version: i64, series_version: Option<i64>) -> Self {
         Self {
             id: asset.id.to_string(),
@@ -52,12 +56,14 @@ impl MediaAssetResponse {
 const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
 const MAX_FILE_NAME_BYTES: usize = 255;
 
+/// 在组装应用路由时注册供代理调用的媒体授权接口。
 pub fn authorization_router(state: AuthState) -> Router {
     Router::new()
         .route("/api/media/authorize", get(super::authorization::authorize))
         .with_state(state)
 }
 
+/// 在组装应用路由时注册当前领域的接口及共享状态。
 pub fn router(
     auth_state: AuthState,
     storage: LocalMediaStorage,
@@ -87,6 +93,7 @@ pub fn router(
         .with_state(state))
 }
 
+/// 在电影海报上传请求中选择对应媒体槽位并执行上传。
 async fn movie_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
@@ -104,6 +111,7 @@ async fn movie_poster(
     .await
 }
 
+/// 在电影视频上传请求中选择对应媒体槽位并执行上传。
 async fn movie_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
@@ -121,6 +129,7 @@ async fn movie_video(
     .await
 }
 
+/// 在剧集海报上传请求中选择对应媒体槽位并执行上传。
 async fn series_poster(
     State(state): State<MediaState>,
     Path(id): Path<String>,
@@ -138,6 +147,7 @@ async fn series_poster(
     .await
 }
 
+/// 在单集视频上传请求中选择对应媒体槽位并执行上传。
 async fn episode_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
@@ -155,6 +165,7 @@ async fn episode_video(
     .await
 }
 
+/// 在媒体上传请求中解析表单并协调文件准备和槽位切换。
 async fn upload(
     state: MediaState,
     target: AttachmentTarget,
@@ -208,6 +219,7 @@ async fn upload(
     )))
 }
 
+/// 在解析上传表单失败时转换为媒体领域错误。
 fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> MediaError {
     // 仅将提取器的请求体上限错误映射为稳定的 TooLarge，其余格式错误保留为 Multipart。
     if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
@@ -217,6 +229,7 @@ fn map_multipart_error(error: axum::extract::multipart::MultipartError) -> Media
     }
 }
 
+/// 在暂存海报请求中解析上传内容并返回可消费的令牌。
 async fn stage_poster(
     State(state): State<MediaState>,
     Extension(principal): Extension<auth::mcp::ManagementPrincipal>,

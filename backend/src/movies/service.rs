@@ -30,6 +30,7 @@ use super::{
 };
 
 #[derive(Debug)]
+/// 电影领域错误，供服务和路由统一表达校验、冲突及存储失败。
 pub enum MovieError {
     Invalid,
     NotFound,
@@ -41,12 +42,14 @@ pub enum MovieError {
 }
 
 impl From<DbErr> for MovieError {
+    /// 在数据库操作失败时将错误归入电影领域数据库错误。
     fn from(_: DbErr) -> Self {
         Self::Database
     }
 }
 
 impl From<ContentRuleError> for MovieError {
+    /// 在公共内容规则校验失败时保留无效请求或冲突语义。
     fn from(error: ContentRuleError) -> Self {
         match error {
             ContentRuleError::Invalid => Self::Invalid,
@@ -56,6 +59,7 @@ impl From<ContentRuleError> for MovieError {
 }
 
 impl From<genres::service::GenreError> for MovieError {
+    /// 在关联题材失败时映射为电影字段校验、冲突或数据库错误。
     fn from(error: genres::service::GenreError) -> Self {
         match error {
             genres::service::GenreError::Invalid => Self::Invalid,
@@ -69,6 +73,7 @@ impl From<genres::service::GenreError> for MovieError {
 }
 
 impl IntoResponse for MovieError {
+    /// 在路由返回错误时转换为对应的 HTTP 响应。
     fn into_response(self) -> Response {
         match self {
             Self::Invalid => (
@@ -116,6 +121,7 @@ impl IntoResponse for MovieError {
     }
 }
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 pub async fn set_privacy(
     db: &DatabaseConnection,
     id: Uuid,
@@ -130,6 +136,7 @@ pub async fn set_privacy(
     Ok(result)
 }
 
+/// 在创建请求中建立初始内容并返回响应。
 pub async fn create(
     db: &DatabaseConnection,
     name: String,
@@ -150,6 +157,7 @@ pub async fn create(
     response(db, model).await
 }
 
+/// 在 MCP 创建内容时校验完整字段并原子消费暂存海报。
 pub async fn create_mcp(
     db: &DatabaseConnection,
     input: CreateMovieRequest,
@@ -212,6 +220,7 @@ pub async fn create_mcp(
     Ok(result)
 }
 
+/// 在详情请求中读取指定内容并组装关联数据。
 pub async fn detail<C: sea_orm::ConnectionTrait>(
     db: &C,
     id: Uuid,
@@ -219,6 +228,7 @@ pub async fn detail<C: sea_orm::ConnectionTrait>(
     response(db, repository::find(db, id).await?).await
 }
 
+/// 在列表请求中读取符合筛选条件的内容并组装响应。
 pub async fn list(
     db: &DatabaseConnection,
     query: MovieListQuery,
@@ -243,6 +253,7 @@ pub async fn list(
     Ok(result)
 }
 
+/// 在编辑请求中校验状态和版本后保存内容。
 pub async fn update(
     db: &DatabaseConnection,
     id: Uuid,
@@ -294,6 +305,7 @@ pub async fn update(
     Ok(result)
 }
 
+/// 在生命周期请求中校验目标状态和版本后执行转换。
 pub async fn transition(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -313,6 +325,7 @@ pub async fn transition(
         return Ok(result);
     }
     require_version(model.version, expected_version)?;
+    // 先约束合法状态转换，再检查发布所需素材；任一失败都不写入状态。
     ensure_transition(&model.status, target)?;
     if target == TargetState::Published {
         validate_publish(&tx, storage, allowed_video_mime_types, &model).await?;
@@ -330,6 +343,7 @@ pub async fn transition(
     Ok(result)
 }
 
+/// 在删除预览请求中统计受影响的内容与媒体。
 pub async fn delete_impact(
     db: &DatabaseConnection,
     id: Uuid,
@@ -348,6 +362,7 @@ pub async fn delete_impact(
     })
 }
 
+/// 在电影删除请求中检查状态与版本，并在事务中同步处理关联媒体。
 pub async fn delete(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -395,6 +410,7 @@ pub async fn delete(
     }
 }
 
+/// 在读取或写入内容后汇总关联题材和媒体，构造完整响应。
 async fn response<C: sea_orm::ConnectionTrait>(
     db: &C,
     model: movie::Model,
@@ -405,6 +421,7 @@ async fn response<C: sea_orm::ConnectionTrait>(
     Ok(MovieResponse::new(model, genres, poster, video)?)
 }
 
+/// 在发布电影前检查必需字段和媒体是否满足发布条件。
 async fn validate_publish<C: sea_orm::ConnectionTrait>(
     db: &C,
     storage: &LocalMediaStorage,

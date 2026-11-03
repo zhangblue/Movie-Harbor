@@ -33,6 +33,7 @@ use super::{
 };
 
 #[derive(Debug)]
+/// 剧集领域错误，供服务和路由统一表达校验、冲突及存储失败。
 pub enum SeriesError {
     Invalid,
     NotFound,
@@ -44,6 +45,7 @@ pub enum SeriesError {
 }
 
 impl From<DbErr> for SeriesError {
+    /// 在数据库操作失败时转换为相应剧集领域错误。
     fn from(error: DbErr) -> Self {
         if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
             Self::Conflict
@@ -54,6 +56,7 @@ impl From<DbErr> for SeriesError {
 }
 
 impl From<ContentRuleError> for SeriesError {
+    /// 在公共内容规则校验失败时保留无效请求或冲突语义。
     fn from(error: ContentRuleError) -> Self {
         match error {
             ContentRuleError::Invalid => Self::Invalid,
@@ -63,6 +66,7 @@ impl From<ContentRuleError> for SeriesError {
 }
 
 impl From<genres::service::GenreError> for SeriesError {
+    /// 在关联题材失败时映射为剧集字段校验、冲突或数据库错误。
     fn from(error: genres::service::GenreError) -> Self {
         match error {
             genres::service::GenreError::Invalid => Self::Invalid,
@@ -76,6 +80,7 @@ impl From<genres::service::GenreError> for SeriesError {
 }
 
 impl IntoResponse for SeriesError {
+    /// 在路由返回错误时转换为对应的 HTTP 响应。
     fn into_response(self) -> Response {
         match self {
             Self::Invalid => (
@@ -123,12 +128,14 @@ impl IntoResponse for SeriesError {
     }
 }
 
+/// 创建季命令，供服务层接收父剧集版本及季字段。
 pub struct CreateSeasonCommand {
     pub series_id: Uuid,
     pub expected_series_version: i64,
     pub number: i32,
 }
 
+/// 修改季命令，供服务层接收层级标识、版本及新字段。
 pub struct UpdateSeasonCommand {
     pub series_id: Uuid,
     pub season_id: Uuid,
@@ -136,18 +143,21 @@ pub struct UpdateSeasonCommand {
     pub number: i32,
 }
 
+/// 删除季命令，供服务层接收层级标识与预期版本。
 pub struct DeleteSeasonCommand {
     pub series_id: Uuid,
     pub season_id: Uuid,
     pub expected_series_version: i64,
 }
 
+/// 创建单集命令，供服务层接收层级和单集字段。
 pub struct CreateEpisodeCommand {
     pub series_id: Uuid,
     pub season_id: Uuid,
     pub input: CreateEpisodeRequest,
 }
 
+/// 修改单集命令，供服务层接收层级、版本及字段补丁。
 pub struct UpdateEpisodeCommand {
     pub series_id: Uuid,
     pub season_id: Uuid,
@@ -155,6 +165,7 @@ pub struct UpdateEpisodeCommand {
     pub input: UpdateEpisodeRequest,
 }
 
+/// 单集状态转换命令，供服务层接收层级、版本和目标状态。
 pub struct TransitionEpisodeCommand<'a> {
     pub series_id: Uuid,
     pub season_id: Uuid,
@@ -163,6 +174,7 @@ pub struct TransitionEpisodeCommand<'a> {
     pub target: &'a str,
 }
 
+/// 删除单集命令，供服务层接收层级标识与预期版本。
 pub struct DeleteEpisodeCommand {
     pub series_id: Uuid,
     pub season_id: Uuid,
@@ -170,6 +182,7 @@ pub struct DeleteEpisodeCommand {
     pub expected_episode_version: i64,
 }
 
+/// 在访问范围变更请求中按版本修改隐私设置并返回更新结果。
 pub async fn set_privacy(
     db: &DatabaseConnection,
     id: Uuid,
@@ -184,6 +197,7 @@ pub async fn set_privacy(
     Ok(result)
 }
 
+/// 在创建请求中建立初始内容并返回响应。
 pub async fn create(
     db: &DatabaseConnection,
     name: String,
@@ -204,6 +218,7 @@ pub async fn create(
     response(db, model).await
 }
 
+/// 在 MCP 创建内容时校验完整字段并原子消费暂存海报。
 pub async fn create_mcp(
     db: &DatabaseConnection,
     input: CreateSeriesRequest,
@@ -261,10 +276,12 @@ pub async fn create_mcp(
     Ok(result)
 }
 
+/// 在详情请求中读取指定内容并组装关联数据。
 pub async fn detail<C: ConnectionTrait>(db: &C, id: Uuid) -> Result<SeriesResponse, SeriesError> {
     response(db, repository::find(db, id).await?).await
 }
 
+/// 在列表请求中读取符合筛选条件的内容并组装响应。
 pub async fn list(
     db: &DatabaseConnection,
     query: SeriesListQuery,
@@ -289,6 +306,7 @@ pub async fn list(
     Ok(result)
 }
 
+/// 在编辑请求中校验状态和版本后保存内容。
 pub async fn update(
     db: &DatabaseConnection,
     id: Uuid,
@@ -339,6 +357,7 @@ pub async fn update(
     Ok(result)
 }
 
+/// 在创建季请求中校验父剧集和版本并建立季。
 pub async fn create_season(
     db: &DatabaseConnection,
     command: CreateSeasonCommand,
@@ -346,6 +365,7 @@ pub async fn create_season(
     create_season_with_policy(db, command, false).await
 }
 
+/// 在 MCP 创建季时使用对应策略校验并建立季。
 pub async fn create_season_mcp(
     db: &DatabaseConnection,
     command: CreateSeasonCommand,
@@ -353,6 +373,7 @@ pub async fn create_season_mcp(
     create_season_with_policy(db, command, true).await
 }
 
+/// 在创建季的入口选定策略后执行共用的层级写入。
 async fn create_season_with_policy(
     db: &DatabaseConnection,
     command: CreateSeasonCommand,
@@ -385,6 +406,7 @@ async fn create_season_with_policy(
     Ok(result)
 }
 
+/// 在修改季请求中检查父剧集版本及已发布单集约束后更新。
 pub async fn update_season(
     db: &DatabaseConnection,
     command: UpdateSeasonCommand,
@@ -423,6 +445,7 @@ pub async fn update_season(
     Ok(result)
 }
 
+/// 在删除季请求中检查层级与状态并同步清理其媒体。
 pub async fn delete_season(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -466,6 +489,7 @@ pub async fn delete_season(
     finish_delete_transaction(tx, staged, owned.len(), database_result).await
 }
 
+/// 在 MCP 创建单集时使用对应策略校验并建立草稿。
 pub async fn create_episode_mcp(
     db: &DatabaseConnection,
     command: CreateEpisodeCommand,
@@ -490,6 +514,7 @@ pub async fn create_episode_mcp(
     create_episode_with_policy(db, command, true).await
 }
 
+/// 在创建单集请求中校验层级和版本后建立草稿。
 pub async fn create_episode(
     db: &DatabaseConnection,
     command: CreateEpisodeCommand,
@@ -497,6 +522,7 @@ pub async fn create_episode(
     create_episode_with_policy(db, command, false).await
 }
 
+/// 在创建单集的入口选定策略后执行共用的层级写入。
 async fn create_episode_with_policy(
     db: &DatabaseConnection,
     command: CreateEpisodeCommand,
@@ -539,6 +565,7 @@ async fn create_episode_with_policy(
     Ok(result)
 }
 
+/// 在单集详情请求中验证所属层级并组装响应。
 pub async fn episode_detail(
     db: &DatabaseConnection,
     series_id: Uuid,
@@ -561,6 +588,7 @@ pub async fn episode_detail(
     episode_envelope(db, series.version, episode).await
 }
 
+/// 在编辑单集请求中检查草稿状态及版本后保存。
 pub async fn update_episode(
     db: &DatabaseConnection,
     command: UpdateEpisodeCommand,
@@ -591,6 +619,7 @@ pub async fn update_episode(
     Ok(result)
 }
 
+/// 在剧集状态转换请求中检查生命周期与版本并保存结果。
 pub async fn transition_series(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -610,6 +639,7 @@ pub async fn transition_series(
         return Ok(result);
     }
     require_version(model.version, expected_version)?;
+    // 先通过状态机校验转换，发布所需字段不完整时也不会保存新状态。
     ensure_transition(&model.status, target)?;
     if target == TargetState::Published {
         validate_series_publish(&tx, storage, allowed_video_mime_types, &model).await?;
@@ -627,6 +657,7 @@ pub async fn transition_series(
     Ok(result)
 }
 
+/// 在单集状态转换请求中检查层级、生命周期与版本并保存结果。
 pub async fn transition_episode(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -653,6 +684,7 @@ pub async fn transition_episode(
         return Ok(result);
     }
     require_version(episode.version, expected_version)?;
+    // 单集状态独立校验；发布素材缺失时保持原状态和父版本。
     ensure_transition(&episode.status, target)?;
     if target == TargetState::Published {
         validate_episode_publish(&tx, storage, allowed_video_mime_types, &episode).await?;
@@ -671,6 +703,7 @@ pub async fn transition_episode(
     Ok(result)
 }
 
+/// 在删除单集时按层级及版本约束执行删除和媒体清理。
 pub async fn delete_episode(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -710,6 +743,7 @@ pub async fn delete_episode(
     finish_delete_transaction(tx, staged, owned.len(), database_result).await
 }
 
+/// 在删除整剧时检查生命周期与版本并清理子级媒体。
 pub async fn delete_series(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -759,6 +793,7 @@ pub async fn delete_series(
     finish_delete_transaction(tx, staged, owned.len(), database_result).await
 }
 
+/// 在删除操作完成数据库写入后协调提交、文件恢复和最终清理。
 async fn finish_delete_transaction(
     tx: sea_orm::DatabaseTransaction,
     staged: removal::StagedRemoval,
@@ -782,6 +817,7 @@ async fn finish_delete_transaction(
     }
 }
 
+/// 在删除预览请求中统计受影响的内容与媒体。
 pub async fn delete_impact(
     db: &DatabaseConnection,
     id: Uuid,
@@ -810,6 +846,7 @@ pub async fn delete_impact(
     })
 }
 
+/// 在删除季前统计其单集与媒体影响。
 pub async fn season_delete_impact(
     db: &DatabaseConnection,
     series_id: Uuid,
@@ -843,6 +880,7 @@ pub async fn season_delete_impact(
     Ok(result)
 }
 
+/// 在删除单集前统计其媒体影响。
 pub async fn episode_delete_impact(
     db: &DatabaseConnection,
     series_id: Uuid,
@@ -877,6 +915,7 @@ pub async fn episode_delete_impact(
     Ok(result)
 }
 
+/// 在读取或写入内容后汇总关联题材和媒体，构造完整响应。
 async fn response<C: ConnectionTrait>(
     db: &C,
     model: series::Model,
@@ -900,6 +939,7 @@ async fn response<C: ConnectionTrait>(
     )?)
 }
 
+/// 在单集读取或写入后汇总单集与父剧集版本，构造响应。
 async fn episode_envelope<C: ConnectionTrait>(
     db: &C,
     series_version: i64,
@@ -912,6 +952,7 @@ async fn episode_envelope<C: ConnectionTrait>(
     })
 }
 
+/// 在发布剧集前检查必需字段、题材及海报是否满足发布条件。
 async fn validate_series_publish<C: ConnectionTrait>(
     db: &C,
     storage: &LocalMediaStorage,
@@ -949,6 +990,7 @@ async fn validate_series_publish<C: ConnectionTrait>(
     }
 }
 
+/// 在发布单集前检查必需字段与视频是否满足发布条件。
 async fn validate_episode_publish<C: ConnectionTrait>(
     db: &C,
     storage: &LocalMediaStorage,
@@ -971,6 +1013,7 @@ async fn validate_episode_publish<C: ConnectionTrait>(
     }
 }
 
+/// 在修改序号时应用补丁并拒绝缺失或无效的必填值。
 fn apply_required_number(current: &mut i32, patch: Patch<i32>) -> Result<(), SeriesError> {
     match patch {
         Patch::Missing => Ok(()),
