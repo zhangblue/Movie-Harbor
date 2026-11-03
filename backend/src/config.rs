@@ -179,6 +179,7 @@ where
         return Ok(value);
     }
 
+    // 未提供完整 URL 时尝试拆分配置；主机也缺失则仍提示数据库连接入口缺失。
     let host = required(lookup, "DATABASE_HOST").map_err(|error| match error {
         ConfigError::Missing(_) => ConfigError::Missing("DATABASE_URL"),
         other => other,

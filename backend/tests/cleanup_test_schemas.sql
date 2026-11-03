@@ -1,5 +1,6 @@
 -- Run only when no Movie Harbor test process is active. This intentionally matches only the
 -- per-suite prefixes created by this repository; it never drops arbitrary non-project schemas.
+-- 仅在没有本项目测试进程运行时手动执行；按仓库测试前缀清理独立 schema，避免误删其他项目数据。
 DO $cleanup$
 DECLARE
     schema_name text;

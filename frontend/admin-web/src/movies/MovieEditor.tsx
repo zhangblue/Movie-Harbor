@@ -59,6 +59,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       throw error;
     });
     void Promise.all([id ? watch(getMovie(id)) : null, watch(listGenres())]).then(async ([value, choices]) => {
+      // 详情和题材都就绪后接收编辑状态；从列表删除入口进入时再读最新影响，失败保持锁定。
       if (ignore) return;
       setGenres(choices); setConflict(false);
       if (value) {
@@ -190,10 +191,11 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {notice && <p role="status">{notice}</p>}
       {warning && <p role="alert" className="error-message">{warning}</p>}
       {loading ? <p role="status">正在加载电影…</p> : !movie ? <form className="movie-form" onSubmit={(event) => {
+        // 首次提交只创建草稿并接收服务端身份，后续字段和媒体保存复用同一编辑器。
         event.preventDefault(); void run(async () => { const created = await createMovie(fields.name, isPrivate); if (mounted.current) accept(created); });
       }}><Field label="名称" className="movie-field-medium"><input required value={fields.name} disabled={locked} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field><PrivacySelector value={isPrivate} onChange={setIsPrivate} disabled={locked} /><Button variant="primary" type="submit" disabled={locked}>创建草稿</Button></form> : <div className="movie-editor-card">
         <PosterPicker current={movie.poster} file={poster} onSelect={setPoster} readOnly={readOnly} disabled={locked} />
-        <form className="movie-form" onSubmit={(event) => { event.preventDefault(); const submitter = (event.nativeEvent as SubmitEvent).submitter; void save(submitter?.getAttribute("value") === "publish"); }}>
+        <form className="movie-form" onSubmit={(event) => { /* 区分保存和发布按钮，把发布意图交给先保存媒体再发布的统一流程。 */ event.preventDefault(); const submitter = (event.nativeEvent as SubmitEvent).submitter; void save(submitter?.getAttribute("value") === "publish"); }}>
           <Field label="名称" className="movie-field-medium"><input required disabled={readOnly || locked} value={fields.name} onChange={(e) => setFields({ ...fields, name: e.target.value })} /></Field>
           <PrivacySelector value={movie.is_private} onChange={setIsPrivate} disabled />
           <div className="movie-inline-fields">
@@ -202,6 +204,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           </div>
           <Field label="简介" className="movie-field-wide"><textarea rows={4} disabled={readOnly || locked} value={fields.synopsis} onChange={(e) => setFields({ ...fields, synopsis: e.target.value })} /></Field>
           <Field label="题材" className="movie-field-medium"><select multiple size={3} disabled={readOnly || locked} value={fields.genreIds} onChange={(e) => {
+            // 已绑定但停用的题材无法重新选择，合并时保留这些关联以免编辑其他项意外删去。
             const retained = fields.genreIds.filter((genreId) => choices.some((g) => g.id === genreId && !g.enabled));
             setFields({ ...fields, genreIds: [...new Set([...retained, ...Array.from(e.target.selectedOptions).map((option) => option.value)])] });
           }}>{choices.filter((g) => g.enabled || fields.genreIds.includes(g.id)).map((g) => <option key={g.id} value={g.id} disabled={!g.enabled}>{g.name}{!g.enabled ? "（已停用）" : ""}</option>)}</select></Field>

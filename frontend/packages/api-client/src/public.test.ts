@@ -1,6 +1,7 @@
 import { afterEach, expect, expectTypeOf, it, vi } from "vitest";
 import { listCatalog, type CatalogQuery } from "./public";
 
+// 公开请求用例结束后恢复全局网络实现，避免模拟响应影响其他测试。
 afterEach(() => vi.unstubAllGlobals());
 
 // 验证：目录请求转发私密筛选并忽略无关字段。

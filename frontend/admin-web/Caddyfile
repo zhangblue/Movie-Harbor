@@ -1,5 +1,6 @@
 :80 {
 	root * /srv
+	# 静态路径未命中时返回管理站入口，使 /admin/ 下的页面可直接访问或刷新。
 	try_files {path} /admin/index.html
 	file_server
 }

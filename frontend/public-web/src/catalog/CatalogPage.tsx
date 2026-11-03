@@ -42,12 +42,14 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
     navigate(encoded ? `/?${encoded}` : "/", replace);
   }, [kind, query, privateOnly, page, navigate]);
 
+  // 身份确认或退出后去掉匿名用户无权使用的私密筛选，同时重置分页并替换当前历史项。
   useEffect(() => {
     const authenticationLost = wasAuthenticated.current && !authenticated;
     wasAuthenticated.current = authenticated;
     if (!discoveryPending && !authenticated && (privateOnly || authenticationLost)) update({ privateOnly: false }, true);
   }, [authenticated, discoveryPending, privateOnly, update]);
 
+  // 目录结果就绪后校正越界页码；合法换页则恢复标题焦点，方便键盘用户继续浏览。
   useEffect(() => {
     if (state.status !== "ready" || (privateOnly && !authenticated)) return;
     const totalPages = Math.max(1, Math.ceil(state.data.total / state.data.size));

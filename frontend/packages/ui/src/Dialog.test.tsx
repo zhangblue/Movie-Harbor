@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import { Dialog } from "./Dialog";
 
+// 对话框测试结束后卸载组件，清除 Portal 及键盘监听。
 afterEach(cleanup);
 
 // 验证：打开对话框时提供模态语义、标题并聚焦首个控件。

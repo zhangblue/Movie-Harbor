@@ -26,7 +26,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
     });
   }, [mounted, onExpired]);
 
-  // 校验并提交当前表单，在用户提交相应操作时调用。
+  // 提交新增题材表单时去除首尾空白，创建成功后按服务端顺序插入列表并清空输入。
   async function submit(event: FormEvent) {
     event.preventDefault();
     const normalized = name.trim();
@@ -79,6 +79,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
     if (target < 0 || target >= genres.length) return;
     const ordered = [...genres];
     [ordered[index], ordered[target]] = [ordered[target]!, ordered[index]!];
+    // 把目标顺序一次提交到后端，成功后采用返回列表；失败保留原顺序并展示相应错误。
     void mutate(
       () => reorderGenres(ordered.map((genre, position) => ({ id: genre.id, sort_order: position + 1 }))),
       (value) => setGenres(value as GenreResponse[]),

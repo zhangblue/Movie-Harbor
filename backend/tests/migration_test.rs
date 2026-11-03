@@ -315,6 +315,7 @@ async fn media_ownership_constraint_serializes_concurrent_cross_table_claims() {
     first.execute_unprepared("INSERT INTO movie (id, name, poster_asset_id) VALUES ('20000000-0000-0000-0000-000000000004', 'Concurrent movie', '10000000-0000-0000-0000-000000000004')").await.unwrap();
 
     let competing_db = db.clone();
+    // 在另一连接中争用已被未提交电影占据的媒体，首个事务提交后此写入应遭唯一约束拒绝。
     let competing = tokio::spawn(async move {
         competing_db.execute_unprepared("UPDATE series SET poster_asset_id='10000000-0000-0000-0000-000000000004' WHERE id='30000000-0000-0000-0000-000000000004'").await
     });
@@ -352,6 +353,7 @@ async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_install
         .unwrap();
 
     let migration_db = db.clone();
+    // 独立运行升级以观察其先取得旧表锁、再等待咨询锁的阶段，随后才发起旧版写入。
     let mut migration =
         tokio::spawn(async move { migration::Migrator::up(&migration_db, None).await });
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -372,6 +374,7 @@ async fn media_ownership_migration_blocks_v4_writes_across_preflight_and_install
         cleanup_db.execute_unprepared("INSERT INTO file_cleanup_job (id, media_asset_id) VALUES (gen_random_uuid(), '10000000-0000-0000-0000-000000000005')").await
     });
     let shared_db = db.clone();
+    // 并发提交旧版共享媒体更新，与清理写入共同验证迁移预检及安装期间都受表锁保护。
     let mut shared_write = tokio::spawn(async move {
         shared_db.execute_unprepared("UPDATE series SET poster_asset_id='10000000-0000-0000-0000-000000000005' WHERE id='30000000-0000-0000-0000-000000000005'").await
     });

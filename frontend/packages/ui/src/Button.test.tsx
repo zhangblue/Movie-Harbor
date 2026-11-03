@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 
 import { Button } from "./Button";
 
+// 按钮测试结束后卸载组件，避免残留控件干扰后续查询。
 afterEach(cleanup);
 
 // 验证：原生按钮可通过键盘到达并激活。

@@ -11,6 +11,7 @@ export interface MovieToolDependencies { client: MovieHarborClient; allowedRoots
 // 确认入库后验证并暂存用户提供的海报。
 export async function stagePoster(input: unknown, dependencies: MovieToolDependencies) {
   const { path, confirmed: _confirmed } = stagePosterInput.parse(input);
+  // 本地格式检查通过后再次读取身份；文件变化时不上传，暂存 token 仅供后续显式创建使用。
   const checkedPoster = await validatePoster(path, dependencies.allowedRoots);
   const file = await inspectAllowedFile(path, dependencies.allowedRoots);
   const currentIdentity = serializeIdentity(file);
@@ -26,6 +27,7 @@ export async function createMovie(input: unknown, client: MovieHarborClient) {
   const { visibility, confirmed: _confirmed, duration_minutes, ...metadata } = createMovieInput.parse(input);
   const duration_seconds = durationSecondsFromMinutes(duration_minutes);
   const is_private = visibility === 'private';
+  // 确认标记和分钟单位留在 MCP 边界处理；只提交 API 字段，并核对保存的范围与秒数。
   const movie = parseApi(apiMovie, await client.json('POST', '/api/admin/movies', { ...metadata, duration_seconds, is_private }));
   if (movie.is_private !== is_private || movie.duration_seconds !== duration_seconds) {
     throw new MovieHarborClientError('invalid_response');
@@ -36,6 +38,7 @@ export async function createMovie(input: unknown, client: MovieHarborClient) {
 export async function updateMovieMetadata(input: unknown, client: MovieHarborClient) {
   const { movie_id, duration_minutes, ...patch } = updateMovieInput.parse(input);
   const duration_seconds = duration_minutes === undefined ? undefined : durationSecondsFromMinutes(duration_minutes);
+  // 只发送明确提交的字段和版本；返回 ID 或时长不符时拒绝把结果交给后续上传或发布。
   const movie = parseApi(apiMovie, await client.json('PATCH', `/api/admin/movies/${movie_id}`, {
     ...patch, ...(duration_seconds === undefined ? {} : { duration_seconds }),
   }));

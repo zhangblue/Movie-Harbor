@@ -9,6 +9,7 @@ import type {
   ViewerSessionResponse, ViewerUserPage, ViewerUserSummary, JsonValue,
 } from "./index";
 
+// 管理客户端用例结束后清除认证令牌与全局网络替身，隔离后续请求。
 afterEach(() => {
   clearCsrfToken();
   vi.unstubAllGlobals();
@@ -444,9 +445,9 @@ it("exports required viewer and privacy DTO contracts from the package", () => {
   expectTypeOf<Pick<AdminContentListItem | CatalogCard | MovieDetail | MovieResponse | SeriesDetail | SeriesResponse, "is_private">>()
     .toEqualTypeOf<{ is_private: boolean }>();
   if (false) {
-    // @ts-expect-error Creation requires an explicit access scope.
+    // @ts-expect-error 创建请求必须明确提供访问范围，省略时应产生类型错误。
     void client.createMovie("Movie");
-    // @ts-expect-error Creation requires an explicit access scope.
+    // @ts-expect-error 创建请求必须明确提供访问范围，省略时应产生类型错误。
     void client.createSeries("Series");
   }
 });

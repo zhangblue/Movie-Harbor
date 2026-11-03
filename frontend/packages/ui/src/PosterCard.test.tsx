@@ -10,9 +10,10 @@ let resizeCallback: ResizeObserverCallback | undefined;
 
 // 海报卡片测试时构造指定宽度的布局矩形。
 function rect(width: number): DOMRect {
-  return { x: 0, y: 0, width, height: 20, top: 0, right: width, bottom: 20, left: 0, toJSON: () => ({}) };
+  return { x: 0, y: 0, width, height: 20, top: 0, right: width, bottom: 20, left: 0, /* 补齐测试矩形的序列化接口，布局测试不依赖输出内容。 */ toJSON: () => ({}) };
 }
 
+// 布局用例开始时重置宽度及观察器，使用可控尺寸模拟浏览器测量。
 beforeEach(() => {
   availableWidth = 500;
   chipWidths = {};
@@ -29,6 +30,7 @@ beforeEach(() => {
     disconnect() {}
   }
   vi.stubGlobal("ResizeObserver", MockResizeObserver);
+  // 测量时按容器和标签候选计算测试宽度，其余节点返回零宽矩形。
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     const element = this;
     if (element.dataset.testid === "genre-list") return rect(availableWidth);
@@ -42,6 +44,7 @@ beforeEach(() => {
   });
 });
 
+// 布局用例结束后卸载卡片并恢复尺寸方法与全局观察器。
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();

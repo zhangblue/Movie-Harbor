@@ -4,6 +4,7 @@ import { afterEach, expect, it } from "vitest";
 
 import { Toast } from "./Toast";
 
+// 通知测试结束后卸载组件，避免残留状态消息影响后续断言。
 afterEach(cleanup);
 
 // 验证：信息和成功提示使用礼貌的无障碍播报。

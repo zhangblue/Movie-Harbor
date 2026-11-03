@@ -6,10 +6,12 @@ import { clearCsrfToken } from "@movie-harbor/api-client";
 import { App } from "../app/App";
 import { deferred, json, movie, movieCard, series, seriesCard } from "../test/fixtures";
 
+// 身份测试开始前替换媒体方法，使离开私密播放器的清理可在测试环境执行。
 beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
 });
+// 身份测试结束后恢复媒体和网络实现，并清除令牌、页面及导航状态。
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); clearCsrfToken(); window.history.replaceState(null, "", "/"); });
 
 // 认证测试时创建可控制登录状态的模拟服务。

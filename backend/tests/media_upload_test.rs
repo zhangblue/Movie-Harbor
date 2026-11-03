@@ -392,6 +392,7 @@ impl ChunkSource for Chunks {
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        // 每次实际轮询才记录消费次数，并在第二块交付前检查首块已落盘，识别整文件缓冲实现。
         Box::pin(async move {
             self.polls.fetch_add(1, Ordering::SeqCst);
             if self.index == 1
@@ -410,12 +411,12 @@ impl ChunkSource for Chunks {
     }
 }
 
-/// 在上传并发测试中暂停数据流以控制操作交错。
+/// 首块后永久等待的上传数据源，供测试取消正在写入的请求。
 struct PausingChunks {
     first: bool,
 }
 
-/// 在上传取消测试中阻塞数据流以保持未完成状态。
+/// 通过开始和释放信号控制首块交付的数据源，供测试并发上传的存储锁顺序。
 struct BlockingChunks {
     started: Option<tokio::sync::oneshot::Sender<()>>,
     release: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -431,6 +432,7 @@ impl ChunkSource for BlockingChunks {
         let release = self.release.take();
         let finished = self.finished;
         self.finished = true;
+        // 在异步读取真正开始时通知外层，再等待释放，确保并发任务按测试约定顺序争用锁。
         Box::pin(async move {
             if finished {
                 return Ok(None);
@@ -447,6 +449,7 @@ impl ChunkSource for PausingChunks {
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        // 首块写入后保持请求未结束，外层才能在临时文件已存在的阶段取消任务并检查清理。
         Box::pin(async move {
             if self.first {
                 self.first = false;
@@ -789,7 +792,7 @@ async fn json_request(
     app.clone().oneshot(request).await.unwrap()
 }
 
-/// 在路由测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在媒体上传路由测试前登录预置管理员，并读取 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let login = json_request(
         app,
@@ -953,6 +956,7 @@ async fn storage_mutations_are_serialized_until_the_promoted_file_is_resolved() 
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
     let first_storage = storage.clone();
+    // 第一个上传先取得存储锁并停在分块读取，供下方验证第二个上传尚不能消费请求体。
     let first = tokio::spawn(async move {
         first_storage
             .store(
@@ -973,6 +977,7 @@ async fn storage_mutations_are_serialized_until_the_promoted_file_is_resolved() 
 
     let (second_source, second_polls) = Chunks::new([PNG]);
     let second_storage = storage.clone();
+    // 并发启动第二个上传；其读取计数应直到首个上传的提升文件被处理完才开始增长。
     let second = tokio::spawn(async move {
         second_storage
             .store(
@@ -1201,6 +1206,7 @@ async fn durable_promotion_syncs_created_parents_source_and_destination_in_order
     let parent = asset.storage_key.rsplit_once('/').unwrap().0.to_owned();
     let events = hooks.events.lock().unwrap().clone();
 
+    // 顺序断言先定位必须出现的持久化事件，缺失时立即失败，避免拿默认位置掩盖漏同步。
     let find = |predicate: &dyn Fn(&StorageEvent) -> bool| {
         events
             .iter()
@@ -1235,6 +1241,7 @@ async fn cancelling_an_upload_removes_its_incoming_part_file() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
     let task_storage = storage.clone();
+    // 在独立任务中写入首块后暂停，外层观察到临时分片再取消，检验析构清理路径。
     let task = tokio::spawn(async move {
         task_storage
             .store(
@@ -1532,6 +1539,7 @@ async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliatio
     let task_db = db.clone();
     let task_storage = storage.clone();
     let (source, _) = Chunks::new([PNG]);
+    // 独立登记资产，待钩子确认提交发生后取消任务，验证恢复仍能找到已提交记录与文件。
     let task = tokio::spawn(async move {
         store_new_asset(
             &task_db,
@@ -1597,6 +1605,7 @@ async fn cancellation_after_replacement_commit_preserves_new_reference_and_file(
     let task_db = db.clone();
     let task_storage = storage.clone();
     let (source, _) = Chunks::new([PNG]);
+    // 独立执行替换并在数据库提交后取消，验证新引用和文件不会因请求消失而被回收。
     let task = tokio::spawn(async move {
         replace_attachment(
             &task_db,
@@ -2423,6 +2432,7 @@ async fn extreme_sps_dimensions_never_panic_during_pps_parsing() {
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
     let (source, _) = Chunks::bytes(bytes);
 
+    // 用任务边界捕获解析器 panic，使极端尺寸触发的崩溃与正常格式拒绝可分别断言。
     let result = tokio::spawn(async move {
         storage
             .store(
@@ -2456,6 +2466,7 @@ async fn extreme_h264_dimension_and_slice_group_variants_are_bounded_and_never_p
             let (source, _) = Chunks::bytes(bytes);
             let result = tokio::time::timeout(
                 Duration::from_secs(2),
+                // 任务边界捕获 panic，外层超时限制解析预算，两者分别覆盖极端参数的失控风险。
                 tokio::spawn(async move {
                     storage
                         .store(
@@ -2511,6 +2522,7 @@ async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {
         let task_storage = storage.clone();
         let task_policy = fuzz_policy.clone();
         let (source, _) = Chunks::bytes(bytes);
+        // 每个畸形样本单独运行，以任务结果区分解析器崩溃与预期的媒体校验失败。
         let joined = tokio::spawn(async move {
             task_storage
                 .store(
@@ -2720,6 +2732,7 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
     .await
     .unwrap();
     let movie = draft_movie(&db, Some(old.id)).await;
+    // reject_replaced_asset_delete 在提交时拒绝旧资产删除，使替换进入提交结果未知的恢复路径。
     db.execute_unprepared(
         "CREATE FUNCTION reject_replaced_asset_delete() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN RAISE EXCEPTION 'forced deferred replacement failure'; END $$; \
@@ -3056,6 +3069,7 @@ async fn run_recovery_during_uncommitted_replacement() {
             .try_into()
             .expect("UUID prefix is eight bytes"),
     );
+    // pause_replacement_update 在电影 UPDATE 前等待咨询锁，将替换固定在引用切换的临界阶段。
     db.execute_unprepared(&format!(
         "CREATE FUNCTION pause_replacement_update() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN PERFORM pg_advisory_xact_lock({lock_key}); RETURN NEW; END $$; \
@@ -3670,6 +3684,7 @@ async fn new_asset_registration_callback_failure_rolls_back_asset_and_file() {
         "image/png",
         &policy(1024),
         Chunks::new([PNG]).0,
+        // 先写入调用方引用再故意报错，验证登记回调失败会一并回滚资产、引用和文件。
         |tx, asset| {
             Box::pin(async move {
                 movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
@@ -3749,6 +3764,7 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
         "image/png",
         &policy(1024),
         Chunks::new([PNG]).0,
+        // 同事务登记暂存令牌，随后注入提交后故障，确认恢复依据持久引用保留已提交文件。
         |tx, asset| {
             Box::pin(async move {
                 movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
@@ -3795,6 +3811,7 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
     let signal = entered.clone();
     let task_db = db.clone();
     let task_storage = storage2.clone();
+    // 第二次登记停在未提交的回调内，外层收到通知后取消任务并验证重启恢复清理遗留文件。
     let task = tokio::spawn(async move {
         movie_harbor_api::media::upload::store_new_asset_with_registration(
             &task_db,
@@ -3804,6 +3821,7 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
             "image/png",
             &policy(1024),
             Chunks::new([PNG]).0,
+            // 先建立未提交引用再通知外层取消；暂停点确保不会把已提交登记误当作取消回滚。
             move |tx, asset| {
                 Box::pin(async move {
                     movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
@@ -3881,6 +3899,7 @@ async fn registration_commit_unknown_retains_pending_file_until_database_state_r
             "image/png",
             &policy(1024),
             Chunks::new([PNG]).0,
+            // 保存本次资产身份并写入引用，供后续提交结果未知时对照数据库状态检查恢复取舍。
             move |tx, asset| {
                 Box::pin(async move {
                     *capture.lock().unwrap() = Some(asset.clone());

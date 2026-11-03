@@ -454,6 +454,7 @@ async fn login_never_accepts_an_old_hash_changed_during_verification() {
             Err(_) => panic!("replacement password hashing failed"),
         };
     let login_app = app.clone();
+    // 登录在独立任务计算旧密码哈希，主任务随后改密，用于验证登录不会根据过期快照签发会话。
     let pending = tokio::spawn(async move { login(&login_app, "Admin", "initial-password").await });
     tokio::time::sleep(std::time::Duration::from_millis(30)).await;
     let admin = admin_user::Entity::find().one(&db).await.unwrap().unwrap();
@@ -564,7 +565,7 @@ async fn login(app: &Router, name: &str, password: &str) -> Response {
     .await
 }
 
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在管理员会话写请求测试前登录预置账号，并读取 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let response = login(app, "Admin", "initial-password").await;
     assert_eq!(response.status(), StatusCode::OK);

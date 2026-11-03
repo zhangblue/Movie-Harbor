@@ -25,7 +25,7 @@ async function serialized<T>(directory: string, operation: () => Promise<T>): Pr
 export async function prepareGeneratedRoot(config: McpConfig): Promise<string> {
   const parent = await realpath(dirname(config.generatedRoot));
   const expected = join(parent, basename(config.generatedRoot));
-  // Config already canonicalizes this independent output root; reject later parent retargeting.
+  // 配置加载时已固定独立输出目录；父路径后来被重定向时拒绝继续写入。
   if (expected !== config.generatedRoot) throw new Error('生成目录已经变化，请重新检查配置');
   try { await mkdir(expected, { mode: 0o700 }); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
@@ -65,17 +65,19 @@ async function writeRegistry(directory: string, registry: Registry) {
     await rename(temporary, join(directory, 'generated-files.json'));
   } finally {
     await handle?.close();
+    // 原子替换成功后临时路径本就不存在；清理时仅忽略此情况，其他失败仍向上传递。
     await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
 }
 // 转换完成后核验来源与输出并持久登记。
 export async function recordGeneratedFile(path: string, source: CheckedFile, config: McpConfig, directory: string) {
+  // 同目录登记串行化后再复验来源和输出；任一检查失败都不得把文件登记为可删除输出。
   return serialized(directory, async () => {
     await revalidateAllowedFile(source, config.allowedRoots);
     await prepareGeneratedRoot(config);
     await privateDirectory(directory);
     const output = await inspectAllowedFile(path, [config.generatedRoot]);
-    // Never register a hard link to the original as a disposable conversion output.
+    // 输出与源文件共享 inode 时拒绝登记，避免以后清理生成文件误伤原视频。
     if (output.identity.dev === source.identity.dev && output.identity.ino === source.identity.ino) throw new Error('生成文件不能是原视频');
     await chmod(output.realPath, 0o600);
     await revalidateAllowedFile(output, [config.generatedRoot]);
@@ -92,10 +94,11 @@ function sameIdentity(a: FileIdentity, b: FileIdentity) {
 }
 // 用户请求清理时仅删除身份匹配的登记输出。
 export async function deleteGeneratedFile(path: string, config: McpConfig, directory: string): Promise<void> {
+  // 与登记操作使用同一队列；仅在路径和身份都匹配后物理删除，再移除登记记录。
   return serialized(directory, async () => {
     await privateDirectory(directory);
     const registry = await readRegistry(directory);
-    // Match the actual registered path, never an arbitrary alias or user source.
+    // 只匹配实际登记路径，不接受任意别名或用户源文件。
     const record = registry.files.find(record => record.path === path);
     if (!record) throw new Error('不是 MCP 生成文件');
     await prepareGeneratedRoot(config);

@@ -8,7 +8,7 @@ test('catalog genre movie series episode tools advertise independent schemas and
   assert.ok(modules.every(Boolean), 'content tool modules must exist');
   const registrations = new Map<string, any>();
   const server = { /* 测试注册时收集工具 schema 与处理器。 */ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
-  const client = { json: async () => { throw new Error('unexpected request'); }, upload: async () => { throw new Error('unexpected upload'); } };
+  const client = { /* 仅注册工具时不得请求 API，误调用立即令测试失败。 */ json: async () => { throw new Error('unexpected request'); }, /* 仅注册工具时不得上传文件，误调用立即令测试失败。 */ upload: async () => { throw new Error('unexpected upload'); } };
   modules[0]!.registerCatalogTools(server, client);
   modules[1]!.registerGenreTools(server, client);
   modules[2]!.registerMovieTools(server, { client, allowedRoots: [] });

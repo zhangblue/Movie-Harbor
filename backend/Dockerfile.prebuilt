@@ -1,11 +1,14 @@
+# 半离线打包使用已编译的后端程序；本文件只组装运行镜像，不重新编译源码。
 FROM debian:bookworm-slim AS runtime
 
+# 安装证书与健康检查工具，并创建与媒体目录授权一致的固定普通用户。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 10001 movie-harbor \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin movie-harbor
 
+# 构建上下文必须预先提供目标平台的程序，复制后由固定用户作为容器入口执行。
 COPY movie-harbor-api /usr/local/bin/movie-harbor-api
 
 USER 10001:10001

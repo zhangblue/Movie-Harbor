@@ -167,7 +167,7 @@ async fn assert_internal_server_error(response: Response, leaked_storage_key: &s
     assert!(!raw.contains(leaked_storage_key));
 }
 
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在电影管理写请求测试前登录预置管理员，并读取 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let response = request(
         app,
@@ -335,6 +335,7 @@ impl ChunkSource for PausedPng {
         let release = self.release.take();
         let finished = self.finished;
         self.finished = true;
+        // 首次轮询通知外层上传已开始并等待释放，确保删除请求能与上传争用媒体变更锁。
         Box::pin(async move {
             if finished {
                 return Ok(None);
@@ -430,6 +431,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let upload_db = db.clone();
     let upload_storage = storage.clone();
     let upload_id = upload_movie.id;
+    // 独立启动替换并在读取分块时停住，让下方删除请求与其争用存储锁。
     let mut upload = tokio::spawn(async move {
         replace_attachment(
             &upload_db,
@@ -454,6 +456,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let delete_db = db.clone();
     let delete_storage = storage;
     let delete_id = delete_movie.id;
+    // 上传暂停后发起删除，检查同一电影和不同电影的交错都能按约定锁顺序结束。
     let mut deletion = tokio::spawn(async move {
         movie_service::delete(&delete_db, &delete_storage, delete_id, 1).await
     });
@@ -1109,6 +1112,7 @@ async fn publish_rejects_a_fifo_without_waiting_for_a_writer() {
             .success()
     );
     let delayed_writer_path = fifo.clone();
+    // 延迟打开 FIFO 作为兜底写端；发布应在此之前拒绝特殊文件，耗时断言据此检测阻塞读取。
     let delayed_writer = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(600));
         std::fs::OpenOptions::new()
@@ -1460,6 +1464,7 @@ async fn delete_restores_movie_media_when_the_database_transaction_fails() {
         associate(&db, id, "video", video.id, 1).await.status(),
         StatusCode::OK
     );
+    // reject_media_asset_delete 在资产删除前抛错，验证电影删除失败时内容记录和媒体文件一起恢复。
     db.execute_unprepared(
         "CREATE FUNCTION reject_media_asset_delete() RETURNS trigger LANGUAGE plpgsql AS $$ \
          BEGIN RAISE EXCEPTION 'forced media asset delete failure'; END $$; \

@@ -42,6 +42,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       name: state.filters.name || undefined,
       page: state.page,
     }).then((result) => {
+      // 删除等操作可能缩短列表；先修正越界页码触发重载，再接收当前有效页。
       if (ignore) return;
       const lastPage = Math.max(1, Math.ceil(result.total / result.size));
       if (state.page > lastPage) {
@@ -51,6 +52,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       setData(result);
       setConflict(false);
     }).catch((cause: CaughtValue) => {
+      // 认证失效交给根组件退出后台；其他失败保留列表上下文并展示重试入口。
       const error = normalizeError(cause);
       if (ignore) return;
       if (error instanceof ApiError && error.status === 401) onExpired();

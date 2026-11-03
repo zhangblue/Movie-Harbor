@@ -60,8 +60,8 @@ function tabbableElements(panel: HTMLElement, activeElement: Element | null = nu
       } else if (checkedRadio) {
         radioTabStops.add(checkedRadio);
       } else {
-        // Browsers enter an unchecked group at its first or last member depending on Tab direction.
-        // Once a member is active, that member becomes the group's sole sequential tab stop.
+        // 未选中的单选组会按 Tab 方向从首项或末项进入，因此先保留全组候选。
+        // 一旦某项获得焦点，后续计算就只保留该项作为组内的顺序焦点。
         group.forEach((radio) => radioTabStops.add(radio));
       }
     }
@@ -82,6 +82,7 @@ export function Dialog({ open, title, onClose, children, closeLabel, className }
   const previousFocus = useRef<HTMLElement | null>(null);
   const closeFromEffect = useEffectEvent(onClose);
 
+  // 打开时聚焦面板内首个控件并约束键盘导航，关闭或卸载时移除监听并恢复原焦点。
   useEffect(() => {
     if (!open) return;
     previousFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;

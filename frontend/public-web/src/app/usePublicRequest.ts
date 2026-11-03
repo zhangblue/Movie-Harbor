@@ -13,6 +13,7 @@ export function usePublicRequest<T>(load: () => Promise<T>) {
   const { revision, authenticated, discoveryPending, validate, expire, recordScope } = useViewer();
   const [attempt, setAttempt] = useState(0);
   const [result, setResult] = useState<{ load: typeof load; attempt: number; revision: number; value: Result<T> }>();
+  // 查询、重试或身份版本变化时重新加载；卸载后忽略旧请求，避免覆盖当前页面。
   useEffect(() => {
     let ignore = false;
     // 执行公开请求，先验证已登录会话再加载数据并记录私密范围。
@@ -45,5 +46,5 @@ export function usePublicRequest<T>(load: () => Promise<T>) {
     // 身份发现期间先等待；确认匿名后隐藏残留私密数据并统一表现为 404。
     state = discoveryPending ? { status: "loading" } : { status: "error", error: new ApiError(404, "Not Found", "content not found", undefined) };
   }
-  return { state, retry: () => setAttempt((value) => value + 1) };
+  return { state, /* 页面请求失败后递增重试版本，让加载 Effect 重新发起请求。 */ retry: () => setAttempt((value) => value + 1) };
 }

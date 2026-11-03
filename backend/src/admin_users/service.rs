@@ -30,7 +30,7 @@ pub enum ViewerUserError {
 }
 
 impl From<DbErr> for ViewerUserError {
-    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
+    // 在用户管理数据库操作失败时，将唯一约束冲突映射为冲突响应，其余错误归为数据库故障。
     fn from(error: DbErr) -> Self {
         if matches!(error.sql_err(), Some(SqlErr::UniqueConstraintViolation(_))) {
             Self::Conflict
@@ -41,7 +41,7 @@ impl From<DbErr> for ViewerUserError {
 }
 
 impl From<crate::auth::model::AuthError> for ViewerUserError {
-    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
+    // 在创建或重置用户密码的哈希处理失败时，将底层认证错误统一映射为内部故障。
     fn from(_: crate::auth::model::AuthError) -> Self {
         Self::Database
     }
@@ -80,7 +80,7 @@ struct ViewerUserRow {
 }
 
 impl From<ViewerUserRow> for ViewerUserSummary {
-    // 转换底层错误或用户查询行，供用户管理服务返回结果时调用。
+    // 在管理列表与概览组装响应时，将查询行转为用户摘要并统一序列化时间。
     fn from(row: ViewerUserRow) -> Self {
         Self {
             id: row.id,
@@ -110,6 +110,7 @@ pub async fn list(
         count(*) FILTER (WHERE EXISTS (SELECT 1 FROM viewer_session s WHERE s.viewer_user_id = u.id AND s.expires_at > CURRENT_TIMESTAMP))::bigint AS active_users,
         count(*) FILTER (WHERE $1::text IS NULL OR u.normalized_username LIKE $1::text ESCAPE '!')::bigint AS total
         FROM viewer_user u", [filter.pattern.clone().into()])).await?.ok_or(ViewerUserError::Database)?;
+    // 在组装分页和概览前读取非负计数；字段读取或数值转换失败时中止本次查询响应。
     let count = |key: &str| -> Result<u64, ViewerUserError> {
         u64::try_from(counts.try_get::<i64>("", key)?).map_err(|_| ViewerUserError::Database)
     };
@@ -151,6 +152,7 @@ pub async fn create(
     if username.is_empty() {
         return Err(ViewerUserError::Invalid);
     }
+    // 创建前先拒绝不符合规则的密码，再计算哈希，避免开启必然失败的写事务。
     password_policy::validate(&password).map_err(|_| ViewerUserError::InvalidPassword)?;
     let hash = password::hash_limited(&state.password_work, password).await?;
     let tx = state.db.begin().await?;
@@ -229,6 +231,7 @@ pub async fn delete(
         return Err(ViewerUserError::Invalid);
     }
     let tx = db.begin().await?;
+    // 删除前在用户行锁内校验版本，使并发改密或删除先完成的一方决定本次请求是否仍有效。
     locked_user(&tx, id, version).await?;
     // 删除用户与外键级联会话在同一事务提交，和登录、改密共用用户行锁。
     viewer_user::Entity::delete_by_id(id).exec(&tx).await?;

@@ -20,7 +20,7 @@ function absolutePath(value: string | undefined, field: string): string {
 
 // 启动时安全打开配置或凭据文件并读取键值。
 async function readEnv(path: string, privateFile: boolean): Promise<Map<string, string>> {
-  // O_NOFOLLOW rejects symlinks; O_NONBLOCK lets stat reject FIFOs without waiting for a writer.
+  // O_NOFOLLOW 拒绝符号链接；O_NONBLOCK 让后续 stat 可拒绝 FIFO，而不阻塞等待写端。
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => {
     throw new Error('配置必须是可读取的普通文件，不能使用符号链接');
   });
@@ -101,7 +101,7 @@ export async function loadConfig(env: NodeJS.ProcessEnv): Promise<McpConfig> {
     }
     return { baseUrl, apiKey, credentialDirectory, allowedRoots, generatedRoot, requestTimeoutMs };
   } catch (error) {
-    // Native filesystem errors contain paths; do not expose configuration values.
+    // 原生文件系统错误可能包含路径；统一转为安全提示，不对外暴露配置值。
     if ((error as NodeJS.ErrnoException).code) throw new Error('配置目录不存在或不可读取');
     throw error;
   }

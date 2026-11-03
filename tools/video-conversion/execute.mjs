@@ -132,7 +132,7 @@ export async function executeConversion({ inputPath, outputPath, media, plan }, 
       }
     }
     finally {
-      // Keep signal protection until publication and cleanup have both settled.
+      // 发布和临时文件清理均结束后才移除信号保护，避免收尾窗口中的取消被忽略。
       if (interrupted && !failure) failure = interruptionError();
       process.off("SIGINT", onInterrupt); process.off("SIGTERM", onTerminate);
     }

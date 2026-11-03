@@ -15,6 +15,7 @@ import {
 } from "./http";
 import type { JsonObject } from "./dataTypes";
 
+// 请求测试结束后移除 CSRF 与全局网络替身，避免认证或事件状态串入下一用例。
 afterEach(() => {
   clearCsrfToken();
   vi.unstubAllGlobals();
@@ -341,7 +342,7 @@ describe("apiUpload", () => {
       method: "POST",
       query: { version: 4 },
       body: new FormData(),
-      onProgress: (event) => events.push(event),
+      /* 上传事件到达时收集顺序，供当前测试核对百分比及处理阶段。 */ onProgress: (event) => events.push(event),
     });
 
     xhr.uploadProgress({ lengthComputable: true, loaded: 40, total: 100 });
@@ -371,7 +372,7 @@ describe("apiUpload", () => {
     const request = apiUpload("/api/admin/media/movies/movie-1/video", {
       method: "POST",
       body: new FormData(),
-      onProgress: (event) => events.push(event),
+      /* 上传事件到达时收集顺序，供当前测试核对百分比及处理阶段。 */ onProgress: (event) => events.push(event),
     });
 
     xhr.uploadProgress({ lengthComputable: false, loaded: 20, total: 0 });
@@ -395,7 +396,7 @@ describe("apiUpload", () => {
     const request = apiUpload("/api/admin/media/movies/movie-1/video", {
       method: "POST",
       body: new FormData(),
-      onProgress: (event) => events.push(event),
+      /* 上传事件到达时收集顺序，供当前测试核对百分比及处理阶段。 */ onProgress: (event) => events.push(event),
     });
 
     xhr.uploadProgress({ lengthComputable: true, loaded: 0, total: 100 });
@@ -413,7 +414,7 @@ describe("apiUpload", () => {
   it("preserves API response error and parse error semantics", async () => {
     const unsupportedXhr = installFakeXhr();
     const unsupported = apiUpload("/api/admin/media/movies/movie-1/video", {
-      method: "POST", body: new FormData(), onProgress: () => undefined,
+      method: "POST", body: new FormData(), /* 当前用例仅检查错误映射，收到进度时无需额外记录。 */ onProgress: () => undefined,
     });
     unsupportedXhr.respond(415, '{"error":"unsupported media"}', { "content-type": "application/json" });
     await expect(unsupported).rejects.toMatchObject({
@@ -422,7 +423,7 @@ describe("apiUpload", () => {
 
     const malformedXhr = installFakeXhr();
     const malformed = apiUpload("/api/admin/media/movies/movie-1/video", {
-      method: "POST", body: new FormData(), onProgress: () => undefined,
+      method: "POST", body: new FormData(), /* 当前用例仅检查错误映射，收到进度时无需额外记录。 */ onProgress: () => undefined,
     });
     malformedXhr.respond(200, "not-json", { "content-type": "application/json" });
     await expect(malformed).rejects.toBeInstanceOf(ApiResponseParseError);
@@ -436,7 +437,7 @@ describe("apiUpload", () => {
   ] as const)("maps XHR %s events to network errors", async (event, aborted) => {
     const xhr = installFakeXhr();
     const request = apiUpload("/api/admin/media/movies/movie-1/video", {
-      method: "POST", body: new FormData(), onProgress: () => undefined,
+      method: "POST", body: new FormData(), /* 当前用例仅检查错误映射，收到进度时无需额外记录。 */ onProgress: () => undefined,
     });
     xhr.fail(event);
     xhr.respond(200, '{"ignored":true}', { "content-type": "application/json" });

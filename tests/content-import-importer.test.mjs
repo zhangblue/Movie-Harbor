@@ -274,7 +274,7 @@ test("movie create, metadata, poster and video save each returned version; rerun
 test("a failed movie video resumes without repeating create, metadata or poster", async (t) => {
   const { path, progress, logger } = await setup(t);
   let fail = true;
-  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
+  // 首次视频上传时注入致命网络错误，第二次允许成功，验证续传复用已保存的电影与海报步骤。
   const client = fakeClient({ failure({ method, path }) {
     if (fail && method === "UPLOAD" && path.includes("/video?")) {
       fail = false;
@@ -295,7 +295,7 @@ test("a failed movie video resumes without repeating create, metadata or poster"
 // 验证普通电影失败后继续下一项且不保存失败步骤。
 test("ordinary movie failure continues to the next item and leaves failed step unsaved", async (t) => {
   const { path, progress, logger, messages } = await setup(t);
-  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
+  // 仅拒绝第一部电影的元数据更新，验证非致命内容错误留下当前检查点并继续下一部电影。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "PATCH" && path === "/api/admin/movies/new-movie-1") return new ImportRequestError("invalid metadata", { status: 422 });
   } });
@@ -362,7 +362,7 @@ test("preserves private state on create and rejects privacy changes during resum
 // 验证认证失败立即停止且不保存未完成题材。
 test("auth failure stops immediately and does not persist an incomplete genre", async (t) => {
   const { path, progress, logger } = await setup(t);
-  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
+  // 创建题材时返回致命认证错误，验证导入立即停止且不会保存未成功的题材映射。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "POST" && path === "/api/admin/genres") return new ImportRequestError("unauthorized", { fatal: true, category: "auth", status: 401 });
   } });
@@ -396,7 +396,7 @@ test("a __proto__ genre is stored as an own progress entry and reused on rerun",
 test("constructor and toString movie names create own checkpoints and resume without duplicates", async (t) => {
   const { path, progress, logger } = await setup(t);
   let failVideo = true;
-  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
+  // 首次视频上传中断以留下特殊名称的检查点，恢复后验证自有属性不会被原型链名称干扰。
   const client = fakeClient({ failure({ method, path }) {
     if (failVideo && method === "UPLOAD" && path.includes("/video?")) {
       failVideo = false;
@@ -626,7 +626,7 @@ test("series exact-name conflict skips only series and prototype-like name resum
 // 验证单集业务失败保留检查点并继续下一条内容。
 test("series episode business failure leaves its checkpoint and continues to next content", async (t) => {
   const { path, progress, logger } = await setup(t);
-  // 按本测试的请求阶段注入失败，供检查错误分类和进度恢复。
+  // 拒绝单集时长更新以模拟非致命校验失败，确认保留其检查点并继续导入后续整剧。
   const client = fakeClient({ failure({ method, path }) {
     if (method === "PATCH" && path.includes("/episodes/")) return new ImportRequestError("invalid duration", { status: 422 });
   } });

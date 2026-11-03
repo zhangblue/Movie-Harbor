@@ -75,10 +75,12 @@ export function VideoPlayer({ contentKey, src, title }: {
       preload="metadata"
       src={src}
       onLoadedMetadata={(event) => {
+        // 元数据给出真实时长后才恢复位置；用户未选择继续时保留默认播放起点。
         if (resumeChoice !== "continue" || !savedProgress.current) return;
         restoreSavedPosition(event.currentTarget);
       }}
       onTimeUpdate={() => {
+        // 播放过程中最多每五秒写一次本地进度，暂停和离页仍由各自事件立即保存。
         if (Date.now() - lastSavedAt.current >= 5_000) persist();
       }}
       onPause={() => persist()}

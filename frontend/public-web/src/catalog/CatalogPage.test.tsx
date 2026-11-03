@@ -1,5 +1,5 @@
 import "@testing-library/jest-dom/vitest";
-// @ts-expect-error Vitest runs this test in Node while the application tsconfig intentionally excludes Node globals.
+// @ts-expect-error 测试在 Node 中读取样式；应用类型配置有意不包含 Node 全局声明。
 import { readFileSync } from "node:fs";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -13,7 +13,9 @@ const publicStyles = readFileSync("src/styles.css", "utf8");
 styleElement.textContent = publicStyles.replace(/^@import[^;]+;/, "");
 document.head.append(styleElement);
 
+// 目录测试开始时回到首页，避免前一用例的搜索或页码参数残留。
 beforeEach(() => window.history.replaceState(null, "", "/"));
+// 目录测试结束后卸载页面并恢复网络替身，隔离下一次加载。
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 // 验证：混合目录渲染可访问卡片、元数据和五列网格。

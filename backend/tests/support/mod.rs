@@ -58,11 +58,13 @@ impl Drop for TestDatabase {
     fn drop(&mut self) {
         let admin_url = self.admin_url.clone();
         let schema = self.schema.clone();
+        // Drop 不能直接异步等待；独立线程创建运行时并等待清理结束，避免嵌套当前测试运行时。
         let _ = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
             if let Ok(runtime) = runtime {
+                // 清理仅针对本测试 schema；连接或删除失败时尽力退出，避免析构错误遮蔽原测试结果。
                 runtime.block_on(async move {
                     if let Ok(admin) = Database::connect(admin_url).await {
                         let _ = admin

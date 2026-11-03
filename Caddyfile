@@ -1,6 +1,7 @@
 :80 {
 	encode zstd gzip
 
+	# 外部请求不能直接调用内部媒体授权入口，统一返回不存在且禁止缓存。
 	handle /api/media/authorize {
 		header Cache-Control "private, no-store"
 		respond 404
@@ -8,6 +9,7 @@
 
 	@api path /api /api/*
 	handle @api {
+		# 转发 API 时移除客户端伪造的原始路径，并用代理共享凭据标识可信转发。
 		reverse_proxy api:3000 {
 			header_up -X-Forwarded-Uri
 			header_up X-Forwarded-For {remote_host}
@@ -19,6 +21,7 @@
 	handle @public_media {
 		header X-Content-Type-Options nosniff
 		header >Cache-Control "private, no-store"
+		# 每次媒体读取先向后端校验会话与内容状态，只有获准请求才继续交给文件服务。
 		forward_auth api:3000 {
 			uri /api/media/authorize
 			header_up X-Forwarded-Uri {uri}
@@ -29,6 +32,7 @@
 	}
 
 	@other_media path /media /media/*
+	# 不符合受控存储键规则的媒体路径不进入文件服务，避免路径探测与目录访问。
 	handle @other_media {
 		header Cache-Control "private, no-store"
 		respond 404

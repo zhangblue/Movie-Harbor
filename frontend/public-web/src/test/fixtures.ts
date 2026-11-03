@@ -45,7 +45,7 @@ export function json(value: PublicFixturePayload, status = 200) {
 export function catalog(items: CatalogCard[], total = items.length, page = 1) {
   return json({ items, total, page, size: 25 });
 }
-// Only the network boundary is replaced; shared request encoding and error handling run unchanged.
+// 只替换网络边界，测试仍执行共享客户端的请求编码和错误处理。
 // 公开站测试中安装按 URL 分派的模拟服务。
 export function serve(handler: (url: URL) => Response | Promise<Response>) {
   vi.stubGlobal("fetch", (input: string) => {

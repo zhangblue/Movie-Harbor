@@ -41,6 +41,7 @@ pub async fn initialize(
         .await?;
     // 已有管理员时完全忽略环境变量中的初始凭据，避免重启服务意外重置既有账号。
     if admin_user::Entity::find().one(&tx).await?.is_none() {
+        // 首次创建时逐项读取非空初始凭据，缺失就中止初始化，避免保存不可登录的管理员。
         let required = |value: &Option<String>, name| {
             value
                 .as_ref()

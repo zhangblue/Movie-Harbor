@@ -27,7 +27,9 @@ class MemoryStorage implements Storage {
 
 // 验证：分组验证播放进度的本地持久化。
 describe("playback progress storage", () => {
+  // 每个进度用例使用全新内存存储，避免依赖浏览器持久状态。
   beforeEach(() => vi.stubGlobal("localStorage", new MemoryStorage()));
+  // 写入场景开始前清空存储，确保所有记录均来自当前用例。
   beforeEach(() => localStorage.clear());
 
   // 验证：电影和单集进度在同一版本化存储中按键隔离。

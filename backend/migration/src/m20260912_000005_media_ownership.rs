@@ -8,6 +8,11 @@ pub struct Migration;
 impl MigrationTrait for Migration {
     /// 升级时锁定旧写入并检查存量数据，再回填所有权和安装约束。
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        // 整批 SQL 持锁完成预检与回填，再安装三个函数及触发器，避免旧写入穿过约束安装窗口。
+        // sync_movie_media_ownership 在电影插入、媒体槽位更新和删除后同步海报与视频归属。
+        // sync_series_media_ownership 在整剧插入、海报更新和删除后同步海报归属。
+        // sync_episode_media_ownership 在单集插入、视频更新和删除后同步视频归属。
+        // 各函数先清除旧归属再写入当前槽位，由资产主键保证跨表独占；冲突使原内容写入一起失败。
         manager
             .get_connection()
             .execute_unprepared(

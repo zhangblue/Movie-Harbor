@@ -82,7 +82,7 @@ function writeState(state: ProgressState, storage?: Storage) {
   try {
     target.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(state));
   } catch {
-    // Browsers may deny or exhaust local storage. Playback must continue without persistence.
+    // 浏览器可能拒绝存储或空间已满；忽略持久化失败，保证播放仍能继续。
   }
 }
 

@@ -9,16 +9,26 @@ import { MovieHarborClientError, type MovieHarborClient } from '../services/movi
 import { inspectAllowedFile } from '../services/path-policy.js';
 import type { LocalMediaDependencies } from './local-media.js';
 
+// 上传输入仅接受绝对路径；实际读取前还会验证目录、文件身份和视频兼容性。
 const localPath = z.string().refine(path => isAbsolute(path) && !path.includes('\0'), '必须使用不含 NUL 的绝对路径');
+// 电影上传必须显式提供内容版本和入库确认，防止对过时目标写入。
 export const uploadMovieVideoInput = z.strictObject({ movie_id: id, version, path: localPath, confirmed });
+// 替换电影视频复用同一输入边界，是否已有视频由工具另外核对。
 export const replaceMovieVideoInput = uploadMovieVideoInput;
+// 单集上传携带完整层级及单集版本，供远端归属和并发检查使用。
 export const uploadEpisodeVideoInput = z.strictObject({ series_id: id, season_id: id, episode_id: id, version, path: localPath, confirmed });
+// 替换单集视频复用上传输入，替换意图由独立工具入口表达。
 export const replaceEpisodeVideoInput = uploadEpisodeVideoInput;
+// 上传结果向调用方报告媒体元数据、生成文件清理结果及仍需确认的后续动作。
 const uploadFields = { id, version, media_id: id, mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(),
   generated_file_deleted: z.boolean(), retained_generated_path: z.string().nullable(), next_actions: z.array(z.string()) };
+// 电影上传返回内容的新版本，供后续独立发布使用。
 export const movieUploadOutput = z.object(uploadFields);
+// 单集上传还返回父剧集新版本，避免后续层级操作沿用旧版本。
 export const episodeUploadOutput = z.object({ ...uploadFields, series_version: version });
+// 校验管理 API 原子上传返回的媒体身份、格式、大小及内容版本。
 const apiMovieUpload = z.object({ id, mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(), version: positiveInt });
+// 单集原子上传响应必须另外包含父级版本。
 const apiEpisodeUpload = apiMovieUpload.extend({ series_version: version });
 
 // 描述上传工具所需客户端和媒体检查依赖。
@@ -76,7 +86,7 @@ async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependenci
     if (checked.generated) throw new Error(`视频上传失败或结果未知；生成文件已保留，请重新查询目标后重试：${checked.file.realPath}`);
     throw error;
   }
-  // Parse and cross-check before cleanup: a structurally valid but impossible response is commit-unknown.
+  // 清理前先解析并交叉核对：结构合法但版本或文件信息不符时仍视为提交结果未知。
   const response = parser(raw, checked);
   // 仅在服务端结果通过校验后清理生成文件；失败时保留文件供重试。
   return { response, ...(await cleanupAfterUpload(checked.file.realPath, checked.generated, dependencies)) };
@@ -85,6 +95,7 @@ async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependenci
 // 确认入库后上传或替换指定电影视频。
 export async function uploadMovieVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceMovieVideoInput : uploadMovieVideoInput).parse(input);
+  // 本地兼容性先通过才查询远端；远端草稿、版本与替换意图全部匹配后才上传。
   const checked = await checkedVideo(parsed.path, dependencies);
   const movie = parseApi(apiMovie, await dependencies.client.json('GET', `/api/admin/movies/${parsed.movie_id}`));
   if (movie.id !== parsed.movie_id) throw new MovieHarborClientError('invalid_response');
@@ -93,6 +104,7 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
   if (replace && !movie.video) throw new Error('目标没有视频，请改用 upload_movie_video');
   const result = await uploadFile(checked, `/api/admin/media/movies/${parsed.movie_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
+      // 上传响应必须对应本次文件且只推进一个版本，否则不允许清理本地生成文件。
       const response = parseApi(apiMovieUpload, value);
       if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
         || response.version !== parsed.version + 1) throw new MovieHarborClientError('invalid_response');
@@ -107,6 +119,7 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
 // 确认入库后上传或替换指定单集视频。
 export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceEpisodeVideoInput : uploadEpisodeVideoInput).parse(input);
+  // 先拒绝不兼容本地文件，再确认目标单集归属和版本，避免写入错误层级。
   const checked = await checkedVideo(parsed.path, dependencies);
   const detailPath = `/api/admin/series/${parsed.series_id}/seasons/${parsed.season_id}/episodes/${parsed.episode_id}`;
   const envelope = parseApi(apiEpisodeEnvelope, await dependencies.client.json('GET', detailPath));
@@ -119,6 +132,7 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');
   const result = await uploadFile(checked, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
+      // 同时核对媒体元数据、单集和父剧集的版本增量，任何不一致都保留生成文件。
       const response = parseApi(apiEpisodeUpload, value);
       if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
         || response.version !== parsed.version + 1 || response.series_version !== envelope.series_version + 1) {

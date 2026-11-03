@@ -40,6 +40,7 @@ declare namespace VideoConversion {
     onProgress?: (message: string) => void;
   }
 }
+// 为 MCP 复用根目录媒体子进程工具提供跨模块声明，约束探测、编码器检查与执行调用。
 declare module '*video-conversion/execute.mjs' {
   // 探测媒体时运行探测程序并返回轨道信息。
   export function probeMedia(path: string, options?: VideoConversion.ProcessOptions): Promise<VideoConversion.Media>;
@@ -48,6 +49,7 @@ declare module '*video-conversion/execute.mjs' {
   // 按计划运行转换进程并返回输出路径。
   export function executeConversion(conversion: VideoConversion.Conversion, options?: VideoConversion.ProcessOptions): Promise<string>;
 }
+// 为 MCP 检查兼容性及规划转换提供根目录规划模块的类型边界。
 declare module '*video-conversion/plan.mjs' {
   // 根据探测结果生成转换计划。
   export function buildConversionPlan(media: VideoConversion.Media): VideoConversion.Plan;

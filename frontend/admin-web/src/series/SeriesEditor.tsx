@@ -71,6 +71,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     });
     const id = current.current?.id ?? seriesId;
     void Promise.all([id ? watch(getSeries(id)) : null, watch(listGenres())]).then(async ([value, choices]) => {
+      // 接收完整层级后恢复新建流程或读取删除影响，后续请求失败时统一锁定等待刷新。
       if (ignore) return;
       setGenres(choices); setConflict(false);
       if (value) {
@@ -247,6 +248,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
         <section className="series-section" aria-labelledby="series-basic-title"><h2 id="series-basic-title">基本信息</h2>
           <div className="movie-editor-card"><PosterPicker current={series.poster} file={poster} onSelect={setPoster} readOnly={readOnly} disabled={locked} />
             <form className="movie-form" onSubmit={(event) => {
+              // 提交时先保存基本信息及海报，只有全部成功且权限仍允许时才按新版本发布整剧。
               event.preventDefault(); if (!fields.name.trim()) return;
               const publish = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "publish";
               void run(async () => { const saved = await saveBasic(); if (!saved || !mounted.current) return; if (publish && canAct(saved, "publish")) { await transitionSeries(saved.id, "publish", saved.version); await refresh(undefined, true); } else setNotice("剧集草稿已保存。"); });
@@ -255,6 +257,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
               <Field label="首播年份" className="movie-field-short"><input type="number" min="1" max="9999" disabled={readOnly || locked} value={fields.year} onChange={(e) => setFields({ ...fields, year: e.target.value })} /></Field>
               <Field label="简介" className="movie-field-wide"><textarea rows={4} disabled={readOnly || locked} value={fields.synopsis} onChange={(e) => setFields({ ...fields, synopsis: e.target.value })} /></Field>
               <Field label="题材" className="movie-field-medium"><select multiple size={3} disabled={readOnly || locked} value={fields.genreIds} onChange={(e) => {
+                // 保留已绑定的停用题材，再合并新选择，避免表单编辑隐式丢失旧关联。
                 const retained = fields.genreIds.filter((id) => choices.some((g) => g.id === id && !g.enabled));
                 setFields({ ...fields, genreIds: [...new Set([...retained, ...Array.from(e.target.selectedOptions).map((o) => o.value)])] });
               }}>{choices.filter((g) => g.enabled || fields.genreIds.includes(g.id)).map((g) => <option key={g.id} value={g.id} disabled={!g.enabled}>{g.name}{g.enabled ? "" : "（已停用）"}</option>)}</select></Field>
@@ -262,7 +265,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
               <div className="movie-form-actions">
                 {canAct(series, "edit") && <Button type="submit" disabled={locked}>保存剧集草稿</Button>}
                 {canAct(series, "publish") && series.status === "draft" && <Button type="submit" value="publish" disabled={locked} variant="primary">发布剧集</Button>}
-                {(["publish", "archive", "draft"] as const).filter((action) => canAct(series, action) && !(action === "publish" && series.status === "draft")).map((action) => <Button key={action} disabled={locked} onClick={() => { void run(async () => { await transitionSeries(series.id, action, series.version); await refresh(undefined, true); }); }}>{action === "archive" ? "归档剧集" : action === "draft" ? "剧集转为草稿" : "原样发布剧集"}</Button>)}
+                {(["publish", "archive", "draft"] as const).filter((action) => canAct(series, action) && !(action === "publish" && series.status === "draft")).map((action) => <Button key={action} disabled={locked} onClick={() => { void run(async () => { /* 非草稿状态按钮仅转换生命周期，完成后刷新表单和层级版本。 */ await transitionSeries(series.id, action, series.version); await refresh(undefined, true); }); }}>{action === "archive" ? "归档剧集" : action === "draft" ? "剧集转为草稿" : "原样发布剧集"}</Button>)}
                 {canAct(series, "delete") && <Button variant="danger" disabled={locked} onClick={() => { void prepareDelete(); }}>永久删除剧集</Button>}
               </div>
             </form>
@@ -270,15 +273,17 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
         </section>
         <section className="series-section" aria-labelledby="series-structure-title"><h2 id="series-structure-title">季与单集</h2><p>季只填写序号；每一集必须输入名称，独立保存草稿和上传视频。</p>
           {series.seasons.map((season) => <SeasonCard key={`${revision}:${season.id}`} series={series} season={season} disabled={locked} initialEpisode={newSeasons.includes(season.id)} expanded={expandedSeasons.has(season.id)} onToggle={() => setExpandedSeasons((ids) => {
+            // 只切换当前季的展开状态，复制集合以触发渲染并保留其他季选择。
             const next = new Set(ids);
             if (next.has(season.id)) next.delete(season.id); else next.add(season.id);
             return next;
           })}
-            actions={{ save: saveEpisode, transition: (episode, action) => { if (canAct(episode, action)) void run(async () => { await transitionEpisode(series.id, season.id, episode.id, action, episode.version); await refresh(); }); }, remove: (episode) => { void prepareDelete(season.id, episode.id); } }}
-            create={(number, name) => run(async () => { if (!knownStatus(series.status) || !permits(series, "add_episode") || !permits(season, "add_episode")) return; const saved = await createEpisode(series.id, season.id, { version: series.version, number, name }); if (mounted.current) { accept(saved); setNotice("单集草稿已保存。"); } })}
-            update={(number) => { if (canChangeSeason(series, season, "edit")) void run(async () => { const saved = await updateSeason(series.id, season.id, number, series.version); if (mounted.current) accept(saved); }); }}
+            actions={{ save: saveEpisode, /* 单集状态按钮触发时先检查权限，再按单集版本转换并刷新整剧层级。 */ transition: (episode, action) => { if (canAct(episode, action)) void run(async () => { await transitionEpisode(series.id, season.id, episode.id, action, episode.version); await refresh(); }); }, /* 单集删除入口先读取最新影响，确认后才允许实际删除。 */ remove: (episode) => { void prepareDelete(season.id, episode.id); } }}
+            create={(number, name) => run(async () => { /* 提交新单集时重新检查父级与季权限，按父版本创建并接收最新层级。 */ if (!knownStatus(series.status) || !permits(series, "add_episode") || !permits(season, "add_episode")) return; const saved = await createEpisode(series.id, season.id, { version: series.version, number, name }); if (mounted.current) { accept(saved); setNotice("单集草稿已保存。"); } })}
+            update={(number) => { /* 保存季号前检查是否可编辑，写入成功后采用返回的整剧版本。 */ if (canChangeSeason(series, season, "edit")) void run(async () => { const saved = await updateSeason(series.id, season.id, number, series.version); if (mounted.current) accept(saved); }); }}
             remove={() => { void prepareDelete(season.id); }} />)}
           <Button disabled={locked || !knownStatus(series.status) || !permits(series, "add_season")} onClick={() => { void run(async () => {
+            // 用当前父级版本创建下一季；返回后仅展开新增季，保留其他季已有的展开状态。
             const saved = await createSeason(series.id, Math.max(0, ...series.seasons.map((s) => s.number)) + 1, series.version);
             if (mounted.current) {
               const createdIds = saved.seasons.filter((candidate) => !series.seasons.some((old) => old.id === candidate.id)).map((candidate) => candidate.id);

@@ -1,3 +1,4 @@
+# 仅供本机 Rust 数据库测试使用，与生产 Compose 的端口和数据目录隔离。
 name: movie-harbor-test
 
 services:
@@ -15,4 +16,5 @@ services:
       timeout: 5s
       retries: 15
     tmpfs:
+      # 测试数据库使用容器临时内存挂载，不写入生产默认的宿主数据库目录。
       - /var/lib/postgresql/data

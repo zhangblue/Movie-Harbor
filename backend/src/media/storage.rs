@@ -38,6 +38,7 @@ impl ChunkSource for axum::extract::multipart::Field<'_> {
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
         Box::pin(async move {
+            // 请求体读取失败即终止上传；显式区分大小限制，保留其他 multipart 错误供上层报告。
             self.chunk().await.map_err(|error| {
                 if error.status() == axum::http::StatusCode::PAYLOAD_TOO_LARGE {
                     MediaError::TooLarge

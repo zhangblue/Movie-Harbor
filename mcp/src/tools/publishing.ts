@@ -4,8 +4,11 @@ import { contentResult, id, parseApi, toolResult, version, writeAnnotations } fr
 import { apiEpisodeEnvelope, apiMovie, apiSeries, episodeOutput } from '../schemas/content.js';
 import { MovieHarborClientError, type MovieHarborClient } from '../services/movie-harbor-client.js';
 
+// 电影发布输入与入库输入分离，由处理器要求此次发布确认明确为真。
 export const publishMovieInput = z.strictObject({ movie_id:id, version, confirmed:z.boolean() });
+// 整剧发布单独接收父级版本，不复用单集发布确认。
 export const publishSeriesInput = z.strictObject({ series_id:id, version, confirmed:z.boolean() });
+// 单集发布携带完整层级和单集版本，供后续归属与并发核验。
 export const publishEpisodeInput = z.strictObject({ series_id:id, season_id:id, episode_id:id, version, confirmed:z.boolean() });
 
 // 发布前检查用户是否作出独立确认。
@@ -26,6 +29,7 @@ function assertPublishable(status: string, currentVersion: number, expectedVersi
 export async function publishMovie(input: unknown, client: MovieHarborClient) {
   const parsed=publishMovieInput.parse(input); requireConfirmation(parsed.confirmed);
   const path=`/api/admin/movies/${parsed.movie_id}`;
+  // 发布前读回目标状态；已发布则直接返回，草稿必须匹配用户确认的版本。
   const current=parseApi(apiMovie,await client.json('GET',path)); assertOwned(current.id,parsed.movie_id);
   assertPublishable(current.status,current.version,parsed.version,'电影');
   if(current.status==='published') return toolResult(contentResult,{id:current.id,version:current.version,status:current.status,next_actions:[]},'电影已经发布，无需重复操作。');
@@ -38,6 +42,7 @@ export async function publishMovie(input: unknown, client: MovieHarborClient) {
 export async function publishSeries(input: unknown, client: MovieHarborClient) {
   const parsed=publishSeriesInput.parse(input); requireConfirmation(parsed.confirmed);
   const path=`/api/admin/series/${parsed.series_id}`;
+  // 独立核验父剧集状态与版本，避免单集已发布就隐式发布整剧。
   const current=parseApi(apiSeries,await client.json('GET',path)); assertOwned(current.id,parsed.series_id);
   assertPublishable(current.status,current.version,parsed.version,'父剧集');
   if(current.status==='published') return toolResult(contentResult,{id:current.id,version:current.version,status:current.status,next_actions:[]},'父剧集已经发布，无需重复操作。');
@@ -49,6 +54,7 @@ export async function publishSeries(input: unknown, client: MovieHarborClient) {
 // 独立确认后发布指定单集并检查父级。
 export async function publishEpisode(input: unknown, client: MovieHarborClient) {
   const parsed=publishEpisodeInput.parse(input); requireConfirmation(parsed.confirmed);
+  // 先确认父级未归档，再校验单集所属层级及共同版本；不一致时停止发布。
   const parent=parseApi(apiSeries,await client.json('GET',`/api/admin/series/${parsed.series_id}`));
   assertOwned(parent.id,parsed.series_id);
   if(parent.status==='archived') throw new Error('父剧集已归档，请由管理员处理，MCP 不会发布单集或恢复草稿');
@@ -62,6 +68,7 @@ export async function publishEpisode(input: unknown, client: MovieHarborClient) 
   const next=parent.status==='draft'?['publish_series']:[];
   if(episode.status==='published') return toolResult(episodeOutput,{id:episode.id,version:episode.version,status:episode.status,
     series_version:current.series_version,next_actions:next},parent.status==='draft'?'单集已经发布；父剧集仍需单独确认发布。':'单集已经发布，无需重复操作。');
+  // 仅发布该单集；返回前验证单集和父级版本各推进一次，父剧集发布仍由 next_actions 提示。
   const response=parseApi(apiEpisodeEnvelope,await client.json('POST',`${path}/publish`,{version:parsed.version})); const published=response.episode;
   if(published.id!==parsed.episode_id||published.season_id!==parsed.season_id||published.status!=='published'
     ||published.version!==parsed.version+1||response.series_version!==parent.version+1

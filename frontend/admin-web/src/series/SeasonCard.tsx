@@ -7,8 +7,8 @@ import { canChangeSeason, knownStatus, permits } from "./permissions";
 // 展示待创建单集输入，在新增季或单集草稿时使用。
 function NewEpisode({ number, disabled, create, remove, changeNumber }: { number: number; disabled: boolean; create: (number: number, name: string) => Promise<boolean>; remove: () => void; changeNumber: (number: number) => void }) {
   const [name, setName] = useState(""); const [value, setValue] = useState(String(number));
-  return <form className="series-episode" aria-label="新单集草稿" onSubmit={(e) => { e.preventDefault(); if (name.trim()) void create(Number(value), name).then((saved) => { if (saved) remove(); }); }}>
-    <div className="movie-inline-fields"><Field label="集序号" className="movie-field-short"><input type="number" min="1" required disabled={disabled} value={value} onChange={(e) => { setValue(e.target.value); changeNumber(Number(e.target.value)); }} /></Field><Field label="单集名称" className="movie-field-medium"><input required disabled={disabled} value={name} placeholder="请输入名称" onChange={(e) => setName(e.target.value)} /></Field></div>
+  return <form className="series-episode" aria-label="新单集草稿" onSubmit={(e) => { /* 名称非空时请求创建，只有成功保存才移除本地待建表单，失败保留输入。 */ e.preventDefault(); if (name.trim()) void create(Number(value), name).then((saved) => { if (saved) remove(); }); }}>
+    <div className="movie-inline-fields"><Field label="集序号" className="movie-field-short"><input type="number" min="1" required disabled={disabled} value={value} onChange={(e) => { /* 同步本地输入与待建列表序号，使下一集编号计算包含此项。 */ setValue(e.target.value); changeNumber(Number(e.target.value)); }} /></Field><Field label="单集名称" className="movie-field-medium"><input required disabled={disabled} value={name} placeholder="请输入名称" onChange={(e) => setName(e.target.value)} /></Field></div>
     <p>保存单集草稿后可填写时长并上传视频。</p>
     <div className="movie-form-actions"><Button type="submit" disabled={disabled}>保存单集草稿</Button><Button variant="danger" disabled={disabled} onClick={remove}>移除未保存单集</Button></div>
   </form>;
@@ -33,7 +33,7 @@ export function SeasonCard({ series, season, disabled, initialEpisode, expanded,
     </div>
     <div id={bodyId} className="series-season-body" hidden={!expanded}>
       <div className="series-season-controls">
-        <form className="movie-inline-fields series-season-number-form" onSubmit={(e) => { e.preventDefault(); update(Number(number)); }}>
+        <form className="movie-inline-fields series-season-number-form" onSubmit={(e) => { /* 提交季号给父编辑器，由其按权限和父级版本执行写入。 */ e.preventDefault(); update(Number(number)); }}>
           <Field label="季序号" className="movie-field-short"><input type="number" min="1" required value={number} disabled={disabled || !canChangeSeason(series, season, "edit")} onChange={(e) => setNumber(e.target.value)} /></Field>
           <Button className="series-season-action" type="submit" disabled={disabled || !canChangeSeason(series, season, "edit")}>保存季序号</Button>
         </form>

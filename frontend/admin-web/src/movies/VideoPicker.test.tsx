@@ -6,6 +6,7 @@ import { VideoPicker } from "./VideoPicker";
 const baseProps = {
   current: null,
   file: new File(["video"], "feature.mp4", { type: "video/mp4" }),
+  // 仅检查进度展示时忽略文件选择，避免为无关交互增加断言。
   onSelect: () => {},
   readOnly: false,
   disabled: false,

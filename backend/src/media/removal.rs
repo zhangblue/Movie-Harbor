@@ -256,7 +256,7 @@ pub(crate) fn continue_with_guard(
 }
 
 impl RemovalSession {
-    /// 在删除或替换前获取变更锁并隔离受影响文件，供事务结束后处理。
+    /// 在删除或替换事务中隔离受影响文件，并将当前会话持有的全局变更锁移交给暂存结果。
     pub(crate) fn stage(
         self,
         reason: &str,

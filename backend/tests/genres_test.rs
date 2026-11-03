@@ -109,7 +109,7 @@ async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在管理题材写请求测试前登录预置管理员，并读取 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let login = request(
         app,

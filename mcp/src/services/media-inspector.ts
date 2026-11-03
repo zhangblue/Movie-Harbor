@@ -17,6 +17,7 @@ export function durationSeconds(media: VideoConversion.Media): number | null {
 }
 // 检查视频时探测已验证文件并重新核验身份。
 export async function probeCheckedFile(file: CheckedFile, roots: string[], probe = probeMedia) {
+  // 子进程读取前后都核对同一文件身份，探测期间发生替换时不返回过时元数据。
   await revalidateAllowedFile(file, roots);
   let media: VideoConversion.Media;
   try { media = await probe(file.realPath); }
@@ -71,6 +72,7 @@ export async function validatePoster(path: string, roots: string[]) {
   const format = extension === '.jpg' || extension === '.jpeg' ? 'jpeg' : extension === '.png' ? 'png' : extension === '.webp' ? 'webp' : null;
   if (!format) throw new Error('海报仅支持 jpg、jpeg、png 或 webp');
   await revalidateAllowedFile(file, roots);
+  // 以禁止跟随符号链接的句柄读取有限头尾，避免校验期间改读替换文件或整张大图片。
   const handle = await open(file.realPath, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   let matches = false;
   try {

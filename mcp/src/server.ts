@@ -48,12 +48,15 @@ export async function startStdio(env:NodeJS.ProcessEnv=process.env){
   const config=await loadConfig(env);
   const configPath=env.MOVIE_HARBOR_MCP_CONFIG;
   if(!configPath) throw new Error('缺少 MCP 配置');
+  // 仅在配置与凭据验证成功后连接协议通道；连接错误只写 stderr，避免污染标准输出。
   return serveStdio(()=>buildServer(createServices(config)),{
+    // 协议层报告错误时仅记录固定提示，不向日志转发配置或敏感诊断。
     onerror:()=>console.error('Movie Harbor MCP 协议连接失败'),
   });
 }
 
 const executed=process.argv[1]!==undefined&&import.meta.url===pathToFileURL(process.argv[1]).href;
 if(executed){
+  // 直接执行入口时把启动失败转为非零退出码，标准输出仍留给 MCP 协议。
   void startStdio().catch(()=>{ console.error('Movie Harbor MCP 启动失败：请检查本机配置和文件权限'); process.exitCode=1; });
 }

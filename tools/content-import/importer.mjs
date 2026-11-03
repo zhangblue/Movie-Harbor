@@ -5,12 +5,12 @@ function fatal(message) {
   return new ImportRequestError(message, { fatal: true, category: "content" });
 }
 
-// 读取自有属性，避免导入名称触发原型链属性。
+// 导入与续传读取题材或内容检查点时只读取自有属性，避免名称触发原型链属性。
 function ownEntry(record, name) {
   return Object.hasOwn(record, name) ? record[name] : undefined;
 }
 
-// 写入自有属性，允许特殊名称作为进度键而不改变原型。
+// 保存导入检查点时写入自有属性，允许特殊名称作为进度键而不改变原型。
 function setOwnEntry(record, name, value) {
   Object.defineProperty(record, name, { value, writable: true, enumerable: true, configurable: true });
 }
@@ -42,6 +42,7 @@ export async function syncGenres({ source, client, progress, logger }) {
         logger?.info?.(`CREATED genre ${name}`);
       } catch (error) {
         if (!(error instanceof ImportRequestError) || error.status !== 409) throw error;
+        // 创建冲突可能来自并发导入，重读后只复用启用的同名题材，否则停止以免错误关联。
         available = await client.json("GET", "/api/admin/genres");
         matching = available.find((genre) => genre.name === name);
         if (!matching || !matching.enabled) throw fatal(`genre creation conflict has no enabled exact match: ${name}`);
@@ -51,6 +52,7 @@ export async function syncGenres({ source, client, progress, logger }) {
     genreIds.set(name, matching.id);
     if (ownEntry(progress.state.genres, name) !== matching.id) {
       setOwnEntry(progress.state.genres, name, matching.id);
+      // 每个题材映射成功后立即落盘，保存失败会阻止内容写入，避免后续继续使用未保存进度。
       await progress.save();
     }
   }
@@ -65,6 +67,7 @@ export async function loadConflictIndex(client) {
     let seen = 0;
     let total;
     do {
+      // 逐页收齐同类型名称，避免只看第一页而把已有内容误判为可创建的新内容。
       const response = await client.json("GET", `/api/admin/contents?kind=${kind}&page=${page}`);
       if (!Array.isArray(response?.items) || !Number.isSafeInteger(response.total) || response.total < 0 ||
           (response.items.length === 0 && seen < response.total)) {
@@ -93,6 +96,7 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
   if (state) {
     let target;
     try {
+      // 续传先读取目标权威状态；缺失或版本变化会拒绝本条内容，避免覆盖其他操作。
       target = await client.json("GET", `/api/admin/movies/${encodeURIComponent(state.id)}`);
     } catch (error) {
       if (error instanceof ImportRequestError && error.status === 404) {
@@ -105,6 +109,7 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
     }
     if (state.completed) return "already";
   } else {
+    // 新电影创建后先保存标识与初始版本，再进入字段和媒体步骤，供中断后的目标核对。
     const created = await client.json("POST", "/api/admin/movies", { name, is_private: movie.isPrivate });
     state = { id: created.id, version: created.version };
     setOwnEntry(progress.state.movies, name, state);
@@ -112,6 +117,7 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
   }
 
   if (!state.metadataUpdated) {
+    // 使用检查点版本更新元数据，成功响应版本落盘后才允许上传，失败时不标记步骤完成。
     const updated = await client.json("PATCH", `/api/admin/movies/${encodeURIComponent(state.id)}`, {
       version: state.version,
       name,
@@ -124,11 +130,13 @@ async function importMovie({ movie, client, progress, genreIds, logger }) {
   }
   if (movie.poster && !state.posterUploaded) {
     logger?.info?.(`UPLOAD movie ${name} poster`);
+    // 海报上传成功后保存新版本与完成标记，供视频上传和续传使用，避免重复替换海报。
     const uploaded = await client.upload(`/api/admin/media/movies/${encodeURIComponent(state.id)}/poster?version=${state.version}`, movie.poster);
     await saveMovieStep(progress, name, { version: uploaded.version, posterUploaded: true });
   }
   if (movie.video && !state.videoUploaded) {
     logger?.info?.(`UPLOAD movie ${name} video`);
+    // 视频沿用上一步的最新版本；只有上传成功才推进检查点，失败保留可诊断的当前步骤。
     const uploaded = await client.upload(`/api/admin/media/movies/${encodeURIComponent(state.id)}/video?version=${state.version}`, movie.video);
     await saveMovieStep(progress, name, { version: uploaded.version, videoUploaded: true });
   }
@@ -179,6 +187,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
   if (state) {
     let target;
     try {
+      // 先读取整剧最新层级再核对父子检查点，目标缺失或外部修改会阻止本条续传写入。
       target = await client.json("GET", `/api/admin/series/${encodeURIComponent(state.id)}`);
     } catch (error) {
       if (error instanceof ImportRequestError && error.status === 404) {
@@ -189,6 +198,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
     validateSeriesResume(target, state, name, series.isPrivate);
     if (state.completed) return "already";
   } else {
+    // 整剧创建后立即保存标识与初始版本，后续元数据和层级步骤据此恢复。
     const created = await client.json("POST", "/api/admin/series", { name, is_private: series.isPrivate });
     state = { id: created.id, version: created.version };
     setOwnEntry(progress.state.series, name, state);
@@ -197,6 +207,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
 
   const seriesPath = `/api/admin/series/${encodeURIComponent(state.id)}`;
   if (!state.metadataUpdated) {
+    // 先保存剧集元数据并持久化返回版本，确保海报和季使用同一条顺序推进的版本链。
     const updated = await client.json("PATCH", seriesPath, {
       version: state.version,
       name,
@@ -208,6 +219,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
   }
   if (series.poster && !state.posterUploaded) {
     logger?.info?.(`UPLOAD series ${name} poster`);
+    // 海报更新成功后记录版本和完成标记，后续季创建及续传不得沿用上传前版本。
     const uploaded = await client.upload(`/api/admin/media/series/${encodeURIComponent(state.id)}/poster?version=${state.version}`, series.poster);
     await saveSeriesStep(progress, name, { version: uploaded.version, posterUploaded: true });
   }
@@ -268,6 +280,7 @@ async function importSeries({ series, client, progress, genreIds, logger }) {
 
 // 协调题材同步、冲突检查和逐条导入，返回成功、跳过及失败统计。
 export async function importContent({ source, client, progress, logger }) {
+  // 内容写入前先完成题材映射和全页冲突索引；任一预检失败都停止导入，避免误建内容。
   const genreIds = await syncGenres({ source, client, progress, logger });
   const conflicts = await loadConflictIndex(client);
   const result = { completed: [], resumed: [], skipped: [], failed: [] };

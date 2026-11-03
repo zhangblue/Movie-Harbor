@@ -11,6 +11,7 @@ export function AccountMenu({ name, onPassword, onLogout, disabled }: {
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
+  // 菜单展开时移动焦点并安装关闭监听，关闭或卸载时移除监听以免影响其他页面。
   useEffect(() => {
     if (!open) return;
     menu.current?.querySelector<HTMLButtonElement>("button")?.focus();

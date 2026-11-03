@@ -8,6 +8,7 @@ import { createSeriesInput, createSeriesOutput, createSeasonInput, createSeasonO
 export async function createSeries(input: unknown, client: MovieHarborClient) {
   const { visibility, confirmed: _confirmed, ...metadata } = createSeriesInput.parse(input);
   const is_private = visibility === 'private';
+  // 创建只写整剧基本信息；校验保存的访问范围后返回新版本，由调用方另行创建季。
   const series = parseApi(apiSeries, await client.json('POST', '/api/admin/series', { ...metadata, is_private }));
   if (series.is_private !== is_private) throw new MovieHarborClientError('invalid_response');
   return toolResult(createSeriesOutput, { id: series.id, version: series.version, status: series.status, next_actions: ['create_season'] }, `已创建完整${is_private ? '私密' : '公开'}剧集草稿。`);
@@ -15,6 +16,7 @@ export async function createSeries(input: unknown, client: MovieHarborClient) {
 // 确认入库后向指定剧集创建季并返回版本。
 export async function createSeason(input: unknown, client: MovieHarborClient) {
   const { series_id, confirmed: _confirmed, ...body } = createSeasonInput.parse(input);
+  // 使用确认时的父级版本创建季，再从整剧响应中唯一定位新季，避免返回其他季的标识。
   const series = parseApi(apiSeries, await client.json('POST', `/api/admin/series/${series_id}/seasons`, body));
   const seasons = series.seasons.filter(season => season.number === body.number);
   if (series.id !== series_id || seasons.length !== 1) throw new MovieHarborClientError('invalid_response');
@@ -24,6 +26,7 @@ export async function createSeason(input: unknown, client: MovieHarborClient) {
 export async function createEpisode(input: unknown, client: MovieHarborClient) {
   const { series_id, season_id, confirmed: _confirmed, ...body } = createEpisodeInput.parse(input);
   body.duration_seconds = roundedDurationSeconds(body.duration_seconds);
+  // 写入后按父剧集、季和集序号逐层核对返回目标，匹配失败时不继续上传。
   const response = parseApi(apiSeries, await client.json('POST', `/api/admin/series/${series_id}/seasons/${season_id}/episodes`, body));
   const seasons = response.seasons.filter(season => season.id === season_id);
   if (response.id !== series_id || seasons.length !== 1) throw new MovieHarborClientError('invalid_response');
@@ -36,6 +39,7 @@ export async function createEpisode(input: unknown, client: MovieHarborClient) {
 // 按版本更新剧集元数据。
 export async function updateSeriesMetadata(input: unknown, client: MovieHarborClient) {
   const { series_id, ...patch } = updateSeriesInput.parse(input);
+  // 仅更新传入字段并携带版本；返回身份不符时拒绝继续使用响应。
   const series = parseApi(apiSeries, await client.json('PATCH', `/api/admin/series/${series_id}`, patch));
   if (series.id !== series_id) throw new MovieHarborClientError('invalid_response');
   return toolResult(contentResult, { id: series.id, version: series.version, status: series.status, next_actions: ['get_series_structure'] }, '已更新剧集元数据。');
@@ -44,6 +48,7 @@ export async function updateSeriesMetadata(input: unknown, client: MovieHarborCl
 export async function updateEpisodeMetadata(input: unknown, client: MovieHarborClient) {
   const { series_id, season_id, episode_id, ...patch } = updateEpisodeInput.parse(input);
   if (patch.duration_seconds !== undefined) patch.duration_seconds = roundedDurationSeconds(patch.duration_seconds);
+  // 在完整层级路径下按单集版本更新；响应层级必须一致，后续操作才能使用返回版本。
   const response = parseApi(apiEpisodeEnvelope, await client.json('PATCH', `/api/admin/series/${series_id}/seasons/${season_id}/episodes/${episode_id}`, patch));
   const episode = response.episode;
   if (episode.id !== episode_id || episode.season_id !== season_id

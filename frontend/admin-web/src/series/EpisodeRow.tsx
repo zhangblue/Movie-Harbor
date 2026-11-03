@@ -28,6 +28,7 @@ export function EpisodeRow({ episode, disabled, actions }: { episode: EpisodeRes
   const [file, setFile] = useState<File | null>(null);
   const [uploadProgress, setUploadProgress] = useState<ApiUploadProgress | null>(null);
   const mounted = useMounted();
+  // 单集身份、版本或状态变化时同步服务端字段；退出草稿状态后清除待上传文件。
   useEffect(() => {
     setName(episode.name); setNumber(String(episode.number));
     setMinutes(episode.duration_seconds === null ? "" : String(episode.duration_seconds / 60));

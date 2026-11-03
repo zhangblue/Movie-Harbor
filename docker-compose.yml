@@ -9,6 +9,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
     volumes:
+      # 数据库目录持久化到宿主路径；容器重建保留数据，切换来源目录不会自动迁移旧数据。
       - type: bind
         source: ${DATABASE_HOST_DIR:-./data/postgres}
         target: /var/lib/postgresql/data
@@ -24,6 +25,7 @@ services:
   media-init:
     image: alpine:3.22
     restart: "no"
+    # 后端启动前仅初始化媒体根目录权限，使固定普通用户可写且不递归改动已有文件。
     command: ["sh", "-c", "chown 10001:10001 /media && chmod 0700 /media"]
     volumes:
       - type: bind
@@ -37,6 +39,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     restart: unless-stopped
+    # 数据库健康且目录初始化成功后才启动后端，避免连接或媒体目录权限尚未就绪。
     depends_on:
       postgres:
         condition: service_healthy
@@ -61,6 +64,7 @@ services:
       ADMIN_NAME: ${ADMIN_NAME:-}
       ADMIN_INITIAL_PASSWORD: ${ADMIN_INITIAL_PASSWORD:-}
     volumes:
+      # 后端写入受控媒体目录，网关随后以只读方式挂载同一宿主目录。
       - type: bind
         source: ${MEDIA_HOST_DIR:-./data/media}
         target: /media
@@ -111,6 +115,7 @@ services:
       - "${APP_PORT:-8080}:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 文件服务只读取后端管理的媒体；访问权限仍由每次请求中的后端授权决定。
       - type: bind
         source: ${MEDIA_HOST_DIR:-./data/media}
         target: /srv/media

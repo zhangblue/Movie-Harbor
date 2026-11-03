@@ -42,7 +42,7 @@ export function App() {
     const decodedEpisodeId = seriesPlayerMatch?.[2] ? decodeURIComponent(seriesPlayerMatch[2]) : undefined;
     id = decodedId;
     episodeId = decodedEpisodeId;
-  } catch { /* Invalid paths use public 404. */ }
+  } catch { /* 路径解码失败时不设置内容 ID，统一进入公开 404 页面。 */ }
 
   useEffect(() => {
     // 在浏览器历史变化时同步路由，并在离开内容页时清除私密标记。
@@ -53,6 +53,7 @@ export function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+  // 切换页面路径后将焦点移到主内容，避免键盘焦点停留在已离开的视图。
   useEffect(() => { mainRef.current?.focus(); }, [url.pathname]);
 
   // 在站内导航时更新浏览器历史和当前页面，必要时清除私密内容标记。
@@ -109,7 +110,7 @@ export function App() {
         setMessage("暂时无法确认登录状态，请稍后重试。");
         return true;
       },
-    ).finally(() => { if (validation.current === request) validation.current = undefined; });
+    ).finally(() => { /* 只清除本次共享校验，避免旧请求收尾时抹去新身份的校验。 */ if (validation.current === request) validation.current = undefined; });
     validation.current = request;
     return request;
   }, [acceptSession, expire]);
@@ -139,6 +140,7 @@ export function App() {
     {authenticated ? <><span className="viewer-username">{viewer.username}</span>
       <button className="pill" type="button" disabled={loggingOut} onClick={() => setDialog("password")}>修改密码</button>
       <button className="pill" type="button" disabled={loggingOut} onClick={async () => {
+        // 用户主动退出时记录身份代次；验证、退出及收尾均只作用于这一代会话。
         const startedAt = identity.current;
         // 异步操作完成时检查身份代次，避免旧结果改变新会话。
         const isCurrent = () => startedAt === identity.current;

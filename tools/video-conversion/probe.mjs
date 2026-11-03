@@ -8,7 +8,7 @@ function optionalString(value) {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-// 解析并校验 FFprobe 输出，提取可转换的视频、音频、字幕和时长。
+// FFprobe 结束后解析并校验输出，提取视频、音频、字幕和时长供转换计划使用。
 export function parseProbeOutput(text) {
   let output;
   try {

@@ -1,5 +1,6 @@
 :80 {
 	root * /srv
+	# 静态路径未命中时返回公开站入口，交由客户端解析目录、详情和播放路径。
 	try_files {path} /index.html
 	file_server
 }

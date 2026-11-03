@@ -249,6 +249,7 @@ pub async fn create_mcp(
     let poster =
         staged_poster::lock_for_consumption(&tx, &token, principal_hash, Utc::now().fixed_offset())
             .await
+            // 令牌不存在、过期或不属于当前主体均提示海报无效，存储故障则保留内部错误语义。
             .map_err(|error| match error {
                 staged_poster::StagedPosterError::NotFound => {
                     SeriesError::Validation(vec!["poster"])
@@ -479,6 +480,7 @@ pub async fn delete_season(
     let staged = removal
         .stage("delete-season", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
+    // 将季级联删除、整剧版本推进和资产删除作为同一结果交给收尾，失败时恢复暂存文件。
     let database_result: Result<(), SeriesError> = async {
         season::Entity::delete_by_id(season_id).exec(&tx).await?;
         repository::bump_series(&tx, &model).await?;
@@ -734,6 +736,7 @@ pub async fn delete_episode(
     let staged = removal
         .stage("delete-episode", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
+    // 删除单集后同步推进整剧版本并删除资产；任何写入失败都由统一收尾回滚和恢复文件。
     let database_result: Result<(), SeriesError> = async {
         repository::delete_episode(&tx, episode_id, expected_version).await?;
         repository::bump_series(&tx, &series).await?;
@@ -786,6 +789,7 @@ pub async fn delete_series(
     let staged = removal
         .stage("delete-series", &owned)
         .map_err(|_| SeriesError::MediaDelete)?;
+    // 整剧层级与媒体记录在同一事务删除，结果交给收尾决定提交清理或回滚恢复。
     let database_result: Result<(), SeriesError> = async {
         repository::delete_series(&tx, id, expected_version).await?;
         removal::delete_media_assets(&tx, &asset_ids).await?;
@@ -1015,7 +1019,7 @@ async fn validate_episode_publish<C: ConnectionTrait>(
     }
 }
 
-/// 在修改序号时应用补丁并拒绝缺失或无效的必填值。
+/// 在修改单集序号时应用补丁；未提供字段则保留原值，拒绝显式清空和非正整数。
 fn apply_required_number(current: &mut i32, patch: Patch<i32>) -> Result<(), SeriesError> {
     match patch {
         Patch::Missing => Ok(()),

@@ -82,7 +82,7 @@ async fn request(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     app.clone().oneshot(request).await.unwrap()
 }
 
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在管理内容列表测试前登录预置管理员，并返回用于认证读取请求的 Cookie。
 async fn credentials(app: &Router) -> String {
     let mut request = Request::builder()
         .method("POST")
@@ -198,7 +198,7 @@ INSERT INTO series (id, name, status, version, created_at) VALUES
     (db, root, app)
 }
 
-/// 在排序断言前提取列表中的类型、名称和标识。
+/// 在稳定排序断言前提取列表中的创建时间、类型和标识。
 fn tuples(payload: &Value) -> Vec<(String, String, String)> {
     payload["items"]
         .as_array()
@@ -448,6 +448,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
         .await
         .unwrap();
     let read_db = db.connection();
+    // 总数查询先建立快照，条目查询受媒体表锁阻挡，为下方替换内容提供确定的并发窗口。
     let list_task = tokio::spawn(async move {
         query::list(
             &read_db,

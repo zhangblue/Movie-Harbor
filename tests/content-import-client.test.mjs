@@ -317,6 +317,7 @@ test("streams a file with exact multipart length and preserves query", async () 
     const payload = Buffer.alloc(256 * 1024, 0x61);
     writeFileSync(localPath, payload);
     let readChunks = 0;
+    // 完整接收上传后返回新版本，供客户端核对 multipart 长度和成功结果。
     await withServer(async (_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
       response.end('{"version":3}');
@@ -514,11 +515,11 @@ test("parses a complete series response larger than 64 KiB", async () => {
   const payload = JSON.stringify(series);
   assert.ok(Buffer.byteLength(payload) > 64 * 1024);
   assert.ok(Buffer.byteLength(payload) < 16 * 1024 * 1024);
-  // 模拟服务器构造当前测试需要的响应，供客户端验证超时或错误处理。
+  // 返回包含 600 集且未超成功响应上限的完整 JSON，验证客户端不会按错误响应的 64 KiB 限制截断。
   await withServer((_request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(payload);
-  // 服务就绪后发送请求并断言本场景结果，结束时关闭服务。
+  // 登录后读取大剧集详情并核对末集，确认成功响应完整解析后再关闭服务。
   }, async ({ origin }) => {
     const client = createAdminClient(origin);
     await client.login("admin", "secret");
@@ -588,6 +589,7 @@ test("shared multipart rejects changed sizes and abort destroys both streams", a
     // 测试接收端立即确认写入，供文件长度变化和取消场景使用。
     const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
     const source = Readable.from([Buffer.from("x")]);
+    // createStream 在上传读取时交回固定一字节源，分别触发声明长度过短和过长的拒绝分支。
     await assert.rejects(createMultipartFileBody({ localPath: "/unused", fileName: "v.mp4", mimeType: "video/mp4", byteSize: size })
       .writeTo(sink, { createStream: () => source }), /file size changed/);
     assert.equal(sink.destroyed, true);
@@ -598,6 +600,7 @@ test("shared multipart rejects changed sizes and abort destroys both streams", a
   const source = new Readable({ read() {} });
   // 测试接收端立即确认写入，供文件长度变化和取消场景使用。
   const sink = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
+  // createStream 提供不结束的源流，让下面的取消信号必须负责终止两端资源。
   const writing = createMultipartFileBody({ localPath: "/unused", fileName: "v.mp4", mimeType: "video/mp4", byteSize: 1 })
     .writeTo(sink, { createStream: () => source, signal: abort.signal });
   // 下一事件循环取消停滞上传，确认请求和源流都被销毁。

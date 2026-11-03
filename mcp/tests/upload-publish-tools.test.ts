@@ -139,7 +139,7 @@ test('movie upload rejects incompatible MP4 tracks before every HTTP call and po
 
   for (const [name, selectedVideo, audio, subtitles] of cases) {
     const c = fakeClient([]);
-    const dependencies = { ...f, probeMedia: async () => ({ durationSeconds: 1, video: selectedVideo, audio, subtitles }) };
+    const dependencies = { ...f, /* 按场景返回不兼容轨道，验证上传在 HTTP 请求前被拒绝。 */ probeMedia: async () => ({ durationSeconds: 1, video: selectedVideo, audio, subtitles }) };
     const tools = await registeredTools(c.client, dependencies);
     await assert.rejects(
       tools.call('upload_movie_video', { movie_id: movieId, version: 3, path: f.path,confirmed:true }),

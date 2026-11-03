@@ -34,6 +34,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
       if (page > lastPage) { setPage(lastPage); return; }
       setData(result);
     }).catch((cause) => {
+      // 只把 401 交给身份层，其余错误允许在当前搜索条件下重新加载。
       if (ignore) return;
       if (cause instanceof ApiError && cause.status === 401) onExpired();
       else setError("用户列表加载失败，请重新加载。");
@@ -49,7 +50,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
     setRevision((value) => value + 1);
     setNotice("");
   }
-  // 打开或初始化当前操作，在对应入口触发时调用。
+  // 点击用户行的改密或删除按钮时记录目标用户，交由弹窗携带其版本提交。
   function open(mode: "password" | "delete", user: ViewerUserSummary) {
     setNotice("");
     setOperation({ mode, user });
@@ -83,6 +84,6 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
       </div>}
       <div className="content-pagination-slot">{data && <ContentPagination page={data.page} size={20} total={data.total} disabled={loading} onPage={setPage} />}</div>
     </section>
-    {operation && <UserDialog operation={operation} onExpired={onExpired} onClose={() => setOperation(null)} onReload={() => { setOperation(null); setRevision((value) => value + 1); }} onDone={(message) => { setOperation(null); setNotice(message); setRevision((value) => value + 1); }} />}
+    {operation && <UserDialog operation={operation} onExpired={onExpired} onClose={() => setOperation(null)} onReload={() => { /* 版本冲突时关闭旧弹窗并重新读取用户列表，避免继续使用旧目标版本。 */ setOperation(null); setRevision((value) => value + 1); }} onDone={(message) => { /* 写入成功后关闭弹窗、显示结果并刷新用户及会话统计。 */ setOperation(null); setNotice(message); setRevision((value) => value + 1); }} />}
   </>;
 }

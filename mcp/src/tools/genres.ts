@@ -23,6 +23,7 @@ export async function listGenres(input: unknown, client: MovieHarborClient) {
 // 用户确认入库后复用或创建精确匹配题材。
 export async function createGenre(input: unknown, client: MovieHarborClient) {
   const { name, confirmed: _confirmed } = createGenreInput.parse(input);
+  // 确认通过后先精确查重；只复用启用题材，避免重复创建或恢复已停用项。
   const existing = sameGenre(await readGenres(client), name);
   if (existing) return toolResult(createGenreOutput, { ...existing, reused: true, next_actions: [] }, '已复用同名启用题材。');
   try {
@@ -31,6 +32,7 @@ export async function createGenre(input: unknown, client: MovieHarborClient) {
     return toolResult(createGenreOutput, { ...created, reused: false, next_actions: [] }, '已创建题材。');
   } catch (error) {
     if (!(error instanceof MovieHarborClientError) || error.status !== 409) throw error;
+    // 并发创建冲突时重新查找同名启用项；不存在则保留原错误，不把其他失败当作成功。
     const concurrent = sameGenre(await readGenres(client), name);
     if (!concurrent) throw error;
     return toolResult(createGenreOutput, { ...concurrent, reused: true, next_actions: [] }, '已复用并发创建的同名启用题材。');

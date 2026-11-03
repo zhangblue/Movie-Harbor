@@ -68,7 +68,7 @@ test("private-only catalog filters movies and series and clears on logout", asyn
     await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();
 
-    // An explicit first page keeps this saved URL valid with the three-content fixture.
+    // 显式使用第一页以匹配三条内容的测试数据，验证保存的私密筛选地址可恢复且退出时会清除。
     await page.goto(`/?q=${encodeURIComponent(prefix)}&privacy=private&page=1`);
     await expect(privateOnly).toBeChecked();
     await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();

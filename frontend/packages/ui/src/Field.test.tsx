@@ -4,6 +4,7 @@ import { afterEach, expect, it } from "vitest";
 
 import { Field } from "./Field";
 
+// 表单字段测试结束后卸载控件，隔离标签与描述关联。
 afterEach(cleanup);
 
 // 验证：表单字段关联标签、帮助文字与控件。

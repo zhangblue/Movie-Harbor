@@ -188,7 +188,7 @@ fn response_cookie(response: &Response) -> String {
         .unwrap()
         .to_owned()
 }
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在普通用户写请求测试前登录预置账号，并读取其 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let response = login(app, " summer ", "viewer-password").await;
     assert_eq!(response.status(), StatusCode::OK);

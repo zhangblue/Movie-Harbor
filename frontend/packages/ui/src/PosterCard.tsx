@@ -32,6 +32,7 @@ export function PosterCard({ href, title, kind, year, posterUrl, genres, genreCo
   const measurementsRef = useRef<HTMLDivElement>(null);
   const namesKey = JSON.stringify(names);
 
+  // 题材或容器尺寸变化后在绘制前重测标签，移除旧观察器后再监听当前卡片。
   useLayoutEffect(() => {
     setMeasuredNameCount(maximumNameCount);
     if (typeof ResizeObserver === "undefined" || total === 0) return;

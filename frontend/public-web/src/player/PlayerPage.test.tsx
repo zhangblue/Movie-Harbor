@@ -29,6 +29,7 @@ class MemoryStorage implements Storage {
   setItem(key: string, value: string) { this.#items.set(key, value); }
 }
 
+// 播放用例开始时安装内存存储、媒体替身及可推进时钟，隔离恢复进度场景。
 beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
   vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
@@ -36,6 +37,7 @@ beforeEach(() => {
   localStorage.clear();
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
+// 播放用例结束后卸载播放器并恢复时钟、存储和路由，触发真实组件清理。
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -73,7 +75,7 @@ it("offers continue or start over and restores only after metadata is ready with
   fireEvent.loadedMetadata(video);
   expect(video.currentTime).toBe(500);
 
-  // Leave a resumable position before unmount now flushes progress and releases the media source.
+  // 卸载会保存进度并释放媒体源，因此先留下可恢复的位置供重新进入时验证。
   setMediaTime(video, 350, 900);
   cleanup();
   render(<App />);

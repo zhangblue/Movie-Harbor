@@ -533,6 +533,7 @@ async fn concurrent_consumption_has_one_winner() {
     let root = std::env::temp_dir().join(format!("staged_concurrent_{}", uuid::Uuid::new_v4()));
     let storage = LocalMediaStorage::initialize(&root).await.unwrap();
     let response = staged(&db, &storage).await;
+    // 每次调用开启独立事务消费同一令牌并提交，使并发断言覆盖真实行锁与删除竞争。
     let run = || {
         let db = db.connection();
         let token = response.token.clone();
@@ -1046,6 +1047,7 @@ async fn mcp_failed_commit_restores_token_and_all_content_writes() {
     ] {
         let (payload, asset) = complete_draft(&db, &app).await;
         let owners = count(&db, "media_asset_ownership").await;
+        // reject_draft_commit 由题材关系的延迟触发器在 COMMIT 抛错，验证消费令牌和内容写入共同回滚。
         db.execute_unprepared("CREATE OR REPLACE FUNCTION reject_draft_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$").await.unwrap();
         db.execute_unprepared(&format!("CREATE CONSTRAINT TRIGGER reject_draft_commit AFTER INSERT ON {table}_genre DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_draft_commit()")).await.unwrap();
         assert_eq!(

@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { deferred, json, movie, series, serve } from "../test/fixtures";
 
+// 详情测试结束后卸载页面并恢复全局替身，隔离后续数据和请求。
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); window.history.replaceState(null, "", "/"); });
 
 // 验证：从深链加载电影详情、全部题材、时长和公开播放入口。

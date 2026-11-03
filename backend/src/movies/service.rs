@@ -192,6 +192,7 @@ pub async fn create_mcp(
     let poster =
         staged_poster::lock_for_consumption(&tx, &token, principal_hash, Utc::now().fixed_offset())
             .await
+            // 令牌不存在、过期或不属于当前主体均提示海报无效，存储故障则保留内部错误语义。
             .map_err(|error| match error {
                 staged_poster::StagedPosterError::NotFound => {
                     MovieError::Validation(vec!["poster"])
@@ -389,6 +390,7 @@ pub async fn delete(
     let staged = removal
         .stage("delete-movie", &owned)
         .map_err(|_| MovieError::MediaDelete)?;
+    // 汇集内容与资产删除的结果，任一步失败都交由统一收尾回滚事务并恢复暂存文件。
     let database_result: Result<(), MovieError> = async {
         repository::delete(&tx, id, expected_version).await?;
         removal::delete_media_assets(&tx, &asset_ids).await?;

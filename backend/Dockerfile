@@ -1,3 +1,4 @@
+# ARM64 镜像构建时使用目标平台工具链，锁定依赖后生成供运行阶段复制的后端程序。
 FROM rust:1.91-bookworm AS builder-arm64
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
@@ -6,6 +7,7 @@ RUN cargo build --locked --release -p movie-harbor-api \
     && mkdir /out \
     && cp target/release/movie-harbor-api /out/movie-harbor-api
 
+# AMD64 构建在构建机平台安装固定版本 Zig 与交叉编译工具，避免在模拟目标平台中编译。
 FROM --platform=$BUILDPLATFORM rust:1.91-bookworm AS builder-amd64
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-venv \
@@ -18,12 +20,15 @@ RUN cargo install --locked cargo-zigbuild --version 0.23.4 \
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY backend ./backend
+# 交叉编译 Linux AMD64 的 musl 程序，后续运行镜像只接收产物，不包含编译工具链。
 RUN cargo zigbuild --locked --release --target x86_64-unknown-linux-musl -p movie-harbor-api \
     && mkdir /out \
     && cp target/x86_64-unknown-linux-musl/release/movie-harbor-api /out/movie-harbor-api
 
+# 由镜像构建的目标架构选中对应阶段，两个平台均提供相同的产物路径。
 FROM builder-${TARGETARCH} AS builder
 
+# 运行阶段安装证书及健康检查工具，并以固定普通用户启动后端，避免保留构建依赖。
 FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

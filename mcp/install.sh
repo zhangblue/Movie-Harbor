@@ -42,6 +42,7 @@ base_url=${MOVIE_HARBOR_MCP_BASE_URL:-http://127.0.0.1:8080/}
 allowed_roots=${MOVIE_HARBOR_MCP_ALLOWED_ROOTS_JSON:-'["/Users/zhangdi/Downloads"]'}
 request_timeout=${MOVIE_HARBOR_MCP_REQUEST_TIMEOUT_MS:-1800000}
 
+# 修改前先检查同名注册数量；列表无法可信解析时停止，不猜测归属。
 existing_count=$(node -e '
 const {spawnSync}=require("node:child_process");
 const result=spawnSync("codex",["mcp","list","--json"],{encoding:"utf8",maxBuffer:16*1024*1024});
@@ -86,13 +87,13 @@ try{
   process.stdout.write(Buffer.from(JSON.stringify({command:transport.command,args:transport.args,env}),"utf8").toString("base64"));
 }catch{console.error("同名 movie-harbor MCP 不属于当前仓库，或包含无法无损恢复的配置，拒绝覆盖");process.exit(1);}
 ' "$entry" "$verified_config_file") || fail "已有同名 MCP 无法安全更新"
-    # Keep only the already-validated, CLI-reconstructible fields in memory.
-    # The registration JSON itself may contain sensitive data and is never logged or written to disk.
+    # 内存中仅保留已验证且可通过命令完整重建的字段。
+    # 原始注册 JSON 可能含敏感数据，不写日志或落盘。
     ;;
   *) fail "Codex MCP 列表包含异常的同名条目" ;;
 esac
 
-# Only after Codex ownership is proven may this installer touch private configuration.
+# 仅在确认同名注册属于当前仓库后，才允许创建或修改私有配置。
 mkdir -p "$config_base" || fail "无法创建 MCP 配置目录"
 [ -d "$config_base" ] && [ ! -L "$config_base" ] || fail "MCP 配置目录不能是符号链接"
 chmod 700 "$config_base" || fail "无法保护 MCP 配置目录"
@@ -103,6 +104,7 @@ if [ "$existing_count" = 1 ] && [ "$config_file" != "$verified_config_file" ]; t
   fail "MCP 配置目录在归属验证后发生变化"
 fi
 
+# 写入前保存原配置的内容、权限及存在性，供后续写入或注册失败时恢复。
 config_snapshot=$(node -e '
 const fs=require("node:fs"),path=process.argv[1];
 try{

@@ -13,7 +13,7 @@ export function SeriesDetails({ id }: { id: string }) {
   const [selectedSeason, setSelectedSeason] = useState<string>();
   if (state.status === "loading") return <Loading />;
   if (state.status === "error") return <RequestError error={state.error} retry={retry} />;
-  // The public endpoint already enforces publication visibility; never infer or synthesize missing episodes.
+  // 公开接口已按发布状态和权限筛选内容；这里只展示返回的单集，不推测或补造缺失集数。
   const seasons = orderSeasons(state.data.seasons);
   const season = seasons.find((item) => item.id === selectedSeason) ?? seasons[0];
   const episodes = orderEpisodes(season?.episodes ?? []);

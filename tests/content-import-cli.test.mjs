@@ -9,7 +9,7 @@ import { loadAndValidateExport } from "../tools/content-import/schema.mjs";
 import { run, readPassword } from "../tools/import-content.mjs";
 
 const args = ["--json", "/source/export.json", "--media-root", "/source/media", "--target", "https://example.test/", "--admin-name", "admin"];
-// 创建内存输出流，供断言 CLI 信息和密码脱敏使用。
+// 创建内存输出流；返回的 write 在 CLI 输出时累计文本，供信息和密码脱敏断言读取。
 function capture() { return { text: "", write(value) { this.text += value; } }; }
 // 创建导入命令的可替换依赖，供参数、预检及错误场景使用。
 function setup(overrides = {}) {
@@ -72,9 +72,11 @@ test("invalid origins fail before reading credentials", async () => {
 
 // 验证空密码和预检失败均阻止登录。
 test("empty passwords and preflight failures prevent login", async () => {
+  // 密码读取替身返回空串，确认命令在访问来源和登录前停止。
   const empty = setup({ readPassword: async () => "" });
   assert.equal(await run(args, empty.deps), 1);
   assert.deepEqual(empty.calls, []);
+  // 来源预检替身直接抛错，确认已读取密码也不会继续创建进度或认证。
   const invalid = setup({ loadAndValidateExport: async () => { throw new Error("invalid source"); } });
   assert.equal(await run(args, invalid.deps), 1);
   assert.deepEqual(invalid.calls, ["password"]);
@@ -100,6 +102,7 @@ test("blank genres fail real source preflight before login or progress creation"
 // 验证跳过项可成功，内容失败返回失败，所有输出隐藏密码。
 test("skips succeed, content failures fail, and all output redacts password", async () => {
   for (const failed of [[], [{ name: "failure" }]]) {
+    // 导入替身输出含密码的跳过提示并返回可切换的失败列表，同时检查日志脱敏和退出码。
     const { deps, output } = setup({ importContent: async ({ logger }) => {
       logger.warn("SKIP top-secret");
       return { completed: [], resumed: [], skipped: [{ name: "existing" }], failed };
@@ -109,6 +112,7 @@ test("skips succeed, content failures fail, and all output redacts password", as
     assert.match(output.text, /skipped=1/);
     assert.doesNotMatch(output.text, /top-secret/);
   }
+  // 导入替身在异常文本中包含密码，验证最外层错误输出同样经过脱敏。
   const { deps, output } = setup({ importContent: async () => { throw new Error("failed top-secret"); } });
   assert.equal(await run(args, deps), 1);
   assert.doesNotMatch(output.text, /top-secret/);

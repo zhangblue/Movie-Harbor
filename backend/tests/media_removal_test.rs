@@ -96,7 +96,7 @@ async fn operation_directories(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test]
-/// 验证公共删除辅助逻辑加载并删除媒体记录和文件。
+/// 验证公共数据库辅助逻辑按媒体标识加载存储键，并删除对应资产记录。
 async fn common_delete_helpers_load_and_delete_media_assets() {
     let database = support::TestDatabase::migrated("removal_common_database_helpers").await;
     let db = database.connection();

@@ -139,6 +139,7 @@ export class ViewerApi {
 export async function createMovieDraftWithMedia(api: AdminApi, name: string, options: {
   synopsis: string; durationSeconds: number; includePoster?: boolean; year?: number | null; genreIds?: string[];
 }) {
+  // 先取得草稿标识与版本，再更新必填元数据；任一步失败都会阻止后续媒体上传。
   let movie = await api.write<Movie>("post", "/api/admin/movies", { name, is_private: false });
   movie = await api.write<Movie>("patch", `/api/admin/movies/${movie.id}`, {
     version: movie.version, name, synopsis: options.synopsis, year: options.year === undefined ? 2026 : options.year,
@@ -146,10 +147,12 @@ export async function createMovieDraftWithMedia(api: AdminApi, name: string, opt
   });
   let version = movie.version;
   if (options.includePoster !== false) {
+    // 海报替换会递增电影版本，必须把返回版本交给随后的视频上传，避免过期版本冲突。
     const uploaded = await api.upload<{ version: number }>(`/api/admin/media/movies/${movie.id}/poster?version=${version}`, poster);
     version = uploaded.version;
   }
   await api.upload(`/api/admin/media/movies/${movie.id}/video?version=${version}`, video());
+  // 上传响应只提供媒体结果，重新读取详情让调用方获得可用于发布的最新版本和完整字段。
   return api.get<Movie>(`/api/admin/movies/${movie.id}`);
 }
 
@@ -172,11 +175,13 @@ export async function createSeriesDraftWithMedia(api: AdminApi, name: string, op
   synopsis: string; seasonNumber: number; episodeNumber: number; episodeName: string; durationSeconds: number;
   year?: number | null; genreIds?: string[];
 }) {
+  // 按父级到子级顺序创建测试层级；每次写入沿用最新响应版本，失败立即终止后续步骤。
   let series = await api.write<Series>("post", "/api/admin/series", { name, is_private: false });
   series = await api.write<Series>("patch", `/api/admin/series/${series.id}`, {
     version: series.version, synopsis: options.synopsis, year: options.year ?? null, genre_ids: options.genreIds ?? [],
   });
   const uploaded = await api.upload<{ version: number }>(`/api/admin/media/series/${series.id}/poster?version=${series.version}`, poster);
+  // 海报上传更新父级版本，创建季必须使用上传结果而非原剧集版本。
   series = await api.write<Series>("post", `/api/admin/series/${series.id}/seasons`, { version: uploaded.version, number: options.seasonNumber });
   const season = series.seasons.find((item) => item.number === options.seasonNumber)!;
   const episodesPath = `/api/admin/series/${series.id}/seasons/${season.id}/episodes`;
@@ -185,6 +190,7 @@ export async function createSeriesDraftWithMedia(api: AdminApi, name: string, op
   const updated = await api.write<{ episode: Episode }>("patch", `${episodesPath}/${episode.id}`, {
     version: episode.version, duration_seconds: options.durationSeconds,
   });
+  // 时长更新后用最新单集版本上传视频，再读取整剧详情供后续发布或归档测试使用。
   await api.upload(`/api/admin/media/episodes/${episode.id}/video?version=${updated.episode.version}`, video());
   return api.get<Series>(`/api/admin/series/${series.id}`);
 }
@@ -200,6 +206,7 @@ export async function createPublishableSeries(api: AdminApi, name: string) {
   });
   const season = series.seasons[0]!;
   const episode = season.episodes[0]!;
+  // 先发布具备媒体的单集以满足整剧发布前提；响应提供随后整剧发布所需的父级版本。
   const published = await api.write<{ series_version: number }>(
     "post",
     `/api/admin/series/${series.id}/seasons/${season.id}/episodes/${episode.id}/publish`,

@@ -35,7 +35,7 @@ export function writeChunk(request, chunk) {
       // 写入回调区分成功和失败，保留必要监听器接收随后发出的错误。
       request.write(chunk, error => {
         if (error) {
-          // Writable emits error after its callback; retain the listener until then.
+          // Writable 在写回调后才发出 error，因此保留错误监听，避免后续错误变成未处理异常。
           request.off('close', closed);
           reject(error);
         } else { cleanup(); resolve(); }

@@ -94,7 +94,7 @@ test("media authorization applies to posters, movie and episode ranges, lifecycl
       expect((await viewer.get(url)).status()).toBe(404);
       expect((await request.get(url, { headers: { Cookie: oldCookies } })).status()).toBe(404);
     }
-    // Published resources become inaccessible immediately after archive, including child episodes.
+    // 归档父级后重新登录普通用户，验证已发布媒体及子集立即不可见，同时保留管理员预览权限。
     movie = await api.write<Movie>("post", `/api/admin/movies/${movie.id}/archive`, { version: movie.version });
     series = await api.write<Series>("post", `/api/admin/series/${series.id}/archive`, { version: series.version });
     await viewer.post("/api/viewer/login", { data: { username, password: "media-viewer-password" } });
@@ -120,7 +120,7 @@ test("Caddy rejects unsafe original paths and external authorization probes", as
       url.replace("/video/", "/video/%252e%252e/video/"), `${url}/extra`,
       "/media/video/aa/aa000000000000000000000000000000.mp4",
     ]) {
-      // Use the raw request target so the HTTP client cannot normalize traversal before Caddy sees it.
+      // 使用原始请求路径，避免客户端先规范化穿越片段，确保断言检查 Caddy 对原始输入的拒绝。
       // 等待原始路径请求结束，供验证代理不会接受伪造授权头。
       const status = await new Promise<number | undefined>((resolve, reject) => {
         // 发送原始路径及伪造代理头，检查服务端是否拒绝绕过授权。

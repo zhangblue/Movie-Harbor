@@ -32,7 +32,7 @@ export function createUploadStream(file: CheckedFile, roots: string[], mimeType:
       throw new MovieHarborClientError('file_changed');
     }
     try {
-      await multipart.writeTo(request, { ...options, createStream: () => handle!.createReadStream({ autoClose: false }) });
+      await multipart.writeTo(request, { ...options, /* multipart 开始消费文件时复用已验证句柄，关闭责任留给外层 finally。 */ createStream: () => handle!.createReadStream({ autoClose: false }) });
       // 流写完后再核验原路径，避免上传期间被替换仍报告成功。
       await revalidateAllowedFile(file, roots);
     } catch (error) {

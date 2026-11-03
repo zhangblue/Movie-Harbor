@@ -883,6 +883,7 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
         .await
         .unwrap();
     let read_db = db.clone();
+    // 在独立任务中读取剧集详情，使主任务能在关联查询受阻时修改父级与单集的可见状态。
     let detail_task = tokio::spawn(async move {
         query::series_detail(
             &read_db,
@@ -948,6 +949,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
         .await
         .unwrap();
     let read_db = db.clone();
+    // 在电影详情读取被题材表锁挡住后并发改写关联，后续断言应仍看到读取开始时的快照。
     let detail_task = tokio::spawn(async move {
         query::movie_detail(
             &read_db,
@@ -1010,6 +1012,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
         .await
         .unwrap();
     let read_db = db.clone();
+    // 异步启动目录查询并让其停在锁定表上，以便并发更改可见内容后比较分页总数和条目。
     let list_task = tokio::spawn(async move {
         query::list(
             &read_db,

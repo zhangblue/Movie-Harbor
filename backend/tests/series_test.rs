@@ -161,7 +161,7 @@ async fn assert_internal_server_error(response: Response, leaked_storage_key: &s
     assert!(!raw.contains(leaked_storage_key));
 }
 
-/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
+/// 在剧集管理写请求测试前登录预置管理员，并读取 Cookie 与 CSRF 令牌。
 async fn credentials(app: &Router) -> (String, String) {
     let response = request(
         app,
@@ -1451,6 +1451,7 @@ async fn parent_and_episode_deletion_are_atomic_with_media_deletion() {
     let rollback_video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
     attach_series_poster(&db, rollback_id.parse().unwrap(), rollback_poster.id).await;
     attach_episode_video(&db, rollback_episode_id.parse().unwrap(), rollback_video.id).await;
+    // reject_series_media_delete 在资产删除前抛错，验证整剧级联删除会回滚层级并恢复暂存媒体。
     db.execute_unprepared(
         "CREATE FUNCTION reject_series_media_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'forced media delete failure'; END $$; CREATE TRIGGER reject_series_media_delete BEFORE DELETE ON media_asset FOR EACH ROW EXECUTE FUNCTION reject_series_media_delete()",
     )
@@ -1530,9 +1531,11 @@ async fn concurrent_series_deletes_remove_each_owned_asset_without_deadlock() {
     let second_db = db.clone();
     let first_storage = storage.clone();
     let second_storage = storage;
+    // 并发删除两部各自拥有媒体的剧集，验证全局变更锁能串行收尾且不会造成死锁。
     let first_delete = tokio::spawn(async move {
         series_service::delete_series(&first_db, &first_storage, first.id, 1).await
     });
+    // 第二个任务争用同一存储锁，两个结果都必须在超时前完成并各清理一个资产。
     let second_delete = tokio::spawn(async move {
         series_service::delete_series(&second_db, &second_storage, second.id, 1).await
     });

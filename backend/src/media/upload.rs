@@ -167,6 +167,7 @@ where
     let tx = db.begin().await?;
     // 数据库写入开始前启用取消保护：中途取消或结果未知时保留正式文件和恢复标记。
     stored.begin_database_write();
+    // 资产与调用方引用必须全部登记成功；保留整体错误，供下方判断回滚是否已确认并处理文件。
     let result: Result<media_asset::Model, MediaError> = async {
         let asset = insert_asset(&tx, id, kind, &original_name, &stored).await?;
         register(&tx, &asset).await?;
@@ -445,6 +446,7 @@ async fn switch_reference(
                 _ => model.video_asset_id,
             };
             let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            // 电影槽位与旧资产删除共享写入结果，失败时由外层事务和暂存清单一并恢复。
             let database_result: Result<(), MediaError> = async {
                 let result = match target {
                     AttachmentTarget::MoviePoster { .. } => {
@@ -501,6 +503,7 @@ async fn switch_reference(
             }
             let old = model.poster_asset_id;
             let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            // 整剧海报引用、版本和旧资产一起更新；收集失败供外层恢复旧文件，避免半完成替换。
             let database_result: Result<(), MediaError> = async {
                 let result = series::Entity::update_many()
                     .col_expr(series::Column::PosterAssetId, Expr::value(Some(new_id)))
@@ -563,6 +566,7 @@ async fn switch_reference(
             }
             let old = model.video_asset_id;
             let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
+            // 单集视频替换同时推进单集与整剧版本；任一写入失败均返回外层恢复暂存状态。
             let database_result: Result<(), MediaError> = async {
                 let episode_result = episode::Entity::update_many()
                     .col_expr(episode::Column::VideoAssetId, Expr::value(Some(new_id)))

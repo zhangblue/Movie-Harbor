@@ -26,7 +26,7 @@ async function fixture(t: TestContext) {
   await writeFile(join(bin, 'ffmpeg'), `#!${process.execPath}\nconst fs = require('node:fs'); const args = process.argv.slice(2); if(args.includes('-encoders')) process.stdout.write(' V..... libx264 H264\\n A..... aac AAC\\n S..... mov_text text\\n'); else {fs.writeFileSync(args.at(-1), 'converted'); process.stdout.write('out_time_us=1000000\\nprogress=end\\n');}\n`, { mode: 0o755 });
   const env = { ...process.env, PATH: bin, MEDIA_FIXTURE: JSON.stringify(media) };
   const config: McpConfig = { baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_never-return-this', credentialDirectory, allowedRoots: [allowed], generatedRoot: join(allowed, 'generated'), requestTimeoutMs: 1000 };
-  const deps: LocalMediaDependencies = { config, credentialDirectory, verifyRequiredEncoders: (encoders) => verifyRequiredEncoders(encoders, { env }), probeMedia: (path) => probeMedia(path, { env }), executeConversion: (conversion) => executeConversion(conversion, { env }) };
+  const deps: LocalMediaDependencies = { config, credentialDirectory, /* 转换测试检查编码器时使用隔离命令环境。 */ verifyRequiredEncoders: (encoders) => verifyRequiredEncoders(encoders, { env }), /* 探测测试从隔离探测程序读取当前轨道夹具。 */ probeMedia: (path) => probeMedia(path, { env }), /* 转换测试在隔离环境执行模拟 FFmpeg，保留真实进程调用链。 */ executeConversion: (conversion) => executeConversion(conversion, { env }) };
   return { directory, allowed, input, bytes, media, env, config, deps, credentialDirectory };
 }
 
@@ -89,7 +89,7 @@ test('video rejects invalid paths and sanitizes probe errors', async t => {
   await assert.rejects(inspectVideoTool({ path: `${f.input}\0` }, f.deps), /路径/);
   const outside = join(f.directory, 'outside.mp4'); await writeFile(outside, 'outside');
   await assert.rejects(inspectVideoTool({ path: outside }, f.deps), /允许目录/);
-  const leaking = { ...f.deps, probeMedia: async () => { throw new Error(`sensitive:${f.config.apiKey}:${f.bytes.toString('base64')}`); } };
+  const leaking = { ...f.deps, /* 探测失败时注入密钥和文件内容，验证工具返回的错误会清理敏感诊断。 */ probeMedia: async () => { throw new Error(`sensitive:${f.config.apiKey}:${f.bytes.toString('base64')}`); } };
   await assert.rejects(inspectVideoTool({ path: f.input }, leaking), error => /探测/.test(String(error)) && !String(error).includes(f.config.apiKey));
 });
 
@@ -135,7 +135,7 @@ test('convert requires confirmation and persists generated identity for deletion
 // 验证转换重新检查源文件，删除生成文件时拒绝替换和符号链接逃逸。
 test('convert revalidates sources and generated deletion rejects replacements and symlink escapes', async t => {
   const f = await fixture(t);
-  const mutating = { ...f.deps, probeMedia: async (path: string) => { const media = await f.deps.probeMedia!(path); await writeFile(f.input, 'changed source'); return media; } };
+  const mutating = { ...f.deps, /* 探测结束前改变源文件，验证转换前复验会阻止使用过期身份。 */ probeMedia: async (path: string) => { const media = await f.deps.probeMedia!(path); await writeFile(f.input, 'changed source'); return media; } };
   await assert.rejects(convertVideoTool({ path: f.input, confirmed: true }, mutating), /文件已经变化/);
   const converted = await convertVideoTool({ path: f.input, confirmed: true }, f.deps);
   const path = converted.structuredContent.output_path;
@@ -179,7 +179,7 @@ test('generated deletion rejects a retargeted generated directory', async t => {
 test('convert refuses registration after the generated directory escapes allowed roots', async t => {
   const f = await fixture(t);
   const outside = join(f.directory, 'escaped-generated');
-  const replacing = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+  const replacing = { ...f.deps, /* 转换期间替换生成目录为符号链接，验证登记前再次检查目录边界。 */ executeConversion: async (conversion: VideoConversion.Conversion) => {
     await rename(f.config.generatedRoot, outside);
     await symlink(outside, f.config.generatedRoot);
     return f.deps.executeConversion!(conversion);
@@ -226,7 +226,7 @@ test('poster supports JPEG and WebP signatures with bounded structural checks', 
 // 验证转换期间源文件身份变化时拒绝登记输出。
 test('convert rejects source identity changes during execution before registering output', async t => {
   const f = await fixture(t);
-  const changing = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+  const changing = { ...f.deps, /* 模拟转换结束前源文件被改写，要求登记阶段拒绝旧来源身份。 */ executeConversion: async (conversion: VideoConversion.Conversion) => {
     const output = await f.deps.executeConversion!(conversion);
     await writeFile(f.input, 'mutated during conversion');
     return output;
@@ -269,7 +269,7 @@ test('independent generated roots still reject directory replacement and escaped
   g.config.generatedRoot = join(g.credentialDirectory, 'generated');
   const external = join(g.directory, 'external-output.mp4');
   await writeFile(external, 'external file');
-  const escaping = { ...g.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+  const escaping = { ...g.deps, /* 用指向外部文件的链接冒充转换输出，验证登记失败且外部文件保留。 */ executeConversion: async (conversion: VideoConversion.Conversion) => {
     await symlink(external, conversion.outputPath);
     return conversion.outputPath;
   } };
@@ -286,7 +286,7 @@ test('independent generated root rejects parent path retargeting during conversi
   await mkdir(parent, { mode: 0o700 });
   f.config.generatedRoot = join(parent, 'generated');
   const moved = join(f.directory, 'retargeted-output');
-  const retargeting = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
+  const retargeting = { ...f.deps, /* 转换时重定向生成目录的父路径，验证输出登记仍遵守最初配置边界。 */ executeConversion: async (conversion: VideoConversion.Conversion) => {
     await rename(parent, moved);
     await symlink(moved, parent);
     return f.deps.executeConversion!(conversion);

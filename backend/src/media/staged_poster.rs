@@ -202,6 +202,7 @@ pub async fn cleanup_expired(
     let owned = super::removal::load_owned_media(&tx, &ids).await?;
     // 在删除数据库记录前隔离文件；后续写入失败时由事务收尾恢复文件。
     let staged = super::removal::stage(storage, "expired-mcp-staged-posters", &owned).await?;
+    // 令牌与资产记录共同删除，捕获任一步错误供统一收尾回滚数据库并恢复已隔离文件。
     let result: Result<(), MediaError> = async {
         mcp_staged_poster::Entity::delete_many()
             .filter(mcp_staged_poster::Column::Id.is_in(rows.iter().map(|row| row.id)))
@@ -213,6 +214,7 @@ pub async fn cleanup_expired(
     .await;
     super::removal::finish_delete_transaction(tx, staged, rows.len(), result)
         .await
+        // 保留原始操作错误，并区分恢复、提交和收尾故障，便于判断失败发生的持久化阶段。
         .map_err(|error| match error {
             super::removal::FinishDeleteError::Operation(error) => error.into(),
             super::removal::FinishDeleteError::Restore => MediaError::Io(std::io::Error::other(

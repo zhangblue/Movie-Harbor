@@ -25,14 +25,14 @@ impl IntoResponse for AuthError {
 }
 
 impl From<crate::auth::model::AuthError> for AuthError {
-    // 转换底层认证或数据库错误，供普通用户认证流程传播失败时调用。
+    // 在普通用户认证调用公共密码或会话能力失败时，保留底层认证错误的 HTTP 状态。
     fn from(error: crate::auth::model::AuthError) -> Self {
         Self(error.0)
     }
 }
 
 impl From<sea_orm::DbErr> for AuthError {
-    // 转换底层认证或数据库错误，供普通用户认证流程传播失败时调用。
+    // 在普通用户认证的数据库读写失败时返回内部错误，不向客户端暴露数据库详情。
     fn from(_: sea_orm::DbErr) -> Self {
         Self(StatusCode::INTERNAL_SERVER_ERROR)
     }

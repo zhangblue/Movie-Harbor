@@ -85,6 +85,7 @@ export function createMovieHarborClient(config: McpConfig, dependencies: ClientD
       if (dependencies.signal?.aborted) { aborted(); return; }
       const send = url.protocol === 'https:' ? httpsRequest : httpRequest;
       try {
+        // 收到响应头后按成功或错误状态限制缓冲量；尚需等响应结束及上传复验共同完成。
         req = send(url, { method, headers: {
           authorization: `Bearer ${apiKey}`,
           ...(body ? { 'content-type': 'application/json', 'content-length': String(body.length) } : {}),
@@ -97,14 +98,17 @@ export function createMovieHarborClient(config: McpConfig, dependencies: ClientD
           const status = res.statusCode ?? 0;
           const success = status >= 200 && status < 300;
           const limit = success ? 16 * 1024 * 1024 : 64 * 1024;
+          // 每个响应块刷新上传的不活动计时；超过上限立即失败并销毁连接。
           res.on('data', (chunk: Buffer) => {
             if (done) return;
             progress(); size += chunk.length;
             if (size > limit) { fail(new MovieHarborClientError('response_too_large', status)); return; }
             chunks.push(chunk);
           });
+          // 响应出错或尚未完整接收就关闭时拒绝请求，不能把截断数据当作成功。
           res.on('error', () => fail(new MovieHarborClientError('network_error')));
           res.on('close', () => { if (!res.complete) fail(new MovieHarborClientError('network_error')); });
+          // 完整响应结束后解析并标记完成；解析或 HTTP 失败走统一清理，不继续成功结算。
           res.on('end', () => {
             if (done) return;
             if (!res.complete) { fail(new MovieHarborClientError('network_error')); return; }
@@ -120,13 +124,16 @@ export function createMovieHarborClient(config: McpConfig, dependencies: ClientD
             finishIfComplete();
           });
         });
+        // 请求侧错误同样关闭文件与连接，避免上传进程在远端失败后继续运行。
         req.on('error', () => fail(new MovieHarborClientError('network_error')));
         req.on('close', () => {
           // 完整响应可能先于文件句柄的上传后复验结束，因此仅在交换未完成时判错。
           if (!requestFinished || !responseReceived) fail(new MovieHarborClientError('network_error'));
         });
+        // 请求写完只满足一个完成条件，仍等待完整响应及上传后的文件身份复验。
         req.on('finish', () => { requestFinished = true; finishIfComplete(); });
         if (upload) {
+          // 文件写入与后验都成功才标记 writerDone；流错误统一结束请求并保留已分类错误。
           upload.writeTo(req, { signal: controller.signal, /* 上传进度到来时刷新超时并转发给调用方。 */ onProgress(sent, total) {
             progress(); onProgress?.(sent, total);
           } }).then(() => { writerDone = true; finishIfComplete(); })

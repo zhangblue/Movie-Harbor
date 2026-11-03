@@ -23,7 +23,7 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
   const creating = operation.mode === "create";
   const title = creating ? "添加用户" : deleting ? "删除用户？" : "修改密码";
 
-  // 校验并提交当前表单，在用户提交相应操作时调用。
+  // 用户提交创建、改密或删除弹窗时校验输入并串行写入，成功后通知列表刷新。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending.current || conflict) return;
@@ -33,6 +33,7 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
     setBusy(true);
     setError("");
     try {
+      // 改密和删除沿用打开弹窗时的版本；后端并发校验通过后才关闭弹窗并报告结果。
       if (operation.mode === "create") await createViewerUser({ username: trimViewerWhitespace(username), password });
       else if (operation.mode === "password") await changeViewerUserPassword(operation.user.id, { version: operation.user.version, new_password: password });
       else await deleteViewerUser(operation.user.id, operation.user.version);
@@ -41,6 +42,7 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
       if (!mounted.current) return;
       if (cause instanceof ApiError && cause.status === 401) onExpired();
       else if (cause instanceof ApiError && cause.status === 403) {
+        // 恢复会话令牌但不重放用户写入；是否重试由用户根据提示决定。
         const recovery = await recoverForbiddenWrite();
         if (!mounted.current) return;
         if (recovery.expired) onExpired();

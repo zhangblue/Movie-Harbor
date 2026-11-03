@@ -27,6 +27,7 @@ fn controlled_storage_key(key: &str, expected_kind: &str) -> bool {
     let Some((stem, extension)) = file.rsplit_once('.') else {
         return false;
     };
+    // 目录分片和文件标识共用定长小写十六进制校验，任一非法都不能生成媒体 URL 或本地路径。
     let lowercase_hex = |value: &str, length: usize| {
         value.len() == length
             && value
