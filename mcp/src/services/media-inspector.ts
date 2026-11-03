@@ -6,13 +6,16 @@ import { buildConversionPlan } from '../../../tools/video-conversion/plan.mjs';
 import { inspectAllowedFile, revalidateAllowedFile, type CheckedFile } from './path-policy.js';
 import type { FileIdentity } from '../schemas/media.js';
 
+// 将检查所得文件身份转换为可返回及登记的字段。
 export function serializeIdentity(file: CheckedFile): FileIdentity {
   return { dev: file.identity.dev.toString(), ino: file.identity.ino.toString(), size: file.identity.size, mtime_ms: file.identity.mtimeMs };
 }
+// 整理媒体探测结果时规范化时长。
 export function durationSeconds(media: VideoConversion.Media): number | null {
   const duration = media.durationSeconds;
   return duration !== null && Number.isFinite(duration) && duration > 0 && Number.isSafeInteger(Math.ceil(duration)) ? Math.ceil(duration) : null;
 }
+// 检查视频时探测已验证文件并重新核验身份。
 export async function probeCheckedFile(file: CheckedFile, roots: string[], probe = probeMedia) {
   await revalidateAllowedFile(file, roots);
   let media: VideoConversion.Media;
@@ -24,6 +27,7 @@ export async function probeCheckedFile(file: CheckedFile, roots: string[], probe
   await revalidateAllowedFile(file, roots);
   return media;
 }
+// 只读检查视频时汇总轨道、兼容性和转换计划。
 export async function inspectVideo(path: string, roots: string[], probe = probeMedia, planBuilder = buildConversionPlan) {
   const file = await inspectAllowedFile(path, roots);
   const media = await probeCheckedFile(file, roots, probe);
@@ -49,6 +53,7 @@ export async function inspectVideo(path: string, roots: string[], probe = probeM
     }
   }
   const accepted = reasons.length === 0;
+  // 汇总视频探测结果时筛选并整理轨道元数据。
   const track = (item: VideoConversion.Track) => ({ index: item.index, codec: item.codec,
     language: typeof item.tags?.language === 'string' ? item.tags.language : null,
     title: typeof item.tags?.title === 'string' ? item.tags.title : null });
@@ -59,6 +64,7 @@ export async function inspectVideo(path: string, roots: string[], probe = probeM
     identity: serializeIdentity(file) };
 }
 
+// 暂存海报前检查本地格式、结构和文件身份。
 export async function validatePoster(path: string, roots: string[]) {
   const file = await inspectAllowedFile(path, roots);
   const extension = extname(file.realPath).toLowerCase();

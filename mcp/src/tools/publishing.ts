@@ -8,17 +8,21 @@ export const publishMovieInput = z.strictObject({ movie_id:id, version, confirme
 export const publishSeriesInput = z.strictObject({ series_id:id, version, confirmed:z.boolean() });
 export const publishEpisodeInput = z.strictObject({ series_id:id, season_id:id, episode_id:id, version, confirmed:z.boolean() });
 
+// 发布前检查用户是否作出独立确认。
 function requireConfirmation(confirmed: boolean) {
   if (confirmed !== true) throw new Error('需要独立发布确认，入库或转换确认不能代替发布确认');
 }
+// 发布前核对响应属于指定内容。
 function assertOwned(actual: string, expected: string) {
   if (actual !== expected) throw new MovieHarborClientError('invalid_response');
 }
+// 发布前核对生命周期状态与版本。
 function assertPublishable(status: string, currentVersion: number, expectedVersion: number, label: string) {
   if (status === 'archived') throw new Error(`${label}已归档，请由管理员处理，MCP 不会恢复草稿`);
   if (status === 'draft' && currentVersion !== expectedVersion) throw new MovieHarborClientError('version_conflict',409);
 }
 
+// 独立确认后发布指定电影。
 export async function publishMovie(input: unknown, client: MovieHarborClient) {
   const parsed=publishMovieInput.parse(input); requireConfirmation(parsed.confirmed);
   const path=`/api/admin/movies/${parsed.movie_id}`;
@@ -30,6 +34,7 @@ export async function publishMovie(input: unknown, client: MovieHarborClient) {
   return toolResult(contentResult,{id:published.id,version:published.version,status:published.status,next_actions:[]},'电影已发布。');
 }
 
+// 独立确认后发布指定剧集。
 export async function publishSeries(input: unknown, client: MovieHarborClient) {
   const parsed=publishSeriesInput.parse(input); requireConfirmation(parsed.confirmed);
   const path=`/api/admin/series/${parsed.series_id}`;
@@ -41,6 +46,7 @@ export async function publishSeries(input: unknown, client: MovieHarborClient) {
   return toolResult(contentResult,{id:published.id,version:published.version,status:published.status,next_actions:[]},'父剧集已发布。');
 }
 
+// 独立确认后发布指定单集并检查父级。
 export async function publishEpisode(input: unknown, client: MovieHarborClient) {
   const parsed=publishEpisodeInput.parse(input); requireConfirmation(parsed.confirmed);
   const parent=parseApi(apiSeries,await client.json('GET',`/api/admin/series/${parsed.series_id}`));
@@ -65,8 +71,12 @@ export async function publishEpisode(input: unknown, client: MovieHarborClient) 
     series_version:response.series_version,next_actions:next},parent.status==='draft'?'单集已发布；父剧集仍需单独确认发布。':'单集已发布。');
 }
 
+// 构建服务器时注册独立发布工具。
 export function registerPublishingTools(server:McpServer,client:MovieHarborClient){
+  // 注册 publish_movie：经独立确认后发布电影；不会修改隐私或其他内容。
   server.registerTool('publish_movie',{description:'经独立确认后发布电影；不会修改隐私或其他内容。',inputSchema:publishMovieInput,outputSchema:contentResult,annotations:writeAnnotations},input=>publishMovie(input,client));
+  // 注册 publish_episode：经独立确认后仅发布单集；不会自动发布父剧集。
   server.registerTool('publish_episode',{description:'经独立确认后仅发布单集；不会自动发布父剧集。',inputSchema:publishEpisodeInput,outputSchema:episodeOutput,annotations:writeAnnotations},input=>publishEpisode(input,client));
+  // 注册 publish_series：经独立确认后发布父剧集；必须与单集发布分开调用。
   server.registerTool('publish_series',{description:'经独立确认后发布父剧集；必须与单集发布分开调用。',inputSchema:publishSeriesInput,outputSchema:contentResult,annotations:writeAnnotations},input=>publishSeries(input,client));
 }

@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { open, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 
+// 保存启动时校验后的服务地址、凭据、目录与超时配置。
 export interface McpConfig {
   baseUrl: URL;
   apiKey: string;
@@ -11,11 +12,13 @@ export interface McpConfig {
   requestTimeoutMs: number;
 }
 
+// 读取配置路径时要求其为绝对路径。
 function absolutePath(value: string | undefined, field: string): string {
   if (!value || !isAbsolute(value)) throw new Error(`${field} 必须是绝对路径`);
   return value;
 }
 
+// 启动时安全打开配置或凭据文件并读取键值。
 async function readEnv(path: string, privateFile: boolean): Promise<Map<string, string>> {
   // O_NOFOLLOW rejects symlinks; O_NONBLOCK lets stat reject FIFOs without waiting for a writer.
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(() => {
@@ -42,12 +45,14 @@ async function readEnv(path: string, privateFile: boolean): Promise<Map<string, 
   }
 }
 
+// 加载配置时解析并验证真实目录。
 async function canonicalDirectory(path: string): Promise<string> {
   const canonical = await realpath(path);
   if (!(await stat(canonical)).isDirectory()) throw new Error('配置的目录必须是目录');
   return canonical;
 }
 
+// 启动服务时校验配置、凭据、允许目录和超时。
 export async function loadConfig(env: NodeJS.ProcessEnv): Promise<McpConfig> {
   const configPath = absolutePath(env.MOVIE_HARBOR_MCP_CONFIG, 'MOVIE_HARBOR_MCP_CONFIG');
   try {

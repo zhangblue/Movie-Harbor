@@ -7,6 +7,7 @@ import { probeMedia, verifyRequiredEncoders, executeConversion } from '../../too
 import { inspectVideoTool, validatePosterTool, convertVideoTool, deleteGeneratedVideoTool, registerLocalMediaTools, type LocalMediaDependencies } from '../src/tools/local-media.js';
 import type { McpConfig } from '../src/config.js';
 
+// 为当前测试准备隔离的文件、配置或服务并安排清理。
 async function fixture(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'mh-local-media-')));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -30,6 +31,7 @@ async function fixture(t: TestContext) {
 }
 
 // Catches rounding down duration, leaking raw probe tags or dropping selected tracks.
+// 验证视频场景：'video metadata includes compatibility and a conversion plan without file bytes or raw tags'。
 test('video metadata includes compatibility and a conversion plan without file bytes or raw tags', async t => {
   const f = await fixture(t);
   const result = await inspectVideoTool({ path: f.input }, f.deps);
@@ -50,6 +52,7 @@ test('video metadata includes compatibility and a conversion plan without file b
 });
 
 // Catches accepting MP4 by extension while its selected tracks still require conversion.
+// 验证相关功能场景：'MP4 compatibility rejects every required track conversion and accepts the target track set'。
 test('MP4 compatibility rejects every required track conversion and accepts the target track set', async t => {
   const f = await fixture(t);
   const mp4 = join(f.allowed, 'compatibility.mp4');
@@ -79,6 +82,7 @@ test('MP4 compatibility rejects every required track conversion and accepts the 
 });
 
 // Catches bypassing path checks or forwarding arbitrary external-process diagnostics.
+// 验证视频、路径场景：'video rejects invalid paths and sanitizes probe errors'。
 test('video rejects invalid paths and sanitizes probe errors', async t => {
   const f = await fixture(t);
   await assert.rejects(inspectVideoTool({ path: 'relative.mp4' }, f.deps), /绝对路径/);
@@ -90,6 +94,7 @@ test('video rejects invalid paths and sanitizes probe errors', async t => {
 });
 
 // Catches trusting extension only or accepting truncated image signatures.
+// 验证海报场景：'poster checks bounded content, extension and serialized identity'。
 test('poster checks bounded content, extension and serialized identity', async t => {
   const f = await fixture(t);
   const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000049454e44ae426082', 'hex');
@@ -104,6 +109,7 @@ test('poster checks bounded content, extension and serialized identity', async t
 });
 
 // Catches implicit conversion, missing persistence, open permissions or source deletion.
+// 验证转换、生成文件场景：'convert requires confirmation and persists generated identity for deletion'。
 test('convert requires confirmation and persists generated identity for deletion', async t => {
   const f = await fixture(t);
   await assert.rejects(convertVideoTool({ path: f.input, confirmed: false }, f.deps), /需要明确确认/);
@@ -126,6 +132,7 @@ test('convert requires confirmation and persists generated identity for deletion
 });
 
 // Catches skipping source revalidation or deleting a replacement file under a registered name.
+// 验证符号链接、转换、生成文件场景：'convert revalidates sources and generated deletion rejects replacements and symlink escapes'。
 test('convert revalidates sources and generated deletion rejects replacements and symlink escapes', async t => {
   const f = await fixture(t);
   const mutating = { ...f.deps, probeMedia: async (path: string) => { const media = await f.deps.probeMedia!(path); await writeFile(f.input, 'changed source'); return media; } };
@@ -142,10 +149,11 @@ test('convert revalidates sources and generated deletion rejects replacements an
 });
 
 // Catches missing independent registrations, result schemas or side-effect hints.
+// 验证海报、视频场景：'video and poster tools register independent schemas and safety annotations'。
 test('video and poster tools register independent schemas and safety annotations', async t => {
   const f = await fixture(t);
   const registrations = new Map<string, any>();
-  registerLocalMediaTools({ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } } as any, f.deps);
+  registerLocalMediaTools({ /* 测试注册时收集每个工具的 schema 与处理器。 */ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } } as any, f.deps);
   assert.deepEqual([...registrations.keys()], ['inspect_video', 'validate_poster', 'convert_video', 'delete_generated_video']);
   for (const name of ['inspect_video', 'validate_poster']) assert.deepEqual(registrations.get(name).schema.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true });
   assert.equal(registrations.get('convert_video').schema.annotations.readOnlyHint, false);
@@ -155,6 +163,7 @@ test('video and poster tools register independent schemas and safety annotations
 });
 
 // Catches trusting a generatedRoot symlink that has been replaced after conversion.
+// 验证生成文件场景：'generated deletion rejects a retargeted generated directory'。
 test('generated deletion rejects a retargeted generated directory', async t => {
   const f = await fixture(t);
   const converted = await convertVideoTool({ path: f.input, confirmed: true }, f.deps);
@@ -166,6 +175,7 @@ test('generated deletion rejects a retargeted generated directory', async t => {
 });
 
 // Catches recording output after its controlled directory is swapped during conversion.
+// 验证注册、转换、生成文件场景：'convert refuses registration after the generated directory escapes allowed roots'。
 test('convert refuses registration after the generated directory escapes allowed roots', async t => {
   const f = await fixture(t);
   const outside = join(f.directory, 'escaped-generated');
@@ -179,6 +189,7 @@ test('convert refuses registration after the generated directory escapes allowed
 });
 
 // Catches failure to reuse encoder checks and accepting unsupported image subtitles.
+// 验证转换场景：'convert reuses required encoder checks and refuses image subtitles before execution'。
 test('convert reuses required encoder checks and refuses image subtitles before execution', async t => {
   const f = await fixture(t);
   f.env.MEDIA_FIXTURE = JSON.stringify({ ...f.media, streams: [{ ...f.media.streams[0], codec_name: 'hevc' }] });
@@ -196,6 +207,7 @@ test('convert reuses required encoder checks and refuses image subtitles before 
 });
 
 // Catches rejecting JPEG/WebP or accepting mismatched declared RIFF sizes.
+// 验证海报场景：'poster supports JPEG and WebP signatures with bounded structural checks'。
 test('poster supports JPEG and WebP signatures with bounded structural checks', async t => {
   const f = await fixture(t);
   const jpeg = join(f.allowed, 'photo.jpeg');
@@ -211,6 +223,7 @@ test('poster supports JPEG and WebP signatures with bounded structural checks', 
 });
 
 // Catches registering output from a source that changes while FFmpeg is running.
+// 验证转换场景：'convert rejects source identity changes during execution before registering output'。
 test('convert rejects source identity changes during execution before registering output', async t => {
   const f = await fixture(t);
   const changing = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
@@ -223,6 +236,7 @@ test('convert rejects source identity changes during execution before registerin
 });
 
 // Catches requiring the private output root to be part of the media input allowlist.
+// 验证转换、生成文件场景：'convert accepts an independent private generated root without expanding input access'。
 test('convert accepts an independent private generated root without expanding input access', async t => {
   const f = await fixture(t);
   f.config.generatedRoot = join(f.credentialDirectory, 'generated');
@@ -240,6 +254,7 @@ test('convert accepts an independent private generated root without expanding in
 });
 
 // Catches relaxing generated-directory and output-child checks when roots are separate.
+// 验证生成文件场景：'independent generated roots still reject directory replacement and escaped outputs'。
 test('independent generated roots still reject directory replacement and escaped outputs', async t => {
   const f = await fixture(t);
   f.config.generatedRoot = join(f.credentialDirectory, 'generated');
@@ -264,6 +279,7 @@ test('independent generated roots still reject directory replacement and escaped
 });
 
 // Catches following a configured output parent that is retargeted during conversion.
+// 验证生成文件、路径场景：'independent generated root rejects parent path retargeting during conversion'。
 test('independent generated root rejects parent path retargeting during conversion', async t => {
   const f = await fixture(t);
   const parent = join(f.directory, 'private-output');

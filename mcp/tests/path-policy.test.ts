@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { inspectAllowedFile, revalidateAllowedFile } from '../src/services/path-policy.js';
 
+// 为当前测试准备隔离的文件、配置或服务并安排清理。
 async function fixture(t: TestContext) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'mh-path-')));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -16,6 +17,7 @@ async function fixture(t: TestContext) {
 }
 
 // Catches dropping realpath resolution or comparing directory string prefixes.
+// 验证符号链接、路径场景：'rejects symlink escapes and sibling paths with shared prefix'。
 test('rejects symlink escapes and sibling paths with shared prefix', async (t) => {
   const f = await fixture(t);
   const sibling = join(f.dir, 'downloads-extra');
@@ -28,6 +30,7 @@ test('rejects symlink escapes and sibling paths with shared prefix', async (t) =
   await assert.rejects(inspectAllowedFile(outside, [f.downloads]), /不在允许目录/);
 });
 
+// 验证符号链接场景：'allows internal symlinks and canonicalizes allowed roots'。
 test('allows internal symlinks and canonicalizes allowed roots', async (t) => {
   const f = await fixture(t);
   const alias = join(f.dir, 'allowed');
@@ -43,6 +46,7 @@ test('allows internal symlinks and canonicalizes allowed roots', async (t) => {
   await revalidateAllowedFile(checked, [alias]);
 });
 
+// 验证相关功能场景：'rejects nonregular files and an empty allowlist'。
 test('rejects nonregular files and an empty allowlist', async (t) => {
   const f = await fixture(t);
   await assert.rejects(inspectAllowedFile(f.downloads, [f.downloads]), /普通文件/);
@@ -50,6 +54,7 @@ test('rejects nonregular files and an empty allowlist', async (t) => {
 });
 
 // Catches missing size / inode comparisons and failure to resolve requested path again.
+// 验证相关功能场景：'revalidation rejects mutation, replacement and retargeted links'。
 test('revalidation rejects mutation, replacement and retargeted links', async (t) => {
   for (const mutation of ['write', 'replace', 'retarget'] as const) {
     const f = await fixture(t);
@@ -67,6 +72,7 @@ test('revalidation rejects mutation, replacement and retargeted links', async (t
   }
 });
 
+// 验证相关功能场景：'revalidation applies current allowed roots'。
 test('revalidation applies current allowed roots', async (t) => {
   const f = await fixture(t);
   const checked = await inspectAllowedFile(f.video, [f.downloads]);
@@ -74,6 +80,7 @@ test('revalidation applies current allowed roots', async (t) => {
 });
 
 // Catches truncating submillisecond timestamps while content size is unchanged.
+// 验证相关功能场景：'revalidation detects same-size submillisecond timestamp changes'。
 test('revalidation detects same-size submillisecond timestamp changes', async (t) => {
   const f = await fixture(t);
   await utimes(f.video, 1700000000.0001, 1700000000.0001);

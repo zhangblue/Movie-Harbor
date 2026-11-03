@@ -21,13 +21,16 @@ export const episodeUploadOutput = z.object({ ...uploadFields, series_version: v
 const apiMovieUpload = z.object({ id, mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(), version: positiveInt });
 const apiEpisodeUpload = apiMovieUpload.extend({ series_version: version });
 
+// 描述上传工具所需客户端和媒体检查依赖。
 export interface UploadDependencies extends LocalMediaDependencies { client: MovieHarborClient }
 
+// 判断上传文件是否位于指定生成目录。
 function inside(root: string, path: string) {
   const child = relative(root, path);
   return !isAbsolute(child) && child.split(sep)[0] !== '..';
 }
 
+// 上传前检查文件身份、格式和兼容性。
 async function checkedVideo(path: string, dependencies: UploadDependencies) {
   const generated = inside(dependencies.config.generatedRoot, path);
   const roots = generated ? [dependencies.config.generatedRoot] : dependencies.config.allowedRoots;
@@ -43,12 +46,14 @@ async function checkedVideo(path: string, dependencies: UploadDependencies) {
   return { file, generated, mimeType: inspected.container === 'mp4' ? 'video/mp4' as const : 'video/webm' as const };
 }
 
+// 上传前核对目标草稿状态和版本。
 function assertDraftTarget(target: { status: string; version: number }, expectedVersion: number) {
   if (target.status === 'archived') throw new Error('目标已归档，请由管理员处理，MCP 不会恢复草稿');
   if (target.status !== 'draft') throw new Error('只有草稿内容可以上传或替换视频');
   if (target.version !== expectedVersion) throw new MovieHarborClientError('version_conflict', 409);
 }
 
+// 上传成功后仅清理已登记的生成文件。
 async function cleanupAfterUpload(path: string, generated: boolean, dependencies: UploadDependencies) {
   if (!generated) return { generated_file_deleted: false, retained_generated_path: null };
   try {
@@ -59,8 +64,10 @@ async function cleanupAfterUpload(path: string, generated: boolean, dependencies
   }
 }
 
+// 描述上传前校验通过的视频及元数据。
 type CheckedVideo = Awaited<ReturnType<typeof checkedVideo>>;
 
+// 上传已检查文件并校验响应后处理生成文件。
 async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependencies: UploadDependencies,
   parser: (value: unknown, checked: Awaited<ReturnType<typeof checkedVideo>>) => T) {
   let raw: unknown;
@@ -71,9 +78,11 @@ async function uploadFile<T>(checked: CheckedVideo, endpoint: string, dependenci
   }
   // Parse and cross-check before cleanup: a structurally valid but impossible response is commit-unknown.
   const response = parser(raw, checked);
+  // 仅在服务端结果通过校验后清理生成文件；失败时保留文件供重试。
   return { response, ...(await cleanupAfterUpload(checked.file.realPath, checked.generated, dependencies)) };
 }
 
+// 确认入库后上传或替换指定电影视频。
 export async function uploadMovieVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceMovieVideoInput : uploadMovieVideoInput).parse(input);
   const checked = await checkedVideo(parsed.path, dependencies);
@@ -95,6 +104,7 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
   replace ? '电影视频已明确替换；发布仍需单独确认。' : '电影视频已上传；发布仍需单独确认。');
 }
 
+// 确认入库后上传或替换指定单集视频。
 export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDependencies, replace = false) {
   const parsed = (replace ? replaceEpisodeVideoInput : uploadEpisodeVideoInput).parse(input);
   const checked = await checkedVideo(parsed.path, dependencies);
@@ -123,9 +133,14 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   replace ? '单集视频已明确替换；发布仍需单独确认。' : '单集视频已上传；发布仍需单独确认。');
 }
 
+// 构建服务器时注册上传和明确替换工具。
 export function registerUploadTools(server: McpServer, dependencies: UploadDependencies) {
+  // 注册 upload_movie_video：携带入库确认 confirmed: true 后向空电影视频槽流式上传兼容文件；发布仍需独立确认。
   server.registerTool('upload_movie_video', { description:'携带入库确认 confirmed: true 后向空电影视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies));
+  // 注册 replace_movie_video：携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。
   server.registerTool('replace_movie_video', { description:'携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input=>uploadMovieVideo(input,dependencies,true));
+  // 注册 upload_episode_video：携带入库确认 confirmed: true 后向空单集视频槽流式上传兼容文件；发布仍需独立确认。
   server.registerTool('upload_episode_video', { description:'携带入库确认 confirmed: true 后向空单集视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies));
+  // 注册 replace_episode_video：携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。
   server.registerTool('replace_episode_video', { description:'携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input=>uploadEpisodeVideo(input,dependencies,true));
 }

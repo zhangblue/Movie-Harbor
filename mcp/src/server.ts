@@ -11,8 +11,10 @@ import { registerPublishingTools } from './tools/publishing.js';
 import { registerSeriesTools } from './tools/series.js';
 import { registerUploadTools } from './tools/uploads.js';
 
+// 描述服务启动时组装的客户端与本地媒体依赖。
 export interface Services extends LocalMediaDependencies { client: MovieHarborClient }
 
+// 启动时根据配置组装服务依赖。
 export function createServices(config: McpConfig): Services {
   return { config, credentialDirectory:config.credentialDirectory, client:createMovieHarborClient(config) };
 }
@@ -28,6 +30,7 @@ const instructions = [
   '目标已有视频时必须明确展示替换；电视剧先发布单集，父剧集需要再次单独确认发布。',
 ].join('\n');
 
+// 创建服务器时注册各组工具与操作说明。
 export function buildServer(services: Services): McpServer {
   const server=new McpServer({name:'movie-harbor',version:'0.1.0'},{instructions});
   registerLocalMediaTools(server,services);
@@ -40,6 +43,7 @@ export function buildServer(services: Services): McpServer {
   return server;
 }
 
+// 作为入口启动时加载配置并建立标准输入输出连接。
 export async function startStdio(env:NodeJS.ProcessEnv=process.env){
   const config=await loadConfig(env);
   const configPath=env.MOVIE_HARBOR_MCP_CONFIG;

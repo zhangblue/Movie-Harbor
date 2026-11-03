@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { loadConfig } from '../src/config.js';
 
+// 为当前测试准备隔离的文件、配置或服务并安排清理。
 async function fixture(t: TestContext, mode = 0o600, overrides: Record<string, string> = {}) {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'mh-config-')));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -25,6 +26,7 @@ async function fixture(t: TestContext, mode = 0o600, overrides: Record<string, s
 }
 
 // Catches missing parsing, secret shell expansion, and absent defaults.
+// 验证凭据、路径场景：'loads private credentials and canonical paths with defaults'。
 test('loads private credentials and canonical paths with defaults', async (t) => {
   const f = await fixture(t);
   const config = await loadConfig(f.env);
@@ -38,6 +40,7 @@ test('loads private credentials and canonical paths with defaults', async (t) =>
 });
 
 // The conversion registry must follow the private credential file, not chmod an arbitrary config directory.
+// 验证凭据场景：'derives the private registry directory from the canonical credential file'。
 test('derives the private registry directory from the canonical credential file', async t => {
   const f = await fixture(t);
   const privateDirectory = join(f.dir, 'private');
@@ -49,10 +52,12 @@ test('derives the private registry directory from the canonical credential file'
   assert.equal((await loadConfig(f.env)).credentialDirectory, privateDirectory);
 });
 
+// 验证凭据场景：'rejects credential files with permissions other than 0600'。
 test('rejects credential files with permissions other than 0600', async (t) => {
   await assert.rejects(loadConfig((await fixture(t, 0o644)).env), /0600/);
 });
 
+// 验证凭据、配置、符号链接场景：'rejects symlink config and credentials'。
 test('rejects symlink config and credentials', async (t) => {
   for (const target of ['configPath', 'credentials'] as const) {
     const f = await fixture(t);
@@ -65,6 +70,7 @@ test('rejects symlink config and credentials', async (t) => {
   }
 });
 
+// 验证凭据场景：'rejects unsafe base URLs without exposing credentials'。
 test('rejects unsafe base URLs without exposing credentials', async (t) => {
   for (const url of ['file:///tmp', 'https://user:secret@example.com', 'https://example.com/api', 'https://example.com/?x=1', 'https://example.com/#frag', 'https://example.com/?', 'https://example.com/#']) {
     const f = await fixture(t, 0o600, { MOVIE_HARBOR_BASE_URL: url });
@@ -72,6 +78,7 @@ test('rejects unsafe base URLs without exposing credentials', async (t) => {
   }
 });
 
+// 验证路径场景：'validates absolute paths, roots, positive safe timeout and API key'。
 test('validates absolute paths, roots, positive safe timeout and API key', async (t) => {
   await assert.rejects(loadConfig({}), /MOVIE_HARBOR_MCP_CONFIG/);
   await assert.rejects(loadConfig({ MOVIE_HARBOR_MCP_CONFIG: 'config.env' }), /绝对路径/);
@@ -90,6 +97,7 @@ test('validates absolute paths, roots, positive safe timeout and API key', async
   await assert.rejects(loadConfig(f.env), /API_KEY/);
 });
 
+// 验证符号链接、生成文件场景：'canonicalizes symlink roots and generated parent and accepts explicit timeout'。
 test('canonicalizes symlink roots and generated parent and accepts explicit timeout', async (t) => {
   const f = await fixture(t);
   const alias = join(f.dir, 'alias');
@@ -105,6 +113,7 @@ test('canonicalizes symlink roots and generated parent and accepts explicit time
 
 // Running the loader in a child bounds the regression even if FIFO open blocks forever.
 for (const target of ['configPath', 'credentials'] as const) {
+  // 验证相关功能场景：`rejects FIFO ${target} without waiting for a writer`。
   test(`rejects FIFO ${target} without waiting for a writer`, async (t) => {
     const f = await fixture(t);
     await rm(f[target]);

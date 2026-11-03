@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 // A missing atomic tool prevents callers from choosing each domain action explicitly.
+// 验证单集、剧集、电影场景：'catalog genre movie series episode tools advertise independent schemas and side effects'。
 test('catalog genre movie series episode tools advertise independent schemas and side effects', async () => {
   const modules = await Promise.all(['catalog', 'genres', 'movies', 'series'].map(name => import(`../src/tools/${name}.js`).catch(() => null)));
   assert.ok(modules.every(Boolean), 'content tool modules must exist');
   const registrations = new Map<string, any>();
-  const server = { registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
+  const server = { /* 测试注册时收集工具 schema 与处理器。 */ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
   const client = { json: async () => { throw new Error('unexpected request'); }, upload: async () => { throw new Error('unexpected upload'); } };
   modules[0]!.registerCatalogTools(server, client);
   modules[1]!.registerGenreTools(server, client);
@@ -30,6 +31,7 @@ const movie = { id: movieId, name: 'Alien', year: 1979, duration_seconds: 7000, 
 const episode = { id: episodeId, season_id: seasonId, number: 1, name: 'Pilot', duration_seconds: 500, status: 'draft', version: 1, video: null };
 const series = { ...movie, id: seriesId, seasons: [{ id: seasonId, number: 1, episodes: [episode] }] };
 for (const [seconds, stored] of [[1, 60], [29, 60], [30, 60], [89, 60], [90, 120], [120, 120], [4395, 4380], [3584, 3600], [2147483647, 2147483640]]) {
+  // 验证时长、单集场景：`episode duration ${seconds}s rounds to ${stored}s on create and update`。
   test(`episode duration ${seconds}s rounds to ${stored}s on create and update`, async () => {
     const saved = { ...episode, duration_seconds: stored };
     const f = clientFixture([
@@ -52,6 +54,7 @@ for (const [seconds, stored] of [[1, 60], [29, 60], [30, 60], [89, 60], [90, 120
   });
 }
 
+// 验证时长、单集场景：'episode metadata-only updates omit duration and invalid seconds never reach HTTP'。
 test('episode metadata-only updates omit duration and invalid seconds never reach HTTP', async () => {
   const f = clientFixture([{ series_version: 4, episode }]);
   const t = await tools(f.client);
@@ -67,9 +70,10 @@ test('episode metadata-only updates omit duration and invalid seconds never reac
   }
   assert.equal(f.calls.length, 1);
 });
+// 内容工具测试中注册工具并提供调用入口。
 async function tools(client: any, allowedRoots: string[] = []) {
   const registrations = new Map<string, any>();
-  const server = { registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
+  const server = { /* 测试注册时收集工具 schema 与处理器。 */ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
   const catalog = await import('../src/tools/catalog.js');
   const genres = await import('../src/tools/genres.js');
   const movies = await import('../src/tools/movies.js');
@@ -78,7 +82,7 @@ async function tools(client: any, allowedRoots: string[] = []) {
   genres.registerGenreTools(server as any, client);
   movies.registerMovieTools(server as any, { client, allowedRoots });
   seriesTools.registerSeriesTools(server as any, client);
-  return { registrations, async call(name: string, input: unknown) {
+  return { registrations, /* 测试调用时校验结构化结果及敏感信息过滤。 */ async call(name: string, input: unknown) {
     const tool = registrations.get(name);
     const result = await tool.handler(input);
     assert.equal(tool.schema.outputSchema.safeParse(result.structuredContent).success, true, `${name} output schema`);
@@ -88,18 +92,20 @@ async function tools(client: any, allowedRoots: string[] = []) {
     return result.structuredContent;
   } };
 }
+// 内容工具测试中提供可控 API 响应和调用记录。
 function clientFixture(responses: unknown[]) {
   const calls: { method: string; path: string; body: unknown }[] = [];
-  return { calls, client: { async json(method: string, path: string, body: unknown) {
+  return { calls, client: { /* 内容测试时记录请求并返回预设响应。 */ async json(method: string, path: string, body: unknown) {
     calls.push({ method, path, body });
     assert.ok(responses.length, 'unexpected extra domain API call');
     const response = responses.shift();
     if (response instanceof Error) throw response;
     return response;
-  }, async upload() { throw new Error('unexpected upload'); } } };
+  }, /* 内容测试中出现未预期的上传时立即报错。 */ async upload() { throw new Error('unexpected upload'); } } };
 }
 
 // Returning only one name or merging substrings hides distinct candidates from the caller.
+// 验证电影、目录场景：'catalog preserves movie candidates, marks trim and case exact names and never chooses among duplicates'。
 test('catalog preserves movie candidates, marks trim and case exact names and never chooses among duplicates', async () => {
   const f = clientFixture([[movie, { ...movie, id: seriesId, name: ' alien ' }, { ...movie, id: episodeId, name: 'Aliens' }, { ...movie, name: 'Arrival' }]]);
   const out = await (await tools(f.client)).call('search_movies', { name: '  ALIEN ' });
@@ -111,6 +117,7 @@ test('catalog preserves movie candidates, marks trim and case exact names and ne
   assert.deepEqual(Object.keys(out.matches[0]).sort(), ['id','name','year','duration_minutes','status','version','is_private','has_poster','has_video','exact'].sort());
 });
 
+// 验证剧集、目录场景：'catalog series counts structure and zero candidates suggest explicit creation'。
 test('catalog series counts structure and zero candidates suggest explicit creation', async () => {
   const f = clientFixture([[series], [], []]); const t = await tools(f.client);
   const found = await t.call('search_series', { name: ' Alien ' });
@@ -122,6 +129,7 @@ test('catalog series counts structure and zero candidates suggest explicit creat
   assert.deepEqual((await t.call('search_series', { name: 'Unknown' })).next_actions, ['create_series']);
 });
 
+// 验证剧集场景：'series structure returns safe child metadata and next explicit action'。
 test('series structure returns safe child metadata and next explicit action', async () => {
   const f = clientFixture([series, { ...series, seasons: [] }]); const t = await tools(f.client);
   const out = await t.call('get_series_structure', { series_id: seriesId });
@@ -131,6 +139,7 @@ test('series structure returns safe child metadata and next explicit action', as
 });
 
 // Returning creation actions here would make the caller continue mutating a terminal MCP target.
+// 验证剧集场景：'archived series structure stops MCP child creation and points to administrator action'。
 test('archived series structure stops MCP child creation and points to administrator action', async () => {
   const archived = { ...series, status: 'archived' as const };
   const f = clientFixture([archived]); const t = await tools(f.client);
@@ -144,6 +153,7 @@ test('archived series structure stops MCP child creation and points to administr
 });
 
 // A POST for an existing genre creates accidental duplicates; disabled matches cannot be revived.
+// 验证题材场景：'genre list filters API fields and create reuses enabled exact names but rejects disabled names'。
 test('genre list filters API fields and create reuses enabled exact names but rejects disabled names', async () => {
   const enabled = { id: genreId, name: '奇幻', enabled: true, sort_order: 1, secret: 'SECRET' };
   const f = clientFixture([[enabled], [enabled], [{ ...enabled, enabled: false }]]); const t = await tools(f.client);
@@ -155,6 +165,7 @@ test('genre list filters API fields and create reuses enabled exact names but re
 });
 
 // Missing confirmation must stop even the duplicate lookup; MCP-only fields never reach the API.
+// 验证题材场景：'genre creation requires import confirmation before any request and strips it from the API body'。
 test('genre creation requires import confirmation before any request and strips it from the API body', async () => {
   const f = clientFixture([[], { id: genreId, name: '奇幻', enabled: true }]);
   const t = await tools(f.client);
@@ -168,6 +179,7 @@ test('genre creation requires import confirmation before any request and strips 
 });
 
 // Built-in genres use canonical UUID text whose RFC version/variant bits are zero.
+// 验证题材场景：'genre list accepts the built-in database UUID representation'。
 test('genre list accepts the built-in database UUID representation', async () => {
   const seededId = '00000000-0000-0000-0001-000000000001';
   const f = clientFixture([[{ id: seededId, name: '剧情', enabled: true, sort_order: 1 }]]);
@@ -176,6 +188,7 @@ test('genre list accepts the built-in database UUID representation', async () =>
   assert.equal(f.calls.length, 1);
 });
 
+// 验证题材场景：'genre create recovers a concurrent same-name conflict with one reread and never fuzzy-merges'。
 test('genre create recovers a concurrent same-name conflict with one reread and never fuzzy-merges', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   const enabled = { id: genreId, name: 'FANTASY', enabled: true, sort_order: 1 };
@@ -193,6 +206,7 @@ test('genre create recovers a concurrent same-name conflict with one reread and 
 });
 
 // Wrong unit, access scope, or leaked MCP-only fields would change the created record.
+// 验证电影场景：'movie creation requires synopsis and confirmation, defaults public, and sends minutes as seconds'。
 test('movie creation requires synopsis and confirmation, defaults public, and sends minutes as seconds', async () => {
   const f = clientFixture([
     { ...movie, duration_seconds: 7020, is_private: false },
@@ -214,6 +228,7 @@ test('movie creation requires synopsis and confirmation, defaults public, and se
   ]);
 });
 
+// 验证剧集场景：'series creation requires synopsis and confirmation and defaults public'。
 test('series creation requires synopsis and confirmation and defaults public', async () => {
   const f = clientFixture([{ ...series, is_private: false }, { ...series, is_private: true }]);
   const t = await tools(f.client);
@@ -231,6 +246,7 @@ test('series creation requires synopsis and confirmation and defaults public', a
   ]);
 });
 
+// 验证单集场景：'season and named episode require confirmation without forwarding it'。
 test('season and named episode require confirmation without forwarding it', async () => {
   const f = clientFixture([series, series]);
   const t = await tools(f.client);
@@ -243,6 +259,7 @@ test('season and named episode require confirmation without forwarding it', asyn
   assert.deepEqual(f.calls[1]!.body, { version: 2, number: 1, name: 'Pilot', duration_seconds: 480 });
 });
 
+// 验证剧集场景：'series creation rejects mismatched API visibility as invalid_response without retrying'。
 test('series creation rejects mismatched API visibility as invalid_response without retrying', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   for (const [visibility, is_private] of [['public', true], ['private', false]] as const) {
@@ -255,6 +272,7 @@ test('series creation rejects mismatched API visibility as invalid_response with
   }
 });
 
+// 验证剧集场景：'series creation summaries identify the selected draft visibility'。
 test('series creation summaries identify the selected draft visibility', async () => {
   const f = clientFixture([{ ...series, is_private: false }, { ...series, is_private: true }]);
   const t = await tools(f.client);
@@ -267,6 +285,7 @@ test('series creation summaries identify the selected draft visibility', async (
   }
 });
 
+// 验证电影、转换场景：'movie tools expose integer minutes and convert updates back to API seconds'。
 test('movie tools expose integer minutes and convert updates back to API seconds', async () => {
   const f = clientFixture([[{ ...movie, duration_seconds: 10176 }], { ...movie, duration_seconds: 10200 }]);
   const t = await tools(f.client);
@@ -278,6 +297,7 @@ test('movie tools expose integer minutes and convert updates back to API seconds
 });
 
 for (const duration_seconds of [7000, null]) {
+  // 验证时长、电影场景：`movie duration update rejects API duration ${duration_seconds} as invalid_response without retrying`。
   test(`movie duration update rejects API duration ${duration_seconds} as invalid_response without retrying`, async () => {
     const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
     const f = clientFixture([{ ...movie, duration_seconds }]);
@@ -290,6 +310,7 @@ for (const duration_seconds of [7000, null]) {
   });
 }
 
+// 验证电影场景：'movie minute helpers round probe seconds, preserve null and reject overflow before HTTP'。
 test('movie minute helpers round probe seconds, preserve null and reject overflow before HTTP', async () => {
   const common = await import('../src/schemas/common.js');
   assert.equal(typeof common.durationMinutesFromSeconds, 'function');
@@ -305,6 +326,7 @@ test('movie minute helpers round probe seconds, preserve null and reject overflo
   }
 });
 
+// 验证时长、电影场景：'movie creation rejects mismatched API visibility or duration as invalid_response without retrying'。
 test('movie creation rejects mismatched API visibility or duration as invalid_response without retrying', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   for (const response of [
@@ -322,6 +344,7 @@ test('movie creation rejects mismatched API visibility or duration as invalid_re
 });
 
 // Malformed creates and mutations must fail before network calls, even on direct handler use.
+// 验证单集、剧集、电影场景：'movie series episode schemas reject missing required fields and invalid mutations before HTTP'。
 test('movie series episode schemas reject missing required fields and invalid mutations before HTTP', async () => {
   const f = clientFixture([]); const t = await tools(f.client);
   const movieInput = { name:'Alien',synopsis:'太空货船遭遇未知生命。',year:1979,duration_minutes:117,genre_ids:[genreId],staged_poster_token:'poster-token',confirmed:true };
@@ -351,6 +374,7 @@ test('movie series episode schemas reject missing required fields and invalid mu
   assert.equal(f.calls.length,0);
 });
 
+// 验证剧集、电影场景：'movie and series creation use one API and respect each creation contract'。
 test('movie and series creation use one API and respect each creation contract', async () => {
   const f = clientFixture([{...movie,duration_seconds:7020},series]); const t = await tools(f.client);
   const common = {name:' Alien ',year:1979,genre_ids:[genreId],staged_poster_token:'poster-token'};
@@ -359,6 +383,7 @@ test('movie and series creation use one API and respect each creation contract',
   assert.deepEqual(f.calls,[{method:'POST',path:'/api/admin/movies',body:{...common,name:'Alien',synopsis:'太空货船遭遇未知生命。',duration_seconds:7020,is_private:true}},{method:'POST',path:'/api/admin/series',body:{...common,name:'Alien',synopsis:'围绕未知生命展开的系列故事。',is_private:true}}]);
 });
 
+// 验证剧集场景：'series season create extracts its unique child and returns parent version without follow-up HTTP'。
 test('series season create extracts its unique child and returns parent version without follow-up HTTP', async () => {
   const f = clientFixture([series,{...series,seasons:[]},{...series,seasons:[...series.seasons,...series.seasons]}]); const t = await tools(f.client);
   assert.deepEqual(await t.call('create_season',{series_id:seriesId,version:2,number:1,confirmed:true}),{series_id:seriesId,series_version:3,season_id:seasonId,next_actions:['create_episode']});
@@ -366,6 +391,7 @@ test('series season create extracts its unique child and returns parent version 
   assert.deepEqual(f.calls[0],{method:'POST',path:`/api/admin/series/${seriesId}/seasons`,body:{version:2,number:1}});
 });
 
+// 验证单集、剧集、电影场景：'movie series episode updates route only explicit patches, preserve versions and suggest safe next actions'。
 test('movie series episode updates route only explicit patches, preserve versions and suggest safe next actions', async () => {
   const f = clientFixture([movie,{...movie,video:{id:genreId}},series,{series_version:4,episode},{series_version:5,episode:{...episode,video:{id:genreId},version:2}}]); const t = await tools(f.client);
   const a = await t.call('update_movie_metadata',{movie_id:movieId,version:2,name:' New '});
@@ -380,6 +406,7 @@ test('movie series episode updates route only explicit patches, preserve version
   assert.deepEqual(f.calls[3],{method:'PATCH',path:`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}`,body:{version:1,name:'Pilot'}});
 });
 
+// 验证剧集、电影场景：'movie and series version conflicts propagate stable errors without implicit retries'。
 test('movie and series version conflicts propagate stable errors without implicit retries', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   const f = clientFixture([new MovieHarborClientError('version_conflict',409)]);
@@ -388,6 +415,7 @@ test('movie and series version conflicts propagate stable errors without implici
 });
 
 // Creating an episode must locate the exact child in the API's whole-series response.
+// 验证单集场景：'episode create extracts its own version and parent version and rejects missing or ambiguous children'。
 test('episode create extracts its own version and parent version and rejects missing or ambiguous children', async () => {
   const variants = [series, { ...series, seasons: [] }, { ...series, seasons: [...series.seasons, ...series.seasons] },
     { ...series, seasons: [{ ...series.seasons[0], episodes: [] }] },
@@ -400,6 +428,7 @@ test('episode create extracts its own version and parent version and rejects mis
   assert.equal(f.calls.length, 5);
 });
 
+// 验证电影、目录场景：'catalog and movie invalid API payloads produce safe stable errors'。
 test('catalog and movie invalid API payloads produce safe stable errors', async () => {
   const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
   for (const [name,input,response] of [
@@ -415,6 +444,7 @@ test('catalog and movie invalid API payloads produce safe stable errors', async 
 });
 
 // Runs the real file policy, poster inspector and streaming HTTP client together.
+// 验证上传、电影、海报场景：'movie stage poster validates MIME and file identity before one bounded upload and returns only staging metadata'。
 test('movie stage poster validates MIME and file identity before one bounded upload and returns only staging metadata', async t => {
   const { mkdtemp,realpath,writeFile,rm,mkdir } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
@@ -464,6 +494,7 @@ for (const [label, tool, input, response] of [
   ['episode envelope series', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,series_id:movieId,episode }],
   ['episode embedded series', 'update_episode_metadata', { series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New' }, { series_version:4,episode:{ ...episode,series_id:movieId } }],
 ] as const) {
+  // 验证单集、剧集、电影场景：`catalog movie series episode rejects mismatched ${label} without another HTTP call`。
   test(`catalog movie series episode rejects mismatched ${label} without another HTTP call`, async () => {
     const { MovieHarborClientError } = await import('../src/services/error-mapper.js');
     const f = clientFixture([response]);
@@ -472,6 +503,7 @@ for (const [label, tool, input, response] of [
   });
 }
 
+// 验证单集、剧集场景：'episode update accepts matching optional series ownership and filters relation fields from output'。
 test('episode update accepts matching optional series ownership and filters relation fields from output', async () => {
   const f = clientFixture([{series_version:4,series_id:seriesId,episode:{...episode,series_id:seriesId}}]);
   const result = await (await tools(f.client)).call('update_episode_metadata',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:1,name:'New'});
@@ -480,6 +512,7 @@ test('episode update accepts matching optional series ownership and filters rela
 });
 
 for (const [tool, createAction, label] of [['search_movies','create_movie','电影'],['search_series','create_series','剧集']] as const) {
+  // 验证目录场景：`catalog ${tool} zero candidates text suggests explicit creation consistently with next_actions`。
   test(`catalog ${tool} zero candidates text suggests explicit creation consistently with next_actions`, async () => {
     const f = clientFixture([[]]); const t = await tools(f.client);
     const result = await t.registrations.get(tool).handler({name:'Unknown'});

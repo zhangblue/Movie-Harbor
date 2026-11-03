@@ -5,6 +5,7 @@ import { MovieHarborClientError } from '../services/error-mapper.js';
 import { normalizedName, parseApi, readOnlyAnnotations, toolResult, durationMinutesFromSeconds } from '../schemas/common.js';
 import { searchMoviesInput, searchSeriesInput, getSeriesStructureInput, searchMoviesOutput, searchSeriesOutput, getSeriesStructureOutput, apiMovie, apiSeries } from '../schemas/content.js';
 
+// 按名称查询电影候选并标记精确匹配。
 export async function searchMovies(input: unknown, client: MovieHarborClient) {
   const { name } = searchMoviesInput.parse(input);
   const candidates = parseApi(z.array(apiMovie), await client.json('GET', '/api/admin/movies'));
@@ -15,6 +16,7 @@ export async function searchMovies(input: unknown, client: MovieHarborClient) {
   return toolResult(searchMoviesOutput, { query: name, normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1,
     next_actions: matches.length ? ['update_movie_metadata'] : ['create_movie'] }, matches.length ? `找到 ${matches.length} 个电影候选，请明确选择后再操作。` : '未找到电影候选，可显式创建电影草稿。');
 }
+// 按名称查询剧集候选并标记精确匹配。
 export async function searchSeries(input: unknown, client: MovieHarborClient) {
   const { name } = searchSeriesInput.parse(input);
   const candidates = parseApi(z.array(apiSeries), await client.json('GET', '/api/admin/series'));
@@ -26,6 +28,7 @@ export async function searchSeries(input: unknown, client: MovieHarborClient) {
   return toolResult(searchSeriesOutput, { query: name, normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1,
     next_actions: matches.length ? ['get_series_structure', 'update_series_metadata'] : ['create_series'] }, matches.length ? `找到 ${matches.length} 个剧集候选，请明确选择后再操作。` : '未找到剧集候选，可显式创建剧集草稿。');
 }
+// 读取指定剧集结构并给出后续操作。
 export async function getSeriesStructure(input: unknown, client: MovieHarborClient) {
   const { series_id } = getSeriesStructureInput.parse(input);
   const series = parseApi(apiSeries, await client.json('GET', `/api/admin/series/${series_id}`));
@@ -37,8 +40,12 @@ export async function getSeriesStructure(input: unknown, client: MovieHarborClie
     ? `剧集已归档，MCP 已停止创建季或单集；请由管理员处理。`
     : `已读取剧集结构，共 ${series.seasons.length} 季。`);
 }
+// 构建服务器时注册内容查询工具。
 export function registerCatalogTools(server: McpServer, client: MovieHarborClient) {
+  // 注册 search_movies：按名称查询电影候选；仅 trim 与大小写用于精确标记，不自动选择或合并。
   server.registerTool('search_movies', { description: '按名称查询电影候选；仅 trim 与大小写用于精确标记，不自动选择或合并。', inputSchema: searchMoviesInput, outputSchema: searchMoviesOutput, annotations: readOnlyAnnotations }, input => searchMovies(input, client));
+  // 注册 search_series：按名称查询剧集候选；仅 trim 与大小写用于精确标记，不自动选择或合并。
   server.registerTool('search_series', { description: '按名称查询剧集候选；仅 trim 与大小写用于精确标记，不自动选择或合并。', inputSchema: searchSeriesInput, outputSchema: searchSeriesOutput, annotations: readOnlyAnnotations }, input => searchSeries(input, client));
+  // 注册 get_series_structure：只读获取一个明确剧集的季、单集和版本。
   server.registerTool('get_series_structure', { description: '只读获取一个明确剧集的季、单集和版本。', inputSchema: getSeriesStructureInput, outputSchema: getSeriesStructureOutput, annotations: readOnlyAnnotations }, input => getSeriesStructure(input, client));
 }

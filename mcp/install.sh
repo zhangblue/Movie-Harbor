@@ -3,6 +3,7 @@ set -eu
 
 umask 077
 
+# 安装任一阶段失败时输出原因并终止，避免继续修改注册。
 fail() {
   printf '%s\n' "安装失败：$*" >&2
   exit 1
@@ -112,6 +113,7 @@ try{
 }
 ' "$config_file") || fail "无法安全保存原 MCP 配置"
 
+# 配置写入或注册失败时从快照原子恢复旧配置。
 restore_config() {
   printf '%s' "$config_snapshot" | node -e '
 const fs=require("node:fs"),pathModule=require("node:path"),crypto=require("node:crypto");
@@ -147,6 +149,7 @@ try{
 }catch{console.error("生成目录必须使用真实且已存在的普通父目录");process.exit(1);}
 ' "$generated_input") || fail "生成目录配置不安全"
 
+# 只向安装者输出密钥的 SHA-256 摘要供服务端认证，原始密钥留在私有凭据文件中。
 digest=$(node -e '
 const fs=require("node:fs"),crypto=require("node:crypto");
 const path=process.argv[1]; let key;
@@ -195,6 +198,7 @@ try {
   fail "无法安全写入 MCP 配置；已恢复原配置"
 fi
 
+# 新注册完成后重新读取并确认命令与配置路径属于当前安装。
 verify_registration() {
   node -e '
 const {spawnSync}=require("node:child_process");const [entry,config]=process.argv.slice(1);
@@ -205,6 +209,7 @@ try{if(result.error||result.status!==0)throw new Error();const item=JSON.parse(r
 
 new_snapshot=$(node -e 'const [entry,config]=process.argv.slice(1);process.stdout.write(Buffer.from(JSON.stringify({command:"node",args:[entry],env:{MOVIE_HARBOR_MCP_CONFIG:config}}),"utf8").toString("base64"));' "$entry" "$config_file") || fail "无法准备 MCP 注册事务"
 
+# 回滚时只清理与预期快照一致的注册，避免删除其他项目的同名服务。
 cleanup_registration() {
   expected_snapshot=$1
   printf '%s' "$expected_snapshot" | node -e '
@@ -228,6 +233,7 @@ try{
 '
 }
 
+# 回滚时用经过验证的快照恢复旧注册。
 restore_registration() {
   printf '%s' "$rollback_snapshot" | node -e '
 const fs=require("node:fs"),{spawnSync}=require("node:child_process"),snapshot=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8"));
@@ -238,6 +244,7 @@ const result=spawnSync("codex",args,{encoding:"utf8",maxBuffer:1024*1024});if(re
 '
 }
 
+# 回滚后检查旧注册的所有可恢复字段，确认恢复完整。
 verify_restored_registration() {
   printf '%s' "$rollback_snapshot" | node -e '
 const fs=require("node:fs"),{spawnSync}=require("node:child_process"),snapshot=JSON.parse(Buffer.from(fs.readFileSync(0,"utf8"),"base64").toString("utf8"));
@@ -251,6 +258,7 @@ try{
 '
 }
 
+# 旧注册删除失败时检查它是否实际消失，以决定能否安全恢复。
 registration_absent() {
   node -e '
 const {spawnSync}=require("node:child_process"),result=spawnSync("codex",["mcp","list","--json"],{encoding:"utf8",maxBuffer:16*1024*1024});
@@ -258,6 +266,7 @@ try{if(result.error||result.status!==0)throw new Error();const items=JSON.parse(
 '
 }
 
+# 新注册失败时依次恢复配置、清理残留并验证旧注册。
 rollback_after_failure() {
   original_error=$1
   restore_config || fail "严重错误：$original_error，且旧 MCP 配置恢复失败"

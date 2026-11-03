@@ -10,8 +10,10 @@ import { serializeIdentity } from './media-inspector.js';
 
 const recordSchema = z.object({ path: z.string(), identity: fileIdentity, source: z.object({ path: z.string(), identity: fileIdentity }) });
 const registrySchema = z.object({ version: z.literal(1), files: z.array(recordSchema) });
+// 描述读取和写入生成文件登记册时的数据结构。
 type Registry = z.infer<typeof registrySchema>;
 const queues = new Map<string, Promise<unknown>>();
+// 读写同一登记目录时串行执行操作以避免竞争。
 async function serialized<T>(directory: string, operation: () => Promise<T>): Promise<T> {
   const previous = queues.get(directory) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(operation);
@@ -19,6 +21,7 @@ async function serialized<T>(directory: string, operation: () => Promise<T>): Pr
   try { return await next; }
   finally { if (queues.get(directory) === next) queues.delete(directory); }
 }
+// 转换或删除前创建并验证独立生成目录。
 export async function prepareGeneratedRoot(config: McpConfig): Promise<string> {
   const parent = await realpath(dirname(config.generatedRoot));
   const expected = join(parent, basename(config.generatedRoot));
@@ -30,12 +33,14 @@ export async function prepareGeneratedRoot(config: McpConfig): Promise<string> {
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(expected) !== expected) throw new Error('生成目录已经变化或不是普通目录');
   return expected;
 }
+// 访问登记册前创建并保护凭据目录。
 async function privateDirectory(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const info = await lstat(directory);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('凭据目录必须是普通目录');
   await chmod(directory, 0o700);
 }
+// 登记或删除前读取并校验私有登记册。
 async function readRegistry(directory: string): Promise<Registry> {
   let handle;
   try { handle = await open(join(directory, 'generated-files.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
@@ -47,6 +52,7 @@ async function readRegistry(directory: string): Promise<Registry> {
   } catch { throw new Error('生成文件记录损坏或权限不安全'); }
   finally { await handle.close(); }
 }
+// 登记变化后以临时文件替换方式保存登记册。
 async function writeRegistry(directory: string, registry: Registry) {
   const temporary = join(directory, `.generated-files.${randomUUID()}.tmp`);
   let handle;
@@ -62,6 +68,7 @@ async function writeRegistry(directory: string, registry: Registry) {
     await unlink(temporary).catch(error => { if (error.code !== 'ENOENT') throw error; });
   }
 }
+// 转换完成后核验来源与输出并持久登记。
 export async function recordGeneratedFile(path: string, source: CheckedFile, config: McpConfig, directory: string) {
   return serialized(directory, async () => {
     await revalidateAllowedFile(source, config.allowedRoots);
@@ -79,9 +86,11 @@ export async function recordGeneratedFile(path: string, source: CheckedFile, con
     return output;
   });
 }
+// 重新检查文件时比较保存的身份信息。
 function sameIdentity(a: FileIdentity, b: FileIdentity) {
   return a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtime_ms === b.mtime_ms;
 }
+// 用户请求清理时仅删除身份匹配的登记输出。
 export async function deleteGeneratedFile(path: string, config: McpConfig, directory: string): Promise<void> {
   return serialized(directory, async () => {
     await privateDirectory(directory);

@@ -20,4 +20,5 @@ export const inspectVideoOutput = z.object({
 export const validatePosterOutput = z.object({ path: z.string(), format: z.enum(['jpeg', 'png', 'webp']), mime_type: z.enum(['image/jpeg', 'image/png', 'image/webp']), byte_size: z.number().int().nonnegative(), identity: fileIdentity });
 export const convertVideoOutput = z.object({ output_path: z.string(), duration_seconds: z.number().int().positive().nullable(), identity: fileIdentity, source_identity: fileIdentity });
 export const deleteGeneratedVideoOutput = z.object({ path: z.string(), deleted: z.literal(true) });
+// 描述媒体检查和生成文件登记时使用的可序列化文件身份。
 export type FileIdentity = z.infer<typeof fileIdentity>;

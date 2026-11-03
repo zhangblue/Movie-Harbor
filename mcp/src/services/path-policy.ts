@@ -1,12 +1,14 @@
 import { realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, sep } from 'node:path';
 
+// 记录允许目录内文件的原路径、真实路径与身份。
 export interface CheckedFile {
   requestedPath: string;
   realPath: string;
   identity: { dev: bigint; ino: bigint; size: number; mtimeMs: number };
 }
 
+// 访问本地文件前解析真实路径并核对允许目录。
 export async function inspectAllowedFile(path: string, roots: string[]): Promise<CheckedFile> {
   const realPath = await realpath(path);
   const allowedRoots = await Promise.all(roots.map(root => realpath(root)));
@@ -24,6 +26,7 @@ export async function inspectAllowedFile(path: string, roots: string[]): Promise
   };
 }
 
+// 使用前后重新检查路径与身份以发现替换。
 export async function revalidateAllowedFile(file: CheckedFile, roots: string[]): Promise<void> {
   let current: CheckedFile;
   try {

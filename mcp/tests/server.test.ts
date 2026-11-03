@@ -8,12 +8,13 @@ import { fileURLToPath } from 'node:url';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
 
+// 验证服务器场景：'server exposes identity, workflow instructions, complete atomic tool schemas and structured output in memory'。
 test('server exposes identity, workflow instructions, complete atomic tool schemas and structured output in memory', async () => {
   const config = { baseUrl:new URL('http://localhost/'),apiKey:'mhmcp_secret',credentialDirectory:'/tmp/credentials',allowedRoots:[],generatedRoot:'/tmp/generated',requestTimeoutMs:1000 };
-  const clientApi = { async json(method:string,path:string) {
+  const clientApi = { /* 内存服务器测试时返回固定的电影列表并拒绝其他请求。 */ async json(method:string,path:string) {
     if(method === 'GET' && path === '/api/admin/movies') return [];
     throw new Error(`unexpected ${method} ${path}`);
-  }, async upload(){ throw new Error('unexpected upload'); } };
+  }, /* 只读测试中出现上传请求即报错。 */ async upload(){ throw new Error('unexpected upload'); } };
   const server = buildServer({ config, credentialDirectory:'/tmp/credentials', client:clientApi } as any);
   const client = new Client({name:'movie-harbor-test',version:'1.0.0'});
   const [clientEnd,serverEnd] = InMemoryTransport.createLinkedPair();
@@ -53,6 +54,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
   } finally { await client.close(); await server.close(); }
 });
 
+// 验证相关功能场景：'stdio entry emits only protocol JSON on stdout and keeps startup diagnostics off stdout'。
 test('stdio entry emits only protocol JSON on stdout and keeps startup diagnostics off stdout', async t => {
   const mcpRoot=fileURLToPath(new URL('../',import.meta.url));
   const build=await mkdtemp(join(mcpRoot,'.server-build-'));

@@ -16,10 +16,13 @@ const messages = {
   invalid_path: '请求路径必须位于受控管理接口内',
   file_changed: '文件已经变化或不可读取，请重新检查',
 } as const;
+// 限定客户端对外暴露的稳定错误代码。
 export type ClientErrorCode = keyof typeof messages;
 
+// 封装网络和 API 失败时可安全展示的错误。
 export class MovieHarborClientError extends Error {
   readonly fields: string[];
+  // 构造客户端错误时保存代码、状态和安全字段。
   constructor(readonly code: ClientErrorCode, readonly status?: number, fields: string[] = []) {
     super(messages[code]);
     this.name = 'MovieHarborClientError';
@@ -27,6 +30,7 @@ export class MovieHarborClientError extends Error {
   }
 }
 
+// 收到非成功 HTTP 响应时映射安全中文错误并过滤远端字段。
 export function mapHttpError(status: number, payload: unknown, apiKey: string): MovieHarborClientError {
   const codes: Record<number, ClientErrorCode> = {
     401: 'auth_required', 403: 'forbidden', 404: 'not_found', 409: 'version_conflict',
