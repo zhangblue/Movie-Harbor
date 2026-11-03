@@ -124,7 +124,8 @@ export interface MovieListQuery { status?: ContentStatus; name?: string }
 export interface VersionRequest { version: number }
 // 管理端切换内容访问范围时提交的版本和私密标记。
 export interface PrivacyRequest { version: number; is_private: boolean }
-// 管理端修改草稿电影时提交版本及可选字段，空值用于显式清除。
+// 管理端修改草稿电影时提交版本及可选字段：name、synopsis 的 null 被拒绝，
+// genre_ids 的 null 保留原关联，只有 year、duration_seconds 的 null 清除对应数值。
 export interface UpdateMovieRequest {
   version: number; name?: string | null; synopsis?: string | null; year?: number | null;
   duration_seconds?: number | null; genre_ids?: string[] | null;
@@ -154,11 +155,13 @@ export interface CreateSeasonRequest { version: number; number: number }
 export interface UpdateSeasonRequest { version: number; number: number }
 // 管理端新增单集时提交剧集版本、集序号和管理员输入的名称。
 export interface CreateEpisodeRequest { version: number; number: number; name: string }
-// 管理端修改草稿剧集时提交版本及可选内容字段。
+// 管理端修改草稿剧集时提交版本及可选字段：name、synopsis 的 null 被拒绝，
+// genre_ids 的 null 保留原关联，year 的 null 清除年份。
 export interface UpdateSeriesRequest {
   version: number; name?: string | null; synopsis?: string | null; year?: number | null; genre_ids?: string[] | null;
 }
-// 管理端修改草稿单集时提交版本及可选序号、名称和时长。
+// 管理端修改草稿单集时提交版本及可选字段：number、name 的 null 被拒绝，
+// duration_seconds 的 null 清除时长。
 export interface UpdateEpisodeRequest {
   version: number; number?: number | null; name?: string | null; duration_seconds?: number | null;
 }
