@@ -165,7 +165,7 @@ where
         mut stored,
     } = pending;
     let tx = db.begin().await?;
-    // Cancellation or an uncertain database result must retain the existing recovery marker.
+    // 数据库写入开始前启用取消保护：中途取消或结果未知时保留正式文件和恢复标记。
     stored.begin_database_write();
     let result: Result<media_asset::Model, MediaError> = async {
         let asset = insert_asset(&tx, id, kind, &original_name, &stored).await?;
@@ -183,10 +183,11 @@ where
         }
     };
     if let Err(error) = tx.commit().await {
-        // COMMIT may still succeed server-side: retain the file and pending marker for recovery.
-        // A fresh SELECT returning no row cannot prove that an in-flight commit has failed.
+        // 提交可能已在服务端成功，因此保留文件和待登记标记供恢复处理。
+        // 此时重新查询未查到记录也不能证明进行中的提交已失败。
         return Err(error.into());
     }
+    // 提交成功后先通知再清除标记；任一步失败都返回错误，已登记文件不得删除，遗留标记供恢复处理。
     stored.notify_database_committed()?;
     tokio::task::yield_now().await;
     stored.mark_registered()?;

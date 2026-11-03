@@ -61,7 +61,7 @@ async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
         return None;
     }
     let uri = single_header(headers, "x-forwarded-uri")?;
-    // Generated URLs are ASCII and need no decoding. Never normalize an attacker-controlled path.
+    // 系统生成的 URL 是 ASCII 且无需解码，不归一化不可信请求路径。
     if !uri.is_ascii() || uri.contains('#') {
         return None;
     }
@@ -83,6 +83,7 @@ async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
         return None;
     }
     let owner = &rows[0];
+    // 先检查管理员会话；有效管理员可预览各状态的媒体。
     if auth::session::authenticate(&state.db, headers)
         .await
         .is_ok()
@@ -95,6 +96,7 @@ async fn is_allowed(state: &AuthState, headers: &HeaderMap) -> Option<bool> {
     if !owner.try_get::<bool>("", "is_private").ok()? {
         return Some(true);
     }
+    // 仅已发布的私密媒体需要普通用户会话；未登录或认证失败不得放行。
     Some(
         viewer_auth::session::authenticate_optional(&state.db, headers)
             .await

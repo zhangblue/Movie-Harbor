@@ -716,7 +716,8 @@ pub async fn delete_episode(
         expected_episode_version: expected_version,
     } = command;
     require_positive_i64(expected_version)?;
-    // 先按层级锁定目标，再暂存独占视频；数据库提交失败时删除流程会恢复已暂存的文件。
+    // 先按层级锁定目标，再暂存独占视频；提交前操作失败时恢复文件。
+    // 提交结果未知时保留隔离副本和清单，由启动恢复根据数据库引用判断。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -751,7 +752,8 @@ pub async fn delete_series(
     expected_version: i64,
 ) -> Result<DeleteResultResponse, SeriesError> {
     require_positive_i64(expected_version)?;
-    // 整剧删除先锁定剧集及全部下级，再暂存海报和视频；提交失败时删除流程会恢复这些文件。
+    // 整剧删除先锁定剧集及全部下级，再暂存海报和视频；提交前操作失败时恢复文件。
+    // 提交结果未知时保留隔离副本和清单，由启动恢复根据数据库引用判断。
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
@@ -800,7 +802,7 @@ async fn finish_delete_transaction(
     deleted_media_count: usize,
     database_result: Result<(), SeriesError>,
 ) -> Result<DeleteResultResponse, SeriesError> {
-    // 数据库提交前只暂存文件；事务失败可恢复，提交成功后才执行不可逆的物理删除。
+    // 提交前操作失败时恢复暂存文件；提交结果未知则保留清单，成功后才物理删除。
     match removal::finish_delete_transaction(tx, staged, deleted_media_count, database_result).await
     {
         Ok(count) => Ok(DeleteResultResponse {
@@ -952,7 +954,7 @@ async fn episode_envelope<C: ConnectionTrait>(
     })
 }
 
-/// 在发布剧集前检查必需字段、题材及海报是否满足发布条件。
+/// 在发布剧集前检查名称，以及至少一集已发布且拥有受支持、可访问的视频；海报可为空。
 async fn validate_series_publish<C: ConnectionTrait>(
     db: &C,
     storage: &LocalMediaStorage,
