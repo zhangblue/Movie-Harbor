@@ -23,9 +23,11 @@ use support::TestDatabase;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在测试准备阶段创建临时目录或测试对象。
     fn new() -> Self {
         let path =
             std::env::temp_dir().join(format!("movie_harbor_admin_content_{}", Uuid::new_v4()));
@@ -35,17 +37,20 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试配置和文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理该测试创建的临时资源。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在测试准备阶段构造应用配置。
 fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -64,6 +69,7 @@ fn config(root: &Path) -> Config {
     }
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     let mut builder = Request::builder().uri(uri).header("host", "harbor.test");
     if let Some(cookie) = cookie {
@@ -76,6 +82,7 @@ async fn request(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> String {
     let mut request = Request::builder()
         .method("POST")
@@ -101,16 +108,19 @@ async fn credentials(app: &Router) -> String {
         .to_owned()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在列表场景发送查询并解析返回数据供断言。
 async fn list(app: &Router, cookie: &str, query: &str) -> Value {
     let response = request(app, &format!("/api/admin/contents{query}"), Some(cookie)).await;
     assert_eq!(response.status(), StatusCode::OK, "{query}");
     body(response).await
 }
 
+/// 在快照并发测试中等待列表查询进入数据库锁等待。
 async fn wait_for_locked_items_query(db: &DatabaseConnection) {
     let marker = ADMIN_CONTENT_ITEMS_SQL
         .trim()
@@ -147,6 +157,7 @@ SELECT EXISTS (
     panic!("admin content items query did not block on media_asset as expected");
 }
 
+/// 在列表测试前准备包含多种内容的隔离数据库与应用。
 async fn seeded_app() -> (TestDatabase, TempRoot, Router) {
     let db = TestDatabase::migrated("admin_content").await;
     db.execute_unprepared(
@@ -187,6 +198,7 @@ INSERT INTO series (id, name, status, version, created_at) VALUES
     (db, root, app)
 }
 
+/// 在排序断言前提取列表中的类型、名称和标识。
 fn tuples(payload: &Value) -> Vec<(String, String, String)> {
     payload["items"]
         .as_array()
@@ -203,6 +215,7 @@ fn tuples(payload: &Value) -> Vec<(String, String, String)> {
 }
 
 #[tokio::test]
+/// 验证管理内容列表要求认证，并按固定页大小稳定排序。
 async fn admin_content_is_authenticated_paginated_and_stably_sorted() {
     let (_db, _root, app) = seeded_app().await;
     let cookie = credentials(&app).await;
@@ -344,6 +357,7 @@ async fn admin_content_is_authenticated_paginated_and_stably_sorted() {
 }
 
 #[tokio::test]
+/// 验证管理列表筛选与名称字面搜索的组合结果。
 async fn admin_content_filters_and_literal_name_search_are_applied() {
     let (_db, _root, app) = seeded_app().await;
     let cookie = credentials(&app).await;
@@ -365,6 +379,7 @@ async fn admin_content_filters_and_literal_name_search_are_applied() {
 }
 
 #[tokio::test]
+/// 验证无效筛选条件及页码边界被拒绝。
 async fn admin_content_rejects_invalid_filters_and_page_boundaries() {
     let (_db, _root, app) = seeded_app().await;
     let cookie = credentials(&app).await;
@@ -380,6 +395,7 @@ async fn admin_content_rejects_invalid_filters_and_page_boundaries() {
 }
 
 #[tokio::test]
+/// 验证管理内容列表只暴露受控海报地址。
 async fn admin_content_only_exposes_controlled_poster_urls() {
     let db = TestDatabase::migrated("admin_content_posters").await;
     db.execute_unprepared(
@@ -411,6 +427,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
 }
 
 #[tokio::test]
+/// 验证并发修改时列表总数与项目来自同一数据库快照。
 async fn admin_content_total_and_items_share_one_snapshot() {
     let db = TestDatabase::migrated("admin_content_snapshot").await;
     db.execute_unprepared(
@@ -424,6 +441,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
     .await
     .unwrap();
 
+    // 锁住媒体表使列表读取停在项目查询，随后可在同一窗口修改内容。
     let blocker = db.begin().await.unwrap();
     blocker
         .execute_unprepared("LOCK TABLE media_asset IN ACCESS EXCLUSIVE MODE")
@@ -446,6 +464,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, created_at) VALUES
         .unwrap()
     });
 
+    // 确认列表确实进入锁等待后再修改数据，避免测试依赖调度时序。
     wait_for_locked_items_query(&db).await;
     blocker
         .execute_unprepared(
@@ -458,6 +477,7 @@ INSERT INTO movie (id, name, status, created_at) VALUES
         )
         .await
         .unwrap();
+    // 提交新数据并释放锁，后续断言检查列表总数与项目仍来自原快照。
     blocker.commit().await.unwrap();
 
     let page = tokio::time::timeout(std::time::Duration::from_secs(3), list_task)
@@ -469,6 +489,7 @@ INSERT INTO movie (id, name, status, created_at) VALUES
     assert_eq!(page.items[0].name, "Old movie");
 }
 #[tokio::test]
+/// 验证私密筛选同时作用于电影、剧集及总数。
 async fn private_admin_content_filter_applies_to_both_kinds_and_totals() {
     let (db, _root, app) = seeded_app().await;
     db.execute_unprepared("UPDATE movie SET is_private=true WHERE name IN ('Movie 01','Movie 07','Movie 10'); UPDATE series SET is_private=true WHERE name IN ('100%_! Series','Series 02','Series 03');").await.unwrap();

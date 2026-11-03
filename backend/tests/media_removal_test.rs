@@ -17,9 +17,11 @@ use uuid::Uuid;
 
 mod support;
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在测试准备阶段创建临时媒体目录。
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("movie_harbor_removal_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -28,23 +30,27 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理测试创建的临时目录。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在删除测试前创建本地媒体存储和隔离临时目录。
 async fn storage_fixture() -> (LocalMediaStorage, TempRoot) {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
     (storage, root)
 }
 
+/// 在文件删除测试前写入指定内容并构造受控媒体身份。
 async fn registered_file(root: &Path, storage_key: &str, bytes: &[u8]) -> OwnedMedia {
     let path = root.join(storage_key);
     tokio::fs::create_dir_all(path.parent().unwrap())
@@ -57,6 +63,7 @@ async fn registered_file(root: &Path, storage_key: &str, bytes: &[u8]) -> OwnedM
     }
 }
 
+/// 在数据库删除测试前登记指定存储键的媒体资产记录。
 async fn registered_asset(
     db: &sea_orm::DatabaseConnection,
     storage_key: &str,
@@ -76,6 +83,7 @@ async fn registered_asset(
     .unwrap()
 }
 
+/// 在恢复或清理断言前列出暂存操作目录。
 async fn operation_directories(root: &Path) -> Vec<PathBuf> {
     let mut reader = tokio::fs::read_dir(root.join(".operations")).await.unwrap();
     let mut entries = Vec::new();
@@ -88,6 +96,7 @@ async fn operation_directories(root: &Path) -> Vec<PathBuf> {
 }
 
 #[tokio::test]
+/// 验证公共删除辅助逻辑加载并删除媒体记录和文件。
 async fn common_delete_helpers_load_and_delete_media_assets() {
     let database = support::TestDatabase::migrated("removal_common_database_helpers").await;
     let db = database.connection();
@@ -124,6 +133,7 @@ async fn common_delete_helpers_load_and_delete_media_assets() {
 }
 
 #[tokio::test]
+/// 验证数据库操作失败时删除事务回滚并恢复暂存文件。
 async fn common_delete_helpers_roll_back_and_restore_when_database_operation_fails() {
     let database = support::TestDatabase::migrated("removal_common_operation_failure").await;
     let db = database.connection();
@@ -182,6 +192,7 @@ async fn common_delete_helpers_roll_back_and_restore_when_database_operation_fai
 }
 
 #[tokio::test]
+/// 验证删除事务提交并返回删除的媒体数量。
 async fn common_delete_helpers_commit_and_return_deleted_media_count() {
     let database = support::TestDatabase::migrated("removal_common_commit").await;
     let db = database.connection();
@@ -206,12 +217,14 @@ async fn common_delete_helpers_commit_and_return_deleted_media_count() {
 }
 
 #[cfg(unix)]
+/// 在暂存完成后使操作目录只读，以注入收尾故障。
 struct MakeOperationReadOnlyAfterStage {
     root: PathBuf,
 }
 
 #[cfg(unix)]
 impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    /// 在暂存重命名后将操作目录设为只读，触发提交后的收尾故障。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::AfterStageRename(_)) {
             use std::os::unix::fs::PermissionsExt;
@@ -228,6 +241,7 @@ impl StorageHooks for MakeOperationReadOnlyAfterStage {
 
 #[cfg(unix)]
 #[tokio::test]
+/// 验证提交后的清理故障被归类为收尾失败。
 async fn common_delete_helpers_classify_post_commit_cleanup_failure_as_finalize() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -267,6 +281,7 @@ async fn common_delete_helpers_classify_post_commit_cleanup_failure_as_finalize(
 }
 
 #[tokio::test]
+/// 验证暂存删除可恢复或最终移除受控文件。
 async fn staged_removal_can_restore_or_finish_owned_files() {
     let (storage, root) = storage_fixture().await;
     let asset = registered_file(
@@ -295,23 +310,27 @@ async fn staged_removal_can_restore_or_finish_owned_files() {
     assert!(operation_directories(root.as_ref()).await.is_empty());
 }
 
+/// 在删除多个文件时注入第二次移动失败。
 struct FailSecondMove {
     root: PathBuf,
     moves: AtomicUsize,
     saw_manifest: AtomicBool,
 }
 
+/// 在重命名后的目录同步阶段注入一次失败。
 struct FailPostRenameSync {
     failed: AtomicBool,
 }
 
 impl StorageHooks for FailPostRenameSync {
+    /// 在暂存后同步时按测试设置返回一次注入失败。
     fn fail_next_post_stage_sync(&self) -> bool {
         !self.failed.swap(true, Ordering::SeqCst)
     }
 }
 
 #[tokio::test]
+/// 验证重命名后的同步失败会恢复当前文件。
 async fn post_rename_sync_failure_restores_the_current_file() {
     let root = TempRoot::new();
     let hooks = Arc::new(FailPostRenameSync {
@@ -340,12 +359,14 @@ async fn post_rename_sync_failure_restores_the_current_file() {
     assert!(operation_directories(root.as_ref()).await.is_empty());
 }
 
+/// 在暂存故障中保留数据，以验证清单不会被错误清除。
 struct LeaveResidualStagedData {
     root: PathBuf,
     failed: AtomicBool,
 }
 
 impl StorageHooks for LeaveResidualStagedData {
+    /// 在暂存重命名后写入额外残留，验证关闭时保留清单。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::AfterStageRename(_)) {
             let operation = std::fs::read_dir(self.root.join(".operations"))?
@@ -357,12 +378,14 @@ impl StorageHooks for LeaveResidualStagedData {
         Ok(())
     }
 
+    /// 在暂存后同步时按测试设置返回一次注入失败。
     fn fail_next_post_stage_sync(&self) -> bool {
         !self.failed.swap(true, Ordering::SeqCst)
     }
 }
 
 #[tokio::test]
+/// 验证暂存数据残留时关闭操作保留恢复清单。
 async fn close_with_residual_staged_data_preserves_the_manifest() {
     let root = TempRoot::new();
     let storage_key = "video/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.mp4";
@@ -398,6 +421,7 @@ async fn close_with_residual_staged_data_preserves_the_manifest() {
 }
 
 impl StorageHooks for FailSecondMove {
+    /// 在暂存前记录清单是否存在，并在第二次移动前注入失败。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if let StorageEvent::BeforeStage(_) = event {
             let entries = std::fs::read_dir(self.root.join(".operations"))?;
@@ -416,6 +440,7 @@ impl StorageHooks for FailSecondMove {
 }
 
 #[tokio::test]
+/// 验证第二次移动失败会恢复第一个文件并清除操作目录。
 async fn second_move_failure_restores_the_first_file_and_removes_the_operation() {
     let root = TempRoot::new();
     let hooks = Arc::new(FailSecondMove {
@@ -460,6 +485,7 @@ async fn second_move_failure_restores_the_first_file_and_removes_the_operation()
 }
 
 #[tokio::test]
+/// 验证暂存前拒绝非法路径和非普通文件而不移动任何文件。
 async fn stage_rejects_invalid_and_non_regular_paths_before_moving_any_file() {
     let (storage, root) = storage_fixture().await;
     let good = registered_file(
@@ -496,6 +522,7 @@ async fn stage_rejects_invalid_and_non_regular_paths_before_moving_any_file() {
 
 #[cfg(unix)]
 #[tokio::test]
+/// 验证暂存前拒绝逃逸的符号链接而不移动文件。
 async fn stage_rejects_a_symlink_escape_before_moving_any_file() {
     let (storage, root) = storage_fixture().await;
     let good = registered_file(
@@ -527,6 +554,7 @@ async fn stage_rejects_a_symlink_escape_before_moving_any_file() {
 }
 
 #[tokio::test]
+/// 验证缺失文件产生可重复执行的空删除操作。
 async fn missing_files_are_idempotent_empty_operations() {
     let (storage, root) = storage_fixture().await;
     let missing = OwnedMedia {
@@ -556,6 +584,7 @@ async fn missing_files_are_idempotent_empty_operations() {
 }
 
 #[tokio::test]
+/// 验证恢复按数据库引用恢复或移除文件，重复执行保持幂等。
 async fn recover_restores_referenced_files_and_finishes_unreferenced_files_idempotently() {
     let database = support::TestDatabase::migrated("removal_recover").await;
     let db = database.connection();
@@ -628,6 +657,7 @@ async fn recover_restores_referenced_files_and_finishes_unreferenced_files_idemp
 }
 
 #[tokio::test]
+/// 验证恢复拒绝清单中的逃逸存储键且不触及外部文件。
 async fn recover_rejects_a_manifest_storage_key_escape_without_touching_external_files() {
     let database = support::TestDatabase::migrated("removal_escape").await;
     let db = database.connection();
@@ -668,6 +698,7 @@ async fn recover_rejects_a_manifest_storage_key_escape_without_touching_external
 }
 
 #[tokio::test]
+/// 验证恢复清理清单发布和关闭阶段的安全崩溃残留。
 async fn recover_cleans_safe_manifest_publication_and_close_crash_residue() {
     let database = support::TestDatabase::migrated("removal_crash_residue").await;
     let db = database.connection();
@@ -697,6 +728,7 @@ async fn recover_cleans_safe_manifest_publication_and_close_crash_residue() {
 }
 
 #[tokio::test]
+/// 验证无清单但有暂存证据的操作会被保留。
 async fn recover_retains_manifestless_operations_that_contain_staged_evidence() {
     let database = support::TestDatabase::migrated("removal_missing_manifest").await;
     let db = database.connection();
@@ -717,6 +749,7 @@ async fn recover_retains_manifestless_operations_that_contain_staged_evidence() 
 
 #[cfg(unix)]
 #[tokio::test]
+/// 验证恢复拒绝受引用的暂存符号链接且不发布该链接。
 async fn recover_rejects_a_referenced_staged_symlink_without_publishing_it() {
     let database = support::TestDatabase::migrated("removal_staged_symlink").await;
     let db = database.connection();
@@ -788,6 +821,7 @@ async fn recover_rejects_a_referenced_staged_symlink_without_publishing_it() {
 
 // Catches treating an unconsumed staged poster as an unreferenced file during interrupted cleanup.
 #[tokio::test]
+/// 验证清理事务回滚后恢复暂存海报引用对应文件。
 async fn recover_restores_staged_poster_reference_after_cleanup_rollback() {
     let database = support::TestDatabase::migrated("removal_staged_poster").await;
     let db = database.connection();
@@ -841,6 +875,7 @@ async fn recover_restores_staged_poster_reference_after_cleanup_rollback() {
 
 // COMMIT Err must leave durable evidence; a later recovery chooses restore or finish from final DB references.
 #[tokio::test]
+/// 验证提交结果未知时保留清单，等待依据数据库状态恢复。
 async fn common_delete_commit_unknown_retains_manifest_until_database_state_recovery() {
     use sea_orm::ConnectionTrait;
     for final_reference_exists in [true, false] {

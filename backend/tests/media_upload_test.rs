@@ -48,6 +48,7 @@ const PNG: &[u8] = &[
 
 const HEVC_HVC1_MP4: &[u8] = include_bytes!("fixtures/hevc-hvc1.mp4");
 
+/// 在图片上传测试准备阶段返回 JPEG 样本。
 fn jpeg() -> &'static [u8] {
     static BYTES: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     BYTES.get_or_init(|| {
@@ -59,6 +60,7 @@ fn jpeg() -> &'static [u8] {
     })
 }
 
+/// 在测试准备阶段解码内嵌的媒体样本。
 fn decode_base64(input: &str) -> Vec<u8> {
     let mut output = Vec::new();
     let mut accumulator = 0_u32;
@@ -86,6 +88,7 @@ fn decode_base64(input: &str) -> Vec<u8> {
     output
 }
 
+/// 在 MP4 样本构造时编码指定类型及内容的 atom。
 fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     let mut result = Vec::with_capacity(payload.len() + 8);
     result.extend_from_slice(&u32::try_from(payload.len() + 8).unwrap().to_be_bytes());
@@ -94,6 +97,7 @@ fn atom(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
     result
 }
 
+/// 在容器校验测试中构造不完整 MP4。
 fn incomplete_mp4() -> Vec<u8> {
     let mut ftyp = b"isom\0\0\x02\0isommp42".to_vec();
     ftyp = atom(b"ftyp", &ftyp);
@@ -124,24 +128,28 @@ fn incomplete_mp4() -> Vec<u8> {
     ftyp
 }
 
+/// 在上传测试准备阶段构造有效的最小 MP4。
 fn valid_mp4() -> Vec<u8> {
     decode_base64(
         "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAMObW9vdgAAAGxtdmhkAAAAAAAAAAAAAAAAAAAD6AAAACgAAQAAAQAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAjl0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAABAAAAAAAAACgAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAABAAAAAQAAAAAAAkZWR0cwAAABxlbHN0AAAAAAAAAAEAAAAoAAAAAAABAAAAAAGxbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAAAyAAAAAgBVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABXG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAARxzdGJsAAAAuHN0c2QAAAAAAAAAAQAAAKhhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAABAAEABIAAAASAAAAAAAAAABFExhdmM2My4xLjEwMSBsaWJ4MjY0AAAAAAAAAAAAAAAAGP//AAAALmF2Y0MBQsAK/+EAFmdCwArZHsBEAAADAAQAAAMAyDxImSABAAVoy4PLIAAAABBwYXNwAAAAAQAAAAEAAAAUYnRydAAAAAAAAfZYAAAAAAAAABhzdHRzAAAAAAAAAAEAAAABAAACAAAAABxzdHNjAAAAAAAAAAEAAAABAAAAAQAAAAEAAAAUc3RzegAAAAAAAAKDAAAAAQAAABRzdGNvAAAAAAAAAAEAAAM+AAAAYXVkdGEAAABZbWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAsaWxzdAAAACSpdG9vAAAAHGRhdGEAAAABAAAAAExhdmY2My4xLjEwMQAAAAhmcmVlAAACi21kYXQAAAJxBgX//23cRem95tlIt5Ys2CDZI+7veDI2NCAtIGNvcmUgMTY1IHIzMjIyIGIzNTYwNWEgLSBILjI2NC9NUEVHLTQgQVZDIGNvZGVjIC0gQ29weWxlZnQgMjAwMy0yMDI1IC0gaHR0cDovL3d3dy52aWRlb2xhbi5vcmcveDI2NC5odG1sIC0gb3B0aW9uczogY2FiYWM9MCByZWY9MyBkZWJsb2NrPTE6MDowIGFuYWx5c2U9MHgxOjB4MTExIG1lPWhleCBzdWJtZT03IHBzeT0xIHBzeV9yZD0xLjAwOjAuMDAgbWl4ZWRfcmVmPTEgbWVfcmFuZ2U9MTYgY2hyb21hX21lPTEgdHJlbGxpcz0xIDh4OGRjdD0wIGNxbT0wIGRlYWR6b25lPTIxLDExIGZhc3RfcHNraXA9MSBjaHJvbWFfcXBfb2Zmc2V0PS0yIHRocmVhZHM9MSBsb29rYWhlYWRfdGhyZWFkcz0xIHNsaWNlZF90aHJlYWRzPTAgbnI9MCBkZWNpbWF0ZT0xIGludGVybGFjZWQ9MCBibHVyYXlfY29tcGF0PTAgY29uc3RyYWluZWRfaW50cmE9MCBiZnJhbWVzPTAgd2VpZ2h0cD0wIGtleWludD0yNTAga2V5aW50X21pbj0yNSBzY2VuZWN1dD00MCBpbnRyYV9yZWZyZXNoPTAgcmNfbG9va2FoZWFkPTQwIHJjPWNyZiBtYnRyZWU9MSBjcmY9MjMuMCBxY29tcD0wLjYwIHFwbWluPTAgcXBtYXg9NjkgcXBzdGVwPTQgaXBfcmF0aW89MS40MCBhcT0xOjEuMDAAgAAAAApliIQK8mKAAKe+",
     )
 }
 
+/// 在兼容性测试中加载含 H.264 基线和 AAC 的 MP4 样本。
 fn ffmpeg_baseline_h264_aac_mp4() -> Vec<u8> {
     decode_base64(
         "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",
     )
 }
 
+/// 在校验测试中构造损坏的 H.264 高级配置样本。
 fn corrupt_ffmpeg_high_h264_mp4_fixture() -> Vec<u8> {
     decode_base64(
         "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",
     )
 }
 
+/// 在兼容性测试中加载 H.264 高级配置 MP4 样本。
 fn ffmpeg_high_h264_mp4() -> Vec<u8> {
     decode_base64(concat!(
         "AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAAvhtZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gy",
@@ -170,6 +178,7 @@ fn ffmpeg_high_h264_mp4() -> Vec<u8> {
     ))
 }
 
+/// 在兼容性测试中构造不带 AVCC 扩展的高级配置样本。
 fn ffmpeg_high_h264_mp4_without_avcc_extensions() -> Vec<u8> {
     let bytes = ffmpeg_high_h264_mp4();
     let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
@@ -180,6 +189,7 @@ fn ffmpeg_high_h264_mp4_without_avcc_extensions() -> Vec<u8> {
     replace_mp4_avcc(bytes, payload)
 }
 
+/// 在图片上传测试准备阶段构造有效 WebP。
 fn valid_webp() -> Vec<u8> {
     let mut bytes = Vec::new();
     image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
@@ -188,6 +198,7 @@ fn valid_webp() -> Vec<u8> {
     bytes
 }
 
+/// 在 WebM 样本构造时编码 EBML 元素。
 fn ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
     assert!(payload.len() < 127);
     let mut result = id.to_vec();
@@ -196,6 +207,7 @@ fn ebml_element(id: &[u8], payload: &[u8]) -> Vec<u8> {
     result
 }
 
+/// 在容器校验测试中构造带结构信息的 WebM。
 fn structured_webm() -> Vec<u8> {
     let doc_type = ebml_element(&[0x42, 0x82], b"webm");
     let header = ebml_element(&[0x1a, 0x45, 0xdf, 0xa3], &doc_type);
@@ -217,6 +229,7 @@ fn structured_webm() -> Vec<u8> {
     [header, segment].concat()
 }
 
+/// 在上传测试准备阶段构造有效 WebM。
 fn valid_webm() -> Vec<u8> {
     decode_base64(concat!(
         "GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAH1EU2bdLpNu4tTq4QV",
@@ -232,6 +245,7 @@ fn valid_webm() -> Vec<u8> {
     ))
 }
 
+/// 在构造 Ogg 页面时计算校验值。
 fn ogg_crc(bytes: &[u8]) -> u32 {
     let mut crc = 0_u32;
     for byte in bytes {
@@ -247,6 +261,7 @@ fn ogg_crc(bytes: &[u8]) -> u32 {
     crc
 }
 
+/// 在 Ogg 视频样本准备阶段构造带校验值的页面。
 fn ogg_page(serial: u32, sequence: u32, header_type: u8, packet: &[u8]) -> Vec<u8> {
     let mut page = b"OggS".to_vec();
     page.extend_from_slice(&[0, header_type]);
@@ -262,6 +277,7 @@ fn ogg_page(serial: u32, sequence: u32, header_type: u8, packet: &[u8]) -> Vec<u
     page
 }
 
+/// 在上传测试准备阶段构造有效 Ogg 视频。
 fn valid_ogg_video() -> Vec<u8> {
     let mut identification = vec![0; 42];
     identification[..7].copy_from_slice(b"\x80theora");
@@ -289,6 +305,7 @@ fn valid_ogg_video() -> Vec<u8> {
     .concat()
 }
 
+/// 在资源限制测试中构造声明样本数异常大的 MP4。
 fn declared_sample_count_bomb() -> Vec<u8> {
     let mut data = atom(b"ftyp", b"isom\0\0\0\0");
     let mut stsz = vec![0; 4];
@@ -300,9 +317,11 @@ fn declared_sample_count_bomb() -> Vec<u8> {
     data
 }
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在上传测试准备阶段创建临时媒体目录。
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("movie_harbor_media_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -311,17 +330,20 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理测试创建的临时目录。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在流式上传测试中按块提供数据并记录读取次数。
 struct Chunks {
     chunks: Vec<Bytes>,
     index: usize,
@@ -330,6 +352,7 @@ struct Chunks {
 }
 
 impl Chunks {
+    /// 在测试准备阶段从静态数据块创建数据源及读取次数计数器。
     fn new(chunks: impl IntoIterator<Item = &'static [u8]>) -> (Self, Arc<AtomicUsize>) {
         let polls = Arc::new(AtomicUsize::new(0));
         (
@@ -343,6 +366,7 @@ impl Chunks {
         )
     }
 
+    /// 在上传测试准备阶段从字节构造可观察的分块数据源。
     fn bytes(bytes: Vec<u8>) -> (Self, Arc<AtomicUsize>) {
         let polls = Arc::new(AtomicUsize::new(0));
         (
@@ -356,6 +380,7 @@ impl Chunks {
         )
     }
 
+    /// 在读取第二块前检查暂存目录，供增量写入测试使用。
     fn inspect_incoming_before_second(mut self, root: &Path) -> Self {
         self.inspect_before_second = Some(root.join(".incoming"));
         self
@@ -363,6 +388,7 @@ impl Chunks {
 }
 
 impl ChunkSource for Chunks {
+    /// 在读取时提供下一块，并按需检查上一块已写入临时文件。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
@@ -384,10 +410,12 @@ impl ChunkSource for Chunks {
     }
 }
 
+/// 在上传并发测试中暂停数据流以控制操作交错。
 struct PausingChunks {
     first: bool,
 }
 
+/// 在上传取消测试中阻塞数据流以保持未完成状态。
 struct BlockingChunks {
     started: Option<tokio::sync::oneshot::Sender<()>>,
     release: Option<tokio::sync::oneshot::Receiver<()>>,
@@ -395,6 +423,7 @@ struct BlockingChunks {
 }
 
 impl ChunkSource for BlockingChunks {
+    /// 在读取第一块时通知测试并等待释放，控制上传与其他操作的交错。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
@@ -414,6 +443,7 @@ impl ChunkSource for BlockingChunks {
 }
 
 impl ChunkSource for PausingChunks {
+    /// 首次读取返回图片，后续保持等待以便测试取消上传。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
@@ -428,24 +458,29 @@ impl ChunkSource for PausingChunks {
     }
 }
 
+/// 在文件清理测试中注入首次删除失败。
 struct FailFirstUnlink {
     failed: AtomicBool,
 }
 
+/// 在替换测试中注入首次暂存失败。
 struct FailFirstStage {
     failed: AtomicBool,
 }
 
+/// 在数据库提交后使操作目录只读，以触发收尾失败。
 struct MakeOperationReadOnlyAfterCommit {
     root: PathBuf,
     operation: Mutex<Option<PathBuf>>,
 }
 
+/// 在数据库提交后注入 incoming 目录同步失败。
 struct FailIncomingSyncAfterCommit {
     committed: AtomicBool,
 }
 
 impl StorageHooks for FailIncomingSyncAfterCommit {
+    /// 在提交事件后对 incoming 目录同步注入失败，模拟提交后故障。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if matches!(event, StorageEvent::DatabaseCommitted(_)) {
             self.committed.store(true, Ordering::SeqCst);
@@ -461,6 +496,7 @@ impl StorageHooks for FailIncomingSyncAfterCommit {
 }
 
 impl StorageHooks for MakeOperationReadOnlyAfterCommit {
+    /// 在数据库提交时将操作目录设为只读，使后续收尾失败。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if !matches!(event, StorageEvent::DatabaseCommitted(_)) {
             return Ok(());
@@ -476,6 +512,7 @@ impl StorageHooks for MakeOperationReadOnlyAfterCommit {
 }
 
 impl StorageHooks for FailFirstStage {
+    /// 在首次暂存前返回权限错误，以检验替换失败的回滚。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if matches!(event, StorageEvent::BeforeStage(_))
             && !self.failed.swap(true, Ordering::SeqCst)
@@ -490,6 +527,7 @@ impl StorageHooks for FailFirstStage {
 }
 
 impl StorageHooks for FailFirstUnlink {
+    /// 在首次删除前返回权限错误，以检验清理错误处理。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if matches!(event, StorageEvent::BeforeUnlink(_))
             && !self.failed.swap(true, Ordering::SeqCst)
@@ -503,13 +541,16 @@ impl StorageHooks for FailFirstUnlink {
     }
 }
 
+/// 在上传测试准备阶段构造指定大小上限的策略。
 fn policy(max_bytes: u64) -> UploadPolicy {
     UploadPolicy::new(max_bytes, ["video/mp4", "video/webm"]).unwrap()
 }
 
+/// 在上传测试准备阶段创建已迁移的隔离数据库连接。
 async fn database() -> DatabaseConnection {
     let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("media_upload_test_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -522,6 +563,7 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+/// 在上传路由测试前构造指向临时目录的应用配置。
 fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -540,6 +582,7 @@ fn config(root: &Path) -> Config {
     }
 }
 
+/// 在替换测试准备阶段创建带可选海报的电影草稿。
 async fn draft_movie(db: &DatabaseConnection, poster_asset_id: Option<Uuid>) -> movie::Model {
     movie::ActiveModel {
         id: Set(Uuid::new_v4()),
@@ -555,10 +598,12 @@ async fn draft_movie(db: &DatabaseConnection, poster_asset_id: Option<Uuid>) -> 
     .unwrap()
 }
 
+/// 在上传或回滚断言前检查指定存储键对应的文件是否存在。
 async fn only_file(root: &Path, key: &str) -> bool {
     tokio::fs::metadata(root.join(key)).await.is_ok()
 }
 
+/// 在清理断言前递归统计目录中的文件数量。
 fn count_files(path: &Path) -> usize {
     std::fs::read_dir(path)
         .unwrap()
@@ -568,6 +613,7 @@ fn count_files(path: &Path) -> usize {
 }
 
 #[cfg(unix)]
+/// 在恢复测试前写入指定资产与文件身份的待处理标记。
 fn write_pending_marker(root: &Path, id: Uuid, key: &str, owner: &Path) -> PathBuf {
     let metadata = std::fs::metadata(owner).unwrap();
     let bytes = std::fs::read(owner).unwrap();
@@ -590,6 +636,7 @@ fn write_pending_marker(root: &Path, id: Uuid, key: &str, owner: &Path) -> PathB
     marker
 }
 
+/// 在恢复测试前将指定文件时间设为过期。
 fn make_stale(path: &Path) {
     let file = std::fs::File::open(path).unwrap();
     file.set_times(
@@ -599,23 +646,27 @@ fn make_stale(path: &Path) {
 }
 
 #[derive(Default)]
+/// 在持久化顺序测试中记录存储事件。
 struct RecordingHooks {
     events: Mutex<Vec<StorageEvent>>,
 }
 
 impl StorageHooks for RecordingHooks {
+    /// 在存储事件发生时记录事件，供持久化顺序断言使用。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         self.events.lock().unwrap().push(event.clone());
         Ok(())
     }
 }
 
+/// 列出恢复和提升测试中注入的对抗性文件替换动作。
 enum AdversarialAction {
     Collision,
     ReplaceParentWithSymlink(PathBuf),
     ReplaceSourceWithSymlink(PathBuf),
 }
 
+/// 在指定存储事件执行对抗性文件替换以检验身份保护。
 struct AdversarialHooks {
     root: PathBuf,
     action: AdversarialAction,
@@ -623,6 +674,7 @@ struct AdversarialHooks {
 }
 
 impl StorageHooks for AdversarialHooks {
+    /// 在提升前制造目标冲突或替换父目录、源文件为符号链接。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if !matches!(event, StorageEvent::BeforePromote(_))
             || self.fired.swap(true, Ordering::SeqCst)
@@ -638,6 +690,7 @@ impl StorageHooks for AdversarialHooks {
             AdversarialAction::ReplaceParentWithSymlink(outside) => {
                 let parent = target.parent().unwrap();
                 let moved = parent.with_extension("moved");
+                // 在提升前替换父目录身份，检查操作不会沿新符号链接逃逸。
                 std::fs::rename(parent, &moved)?;
                 std::os::unix::fs::symlink(outside, parent)?;
                 std::fs::write(outside.join(target.file_name().unwrap()), b"outside")
@@ -649,6 +702,7 @@ impl StorageHooks for AdversarialHooks {
                     .into_iter()
                     .find(|path| path.extension() == Some(std::ffi::OsStr::new("part")))
                     .ok_or_else(|| std::io::Error::other("missing upload part"))?;
+                // 将已准备的分片换成外部符号链接，验证提升会拒绝身份变化。
                 std::fs::remove_file(&part)?;
                 std::os::unix::fs::symlink(outside, part)
             }
@@ -656,10 +710,12 @@ impl StorageHooks for AdversarialHooks {
     }
 }
 
+/// 记录数据库提交事件，供取消与恢复交错测试等待提交阶段。
 struct PauseAfterDatabaseCommit {
     commits: AtomicUsize,
 }
 
+/// 在删除受控文件前替换文件身份，以检验不会误删新文件。
 struct ReplaceAtOwnedUnlink {
     root: PathBuf,
     replaced: AtomicBool,
@@ -668,6 +724,7 @@ struct ReplaceAtOwnedUnlink {
 }
 
 impl StorageHooks for ReplaceAtOwnedUnlink {
+    /// 在删除前保留原文件并换入无关文件，检验删除是否绑定身份。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         let StorageEvent::BeforeUnlink(key) = event else {
             return Ok(());
@@ -685,12 +742,14 @@ impl StorageHooks for ReplaceAtOwnedUnlink {
         );
         *self.key.lock().unwrap() = Some(key.clone());
         let formal = self.root.join(key);
+        // 保留原 inode 并在原路径写入无关文件，检验后续清理不误删替代品。
         std::fs::rename(&formal, formal.with_extension("owned-original"))?;
         std::fs::write(formal, b"UNRELATED REPLACEMENT")
     }
 }
 
 impl StorageHooks for PauseAfterDatabaseCommit {
+    /// 在数据库提交事件发生时递增计数，供测试判断提交已发生。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if matches!(event, StorageEvent::DatabaseCommitted(_)) {
             self.commits.fetch_add(1, Ordering::SeqCst);
@@ -699,6 +758,7 @@ impl StorageHooks for PauseAfterDatabaseCommit {
     }
 }
 
+/// 在上传路由测试中构造并发送认证 JSON 请求。
 async fn json_request(
     app: &Router,
     method: &str,
@@ -729,6 +789,7 @@ async fn json_request(
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在路由测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let login = json_request(
         app,
@@ -763,6 +824,7 @@ async fn credentials(app: &Router) -> (String, String) {
     (cookie, body["csrf_token"].as_str().unwrap().to_owned())
 }
 
+/// 在上传路由测试中构造 multipart 请求。
 fn multipart_request(
     path: String,
     cookie: Option<&str>,
@@ -780,6 +842,7 @@ fn multipart_request(
     )
 }
 
+/// 在上传路由测试中构造指定文件元数据和内容的 multipart 请求。
 fn multipart_file_request(
     path: String,
     cookie: Option<&str>,
@@ -817,6 +880,7 @@ fn multipart_file_request(
     request
 }
 
+/// 在协议边界测试中发送自定义原始 multipart 请求。
 fn raw_multipart_request(
     path: String,
     cookie: &str,
@@ -845,6 +909,7 @@ fn raw_multipart_request(
 
 // Catches buffering the entire body before writing and using the user filename as a disk path.
 #[tokio::test]
+/// 验证分块上传增量写入并生成不透明系统存储键。
 async fn chunks_are_written_incrementally_to_an_opaque_system_key() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -881,6 +946,7 @@ async fn chunks_are_written_incrementally_to_an_opaque_system_key() {
 
 // Catches two storage mutations running concurrently inside one storage instance.
 #[tokio::test]
+/// 验证已提升文件完成处理前其他存储修改保持串行。
 async fn storage_mutations_are_serialized_until_the_promoted_file_is_resolved() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -941,6 +1007,7 @@ async fn storage_mutations_are_serialized_until_the_promoted_file_is_resolved() 
 // Catches starting with a media root writable by other OS accounts or a public quarantine.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证媒体存储要求独占写权限和私有隔离目录。
 async fn storage_requires_exclusive_write_permissions_and_private_quarantine() {
     let unsafe_root = TempRoot::new();
     std::fs::set_permissions(unsafe_root.as_ref(), std::fs::Permissions::from_mode(0o777)).unwrap();
@@ -963,6 +1030,7 @@ async fn storage_requires_exclusive_write_permissions_and_private_quarantine() {
 // Catches a process crash after a random quarantine claim but before unlink.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证启动恢复持久化随机隔离声明以便重试。
 async fn startup_restores_a_durable_random_quarantine_claim_for_retry() {
     let root = TempRoot::new();
     let resource = Uuid::new_v4();
@@ -999,6 +1067,7 @@ async fn startup_restores_a_durable_random_quarantine_claim_for_retry() {
 
 // Catches replacing a destination that appears after a preflight existence check.
 #[tokio::test]
+/// 验证提升文件是原子的且遇到目标冲突不覆盖。
 async fn promotion_is_atomic_and_never_overwrites_a_collision() {
     let root = TempRoot::new();
     let hooks = Arc::new(AdversarialHooks {
@@ -1036,6 +1105,7 @@ async fn promotion_is_atomic_and_never_overwrites_a_collision() {
 // Catches path-based rename following a parent changed to an external symlink mid-operation.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证提交期间替换的父目录符号链接不会被提升操作跟随。
 async fn promotion_does_not_follow_a_parent_symlink_substituted_during_commit() {
     let root = TempRoot::new();
     let outside = TempRoot::new();
@@ -1074,6 +1144,7 @@ async fn promotion_does_not_follow_a_parent_symlink_substituted_during_commit() 
 // Catches promotion renaming an attacker-substituted source symlink after validating another inode.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证提升拒绝已被外部符号链接替换的源分片。
 async fn promotion_rejects_a_source_part_replaced_by_an_external_symlink() {
     let root = TempRoot::new();
     let outside = TempRoot::new();
@@ -1107,6 +1178,7 @@ async fn promotion_rejects_a_source_part_replaced_by_an_external_symlink() {
 
 // Catches omitting a file/directory fsync or syncing cross-directory rename endpoints out of order.
 #[tokio::test]
+/// 验证持久提升按顺序同步新父目录、源和目标。
 async fn durable_promotion_syncs_created_parents_source_and_destination_in_order() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1158,6 +1230,7 @@ async fn durable_promotion_syncs_created_parents_source_and_destination_in_order
 
 // Catches cancellation skipping explicit async error cleanup and leaking a part file.
 #[tokio::test]
+/// 验证取消上传后删除 incoming 临时分片。
 async fn cancelling_an_upload_removes_its_incoming_part_file() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -1201,6 +1274,7 @@ async fn cancelling_an_upload_removes_its_incoming_part_file() {
 
 // Catches an unsafe startup sweep deleting fresh/in-progress files or scanning formal media.
 #[tokio::test]
+/// 验证恢复只清理过期 incoming 分片。
 async fn recovery_sweeps_only_stale_incoming_part_files() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1235,6 +1309,7 @@ async fn recovery_sweeps_only_stale_incoming_part_files() {
 
 // Catches one truncated marker aborting startup recovery or preventing safe entries from sweeping.
 #[tokio::test]
+/// 验证无效恢复标记被保留且不阻断其他扫描。
 async fn invalid_recovery_markers_are_retained_without_aborting_the_sweep() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1263,6 +1338,7 @@ async fn invalid_recovery_markers_are_retained_without_aborting_the_sweep() {
 // Catches crash-before-promotion recovery deleting an unrelated destination collision.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证恢复删除正式文件前必须核对标记身份。
 async fn recovery_requires_marker_identity_before_deleting_a_formal_file() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1295,6 +1371,7 @@ async fn recovery_requires_marker_identity_before_deleting_a_formal_file() {
 // Catches verifying one inode and later unlinking an attacker-replaced filename.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证删除前交换的替代文件不会被恢复操作误删。
 async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1313,6 +1390,7 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
     let formal = root.as_ref().join(&key);
     std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
     std::fs::write(&formal, PNG).unwrap();
+    // 先为原文件记录身份，故障钩子将在恢复删除前替换该路径。
     let marker = write_pending_marker(root.as_ref(), id, &key, &formal);
 
     movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
@@ -1331,6 +1409,7 @@ async fn recovery_claim_never_deletes_a_replacement_swapped_at_before_unlink() {
 
 // Catches the known-rollback Drop path unlinking a name that was replaced after validation.
 #[tokio::test]
+/// 验证回滚清理使用绑定文件身份的相同声明协议。
 async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1375,6 +1454,7 @@ async fn rollback_cleanup_uses_the_same_identity_bound_claim_protocol() {
 // Catches a marker being repointed to a different resource despite matching file metadata.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证恢复标记名称必须匹配正式资源键。
 async fn recovery_marker_name_must_match_its_formal_resource_key() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1398,6 +1478,7 @@ async fn recovery_marker_name_must_match_its_formal_resource_key() {
 
 // Catches a DB failure plus cleanup failure silently leaking a promoted formal file.
 #[tokio::test]
+/// 验证提升后的数据库路径失败可在启动时恢复。
 async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1438,6 +1519,7 @@ async fn failed_post_promotion_database_path_is_recoverable_on_startup() {
 
 // Catches cancellation after an autocommit reached PostgreSQL deleting its committed file.
 #[tokio::test]
+/// 验证资产插入提交后取消操作仍保留文件供协调恢复。
 async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliation() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1487,6 +1569,7 @@ async fn cancellation_after_asset_insert_commit_preserves_file_for_reconciliatio
 
 // Catches cancellation after replacement commit deleting the newly referenced formal file.
 #[tokio::test]
+/// 验证替换提交后取消操作保留新引用和文件。
 async fn cancellation_after_replacement_commit_preserves_new_reference_and_file() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1552,6 +1635,7 @@ async fn cancellation_after_replacement_commit_preserves_new_reference_and_file(
 
 // Catches trusting filenames, declared MIME, extensions, or accepting unsupported formats.
 #[tokio::test]
+/// 验证拒绝路径穿越、伪造 MIME 和不支持的类型。
 async fn traversal_spoofed_mime_and_unsupported_types_are_rejected() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -1608,6 +1692,7 @@ async fn traversal_spoofed_mime_and_unsupported_types_are_rejected() {
 
 // Catches accepting a forged/truncated magic prefix instead of a complete playable container.
 #[tokio::test]
+/// 验证结构校验接受有效最小文件并拒绝伪造容器。
 async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_containers() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -1755,6 +1840,7 @@ async fn structured_validation_accepts_valid_minimal_files_and_rejects_forged_co
 
 // Catches rejecting real browser-playable MP4s merely because they contain AAC or High avcC data.
 #[tokio::test]
+/// 验证 MP4 校验接受 FFmpeg 基线加 AAC 和高级配置样本。
 async fn mp4_validation_accepts_ffmpeg_baseline_with_aac_and_high_profile() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -1784,6 +1870,7 @@ async fn mp4_validation_accepts_ffmpeg_baseline_with_aac_and_high_profile() {
 
 // Catches rejecting structurally valid HEVC MP4 video sample entries.
 #[tokio::test]
+/// 验证 MP4 校验接受 hvc1 和 hev1 的 HEVC 样本。
 async fn mp4_validation_accepts_hvc1_and_hev1_hevc() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -1818,15 +1905,18 @@ async fn mp4_validation_accepts_hvc1_and_hev1_hevc() {
 
 // Catches rejecting an otherwise unchanged real HEVC fixture when temporal scalability is unknown.
 #[tokio::test]
+/// 验证 hvc1 上传接受未知时间层数。
 async fn hevc_hvc1_upload_accepts_unknown_temporal_layers() {
     assert_hevc_upload_accepts_unknown_temporal_layers(b"hvc1").await;
 }
 
 #[tokio::test]
+/// 验证 hev1 上传接受未知时间层数。
 async fn hevc_hev1_upload_accepts_unknown_temporal_layers() {
     assert_hevc_upload_accepts_unknown_temporal_layers(b"hev1").await;
 }
 
+/// 使用指定样本入口构造未知时间层的 HEVC 并断言上传成功。
 async fn assert_hevc_upload_accepts_unknown_temporal_layers(sample_entry: &[u8; 4]) {
     let mut bytes = HEVC_HVC1_MP4.to_vec();
     let hvcc = bytes
@@ -1874,6 +1964,7 @@ async fn assert_hevc_upload_accepts_unknown_temporal_layers(sample_entry: &[u8; 
     );
 }
 
+/// 在移除 MP4 配置数据后调整受影响的块偏移。
 fn shift_mp4_chunk_offsets_after_removal(
     bytes: &mut [u8],
     removed_start: usize,
@@ -1930,6 +2021,7 @@ fn shift_mp4_chunk_offsets_after_removal(
     }
 }
 
+/// 在负面校验测试中从 HEVC 样本移除指定配置数组。
 fn remove_hevc_configuration_array(mut bytes: Vec<u8>, removed_type: u8) -> Vec<u8> {
     let hvcc = bytes
         .windows(4)
@@ -1993,6 +2085,7 @@ fn remove_hevc_configuration_array(mut bytes: Vec<u8>, removed_type: u8) -> Vec<
     panic!("fixture does not contain HEVC NAL array type {removed_type}");
 }
 
+/// 在 HEVC 负面测试中上传指定样本并检查拒绝结果。
 async fn assert_hevc_fixture_rejected(name: &str, bytes: Vec<u8>) {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2015,6 +2108,7 @@ async fn assert_hevc_fixture_rejected(name: &str, bytes: Vec<u8>) {
 
 // Catches accepting truncated configuration or HEVC tracks without every required parameter set.
 #[tokio::test]
+/// 验证 HEVC 配置必须包含完整的 hvcC、VPS、SPS 和 PPS。
 async fn hevc_configuration_requires_complete_hvcc_vps_sps_and_pps() {
     let mut truncated_hvcc = HEVC_HVC1_MP4.to_vec();
     let hvcc = truncated_hvcc
@@ -2035,6 +2129,7 @@ async fn hevc_configuration_requires_complete_hvcc_vps_sps_and_pps() {
 
 // Catches trusting HEVC sample sizes without validating each length-prefixed NAL header.
 #[tokio::test]
+/// 验证 HEVC 样本拒绝长度溢出及非法 NAL 头。
 async fn hevc_samples_reject_length_overflow_and_invalid_nal_headers() {
     let mdat_payload = HEVC_HVC1_MP4
         .windows(4)
@@ -2061,6 +2156,7 @@ async fn hevc_samples_reject_length_overflow_and_invalid_nal_headers() {
 
 // Catches broadening MP4 acceptance to unimplemented video codecs.
 #[tokio::test]
+/// 验证支持 HEVC 不会误接受 AV1 样本入口。
 async fn hevc_support_does_not_accept_av1_sample_entries() {
     let mut av1 = HEVC_HVC1_MP4.to_vec();
     let sample_entry = av1.windows(4).position(|window| window == b"hvc1").unwrap();
@@ -2070,6 +2166,7 @@ async fn hevc_support_does_not_accept_av1_sample_entries() {
 
 // Catches trusting only H.264 NAL types or allocating per an untrusted fixed sample count.
 #[tokio::test]
+/// 验证 MP4 拒绝禁止的 NAL 及异常膨胀的声明数量。
 async fn mp4_validation_rejects_forbidden_nals_and_declared_count_amplification() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2114,6 +2211,7 @@ async fn mp4_validation_rejects_forbidden_nals_and_declared_count_amplification(
 
 // Catches accepting parameter sets that expose only IDs but omit required H.264 RBSP syntax.
 #[tokio::test]
+/// 验证 MP4 拒绝仅包含标识的 SPS 和 PPS。
 async fn mp4_validation_rejects_id_only_sps_and_pps() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2150,6 +2248,7 @@ async fn mp4_validation_rejects_id_only_sps_and_pps() {
 
 // Catches one valid SPS masking a second individually-invalid forbidden-bit SPS.
 #[tokio::test]
+/// 验证 MP4 拒绝额外的禁止 SPS。
 async fn mp4_validation_rejects_an_additional_forbidden_sps() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2191,11 +2290,13 @@ async fn mp4_validation_rejects_an_additional_forbidden_sps() {
     assert!(result.is_err());
 }
 
+/// 在 H.264 边界样本构造时编码无符号 Exp-Golomb 位串。
 fn unsigned_exp_golomb_bits(value: u32) -> String {
     let encoded = format!("{:b}", u64::from(value) + 1);
     format!("{}{}", "0".repeat(encoded.len() - 1), encoded)
 }
 
+/// 在 H.264 边界样本构造时将位串打包为 RBSP 字节。
 fn pack_h264_rbsp(mut bits: String) -> Vec<u8> {
     bits.push('1');
     while !bits.len().is_multiple_of(8) {
@@ -2222,6 +2323,7 @@ fn pack_h264_rbsp(mut bits: String) -> Vec<u8> {
     result
 }
 
+/// 在解析边界测试中构造极端尺寸的 AVCC。
 fn extreme_dimension_avcc() -> Vec<u8> {
     let mut sps = vec![0x67, 66, 0, 30];
     let mut sps_bits = [0, 0, 0, 0, 0].map(unsigned_exp_golomb_bits).concat();
@@ -2247,6 +2349,7 @@ fn extreme_dimension_avcc() -> Vec<u8> {
     payload
 }
 
+/// 在边界测试中构造指定尺寸和切片组类型的 AVCC。
 fn dimension_slice_group_avcc(width: u32, height: u32, map_type: u32) -> Vec<u8> {
     let mut sps = vec![0x67, 66, 0, 30];
     let mut sps_bits = [0, 0, 0, 0, 0].map(unsigned_exp_golomb_bits).concat();
@@ -2288,6 +2391,7 @@ fn dimension_slice_group_avcc(width: u32, height: u32, map_type: u32) -> Vec<u8>
     payload
 }
 
+/// 在解析测试准备阶段替换 MP4 中的 AVCC 配置。
 fn replace_mp4_avcc(mut bytes: Vec<u8>, replacement: Vec<u8>) -> Vec<u8> {
     let avcc = bytes.windows(4).position(|bytes| bytes == b"avcC").unwrap();
     let old_size = u32::from_be_bytes(bytes[avcc - 4..avcc].try_into().unwrap()) as usize;
@@ -2312,6 +2416,7 @@ fn replace_mp4_avcc(mut bytes: Vec<u8>, replacement: Vec<u8>) -> Vec<u8> {
 
 // Catches unbounded SPS dimensions overflowing inside dependent PPS slice-group parsing.
 #[tokio::test]
+/// 验证极端 SPS 尺寸不会使 PPS 解析崩溃。
 async fn extreme_sps_dimensions_never_panic_during_pps_parsing() {
     let bytes = replace_mp4_avcc(ffmpeg_high_h264_mp4(), extreme_dimension_avcc());
     let root = TempRoot::new();
@@ -2338,6 +2443,7 @@ async fn extreme_sps_dimensions_never_panic_during_pps_parsing() {
 
 // Exercises all PPS slice-group branches with extreme Exp-Golomb dimensions and values.
 #[tokio::test]
+/// 验证极端 H.264 尺寸及切片组解析受限且不会崩溃。
 async fn extreme_h264_dimension_and_slice_group_variants_are_bounded_and_never_panic() {
     for dimension in [512, 65_535, u32::MAX] {
         for map_type in 0..=6 {
@@ -2376,6 +2482,7 @@ async fn extreme_h264_dimension_and_slice_group_variants_are_bounded_and_never_p
 
 // Catches unchecked MP4 slicing and parser panics on arbitrary short malformed inputs.
 #[tokio::test]
+/// 验证畸形媒体不会触发崩溃且 17 字节 MP4 被拒绝。
 async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2428,6 +2535,7 @@ async fn malformed_media_never_panics_and_the_17_byte_mp4_is_rejected() {
 
 // Catches enforcing only a Content-Length header or polling/buffering after the byte limit is known exceeded.
 #[tokio::test]
+/// 验证流式上传达到字节上限时停止继续读取。
 async fn byte_limit_is_enforced_while_streaming_and_stops_polling() {
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2456,6 +2564,7 @@ async fn byte_limit_is_enforced_while_streaming_and_stops_polling() {
 
 // Catches a failed old-file stage switching the reference or leaking the promoted replacement.
 #[tokio::test]
+/// 验证替换失败保留旧引用并删除新文件。
 async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2519,6 +2628,7 @@ async fn failed_replacement_preserves_old_reference_and_removes_new_artifact() {
 
 // Catches a post-commit registration failure being reported as if the old reference survived.
 #[tokio::test]
+/// 验证替换注册失败时报告已提交状态。
 async fn replacement_registration_failure_reports_committed_state() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2592,6 +2702,7 @@ async fn replacement_registration_failure_reports_committed_state() {
 
 // Catches a database commit failure leaving the old file staged or the new file registered.
 #[tokio::test]
+/// 验证替换提交失败恢复旧文件并删除新文件。
 async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2662,6 +2773,7 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
 
 // Catches a post-commit finish failure losing the durable removal manifest or reporting success.
 #[tokio::test]
+/// 验证替换收尾失败保留清单并返回稳定错误。
 async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2743,6 +2855,7 @@ async fn replacement_finish_failure_preserves_manifest_and_returns_stable_error(
 
 // Catches media routes bypassing the content lifecycle's draft-only editing rule.
 #[tokio::test]
+/// 验证已发布内容的附件不能替换且不留下新文件。
 async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2791,6 +2904,7 @@ async fn published_attachment_cannot_be_replaced_and_leaves_no_new_file() {
 
 // Catches any slot retaining the old asset/file or falling back to asynchronous cleanup.
 #[tokio::test]
+/// 验证各附件槽位替换在响应前同步删除旧资产。
 async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2930,6 +3044,7 @@ async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot(
     }
 }
 
+/// 在未提交替换期间并发触发恢复，验证新文件注册前受保护。
 async fn run_recovery_during_uncommitted_replacement() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2963,6 +3078,7 @@ async fn run_recovery_during_uncommitted_replacement() {
     let upload_storage = storage.clone();
     let movie_id = movie.id;
     let (source, _) = Chunks::new([jpeg()]);
+    // 咨询锁使替换在更新电影前暂停，从而并发启动恢复检查临界区。
     let mut upload = tokio::spawn(async move {
         replace_attachment(
             &upload_db,
@@ -3003,6 +3119,7 @@ async fn run_recovery_during_uncommitted_replacement() {
 
     let recovery_db = db.clone();
     let recovery_storage = storage.clone();
+    // 在替换尚未注册新文件时启动恢复，验证恢复必须等待存储锁。
     let mut recovery = tokio::spawn(async move {
         movie_harbor_api::media::upload::recover_stale_uploads(
             &recovery_db,
@@ -3017,6 +3134,7 @@ async fn run_recovery_during_uncommitted_replacement() {
             .is_err(),
         "recovery crossed the replacement's storage critical section before registration"
     );
+    // 释放数据库屏障后替换才能完成，随后恢复继续并核对新文件仍存在。
     blocker
         .execute_unprepared(&format!("SELECT pg_advisory_unlock({lock_key})"))
         .await
@@ -3049,12 +3167,14 @@ async fn run_recovery_during_uncommitted_replacement() {
 
 // Catches an empty old slot dropping the transferred mutation guard before commit/registration.
 #[tokio::test]
+/// 验证空槽位替换在新文件登记前阻止恢复介入。
 async fn empty_slot_replacement_keeps_recovery_out_until_the_new_file_is_registered() {
     run_recovery_during_uncommitted_replacement().await;
 }
 
 // Catches omitting the route or bypassing the shared administrator middleware.
 #[tokio::test]
+/// 验证媒体上传路由已注册且要求认证。
 async fn media_upload_routes_are_registered_and_require_authentication() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3163,6 +3283,7 @@ async fn media_upload_routes_are_registered_and_require_authentication() {
 
 // Catches dropping or renaming the stable client-facing code for declared/actual content mismatches.
 #[tokio::test]
+/// 验证上传内容不匹配时返回稳定错误码。
 async fn content_mismatch_response_has_stable_code() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3197,6 +3318,7 @@ async fn content_mismatch_response_has_stable_code() {
 
 // Characterizes every registered attachment target before their handlers share one upload path.
 #[tokio::test]
+/// 验证电影、剧集和单集上传路由遵守共同附件契约。
 async fn movie_series_and_episode_routes_share_the_attachment_contract() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3370,6 +3492,7 @@ async fn movie_series_and_episode_routes_share_the_attachment_contract() {
 // Catches treating an archived series as a blanket media freeze instead of applying the owning
 // series/episode entity's own editability rule.
 #[tokio::test]
+/// 验证归档剧集海报只读但草稿单集视频仍可编辑。
 async fn archived_series_poster_stays_read_only_while_draft_episode_video_is_editable() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3451,6 +3574,7 @@ async fn archived_series_poster_stays_read_only_while_draft_episode_video_is_edi
 
 // Catches disabling Axum's body limit and accepting unbounded multipart metadata/extra fields.
 #[tokio::test]
+/// 验证 multipart 元数据有界且必须恰有一个文件字段。
 async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3533,6 +3657,7 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
 
 // Catches registering media outside the callback transaction or swallowing registration failures.
 #[tokio::test]
+/// 验证新资产注册回调失败时回滚记录并清理文件。
 async fn new_asset_registration_callback_failure_rolls_back_asset_and_file() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3595,8 +3720,10 @@ async fn new_asset_registration_callback_failure_rolls_back_asset_and_file() {
     );
 }
 
+/// 在资产注册提交后注入故障以检验恢复行为。
 struct FailRegisteredCommit;
 impl StorageHooks for FailRegisteredCommit {
+    /// 在数据库提交事件后返回错误，模拟提交成功但后续通知失败。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         if matches!(event, StorageEvent::DatabaseCommitted(_)) {
             return Err(std::io::Error::other("injected post-commit failure"));
@@ -3606,6 +3733,7 @@ impl StorageHooks for FailRegisteredCommit {
 }
 // Catches dropping a committed registration's file or removing an uncommitted registration's recovery evidence.
 #[tokio::test]
+/// 验证原子注册保留已提交的恢复状态并清理取消的注册。
 async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_registration() {
     let db = database().await;
     let root = TempRoot::new();
@@ -3732,6 +3860,7 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
 
 // A real deferred PostgreSQL failure exercises COMMIT Err; recovery is then tested with both final DB states.
 #[tokio::test]
+/// 验证注册提交结果未知时保留待处理文件直至数据库状态恢复。
 async fn registration_commit_unknown_retains_pending_file_until_database_state_recovery() {
     for final_asset_exists in [false, true] {
         let db = database().await;

@@ -17,10 +17,12 @@ use serde_json::{Value, json};
 use tower::ServiceExt;
 mod support;
 
+/// 保存管理员会话与 CSRF 凭据，供管理用户测试复用。
 type Credentials = (String, String);
 
 // Catches DTO timestamps depending on Chrono's dev-only unified serde feature.
 #[test]
+/// 验证普通用户摘要中的时间戳明确使用 RFC 3339 格式。
 fn viewer_summary_timestamps_are_explicit_rfc3339_strings() {
     let created_at =
         chrono::DateTime::parse_from_rfc3339("2026-10-10T14:03:02.123456+08:00").unwrap();
@@ -52,6 +54,7 @@ fn viewer_summary_timestamps_are_explicit_rfc3339_strings() {
     assert!(serde_json::to_value(summary).unwrap()["last_login_at"].is_null());
 }
 
+/// 在测试准备阶段创建隔离数据库、应用和场景所需凭据。
 async fn setup() -> (support::TestDatabase, Router, Credentials) {
     let db = support::TestDatabase::migrated("admin_users").await;
     let cfg = Config {
@@ -93,6 +96,7 @@ async fn setup() -> (support::TestDatabase, Router, Credentials) {
     (db, app, (cookie, csrf))
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -117,6 +121,7 @@ async fn request(
     ));
     app.clone().oneshot(request).await.unwrap()
 }
+/// 在用户管理测试中携带管理员凭据发送 JSON 请求。
 async fn admin_json(
     app: &Router,
     method: &str,
@@ -126,9 +131,11 @@ async fn admin_json(
 ) -> Response {
     request(app, method, path, payload, Some((&admin.0, &admin.1))).await
 }
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
+/// 在登录响应中提取会话 Cookie 供后续请求使用。
 fn cookie(response: &Response) -> String {
     response.headers()["set-cookie"]
         .to_str()
@@ -138,9 +145,11 @@ fn cookie(response: &Response) -> String {
         .unwrap()
         .to_owned()
 }
+/// 在认证测试中发送指定账号的登录请求。
 async fn login(app: &Router, path: &str, payload: Value) -> Response {
     request(app, "POST", path, payload, None).await
 }
+/// 在用户管理测试准备阶段创建指定用户名的普通用户。
 async fn create(app: &Router, admin: &Credentials, username: &str) -> Value {
     let response = admin_json(
         app,
@@ -153,6 +162,7 @@ async fn create(app: &Router, admin: &Credentials, username: &str) -> Value {
     assert_eq!(response.status(), StatusCode::CREATED);
     body(response).await
 }
+/// 在用户管理响应断言时检查不会泄露敏感字段。
 fn assert_safe(user: &Value) {
     let keys: Vec<_> = user
         .as_object()
@@ -175,6 +185,7 @@ fn assert_safe(user: &Value) {
 
 // Catches short ordinary-user passwords bypassing the frontend or being counted by UTF-8 bytes.
 #[tokio::test]
+/// 验证创建普通用户时密码至少八个字符。
 async fn viewer_creation_requires_at_least_eight_password_characters() {
     let (db, app, admin) = setup().await;
     for password in ["1234567", "😀😀😀😀😀😀😀"] {
@@ -227,6 +238,7 @@ async fn viewer_creation_requires_at_least_eight_password_characters() {
 
 // Catches rejected password changes mutating a version or revoking sessions before validation.
 #[tokio::test]
+/// 验证管理员修改普通用户密码时同样要求至少八个字符。
 async fn admin_viewer_password_change_requires_at_least_eight_characters() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, "Summer").await;
@@ -306,6 +318,7 @@ async fn admin_viewer_password_change_requires_at_least_eight_characters() {
 
 // Catches missing normalization, mixing administrator names with viewer uniqueness, and exposing hashes.
 #[tokio::test]
+/// 验证普通用户名归一化不影响管理员且不允许改名。
 async fn creation_normalizes_viewer_names_without_affecting_admin_and_rejects_renaming() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, " Summer ").await;
@@ -345,6 +358,7 @@ async fn creation_normalizes_viewer_names_without_affecting_admin_and_rejects_re
 
 // Catches unstable tied-time ordering, duplicate session counts, expired sessions, and filtered overview.
 #[tokio::test]
+/// 验证用户列表固定分页、稳定排序和全局概览。
 async fn list_has_fixed_stable_pages_and_global_overview() {
     let (db, app, admin) = setup().await;
     let hash = password::hash("viewer-password".into()).await.ok().unwrap();
@@ -435,6 +449,7 @@ async fn list_has_fixed_stable_pages_and_global_overview() {
 
 // Catches SQL interpolation or treating literal search characters as wildcards.
 #[tokio::test]
+/// 验证用户搜索按字面值忽略大小写且空结果仍有概览。
 async fn search_is_literal_case_insensitive_and_empty_overview_is_defined() {
     let (_db, app, admin) = setup().await;
     let empty = admin_json(&app, "GET", "/api/admin/users", Value::Null, &admin).await;
@@ -464,6 +479,7 @@ async fn search_is_literal_case_insensitive_and_empty_overview_is_defined() {
 
 // Catches unguarded routes, invalid pagination, blank credentials, malformed IDs and missing versions.
 #[tokio::test]
+/// 验证用户管理要求管理员、CSRF 和有效请求。
 async fn management_requires_admin_csrf_and_valid_requests() {
     let (_db, app, admin) = setup().await;
     assert_eq!(
@@ -612,6 +628,7 @@ async fn management_requires_admin_csrf_and_valid_requests() {
 
 // Catches stale writes, incomplete session revocation, old password reuse, and missing delete cascade.
 #[tokio::test]
+/// 验证重置密码和删除用户检查版本并撤销会话。
 async fn reset_and_delete_check_version_and_revoke_all_sessions() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, "Summer").await;
@@ -769,6 +786,7 @@ async fn reset_and_delete_check_version_and_revoke_all_sessions() {
 
 // Catches lost updates when two administrators submit the same snapshot concurrently.
 #[tokio::test]
+/// 验证并发重置同一版本时只有一个请求成功。
 async fn concurrent_resets_allow_only_one_version_winner() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, "Summer").await;
@@ -813,6 +831,7 @@ async fn concurrent_resets_allow_only_one_version_winner() {
 
 // Catches relying solely on a pre-insert duplicate check instead of the database unique constraint.
 #[tokio::test]
+/// 验证大小写不同但归一化相同的用户名并发创建只有一个成功。
 async fn concurrent_case_variant_creation_has_one_winner() {
     let (db, app, admin) = setup().await;
     let (a, b) = tokio::join!(
@@ -842,6 +861,7 @@ async fn concurrent_case_variant_creation_has_one_winner() {
 
 // Catches password writes escaping the transaction when session deletion fails.
 #[tokio::test]
+/// 验证撤销会话失败时密码和版本随事务回滚。
 async fn session_revocation_failure_rolls_back_password_and_version() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, "Summer").await;
@@ -857,6 +877,7 @@ async fn session_revocation_failure_rolls_back_password_and_version() {
         .await
         .unwrap()
         .unwrap();
+    // 在会话删除时注入数据库错误，后续检查密码、版本和会话均未部分提交。
     db.execute_unprepared("CREATE FUNCTION reject_session_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test revocation failure'; END $$").await.unwrap();
     db.execute_unprepared("CREATE TRIGGER reject_session_delete BEFORE DELETE ON viewer_session FOR EACH ROW EXECUTE FUNCTION reject_session_delete()").await.unwrap();
     let result = admin_json(
@@ -915,6 +936,7 @@ async fn session_revocation_failure_rolls_back_password_and_version() {
 
 // Catches independent locks letting a stale deletion remove a freshly reset user.
 #[tokio::test]
+/// 验证并发重置与删除不能同时提交同一用户版本。
 async fn concurrent_reset_and_delete_cannot_both_commit_the_same_version() {
     let (db, app, admin) = setup().await;
     let user = create(&app, &admin, "Summer").await;

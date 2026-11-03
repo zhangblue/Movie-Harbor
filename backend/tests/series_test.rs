@@ -34,9 +34,11 @@ use std::{
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在测试准备阶段创建临时目录。
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("movie_harbor_series_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -47,17 +49,20 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试配置和文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理测试创建的临时目录。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在测试准备阶段构造指向临时目录的应用配置。
 fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -76,9 +81,11 @@ fn config(root: &Path) -> Config {
     }
 }
 
+/// 在测试准备阶段创建已迁移的隔离数据库连接。
 async fn database() -> DatabaseConnection {
     let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("series_test_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -91,10 +98,12 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+/// 在测试准备或断言阶段执行预期成功的 SQL。
 async fn sql(db: &DatabaseConnection, statement: &str) {
     db.execute_unprepared(statement).await.unwrap();
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -125,10 +134,12 @@ async fn request(
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在异常响应断言中检查服务端错误且不泄露存储键。
 async fn assert_internal_server_error(response: Response, leaked_storage_key: &str) {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let raw = String::from_utf8(
@@ -150,6 +161,7 @@ async fn assert_internal_server_error(response: Response, leaked_storage_key: &s
     assert!(!raw.contains(leaked_storage_key));
 }
 
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let response = request(
         app,
@@ -186,6 +198,7 @@ async fn credentials(app: &Router) -> (String, String) {
     (cookie, csrf)
 }
 
+/// 在内容管理测试中携带认证和 CSRF 凭据发送写入请求。
 async fn write(
     app: &Router,
     method: &str,
@@ -206,6 +219,7 @@ async fn write(
     .await
 }
 
+/// 在剧集测试准备阶段通过管理接口创建草稿。
 async fn create_series(app: &Router, cookie: &str, csrf: &str, name: &str) -> Value {
     let response = write(
         app,
@@ -220,6 +234,7 @@ async fn create_series(app: &Router, cookie: &str, csrf: &str, name: &str) -> Va
     body(response).await
 }
 
+/// 在剧集测试准备阶段通过管理接口新增季。
 async fn add_season(
     app: &Router,
     cookie: &str,
@@ -239,6 +254,7 @@ async fn add_season(
     .await
 }
 
+/// 在剧集测试准备阶段通过管理接口新增单集。
 async fn add_episode(
     app: &Router,
     cookie: &str,
@@ -260,6 +276,7 @@ async fn add_episode(
     .await
 }
 
+/// 在测试准备阶段创建媒体记录和对应物理文件。
 async fn create_asset(
     db: &DatabaseConnection,
     root: &Path,
@@ -294,6 +311,7 @@ async fn create_asset(
     .unwrap()
 }
 
+/// 在剧集测试准备阶段关联海报资产。
 async fn attach_series_poster(db: &DatabaseConnection, id: Uuid, asset_id: Uuid) {
     let mut active: series::ActiveModel = series::Entity::find_by_id(id)
         .one(db)
@@ -305,6 +323,7 @@ async fn attach_series_poster(db: &DatabaseConnection, id: Uuid, asset_id: Uuid)
     active.update(db).await.unwrap();
 }
 
+/// 在单集测试准备阶段关联视频资产。
 async fn attach_episode_video(db: &DatabaseConnection, id: Uuid, asset_id: Uuid) {
     let mut active: episode::ActiveModel = episode::Entity::find_by_id(id)
         .one(db)
@@ -316,11 +335,13 @@ async fn attach_episode_video(db: &DatabaseConnection, id: Uuid, asset_id: Uuid)
     active.update(db).await.unwrap();
 }
 
+/// 在删除测试中注入第二次暂存失败，以验证先前文件恢复。
 struct FailSecondStage {
     stages: AtomicUsize,
 }
 
 impl StorageHooks for FailSecondStage {
+    /// 在第二次媒体暂存前注入权限错误，以检验先前文件恢复。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::BeforeStage(_))
             && self.stages.fetch_add(1, Ordering::SeqCst) == 1
@@ -335,12 +356,14 @@ impl StorageHooks for FailSecondStage {
 }
 
 #[cfg(unix)]
+/// 在暂存后将操作目录设为只读，以触发清理收尾失败。
 struct MakeOperationReadOnlyAfterStage {
     root: PathBuf,
 }
 
 #[cfg(unix)]
 impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    /// 在暂存重命名后将操作目录设为只读，触发删除收尾失败。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::AfterStageRename(_)) {
             let operation = std::fs::read_dir(self.root.join(".operations"))?
@@ -353,6 +376,7 @@ impl StorageHooks for MakeOperationReadOnlyAfterStage {
     }
 }
 
+/// 在层级测试中从响应提取季和单集标识。
 async fn hierarchy_ids(value: &Value) -> (String, String) {
     (
         value["seasons"][0]["id"].as_str().unwrap().to_owned(),
@@ -365,6 +389,7 @@ async fn hierarchy_ids(value: &Value) -> (String, String) {
 
 // Catches missing route registration, auth/CSRF/origin bypass, DTO leakage, and missing versions.
 #[tokio::test]
+/// 验证剧集管理接口创建和列出带版本的层级且不泄露存储键。
 async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage_keys() {
     let db = database().await;
     let root = TempRoot::new();
@@ -507,6 +532,7 @@ async fn admin_routes_create_list_and_return_versioned_hierarchy_without_storage
 
 // Catches a missing managed-media path on nested episode responses.
 #[tokio::test]
+/// 验证剧集管理详情包含受控的单集视频本地路径。
 async fn series_admin_detail_includes_a_controlled_episode_video_local_path() {
     let db = database().await;
     let root = TempRoot::new();
@@ -562,6 +588,7 @@ async fn series_admin_detail_includes_a_controlled_episode_video_local_path() {
 }
 
 #[tokio::test]
+/// 验证剧集详情拒绝畸形单集视频存储键且不泄露其内容。
 async fn series_admin_detail_rejects_a_malformed_episode_video_storage_key_without_leaking_it() {
     let db = database().await;
     let root = TempRoot::new();
@@ -612,6 +639,7 @@ async fn series_admin_detail_rejects_a_malformed_episode_video_storage_key_witho
 }
 
 #[tokio::test]
+/// 验证剧集详情拒绝用途错误的单集视频且不泄露存储键。
 async fn series_admin_detail_rejects_an_episode_video_asset_with_the_wrong_purpose_without_leaking_it()
  {
     let db = database().await;
@@ -664,6 +692,7 @@ async fn series_admin_detail_rejects_an_episode_video_asset_with_the_wrong_purpo
 
 // Catches partial metadata/genre commits and accidental removal/addition of inactive genres.
 #[tokio::test]
+/// 验证剧集草稿更新原子执行并保留已有停用题材。
 async fn draft_series_updates_are_atomic_and_preserve_inactive_existing_genres() {
     let db = database().await;
     let root = TempRoot::new();
@@ -755,6 +784,7 @@ async fn draft_series_updates_are_atomic_and_preserve_inactive_existing_genres()
 
 // Catches unscoped IDs, absent optimistic predicates, and non-deterministic unique violations.
 #[tokio::test]
+/// 验证层级操作限制标识所属范围并串行处理重复序号。
 async fn hierarchy_commands_scope_ids_and_serialize_duplicate_numbers() {
     let db = database().await;
     let root = TempRoot::new();
@@ -874,6 +904,7 @@ async fn hierarchy_commands_scope_ids_and_serialize_duplicate_numbers() {
 
 // Catches treating a published series as fully frozen or failing to protect published seasons.
 #[tokio::test]
+/// 验证已发布剧集自身只读但可新增草稿子项。
 async fn published_series_is_read_only_but_accepts_new_draft_children() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1030,6 +1061,7 @@ async fn published_series_is_read_only_but_accepts_new_draft_children() {
 
 // Catches missing publish requirements, invalid transitions, and non-idempotent retries.
 #[tokio::test]
+/// 验证组合生命周期检查媒体并在父剧归档时保留子项状态。
 async fn combined_lifecycle_validates_media_and_preserves_child_state_when_parent_is_archived() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1194,6 +1226,7 @@ async fn combined_lifecycle_validates_media_and_preserves_child_state_when_paren
 
 // Catches episode lost updates, cross-season confusion, and duplicate-number races.
 #[tokio::test]
+/// 验证单集写入使用单集版本并将父剧版本递增一次。
 async fn episode_writes_use_episode_versions_and_bump_the_parent_version_once() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1319,6 +1352,7 @@ async fn episode_writes_use_episode_versions_and_bump_the_parent_version_once() 
 
 // Catches non-atomic cascades and media metadata surviving a successful content-tree delete.
 #[tokio::test]
+/// 验证父级和单集删除与其媒体删除保持原子性。
 async fn parent_and_episode_deletion_are_atomic_with_media_deletion() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1461,6 +1495,7 @@ async fn parent_and_episode_deletion_are_atomic_with_media_deletion() {
 
 // Catches concurrent independent tree deletes violating the global storage serialization order.
 #[tokio::test]
+/// 验证并发删除剧集无死锁且移除各自独占媒体。
 async fn concurrent_series_deletes_remove_each_owned_asset_without_deadlock() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1524,6 +1559,7 @@ async fn concurrent_series_deletes_remove_each_owned_asset_without_deadlock() {
 
 // Catches freezing descendant lifecycles merely because their containing series is archived.
 #[tokio::test]
+/// 验证剧集归档后各子项保留独立生命周期。
 async fn archived_series_preserves_independent_child_lifecycles() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1803,6 +1839,7 @@ async fn archived_series_preserves_independent_child_lifecycles() {
 
 // Catches delete confirmation flattening the hierarchy or using stale detail data.
 #[tokio::test]
+/// 验证删除剧集时后续暂存失败会恢复全部媒体。
 async fn series_delete_restores_all_media_when_a_later_stage_fails() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1893,6 +1930,7 @@ async fn series_delete_restores_all_media_when_a_later_stage_fails() {
 }
 
 #[tokio::test]
+/// 验证删除季时后续暂存失败会恢复全部视频。
 async fn season_delete_restores_all_videos_when_a_later_stage_fails() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1967,6 +2005,7 @@ async fn season_delete_restores_all_videos_when_a_later_stage_fails() {
 
 #[cfg(unix)]
 #[tokio::test]
+/// 验证删除单集的数据库提交后收尾失败会报告错误。
 async fn episode_delete_reports_finish_failure_after_the_database_commit() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2041,6 +2080,7 @@ async fn episode_delete_reports_finish_failure_after_the_database_commit() {
 
 // Catches delete confirmation flattening the hierarchy or using stale detail data.
 #[tokio::test]
+/// 验证删除影响统计当前层级且删除清理相应媒体。
 async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2150,6 +2190,7 @@ async fn delete_impact_counts_the_live_hierarchy_and_delete_cleans_its_media() {
 }
 
 #[tokio::test]
+/// 验证删除季在响应前同步移除多个单集视频。
 async fn season_delete_removes_multiple_episode_videos_synchronously() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2235,6 +2276,7 @@ async fn season_delete_removes_multiple_episode_videos_synchronously() {
 }
 
 #[tokio::test]
+/// 验证删除单集在响应前同步移除其视频。
 async fn episode_delete_removes_its_video_synchronously() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2294,6 +2336,7 @@ async fn episode_delete_removes_its_video_synchronously() {
 
 // Catches malformed identifiers being confused with absent series resources.
 #[tokio::test]
+/// 验证无效和不存在的剧集标识按一致规则映射错误。
 async fn invalid_and_missing_series_identifiers_are_mapped_consistently() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2331,6 +2374,7 @@ async fn invalid_and_missing_series_identifiers_are_mapped_consistently() {
 
 // Catches bypassing the archived-to-draft edit gate or deleting currently published content.
 #[tokio::test]
+/// 验证单集与剧集归档、草稿转换控制编辑和删除。
 async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2565,6 +2609,7 @@ async fn episode_and_series_archived_draft_transitions_gate_editing_and_deletion
 }
 
 #[tokio::test]
+/// 验证创建剧集要求显式访问范围并返回该范围。
 async fn private_series_creation_requires_explicit_scope_and_returns_it() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2611,6 +2656,7 @@ async fn private_series_creation_requires_explicit_scope_and_returns_it() {
 }
 
 #[tokio::test]
+/// 验证剧集私密切换独立于生命周期并拒绝过期版本。
 async fn private_series_switch_is_independent_of_lifecycle_and_rejects_stale_versions() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2703,6 +2749,7 @@ async fn private_series_switch_is_independent_of_lifecycle_and_rejects_stale_ver
 }
 
 #[tokio::test]
+/// 验证并发切换剧集私密范围时只有一个版本获胜。
 async fn private_series_concurrent_switch_has_exactly_one_winner() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2776,6 +2823,7 @@ async fn private_series_concurrent_switch_has_exactly_one_winner() {
 }
 
 #[tokio::test]
+/// 验证私密范围保存在剧集父级而不复制到子项字段或版本。
 async fn private_series_scope_stays_on_parent_without_child_fields_or_versions() {
     let db = database().await;
     let root = TempRoot::new();
@@ -2824,6 +2872,7 @@ async fn private_series_scope_stays_on_parent_without_child_fields_or_versions()
 
 // Catches administrator DTO regressions, discarded episode duration, and unintended parent bumps.
 #[tokio::test]
+/// 验证管理员创建剧集忽略 MCP 元数据且单集时长可选。
 async fn admin_series_create_ignores_mcp_metadata_and_episode_duration_is_optional() {
     let db = database().await;
     let root = TempRoot::new();

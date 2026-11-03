@@ -20,6 +20,7 @@ const ID: &str = "00000000-0000-4000-8000-000000000001";
 
 // Catches omitting an approved operation or accepting lookalike/invalid UUID paths.
 #[test]
+/// 验证 MCP 路由策略只允许明确列出的请求方法与路径。
 fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
     let allowed = [
         ("GET", "/api/admin/contents"),
@@ -119,6 +120,7 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
     }
 }
 
+/// 在测试准备阶段创建隔离数据库、应用和场景所需凭据。
 async fn setup(enabled: bool) -> (support::TestDatabase, Router, std::path::PathBuf) {
     let db = support::TestDatabase::migrated("mcp_auth_test").await;
     let root = std::env::temp_dir().join(format!("mcp_auth_{}", uuid::Uuid::new_v4()));
@@ -141,6 +143,7 @@ async fn setup(enabled: bool) -> (support::TestDatabase, Router, std::path::Path
     (db, router, root)
 }
 
+/// 在 MCP 认证测试中构造并发送指定请求。
 async fn send(
     app: &Router,
     method: &str,
@@ -162,12 +165,14 @@ async fn send(
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
 // Catches omission of the Bearer branch and accidentally retaining CSRF on MCP writes.
 #[tokio::test]
+/// 验证有效 Bearer 凭据无需 Cookie、CSRF 或来源即可查询和创建题材。
 async fn bearer_can_query_and_create_genres_without_cookie_csrf_or_origin() {
     let (_db, app, root) = setup(true).await;
     let bearer = format!("Bearer {KEY}");
@@ -203,6 +208,7 @@ async fn bearer_can_query_and_create_genres_without_cookie_csrf_or_origin() {
 
 // Catches widening an allowed prefix into account management or destructive permissions.
 #[tokio::test]
+/// 验证 Bearer 凭据不能访问白名单以外的管理操作。
 async fn bearer_denies_every_unlisted_management_operation() {
     let (_db, app, root) = setup(true).await;
     let bearer = format!("Bearer {KEY}");
@@ -241,6 +247,7 @@ async fn bearer_denies_every_unlisted_management_operation() {
 
 // Catches treating an absent key, ambiguous Authorization, or another scheme as MCP.
 #[tokio::test]
+/// 验证禁用、错误和歧义 Bearer 凭据均被拒绝。
 async fn disabled_wrong_and_ambiguous_bearer_credentials_are_rejected() {
     let (_db, app, root) = setup(true).await;
     let bearer = format!("Bearer {KEY}");
@@ -301,6 +308,7 @@ async fn disabled_wrong_and_ambiguous_bearer_credentials_are_rejected() {
 
 // Catches moving Bearer authentication ahead of the existing Host policy.
 #[tokio::test]
+/// 验证 Bearer 凭据不能绕过 Host 校验。
 async fn bearer_never_bypasses_host_validation() {
     let (_db, app, root) = setup(true).await;
     let bearer = format!("Bearer {KEY}");
@@ -351,6 +359,7 @@ async fn bearer_never_bypasses_host_validation() {
 
 // Catches breaking CurrentSession extraction or suppressing Cookie CSRF on failed MCP attempts.
 #[tokio::test]
+/// 验证管理员 Cookie 及 Bearer 回退路径仍执行会话和 CSRF 校验。
 async fn administrator_cookie_retains_session_and_csrf_including_bearer_fallback() {
     let (_db, app, root) = setup(true).await;
     let response = send(

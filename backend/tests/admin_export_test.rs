@@ -21,14 +21,17 @@ use uuid::Uuid;
 
 const EXPORT_URI: &str = "/api/admin/contents/export";
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理该测试创建的临时资源。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在测试准备阶段创建隔离数据库、应用和场景所需凭据。
 async fn setup() -> (TestDatabase, TempRoot, Router, String) {
     let db = TestDatabase::migrated("admin_export").await;
     let root =
@@ -74,6 +77,7 @@ async fn setup() -> (TestDatabase, TempRoot, Router, String) {
     (db, root, app, cookie)
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     let mut request = Request::builder().uri(uri).header("host", "harbor.test");
     if let Some(cookie) = cookie {
@@ -85,10 +89,12 @@ async fn request(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
         .unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在导出测试前插入覆盖不同状态和关联关系的内容。
 async fn seed(db: &DatabaseConnection) {
     db.execute_unprepared(r#"
 INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
@@ -144,6 +150,7 @@ INSERT INTO series_genre (series_id, genre_id) VALUES
 
 // Catches missing authentication and loss of the download response contract.
 #[tokio::test]
+/// 验证导出需要认证并返回带时间戳的 JSON 附件。
 async fn export_requires_authentication_and_returns_timestamped_json_attachment() {
     let (_db, _root, app, cookie) = setup().await;
     let before = chrono::Utc::now();
@@ -188,6 +195,7 @@ async fn export_requires_authentication_and_returns_timestamped_json_attachment(
 // Exact payloads catch leaked IDs/status, missing states, incorrect grouping, and genre ordering:
 // both content kinds need sort_order before ID, then ID to break equal sort_order ties.
 #[tokio::test]
+/// 验证导出包含全部状态、规定字段、平铺单集及稳定顺序。
 async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_order() {
     let (db, _root, app, cookie) = setup().await;
     seed(&db).await;
@@ -220,6 +228,7 @@ async fn export_includes_all_states_with_exact_fields_flat_episodes_and_stable_o
 
 // Catches accidentally reusing a single page or applying the current list filters.
 #[tokio::test]
+/// 验证导出超过一页时仍完整且不受列表筛选影响。
 async fn export_is_complete_beyond_one_page_and_ignores_list_filters() {
     let (db, _root, app, cookie) = setup().await;
     db.execute_unprepared("INSERT INTO movie (id, name) SELECT md5('movie-' || n)::uuid, 'Movie ' || n FROM generate_series(1, 25) n; INSERT INTO series (id, name) SELECT md5('series-' || n)::uuid, 'Series ' || n FROM generate_series(1, 25) n;").await.unwrap();
@@ -237,6 +246,7 @@ async fn export_is_complete_beyond_one_page_and_ignores_list_filters() {
 
 // Catches turning invalid stored paths into null or disclosing raw database/path errors.
 #[tokio::test]
+/// 验证各媒体槽位路径无效时导出安全失败。
 async fn export_fails_closed_for_invalid_paths_in_every_media_slot() {
     let (db, _root, app, cookie) = setup().await;
     seed(&db).await;
@@ -290,6 +300,7 @@ async fn export_fails_closed_for_invalid_paths_in_every_media_slot() {
     );
 }
 
+/// 在快照并发测试中等待指定查询进入数据库锁等待。
 async fn wait_for_locked_query(db: &DatabaseConnection, relation: &str) -> bool {
     for _ in 0..300 {
         let row = db
@@ -319,9 +330,11 @@ SELECT EXISTS (
 
 // Read committed would combine old parent metadata with newly committed genres and media paths.
 #[tokio::test]
+/// 验证并发修改时导出的内容、题材和媒体来自同一快照。
 async fn export_content_genres_and_media_share_one_snapshot() {
     let (db, _root, app, cookie) = setup().await;
     seed(&db).await;
+    // 锁住题材关联表并启动导出，使导出快照建立后停在后续读取。
     let blocker = db.begin().await.unwrap();
     blocker
         .execute_unprepared("LOCK TABLE movie_genre IN ACCESS EXCLUSIVE MODE")
@@ -331,6 +344,7 @@ async fn export_content_genres_and_media_share_one_snapshot() {
     let read_cookie = cookie.clone();
     let export_task =
         tokio::spawn(async move { request(&read_app, EXPORT_URI, Some(&read_cookie)).await });
+    // 未观察到锁等待就终止测试，避免把未发生的竞争误判为快照一致。
     if !wait_for_locked_query(&db, "movie_genre").await {
         blocker.rollback().await.unwrap();
         export_task.abort();
@@ -346,6 +360,7 @@ UPDATE genre SET name = 'concurrent genre' WHERE id = '00000000-0000-0000-0001-0
 UPDATE media_asset SET storage_key = 'video/ee/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.mp4' WHERE id = 'a0000000-0000-0000-0000-000000000002';
 UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.webm' WHERE id = 'a0000000-0000-0000-0000-000000000004';
 "#).await.unwrap();
+    // 提交并发更改并释放读取，再断言导出各部分均反映原快照。
     blocker.commit().await.unwrap();
     let response = tokio::time::timeout(std::time::Duration::from_secs(3), export_task)
         .await
@@ -395,6 +410,7 @@ UPDATE media_asset SET storage_key = 'video/ff/ffffffffffffffffffffffffffffffff.
     );
 }
 #[tokio::test]
+/// 验证导出仅在电影与剧集上包含布尔型私密范围。
 async fn private_export_scope_is_boolean_only_on_movies_and_series() {
     let (db, _root, app, cookie) = setup().await;
     seed(&db).await;

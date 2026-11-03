@@ -27,9 +27,11 @@ use std::path::{Path, PathBuf};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// 为目录测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在测试准备阶段创建临时媒体目录。
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("movie_harbor_catalog_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -40,17 +42,20 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试配置和文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理该测试创建的临时目录。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在目录测试准备阶段构造指向临时媒体目录的应用配置。
 fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -69,13 +74,16 @@ fn config(root: &Path) -> Config {
     }
 }
 
+/// 在测试准备阶段创建已迁移的隔离数据库连接。
 async fn database(label: &str) -> DatabaseConnection {
     database_with_migrations(label, None).await
 }
 
+/// 按指定迁移步数创建隔离数据库，供迁移和目录测试使用。
 async fn database_with_migrations(label: &str, steps: Option<u32>) -> DatabaseConnection {
     let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("catalog_{label}_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -88,6 +96,7 @@ async fn database_with_migrations(label: &str, steps: Option<u32>) -> DatabaseCo
     db
 }
 
+/// 在快照并发测试中等待指定查询进入数据库锁等待。
 async fn wait_for_locked_query(db: &DatabaseConnection, relation: &str, fragment: &str) {
     for _ in 0..300 {
         let row = db
@@ -118,14 +127,17 @@ SELECT EXISTS (
     panic!("catalog query containing {fragment:?} did not block on {relation:?} as expected");
 }
 
+/// 在目录测试准备或断言阶段执行预期成功的 SQL。
 async fn sql(db: &DatabaseConnection, statement: &str) {
     db.execute_unprepared(statement).await.unwrap();
 }
 
+/// 在公开目录测试中发送匿名读取请求。
 async fn get(app: &Router, uri: &str) -> Response {
     get_with_cookie(app, uri, None).await
 }
 
+/// 在目录测试中使用可选会话发送读取请求。
 async fn get_with_cookie(app: &Router, uri: &str, cookie: Option<&str>) -> Response {
     let mut request = Request::builder().uri(uri);
     if let Some(cookie) = cookie {
@@ -137,6 +149,7 @@ async fn get_with_cookie(app: &Router, uri: &str, cookie: Option<&str>) -> Respo
         .unwrap()
 }
 
+/// 在私密目录测试前准备公开与私密数据以及用户和管理员会话。
 async fn private_fixture(label: &str) -> (DatabaseConnection, TempRoot, Router, String, String) {
     let db = database(label).await;
     sql(&db, r#"
@@ -191,6 +204,7 @@ INSERT INTO series_genre (series_id, genre_id) VALUES
     )
 }
 
+/// 在目录响应断言时检查私密缓存控制头。
 fn assert_private_cache(response: &Response) {
     assert_eq!(
         response
@@ -206,6 +220,7 @@ fn assert_private_cache(response: &Response) {
 }
 
 #[tokio::test]
+/// 验证私密目录在计数、搜索和分页前按访问权限过滤。
 async fn private_catalog_filters_before_count_search_and_pagination() {
     // Removing visibility from any count/items SQL branch exposes private names or wrong totals/pages.
     let (_db, _root, app, viewer, admin) = private_fixture("private_list").await;
@@ -261,6 +276,7 @@ async fn private_catalog_filters_before_count_search_and_pagination() {
 }
 
 #[tokio::test]
+/// 验证仅私密目录要求用户登录并在计数、搜索和分页前过滤。
 async fn private_only_catalog_requires_viewer_and_filters_before_count_search_and_pagination() {
     let (_db, _root, app, viewer, admin) = private_fixture("private_only").await;
 
@@ -326,6 +342,7 @@ async fn private_only_catalog_requires_viewer_and_filters_before_count_search_an
 }
 
 #[tokio::test]
+/// 验证私密详情要求用户登录且仍遵守发布规则。
 async fn private_details_require_viewer_and_keep_publication_rules() {
     // Omitting either parent visibility or publication checks reveals private/nonpublished details.
     let (_db, _root, app, viewer, admin) = private_fixture("private_details").await;
@@ -393,6 +410,7 @@ async fn private_details_require_viewer_and_keep_publication_rules() {
 }
 
 #[tokio::test]
+/// 验证无效、过期和管理员令牌不能扩大公开目录权限。
 async fn private_catalog_invalid_expired_and_admin_tokens_stay_anonymous() {
     // Authenticating an admin token, expired viewer, or duplicate token would expose private content.
     let (db, _root, app, viewer, admin) = private_fixture("private_cookies").await;
@@ -435,6 +453,7 @@ async fn private_catalog_invalid_expired_and_admin_tokens_stay_anonymous() {
 }
 
 #[tokio::test]
+/// 验证私密目录成功和错误响应均设置私有缓存头。
 async fn private_catalog_cache_headers_cover_success_and_error_responses() {
     // Missing response middleware allows successful or rejected identity-dependent responses to cache.
     let (_db, _root, app, viewer, admin) = private_fixture("private_cache").await;
@@ -459,18 +478,22 @@ async fn private_catalog_cache_headers_cover_success_and_error_responses() {
     }
 }
 
+/// 在断言目录响应时读取并解析 JSON 响应体。
 async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在搜索测试准备阶段对查询文本进行 URL 编码。
 fn encoded(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
+/// 在目录测试准备阶段基于数据库和临时目录构建路由。
 async fn built_app(db: DatabaseConnection, root: &TempRoot) -> Router {
     app::build(db, &config(root.as_ref())).await.unwrap()
 }
 
+/// 在公开内容响应断言时检查不泄露管理字段。
 fn assert_public_payload(payload: &Value) {
     let text = payload.to_string();
     for private_field in [
@@ -495,6 +518,7 @@ fn assert_public_payload(payload: &Value) {
 }
 
 #[tokio::test]
+/// 验证公开目录过滤、分页和确定性排序。
 async fn catalog_is_public_filtered_paginated_and_deterministically_sorted() {
     let db = database("listing").await;
     sql(
@@ -553,6 +577,7 @@ INSERT INTO series (id, name, status, published_at) VALUES
 }
 
 #[tokio::test]
+/// 验证目录检查类型、页码和受限的页大小。
 async fn catalog_validates_kind_page_and_bounded_size() {
     let db = database("validation").await;
     let root = TempRoot::new();
@@ -581,6 +606,7 @@ async fn catalog_validates_kind_page_and_bounded_size() {
 }
 
 #[tokio::test]
+/// 验证搜索忽略大小写匹配名称或简介并将元字符视为字面值。
 async fn search_matches_name_or_synopsis_case_insensitively_and_treats_metacharacters_literally() {
     let db = database("search").await;
     sql(
@@ -635,6 +661,7 @@ INSERT INTO series (id, name, synopsis, status, published_at) VALUES
 }
 
 #[tokio::test]
+/// 验证卡片返回安全海报、排序后的前三个题材及题材总数。
 async fn cards_include_safe_poster_and_first_three_ordered_genres_with_total_count() {
     let db = database("cards").await;
     sql(
@@ -673,6 +700,7 @@ INSERT INTO movie_genre (movie_id, genre_id) SELECT '42000000-0000-0000-0000-000
 }
 
 #[tokio::test]
+/// 验证电影详情仅返回公开字段且隐藏电影表现为不存在。
 async fn movie_detail_returns_only_public_fields_and_hidden_movies_are_not_found() {
     let db = database("movie_detail").await;
     sql(
@@ -745,6 +773,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
 }
 
 #[tokio::test]
+/// 验证剧集详情按季展示已发布单集并遵守父级可见性。
 async fn series_detail_groups_only_published_episodes_and_parent_visibility_is_effective() {
     let db = database("series_detail").await;
     sql(
@@ -831,6 +860,7 @@ INSERT INTO episode (id, season_id, number, name, duration_seconds, video_asset_
 }
 
 #[tokio::test]
+/// 验证并发变化时剧集和单集可见性来自同一快照。
 async fn series_detail_never_combines_parent_and_episode_visibility_from_different_snapshots() {
     let db = database("series_snapshot").await;
     sql(
@@ -864,6 +894,7 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
         .unwrap()
     });
 
+    // 等待读取进入锁定的关联表后再修改父剧和单集，确保构造跨快照竞争。
     wait_for_locked_query(&db, "series_genre", "WITH requested(kind, id)").await;
     blocker
         .execute_unprepared(
@@ -894,6 +925,7 @@ WHERE id = '65000000-0000-0000-0000-000000000004';
 }
 
 #[tokio::test]
+/// 验证并发变化时电影与题材详情来自同一快照。
 async fn movie_detail_never_combines_parent_and_genres_from_different_snapshots() {
     let db = database("movie_snapshot").await;
     sql(
@@ -927,6 +959,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
         .unwrap()
     });
 
+    // 确认详情读取已等待关联表，再提交电影与题材的并发更改。
     wait_for_locked_query(&db, "movie_genre", "WITH requested(kind, id)").await;
     blocker
         .execute_unprepared(
@@ -955,6 +988,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
 }
 
 #[tokio::test]
+/// 验证发布状态并发改变时目录总数与项目来自同一快照。
 async fn catalog_total_and_items_share_a_snapshot_during_publication_changes() {
     let db = database("list_snapshot").await;
     sql(
@@ -994,6 +1028,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
         .unwrap()
     });
 
+    // 等候目录查询被媒体表锁阻塞，再改变发布状态以检验总数和项目的快照。
     wait_for_locked_query(&db, "media_asset", "WITH candidates AS").await;
     blocker
         .execute_unprepared(
@@ -1021,6 +1056,7 @@ WHERE id IN (
 }
 
 #[tokio::test]
+/// 验证发布时索引接受不可压缩的长名称。
 async fn publication_indexes_accept_long_noncompressible_names_on_publish() {
     let db = database("long_publish").await;
     sql(
@@ -1048,6 +1084,7 @@ WHERE id = '67000000-0000-0000-0000-000000000002';
 }
 
 #[tokio::test]
+/// 验证索引迁移接受已有长发布名称且可重新应用。
 async fn publication_index_migration_accepts_preexisting_long_published_names_and_reapplies() {
     let db = database_with_migrations("long_migration", Some(2)).await;
     sql(
@@ -1075,6 +1112,7 @@ SELECT '68000000-0000-0000-0000-000000000002', name, 'published', CURRENT_TIMEST
 }
 
 #[tokio::test]
+/// 验证公开目录索引可回滚并支持受限查询计划。
 async fn public_catalog_indexes_are_reversible_and_support_bounded_plans() {
     let db = database("indexes").await;
     let expected_indexes = [
@@ -1263,6 +1301,7 @@ WHERE name ~ '^Series [0-9]+$'
     assert_eq!(remaining.try_get::<i64>("", "count").unwrap(), 0);
 }
 
+/// 在索引迁移测试中回滚目录索引以验证可逆性。
 async fn rollback_catalog_index_migration(db: &DatabaseConnection) {
     let applied = migration::Migrator::get_applied_migrations(db)
         .await
@@ -1277,10 +1316,12 @@ async fn rollback_catalog_index_migration(db: &DatabaseConnection) {
         .unwrap();
 }
 
+/// 在查询计划测试中获取 SQL 的执行计划。
 async fn explain(db: &DatabaseConnection, query: &str) -> String {
     explain_statement(db, query, Vec::new()).await
 }
 
+/// 在查询计划断言前执行带参数的 EXPLAIN。
 async fn explain_statement(
     db: &DatabaseConnection,
     query: &str,
@@ -1300,6 +1341,7 @@ async fn explain_statement(
         .join("\n")
 }
 
+/// 在查询计划断言前读取 JSON 格式的 EXPLAIN 结果。
 async fn explain_json_statement(
     db: &DatabaseConnection,
     query: &str,
@@ -1317,6 +1359,7 @@ async fn explain_json_statement(
     .unwrap()
 }
 
+/// 在查询计划断言前递归收集计划节点。
 fn plan_nodes<'a>(value: &'a Value, nodes: &mut Vec<&'a serde_json::Map<String, Value>>) {
     match value {
         Value::Object(object) => {
@@ -1336,6 +1379,7 @@ fn plan_nodes<'a>(value: &'a Value, nodes: &mut Vec<&'a serde_json::Map<String, 
     }
 }
 
+/// 在查询计划测试中判断是否使用指定索引。
 fn plan_uses_index(plan: &Value, expected: &str) -> bool {
     let mut nodes = Vec::new();
     plan_nodes(plan, &mut nodes);
@@ -1344,6 +1388,7 @@ fn plan_uses_index(plan: &Value, expected: &str) -> bool {
         .any(|node| node.get("Index Name").and_then(Value::as_str) == Some(expected))
 }
 
+/// 在目录查询计划测试中检查媒体读取范围受页面窗口限制。
 fn assert_media_reads_are_bounded(plan: &Value, page_window: u64) {
     let mut nodes = Vec::new();
     plan_nodes(plan, &mut nodes);

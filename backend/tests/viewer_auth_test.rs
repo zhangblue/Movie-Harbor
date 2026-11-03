@@ -22,6 +22,7 @@ mod support;
 
 // Catches optional authentication granting privileges from a duplicate or malformed Cookie header.
 #[tokio::test]
+/// 验证可选普通用户认证将无效 Cookie 当作匿名访问。
 async fn optional_viewer_authentication_treats_invalid_cookies_as_anonymous() {
     let (db, app, _) = setup().await;
     let (cookie, _) = credentials(&app).await;
@@ -89,6 +90,7 @@ async fn optional_viewer_authentication_treats_invalid_cookies_as_anonymous() {
     );
 }
 
+/// 在测试准备阶段创建隔离数据库、应用和场景所需用户。
 async fn setup() -> (support::TestDatabase, Router, viewer_user::Model) {
     let db = support::TestDatabase::migrated("viewer_auth").await;
     let hash = password::hash("viewer-password".into()).await.ok().unwrap();
@@ -121,6 +123,7 @@ async fn setup() -> (support::TestDatabase, Router, viewer_user::Model) {
     (db, app, user)
 }
 
+/// 在认证测试中按指定参数构造并发送请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -149,9 +152,11 @@ async fn request(
     app.clone().oneshot(req).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
+/// 在认证测试中发送指定账号的登录请求。
 async fn login(app: &Router, username: &str, password: &str) -> Response {
     request(
         app,
@@ -162,6 +167,7 @@ async fn login(app: &Router, username: &str, password: &str) -> Response {
     )
     .await
 }
+/// 在普通用户认证测试中使用可选 Cookie 读取受保护内容。
 async fn read(app: &Router, cookie: Option<&str>) -> Response {
     request(
         app,
@@ -172,6 +178,7 @@ async fn read(app: &Router, cookie: Option<&str>) -> Response {
     )
     .await
 }
+/// 在登录响应中提取普通用户 Cookie，供后续会话验证。
 fn response_cookie(response: &Response) -> String {
     response.headers()["set-cookie"]
         .to_str()
@@ -181,6 +188,7 @@ fn response_cookie(response: &Response) -> String {
         .unwrap()
         .to_owned()
 }
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let response = login(app, " summer ", "viewer-password").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -194,6 +202,7 @@ async fn credentials(app: &Router) -> (String, String) {
 
 // Catches missing viewer routes, plaintext token storage and granting either identity the other's permissions.
 #[tokio::test]
+/// 验证普通用户登录归一化用户名、签发不透明 Cookie 且独立于管理员。
 async fn viewer_cookie_login_is_normalized_opaque_and_independent_of_admin() {
     let (db, app, user) = setup().await;
     let response = login(&app, " SUMMER ", "viewer-password").await;
@@ -267,6 +276,7 @@ async fn viewer_cookie_login_is_normalized_opaque_and_independent_of_admin() {
 
 // Catches username enumeration and origin protection missing from the independent login entry point.
 #[tokio::test]
+/// 验证普通用户登录失败响应一致且检查来源。
 async fn viewer_cookie_login_failures_are_uniform_and_origin_checked() {
     let (_db, app, _) = setup().await;
     let wrong = login(&app, "Summer", "wrong").await;
@@ -294,6 +304,7 @@ async fn viewer_cookie_login_failures_are_uniform_and_origin_checked() {
 
 // Catches expired/malformed credentials being accepted and logout accidentally revoking all devices.
 #[tokio::test]
+/// 验证普通用户退出撤销当前会话且过期会话不可重用。
 async fn viewer_cookie_logout_revokes_current_session_and_expiry_rejects_reuse() {
     let (db, app, _) = setup().await;
     let (cookie, csrf) = credentials(&app).await;
@@ -330,6 +341,7 @@ async fn viewer_cookie_logout_revokes_current_session_and_expiry_rejects_reuse()
 
 // Catches short self-service passwords mutating the hash/version or revoking a valid session.
 #[tokio::test]
+/// 验证普通用户自行改密要求至少八个字符。
 async fn viewer_self_password_change_requires_at_least_eight_characters() {
     let (db, app, user) = setup().await;
     let (cookie, csrf) = credentials(&app).await;
@@ -386,6 +398,7 @@ async fn viewer_self_password_change_requires_at_least_eight_characters() {
 }
 
 #[tokio::test]
+/// 验证当前密码错误可重试且不撤销现有会话。
 async fn wrong_current_password_is_retryable_without_revoking_the_session() {
     let (_db, app, _) = setup().await;
     let (cookie, csrf) = credentials(&app).await;
@@ -409,6 +422,7 @@ async fn wrong_current_password_is_retryable_without_revoking_the_session() {
 
 // Catches missing CSRF, wrong current-password checks, incomplete revocation or password/version update.
 #[tokio::test]
+/// 验证普通用户改密检查来源和 CSRF 并撤销所有设备会话。
 async fn viewer_cookie_password_change_verifies_origin_csrf_and_revokes_all_devices() {
     let (db, app, user) = setup().await;
     let (cookie, csrf) = credentials(&app).await;
@@ -508,6 +522,7 @@ async fn viewer_cookie_password_change_verifies_origin_csrf_and_revokes_all_devi
 
 // Catches login issuing a session using a password verified before a concurrent reset commits.
 #[tokio::test]
+/// 验证登录等待用户锁后重新检查密码。
 async fn viewer_cookie_login_rechecks_password_after_waiting_for_user_lock() {
     let (db, app, user) = setup().await;
     let hash = password::hash("replacement-password".into())
@@ -521,11 +536,14 @@ async fn viewer_cookie_login_rechecks_password_after_waiting_for_user_lock() {
         .await
         .unwrap()
         .unwrap();
+    // 保持用户行锁并发起旧密码登录，确保改密发生在登录取得锁之前。
     let pending = tokio::spawn(async move { login(&app, "Summer", "viewer-password").await });
+    // 确认登录已等待行锁，再修改密码以验证锁内重新检查。
     wait_for_row_lock_waiter(&db, &tx).await;
     let mut changed = locked.into_active_model();
     changed.password_hash = Set(hash);
     changed.update(&tx).await.unwrap();
+    // 提交新密码并释放锁，旧密码登录必须被拒绝且不能创建会话。
     tx.commit().await.unwrap();
     assert_eq!(pending.await.unwrap().status(), StatusCode::UNAUTHORIZED);
     assert!(
@@ -538,6 +556,7 @@ async fn viewer_cookie_login_rechecks_password_after_waiting_for_user_lock() {
 }
 
 // Confirm the request reached its transaction lock rather than relying on Argon2 timing.
+/// 在并发认证测试中等待请求进入数据库行锁等待。
 async fn wait_for_row_lock_waiter(
     db: &sea_orm::DatabaseConnection,
     tx: &sea_orm::DatabaseTransaction,
@@ -565,6 +584,7 @@ async fn wait_for_row_lock_waiter(
 
 // Catches a password change trusting a session revoked while its password work was in progress.
 #[tokio::test]
+/// 验证普通用户改密在取得用户锁后重新认证会话。
 async fn viewer_password_change_reauthenticates_session_inside_user_lock() {
     let (db, app, user) = setup().await;
     let (cookie, csrf) = credentials(&app).await;
@@ -575,6 +595,7 @@ async fn viewer_password_change_reauthenticates_session_inside_user_lock() {
         .await
         .unwrap()
         .unwrap();
+    // 持锁发起改密请求，再撤销其会话以模拟认证与写入之间的竞争。
     let pending = tokio::spawn(async move {
         request(
             &app,
@@ -585,11 +606,13 @@ async fn viewer_password_change_reauthenticates_session_inside_user_lock() {
         )
         .await
     });
+    // 确认请求等待用户行后撤销会话，避免依赖密码计算耗时。
     wait_for_row_lock_waiter(&db, &tx).await;
     viewer_session::Entity::delete_many()
         .exec(&tx)
         .await
         .unwrap();
+    // 先提交撤销并释放锁，再验证等待中的改密请求不能使用旧会话。
     tx.commit().await.unwrap();
     assert_eq!(pending.await.unwrap().status(), StatusCode::UNAUTHORIZED);
     let unchanged = viewer_user::Entity::find_by_id(user.id)

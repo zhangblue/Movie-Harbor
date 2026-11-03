@@ -14,6 +14,7 @@ use serde_json::Value;
 use tower::ServiceExt;
 mod support;
 const KEY: &str = "staged-poster-test-key";
+/// 在暂存海报测试准备阶段构造指向临时目录的配置。
 fn config(root: std::path::PathBuf) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -31,6 +32,7 @@ fn config(root: std::path::PathBuf) -> Config {
         admin_initial_password: Some("initial-password".into()),
     }
 }
+/// 在测试准备阶段创建隔离数据库、应用和临时媒体目录。
 async fn setup() -> (support::TestDatabase, Router, std::path::PathBuf) {
     let db = support::TestDatabase::migrated("staged_poster").await;
     let root = std::env::temp_dir().join(format!("staged_poster_{}", uuid::Uuid::new_v4()));
@@ -39,6 +41,7 @@ async fn setup() -> (support::TestDatabase, Router, std::path::PathBuf) {
         .unwrap();
     (db, router, root)
 }
+/// 在上传测试准备阶段返回有效 PNG 字节。
 fn png() -> Vec<u8> {
     let mut bytes = Vec::new();
     image::codecs::png::PngEncoder::new(&mut bytes)
@@ -46,6 +49,7 @@ fn png() -> Vec<u8> {
         .unwrap();
     bytes
 }
+/// 在测试中发送带指定名称、类型和内容的海报暂存请求。
 async fn stage(app: &Router, name: &str, mime: &str, bytes: &[u8]) -> Response {
     let mut body = format!("--boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: {mime}\r\n\r\n").into_bytes();
     body.extend(bytes);
@@ -64,9 +68,11 @@ async fn stage(app: &Router, name: &str, mime: &str, bytes: &[u8]) -> Response {
         .await
         .unwrap()
 }
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
+/// 在数据库断言前统计指定测试表的记录数量。
 async fn count(db: &support::TestDatabase, table: &str) -> i64 {
     db.query_one(Statement::from_string(
         DbBackend::Postgres,
@@ -80,6 +86,7 @@ async fn count(db: &support::TestDatabase, table: &str) -> i64 {
 }
 // Catches forgetting migration registration and token/asset unique constraints.
 #[tokio::test]
+/// 验证暂存海报结构升级和唯一性约束。
 async fn staging_schema_upgrade_and_unique_constraints() {
     let db = support::TestDatabase::at_migration("staged_upgrade", Some(6)).await;
     migration::Migrator::up(&*db, None).await.unwrap();
@@ -122,6 +129,7 @@ async fn staging_schema_upgrade_and_unique_constraints() {
 }
 // Catches missing route, cache protection, and raw token persistence.
 #[tokio::test]
+/// 验证暂存返回一次性令牌及经过校验的元数据。
 async fn stage_returns_only_once_token_and_validated_metadata() {
     let (db, app, root) = setup().await;
     let image = png();
@@ -173,6 +181,7 @@ async fn stage_returns_only_once_token_and_validated_metadata() {
 }
 // Catches bypassing image validation and upload byte limits.
 #[tokio::test]
+/// 验证无效图片、类型和上传超限不会留下媒体资产。
 async fn invalid_images_types_and_upload_limits_leave_no_assets() {
     let (db, app, root) = setup().await;
     for (name, mime, bytes, status) in [
@@ -208,6 +217,7 @@ async fn invalid_images_types_and_upload_limits_leave_no_assets() {
 }
 // Catches admitting authenticated administrator cookies to MCP-only operation.
 #[tokio::test]
+/// 验证即使管理员具备有效 CSRF 也不能使用 MCP 暂存接口。
 async fn administrator_with_valid_csrf_is_forbidden() {
     let (db, app, root) = setup().await;
     let mut request = Request::builder()
@@ -274,8 +284,10 @@ use movie_harbor_api::media::{
     staged_poster::{self, StagePosterCommand, StagedPosterError},
 };
 use sea_orm::TransactionTrait;
+/// 在测试中提供单块上传数据，模拟海报输入流。
 struct Source(Option<axum::body::Bytes>);
 impl ChunkSource for Source {
+    /// 在海报上传测试读取输入流时交付下一块数据。
     fn next_chunk(
         &mut self,
     ) -> std::pin::Pin<
@@ -288,6 +300,7 @@ impl ChunkSource for Source {
         Box::pin(async move { Ok(self.0.take()) })
     }
 }
+/// 在消费测试前创建暂存海报并返回包含令牌的响应。
 async fn staged(
     db: &support::TestDatabase,
     storage: &LocalMediaStorage,
@@ -306,6 +319,7 @@ async fn staged(
 }
 // Catches consuming another principal's token, replay, and consuming on a failed outer transaction.
 #[tokio::test]
+/// 验证暂存令牌绑定主体、仅消费一次且随调用方事务回滚。
 async fn consumption_is_principal_bound_once_and_rolls_back_with_caller() {
     let db = support::TestDatabase::migrated("staged_consume").await;
     let root = std::env::temp_dir().join(format!("staged_consume_{}", uuid::Uuid::new_v4()));
@@ -330,6 +344,7 @@ async fn consumption_is_principal_bound_once_and_rolls_back_with_caller() {
         staged_poster::lock_for_consumption(&tx, &response.token, &principal, now).await,
         Err(StagedPosterError::NotFound)
     ));
+    // 回滚外层事务后令牌应仍可消费，验证消费与调用方操作原子绑定。
     tx.rollback().await.unwrap();
     let tx = db.begin().await.unwrap();
     assert_eq!(
@@ -350,6 +365,7 @@ async fn consumption_is_principal_bound_once_and_rolls_back_with_caller() {
 }
 // Catches broad orphan scans, expiry boundary errors, ignoring limit, or touching consumed assets.
 #[tokio::test]
+/// 验证过期清理有批次上限且只删除记录的暂存资产。
 async fn expiry_cleanup_is_bounded_and_only_deletes_recorded_staging_assets() {
     let db = support::TestDatabase::migrated("staged_expiry").await;
     let root = std::env::temp_dir().join(format!("staged_expiry_{}", uuid::Uuid::new_v4()));
@@ -431,6 +447,7 @@ async fn expiry_cleanup_is_bounded_and_only_deletes_recorded_staging_assets() {
 }
 // Catches omitting opportunistic cleanup or the one-time startup cleanup.
 #[tokio::test]
+/// 验证暂存时及启动时清理过期记录。
 async fn stage_and_startup_cleanup_expired_records() {
     let (db, app, root) = setup().await;
     assert_eq!(
@@ -463,6 +480,7 @@ async fn stage_and_startup_cleanup_expired_records() {
 
 // Catches committing the first file before discovering an extra multipart field.
 #[tokio::test]
+/// 验证 multipart 必须恰有一个文件且拒绝时清理已准备文件。
 async fn multipart_requires_exactly_one_file_and_cleans_prepared_files_on_rejection() {
     let (db, app, root) = setup().await;
     for tail in [
@@ -509,6 +527,7 @@ async fn multipart_requires_exactly_one_file_and_cleans_prepared_files_on_reject
 
 // Catches missing FOR UPDATE / row-count checks allowing concurrent token replay.
 #[tokio::test]
+/// 验证并发消费同一暂存令牌时只有一个成功。
 async fn concurrent_consumption_has_one_winner() {
     let db = support::TestDatabase::migrated("staged_concurrent").await;
     let root = std::env::temp_dir().join(format!("staged_concurrent_{}", uuid::Uuid::new_v4()));
@@ -530,6 +549,7 @@ async fn concurrent_consumption_has_one_winner() {
             result
         }
     };
+    // 两个事务竞争同一令牌，提交后断言只有一个消费成功。
     let (a, b) = tokio::join!(run(), run());
     assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
     assert!(
@@ -540,6 +560,7 @@ async fn concurrent_consumption_has_one_winner() {
 }
 // Catches committing staged-row deletion before media deletion or failing to restore isolated files.
 #[tokio::test]
+/// 验证清理操作失败恢复文件，提交错误保留恢复所需状态。
 async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() {
     let db = support::TestDatabase::migrated("staged_cleanup_failure").await;
     let root =
@@ -606,6 +627,7 @@ async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() 
 }
 // Catches changing the new-stage/startup batch bounds or looping until all staging rows disappear.
 #[tokio::test]
+/// 验证暂存和启动清理均有有限批次上限。
 async fn stage_and_startup_cleanup_have_finite_batch_bounds() {
     let (db, app, root) = setup().await;
     db.execute_unprepared("INSERT INTO media_asset(id,storage_key,original_name,mime_type,byte_size,purpose) SELECT ('00000000-0000-4000-8000-'||lpad(i::text,12,'0'))::uuid,'poster/'||left(md5(i::text),2)||'/'||md5(i::text)||'.png','poster.png','image/png',1,'poster' FROM generate_series(1,1027) AS i; INSERT INTO mcp_staged_poster(id,token_hash,principal_hash,asset_id,created_at,expires_at) SELECT gen_random_uuid(),id::text,'principal',id,CURRENT_TIMESTAMP-INTERVAL '1 hour',CURRENT_TIMESTAMP-INTERVAL '1 minute' FROM media_asset").await.unwrap();
@@ -626,6 +648,7 @@ async fn stage_and_startup_cleanup_have_finite_batch_bounds() {
 
 // Catches treating missing upload metadata as an unsupported media format or accepting a non-file field.
 #[tokio::test]
+/// 验证 multipart 缺少元数据或字段错误时返回请求错误。
 async fn multipart_missing_metadata_or_wrong_field_is_bad_request() {
     let (db, app, root) = setup().await;
     for headers in [
@@ -658,11 +681,13 @@ async fn multipart_missing_metadata_or_wrong_field_is_bad_request() {
 }
 
 #[cfg(unix)]
+/// 在清理收尾事件注入失败，以验证清单恢复。
 struct DenyCleanupFinalize {
     root: std::path::PathBuf,
 }
 #[cfg(unix)]
 impl media::StorageHooks for DenyCleanupFinalize {
+    /// 在暂存重命名后将操作目录设为只读，使清理收尾失败。
     fn on_event(&self, event: &media::StorageEvent) -> std::io::Result<()> {
         use std::os::unix::fs::PermissionsExt;
         if matches!(event, media::StorageEvent::AfterStageRename(_)) {
@@ -679,6 +704,7 @@ impl media::StorageHooks for DenyCleanupFinalize {
 // Catches claiming cleanup success or removing the recovery manifest after physical finalization fails.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证清理收尾失败保留清单以供启动恢复。
 async fn cleanup_finalization_failure_retains_manifest_for_startup_recovery() {
     use std::os::unix::fs::PermissionsExt;
     let db = support::TestDatabase::migrated("staged_finalize_failure").await;
@@ -720,6 +746,7 @@ async fn cleanup_finalization_failure_retains_manifest_for_startup_recovery() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+/// 在 MCP 测试中携带凭据发送 JSON 写请求。
 async fn mcp_post(app: &Router, path: &str, payload: Value) -> Response {
     app.clone()
         .oneshot(
@@ -735,6 +762,7 @@ async fn mcp_post(app: &Router, path: &str, payload: Value) -> Response {
         .await
         .unwrap()
 }
+/// 在完整内容创建测试前准备可用的草稿字段及暂存海报。
 async fn complete_draft(db: &support::TestDatabase, app: &Router) -> (Value, String) {
     let genre = uuid::Uuid::new_v4();
     db.execute_unprepared(&format!(
@@ -765,6 +793,7 @@ async fn complete_draft(db: &support::TestDatabase, app: &Router) -> (Value, Str
 
 // Catches MCP creation accepting synopsis in JSON but discarding it before persistence.
 #[tokio::test]
+/// 验证 MCP 创建私密电影和剧集时保存简介。
 async fn mcp_private_movie_and_series_persist_synopsis() {
     let (db, app, root) = setup().await;
     for (path, table) in [
@@ -798,6 +827,7 @@ async fn mcp_private_movie_and_series_persist_synopsis() {
 
 // Catches MCP creation rejecting public drafts or silently forcing them private.
 #[tokio::test]
+/// 验证 MCP 创建公开电影和剧集时保存请求的可见范围。
 async fn mcp_public_movie_and_series_persist_requested_visibility() {
     let (db, app, root) = setup().await;
     for (path, table) in [
@@ -832,6 +862,7 @@ async fn mcp_public_movie_and_series_persist_requested_visibility() {
 }
 // Catches partial drafts, discarded metadata, missing ownership, and reusable tokens.
 #[tokio::test]
+/// 验证 MCP 完整创建电影和剧集时原子消费海报。
 async fn mcp_complete_movie_and_series_atomically_consume_posters() {
     let (db, app, root) = setup().await;
     for (path, table) in [
@@ -884,6 +915,7 @@ async fn mcp_complete_movie_and_series_atomically_consume_posters() {
 }
 // Catches consuming tokens before validation and accepting expired/wrong-principal tokens.
 #[tokio::test]
+/// 验证无效完整草稿不留下内容且保留海报令牌。
 async fn mcp_invalid_complete_drafts_leave_no_content_and_preserve_tokens() {
     let (db, app, root) = setup().await;
     let (valid, _) = complete_draft(&db, &app).await;
@@ -1001,6 +1033,7 @@ async fn mcp_invalid_complete_drafts_leave_no_content_and_preserve_tokens() {
 }
 // Deferred constraint failure occurs at COMMIT after every application write has succeeded.
 #[tokio::test]
+/// 验证 MCP 创建提交失败后令牌和全部内容写入回滚。
 async fn mcp_failed_commit_restores_token_and_all_content_writes() {
     let (db, app, root) = setup().await;
     for (path, table) in [
@@ -1033,6 +1066,7 @@ async fn mcp_failed_commit_restores_token_and_all_content_writes() {
 }
 // Competing movie/series requests must not share a staged asset across content kinds.
 #[tokio::test]
+/// 验证电影与剧集并发创建时同一海报只消费一次。
 async fn mcp_concurrent_movie_and_series_consume_poster_once() {
     let (db, app, root) = setup().await;
     let (payload, asset) = complete_draft(&db, &app).await;
@@ -1074,6 +1108,7 @@ async fn mcp_concurrent_movie_and_series_consume_poster_once() {
 
 // Catches missing MCP duration enforcement and incorrect parent/child version updates.
 #[tokio::test]
+/// 验证 MCP 单集要求时长且失败时版本保持原子性。
 async fn mcp_episode_duration_is_required_and_versions_remain_atomic() {
     let (db, app, root) = setup().await;
     let series = uuid::Uuid::new_v4();
@@ -1157,6 +1192,7 @@ async fn mcp_episode_duration_is_required_and_versions_remain_atomic() {
 
 // Catches falling through to administrator 400 errors or reporting only the first invalid field.
 #[tokio::test]
+/// 验证 MCP 单集语义错误报告全部相关字段且不写入数据。
 async fn mcp_episode_semantic_errors_report_all_fields_without_writes() {
     let (db, app, root) = setup().await;
     let series = uuid::Uuid::new_v4();

@@ -36,6 +36,7 @@ const DEFAULT_GENRES: [&str; 12] = [
     "动画",
 ];
 
+/// 在测试准备阶段构造应用配置。
 fn config() -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -54,10 +55,12 @@ fn config() -> Config {
     }
 }
 
+/// 在测试准备阶段创建已迁移的隔离数据库连接。
 async fn database() -> DatabaseConnection {
     let url =
         std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required for genre tests");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("genres_test_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -70,6 +73,7 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -100,10 +104,12 @@ async fn request(
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let login = request(
         app,
@@ -140,6 +146,7 @@ async fn credentials(app: &Router) -> (String, String) {
     (cookie, csrf)
 }
 
+/// 在列表场景发送查询并解析返回数据供断言。
 async fn list(app: &Router, cookie: &str) -> Vec<Value> {
     let response = request(
         app,
@@ -157,6 +164,7 @@ async fn list(app: &Router, cookie: &str) -> Vec<Value> {
 
 // Catches moving seed data to application startup, omitting a default, or changing display order.
 #[tokio::test]
+/// 验证迁移按展示顺序填充默认题材。
 async fn migration_seeds_the_default_genres_in_display_order() {
     let db = database().await;
     let genres = genre::Entity::find().all(&db).await.unwrap();
@@ -175,6 +183,7 @@ async fn migration_seeds_the_default_genres_in_display_order() {
 
 // Catches unordered listing, missing CRUD behavior, or bypassing session/CSRF/configured-origin checks.
 #[tokio::test]
+/// 验证管理员可列出、创建、重命名并停用题材。
 async fn administrators_can_list_create_rename_and_deactivate_genres() {
     let db = database().await;
     let app = app::build(db, &config()).await.unwrap();
@@ -280,6 +289,7 @@ async fn administrators_can_list_create_rename_and_deactivate_genres() {
 
 // Catches piecemeal reorder commits and accepting duplicate display positions.
 #[tokio::test]
+/// 验证题材排序原子执行并拒绝重复位置。
 async fn reorder_is_atomic_and_rejects_duplicate_positions() {
     let app = app::build(database().await, &config()).await.unwrap();
     let (cookie, csrf) = credentials(&app).await;
@@ -356,6 +366,7 @@ async fn reorder_is_atomic_and_rejects_duplicate_positions() {
 
 // Catches deleting referenced genres, removing old associations on deactivation, or allowing new ones.
 #[tokio::test]
+/// 验证已引用或停用题材遵循关联约束。
 async fn referenced_or_inactive_genres_obey_association_rules() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -464,6 +475,7 @@ async fn referenced_or_inactive_genres_obey_association_rules() {
 
 // Catches eligibility checks that do not hold a row lock until the association transaction commits.
 #[tokio::test]
+/// 验证题材关联与停用并发时按锁顺序检查可用性。
 async fn association_eligibility_serializes_with_deactivation() {
     let db = database().await;
     let genre_id = genre::Entity::find().one(&db).await.unwrap().unwrap().id;
@@ -500,6 +512,7 @@ async fn association_eligibility_serializes_with_deactivation() {
         ))
         .await
         .unwrap();
+    // 提交已获资格的关联后释放锁，再验证后续停用与新关联的顺序。
     association_tx.commit().await.unwrap();
 
     genres::service::deactivate(&db, genre_id).await.unwrap();

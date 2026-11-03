@@ -21,6 +21,7 @@ use tower::ServiceExt;
 use uuid::Uuid;
 mod support;
 
+/// 在认证测试准备阶段构造应用配置。
 fn config() -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -39,10 +40,12 @@ fn config() -> Config {
     }
 }
 
+/// 在测试准备阶段创建已迁移的隔离数据库连接。
 async fn database() -> DatabaseConnection {
     let url =
         std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required for auth tests");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("auth_test_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -55,6 +58,7 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+/// 在认证测试中按指定参数构造并发送请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -75,6 +79,7 @@ async fn request(
     .await
 }
 
+/// 在认证测试中以指定客户端地址发送请求。
 async fn request_from(
     app: &Router,
     method: &str,
@@ -115,6 +120,7 @@ async fn request_from(
     app.clone().oneshot(req).await.unwrap()
 }
 
+/// 在认证测试中以指定 Host 和来源发送请求。
 async fn request_for_authority(
     app: &Router,
     method: &str,
@@ -147,6 +153,7 @@ async fn request_for_authority(
 
 // Catches policy accepted in isolation but missing from login, read or write authentication.
 #[tokio::test]
+/// 验证启用局域网 HTTP 后私有 IP 可登录、保持会话并写入。
 async fn enabled_lan_http_allows_private_ip_login_session_and_write() {
     let db = database().await;
     let mut cfg = config();
@@ -209,6 +216,7 @@ async fn enabled_lan_http_allows_private_ip_login_session_and_write() {
 
 // Catches matching-but-untrusted headers bypassing either login or authenticated reads.
 #[tokio::test]
+/// 验证局域网模式禁用、公开域名、错误端口和来源不匹配时拒绝请求。
 async fn lan_http_rejects_disabled_public_domain_wrong_port_and_mismatched_origin() {
     let db = database().await;
     let mut cfg = config();
@@ -308,6 +316,7 @@ async fn lan_http_rejects_disabled_public_domain_wrong_port_and_mismatched_origi
 
 // Catches duplicate headers being silently reduced to their first value by authentication.
 #[tokio::test]
+/// 验证局域网模式在会话认证前拒绝无效请求头。
 async fn lan_http_rejects_invalid_headers_before_session_authentication() {
     let mut cfg = config();
     cfg.cookie_secure = false;
@@ -393,6 +402,7 @@ async fn lan_http_rejects_invalid_headers_before_session_authentication() {
 // Catches Argon2 verification running while an exclusive administrator-row lock and pooled
 // connection are held. Unknown-name work must finish while an unrelated writer owns the row.
 #[tokio::test]
+/// 验证错误登录不等待被占用的管理员行锁。
 async fn invalid_logins_do_not_wait_for_the_administrator_row_lock() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -403,6 +413,7 @@ async fn invalid_logins_do_not_wait_for_the_administrator_row_lock() {
         .await
         .unwrap();
 
+    // 保持管理员行锁并并发尝试不存在的账号，验证无效登录不依赖该锁。
     let attempts = (1..=3).map(|suffix| {
         let app = app.clone();
         tokio::spawn(async move {
@@ -433,6 +444,7 @@ async fn invalid_logins_do_not_wait_for_the_administrator_row_lock() {
 
 // Catches a login minting a session from a hash that changed while Argon2 was verifying it.
 #[tokio::test]
+/// 验证密码校验期间哈希已改变时不能使用旧密码登录。
 async fn login_never_accepts_an_old_hash_changed_during_verification() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -456,7 +468,9 @@ async fn login_never_accepts_an_old_hash_changed_during_verification() {
 }
 
 #[tokio::test]
+/// 验证只有显式信任代理时才采用转发的客户端 IP。
 async fn forwarded_client_ip_is_used_only_when_the_proxy_mode_is_explicitly_trusted() {
+    /// 在代理来源场景发送请求并返回状态供断言。
     async fn forwarded(app: &Router, ip: &str, name: &str, authenticated: bool) -> StatusCode {
         request_from(
             app,
@@ -531,10 +545,12 @@ async fn forwarded_client_ip_is_used_only_when_the_proxy_mode_is_explicitly_trus
     );
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在认证测试中发送指定账号的登录请求。
 async fn login(app: &Router, name: &str, password: &str) -> Response {
     request(
         app,
@@ -548,6 +564,7 @@ async fn login(app: &Router, name: &str, password: &str) -> Response {
     .await
 }
 
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let response = login(app, "Admin", "initial-password").await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -576,6 +593,7 @@ async fn credentials(app: &Router) -> (String, String) {
 
 // Catches missing initialization, replacement on restart, and startup unnecessarily requiring credentials.
 #[tokio::test]
+/// 验证初始化只执行一次且不覆盖现有管理员。
 async fn initialization_is_required_once_and_never_overwrites_the_admin() {
     let db = database().await;
     let mut absent = config();
@@ -600,6 +618,7 @@ async fn initialization_is_required_once_and_never_overwrites_the_admin() {
 
 // Catches a new root-path session being shadowed by an expired legacy-path Cookie after login.
 #[tokio::test]
+/// 验证管理员登录处理旧路径的过期会话 Cookie。
 async fn admin_login_cookie_migrates_expired_legacy_path_session() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -665,6 +684,7 @@ async fn admin_login_cookie_migrates_expired_legacy_path_session() {
 
 // Catches leaked plaintext session/CSRF storage, weak cookies, and nonrecoverable session tokens on restart.
 #[tokio::test]
+/// 验证登录签发安全不透明会话，重启后可恢复 CSRF。
 async fn login_cookie_issues_secure_opaque_session_and_recovers_csrf_after_restart() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -710,6 +730,7 @@ async fn login_cookie_issues_secure_opaque_session_and_recovers_csrf_after_resta
 
 // Catches account enumeration and off-by-one throttling.
 #[tokio::test]
+/// 验证登录错误响应一致并在第六次失败时限流。
 async fn login_errors_are_indistinguishable_and_sixth_failure_is_limited() {
     let app = app::build(database().await, &config()).await.unwrap();
     let unknown = login(&app, "Missing", "wrong").await;
@@ -743,6 +764,7 @@ async fn login_errors_are_indistinguishable_and_sixth_failure_is_limited() {
 
 // Catches authentication failures being cached by a browser or intermediary.
 #[tokio::test]
+/// 验证敏感认证失败响应禁止缓存。
 async fn every_sensitive_auth_failure_is_no_store() {
     let database = support::TestDatabase::migrated("auth_no_store").await;
     let app = app::build(database.connection(), &config()).await.unwrap();
@@ -782,6 +804,7 @@ async fn every_sensitive_auth_failure_is_no_store() {
 
 // Catches writes bypassing either authorization, CSRF, or same-origin checks.
 #[tokio::test]
+/// 验证受保护写入要求有效会话、CSRF 和同源请求。
 async fn protected_writes_require_session_csrf_and_same_origin() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -842,6 +865,7 @@ async fn protected_writes_require_session_csrf_and_same_origin() {
 
 // Catches password changes without checking the current password or without revoking other devices.
 #[tokio::test]
+/// 验证管理员改密检查当前密码并撤销所有会话。
 async fn password_change_cookie_checks_current_password_and_revokes_all_sessions() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -922,6 +946,7 @@ async fn password_change_cookie_checks_current_password_and_revokes_all_sessions
 
 // Catches expired cookies remaining usable and logout not removing server-side state.
 #[tokio::test]
+/// 验证退出和过期后旧会话不可重用。
 async fn logout_cookie_and_expiry_reject_reuse() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -980,6 +1005,7 @@ async fn logout_cookie_and_expiry_reject_reuse() {
     );
 }
 
+/// 在退出或失效场景检查管理员 Cookie 已清除。
 fn assert_cleared_admin_cookies(response: &Response) {
     let cookies: Vec<_> = response
         .headers()
@@ -1001,6 +1027,7 @@ fn assert_cleared_admin_cookies(response: &Response) {
 
 // Catches applying ordinary-user restrictions to the existing independent administrator policy.
 #[tokio::test]
+/// 验证普通用户密码长度规则不改变管理员密码规则。
 async fn viewer_password_minimum_does_not_change_administrator_password_rules() {
     let db = support::TestDatabase::migrated("admin_password_policy").await;
     let app = app::build(db.connection(), &config()).await.unwrap();
@@ -1024,6 +1051,7 @@ async fn viewer_password_minimum_does_not_change_administrator_password_rules() 
 
 // Catches accepting an empty replacement password and revoking valid sessions on rejected input.
 #[tokio::test]
+/// 验证空的新密码被拒绝且认证数据不变。
 async fn empty_replacement_password_is_rejected_without_mutating_authentication() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -1049,6 +1077,7 @@ async fn empty_replacement_password_is_rejected_without_mutating_authentication(
 
 // Catches simultaneous empty-table bootstraps creating multiple administrators.
 #[tokio::test]
+/// 验证并发初始化仅创建一个管理员。
 async fn concurrent_startup_creates_only_one_administrator() {
     let db = database().await;
     let config = config();
@@ -1062,6 +1091,7 @@ async fn concurrent_startup_creates_only_one_administrator() {
 
 // Catches initialization incorrectly accepting a missing or blank bootstrap value on an empty table.
 #[tokio::test]
+/// 验证空数据库启动时分别报告缺失的初始化凭据。
 async fn empty_database_reports_each_missing_initialization_credential() {
     let db = database().await;
     for (name, password, missing) in [
@@ -1090,6 +1120,7 @@ async fn empty_database_reports_each_missing_initialization_credential() {
 
 // Catches accepting a forged Host/Origin pair that is not in trusted deployment configuration.
 #[tokio::test]
+/// 验证即使 Host 与 Origin 匹配，未配置的来源仍被拒绝。
 async fn matching_but_unconfigured_host_and_origin_are_rejected() {
     let db = database().await;
     let app = app::build(db.clone(), &config()).await.unwrap();
@@ -1122,6 +1153,7 @@ async fn matching_but_unconfigured_host_and_origin_are_rejected() {
 
 // Catches literal-string origin comparisons that reject equivalent case/default-port forms.
 #[tokio::test]
+/// 验证配置的来源对协议、主机和默认端口进行归一化。
 async fn configured_origin_normalizes_scheme_host_and_default_port() {
     let mut cfg = config();
     cfg.public_origin = "HTTPS://HARBOR.TEST:443/".into();
@@ -1158,6 +1190,7 @@ async fn configured_origin_normalizes_scheme_host_and_default_port() {
 
 // Catches callers bypassing environment parsing to start a production app with insecure cookies.
 #[tokio::test]
+/// 验证非回环地址的不安全配置在启动时被拒绝。
 async fn app_startup_rejects_insecure_non_loopback_configuration() {
     let mut cfg = config();
     cfg.cookie_secure = false;
@@ -1166,6 +1199,7 @@ async fn app_startup_rejects_insecure_non_loopback_configuration() {
 
 // Catches local HTTP development passing config parsing but failing at the actual login boundary.
 #[tokio::test]
+/// 验证回环开发配置允许登录签发 HTTP Cookie。
 async fn loopback_development_login_can_issue_an_http_cookie() {
     let mut cfg = config();
     cfg.public_origin = "http://localhost:5173".into();

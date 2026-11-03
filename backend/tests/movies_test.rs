@@ -40,9 +40,11 @@ use tokio::sync::{Notify, oneshot};
 use tower::ServiceExt;
 use uuid::Uuid;
 
+/// 为测试持有临时媒体目录，并在测试结束时清理。
 struct TempRoot(PathBuf);
 
 impl TempRoot {
+    /// 在测试准备阶段创建临时目录。
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!("movie_harbor_movies_{}", Uuid::new_v4()));
         std::fs::create_dir_all(&path).unwrap();
@@ -53,17 +55,20 @@ impl TempRoot {
 }
 
 impl AsRef<Path> for TempRoot {
+    /// 在测试配置和文件操作时提供临时目录路径。
     fn as_ref(&self) -> &Path {
         &self.0
     }
 }
 
 impl Drop for TempRoot {
+    /// 在测试结束时清理测试创建的临时目录。
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 
+/// 在测试准备阶段构造指向临时目录的应用配置。
 fn config(root: &Path) -> Config {
     Config {
         listen_addr: "127.0.0.1:3000".parse().unwrap(),
@@ -82,9 +87,11 @@ fn config(root: &Path) -> Config {
     }
 }
 
+/// 在测试准备阶段创建已迁移的隔离数据库连接。
 async fn database() -> DatabaseConnection {
     let url = std::env::var("TEST_DATABASE_URL").expect("TEST_DATABASE_URL is required");
     let admin = Database::connect(&url).await.unwrap();
+    // 每个测试使用独立 schema 和 search_path，避免并行测试共享表和数据。
     let schema = format!("movies_test_{}", Uuid::new_v4().simple());
     admin
         .execute_unprepared(&format!("CREATE SCHEMA {schema}"))
@@ -97,10 +104,12 @@ async fn database() -> DatabaseConnection {
     db
 }
 
+/// 在测试准备或断言阶段执行预期成功的 SQL。
 async fn sql(db: &DatabaseConnection, statement: &str) {
     db.execute_unprepared(statement).await.unwrap();
 }
 
+/// 在测试中按指定参数构造并发送路由请求。
 async fn request(
     app: &Router,
     method: &str,
@@ -131,10 +140,12 @@ async fn request(
     app.clone().oneshot(request).await.unwrap()
 }
 
+/// 在断言响应内容时读取并解析 JSON 响应体。
 async fn body(response: Response) -> Value {
     serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
 }
 
+/// 在异常响应断言中检查服务端错误且不泄露存储键。
 async fn assert_internal_server_error(response: Response, leaked_storage_key: &str) {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let raw = String::from_utf8(
@@ -156,6 +167,7 @@ async fn assert_internal_server_error(response: Response, leaked_storage_key: &s
     assert!(!raw.contains(leaked_storage_key));
 }
 
+/// 在测试准备阶段初始化或登录管理员并返回会话凭据。
 async fn credentials(app: &Router) -> (String, String) {
     let response = request(
         app,
@@ -192,6 +204,7 @@ async fn credentials(app: &Router) -> (String, String) {
     (cookie, csrf)
 }
 
+/// 在内容管理测试中携带认证和 CSRF 凭据发送写入请求。
 async fn write(
     app: &Router,
     method: &str,
@@ -212,6 +225,7 @@ async fn write(
     .await
 }
 
+/// 在电影测试准备阶段通过管理接口创建草稿。
 async fn create_movie(app: &Router, cookie: &str, csrf: &str, name: &str) -> Value {
     let response = write(
         app,
@@ -226,6 +240,7 @@ async fn create_movie(app: &Router, cookie: &str, csrf: &str, name: &str) -> Val
     body(response).await
 }
 
+/// 在测试准备阶段创建媒体记录及普通文件或目录，用于有效与无效路径场景。
 async fn create_asset(
     db: &DatabaseConnection,
     root: &Path,
@@ -265,6 +280,7 @@ async fn create_asset(
     .unwrap()
 }
 
+/// 在电影测试准备阶段将媒体关联到指定槽位。
 async fn associate(
     db: &DatabaseConnection,
     movie_id: &str,
@@ -290,6 +306,7 @@ async fn associate(
         .unwrap()
 }
 
+/// 在删除测试中注入第二次暂存失败，以验证先前文件恢复。
 struct FailSecondStage {
     stages: AtomicUsize,
 }
@@ -302,6 +319,7 @@ const LOCK_ORDER_PNG: &[u8] = &[
     0xae, 0x42, 0x60, 0x82,
 ];
 
+/// 在上传与删除并发测试中暂停 PNG 流以控制执行顺序。
 struct PausedPng {
     started: Option<oneshot::Sender<()>>,
     release: Option<oneshot::Receiver<()>>,
@@ -309,6 +327,7 @@ struct PausedPng {
 }
 
 impl ChunkSource for PausedPng {
+    /// 在并发测试读取上传流时控制数据块交付和暂停时机。
     fn next_chunk(
         &mut self,
     ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
@@ -333,11 +352,13 @@ impl ChunkSource for PausedPng {
     }
 }
 
+/// 在并发测试中通知删除操作进入媒体锁阶段。
 struct RemovalLockSignal {
     entered: Arc<Notify>,
 }
 
 impl StorageHooks for RemovalLockSignal {
+    /// 在删除尝试取得媒体锁前通知并发测试继续执行。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::BeforeRemovalLock) {
             self.entered.notify_one();
@@ -347,6 +368,7 @@ impl StorageHooks for RemovalLockSignal {
 }
 
 impl StorageHooks for FailSecondStage {
+    /// 在第二次媒体暂存前注入权限错误，以检验先前文件恢复。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::BeforeStage(_))
             && self.stages.fetch_add(1, Ordering::SeqCst) == 1
@@ -360,6 +382,7 @@ impl StorageHooks for FailSecondStage {
     }
 }
 
+/// 构造上传与删除的受控交错，验证同一或不同电影均无跨系统死锁。
 async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let db = database().await;
     let root = TempRoot::new();
@@ -426,6 +449,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
         )
         .await
     });
+    // 等待上传持有相关资源并暂停，再启动删除以构造锁顺序交错。
     source_started_rx.await.unwrap();
     let delete_db = db.clone();
     let delete_storage = storage;
@@ -433,6 +457,7 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
     let mut deletion = tokio::spawn(async move {
         movie_service::delete(&delete_db, &delete_storage, delete_id, 1).await
     });
+    // 确认删除到达锁阶段后恢复上传；两者都必须在超时前结束。
     removal_entered.notified().await;
     source_release_tx.send(()).unwrap();
 
@@ -485,17 +510,20 @@ async fn run_upload_delete_lock_interleaving(delete_same_movie: bool) {
 }
 
 #[tokio::test]
+/// 验证同一电影上传与删除并发时无跨系统死锁。
 async fn upload_and_delete_of_the_same_movie_complete_without_cross_system_deadlock() {
     run_upload_delete_lock_interleaving(true).await;
 }
 
 #[tokio::test]
+/// 验证不同电影上传与删除并发后文件状态一致。
 async fn upload_and_delete_of_different_movies_complete_with_consistent_files() {
     run_upload_delete_lock_interleaving(false).await;
 }
 
 // Catches missing route registration and bypasses of session, CSRF, or configured-origin checks.
 #[tokio::test]
+/// 验证电影管理路由认证及草稿创建、列表和详情。
 async fn movie_admin_routes_are_authenticated_and_create_list_detail_drafts() {
     let db = database().await;
     let root = TempRoot::new();
@@ -612,6 +640,7 @@ async fn movie_admin_routes_are_authenticated_and_create_list_detail_drafts() {
 
 // Catches exposing a raw storage key or omitting the validated container-visible media path.
 #[tokio::test]
+/// 验证电影管理详情包含受控视频本地路径。
 async fn movie_admin_detail_includes_a_controlled_video_local_path() {
     let db = database().await;
     let root = TempRoot::new();
@@ -648,6 +677,7 @@ async fn movie_admin_detail_includes_a_controlled_video_local_path() {
 }
 
 #[tokio::test]
+/// 验证电影详情拒绝畸形视频存储键且不泄露其内容。
 async fn movie_admin_detail_rejects_a_malformed_video_storage_key_without_leaking_it() {
     let db = database().await;
     let root = TempRoot::new();
@@ -680,6 +710,7 @@ async fn movie_admin_detail_rejects_a_malformed_video_storage_key_without_leakin
 }
 
 #[tokio::test]
+/// 验证电影详情拒绝用途错误的视频资产且不泄露存储键。
 async fn movie_admin_detail_rejects_a_video_asset_with_the_wrong_purpose_without_leaking_it() {
     let db = database().await;
     let root = TempRoot::new();
@@ -713,6 +744,7 @@ async fn movie_admin_detail_rejects_a_video_asset_with_the_wrong_purpose_without
 
 // Catches partial metadata/genre commits, inactive association, or replacing omitted associations.
 #[tokio::test]
+/// 验证电影草稿更新原子执行并保留未提交的题材。
 async fn draft_updates_are_atomic_and_preserve_omitted_genres() {
     let db = database().await;
     let root = TempRoot::new();
@@ -841,6 +873,7 @@ async fn draft_updates_are_atomic_and_preserve_omitted_genres() {
 
 // Catches accidentally retaining the arbitrary asset-ID association API.
 #[tokio::test]
+/// 验证已移除的任意媒体关联路由返回不存在。
 async fn removed_arbitrary_media_association_routes_return_not_found() {
     let db = database().await;
     let root = TempRoot::new();
@@ -864,6 +897,7 @@ async fn removed_arbitrary_media_association_routes_return_not_found() {
 
 // Catches requiring a poster or trusting an unsafe, missing, or non-regular video key.
 #[tokio::test]
+/// 验证电影发布可无海报但必须有浏览器可播放的视频。
 async fn publish_allows_no_poster_but_requires_an_accessible_browser_video() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1044,6 +1078,7 @@ async fn publish_allows_no_poster_but_requires_an_accessible_browser_video() {
 // Catches a blocking FIFO open pinning an async worker and holding the movie row lock.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证发布遇到 FIFO 时直接拒绝而不等待写入者。
 async fn publish_rejects_a_fifo_without_waiting_for_a_writer() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1105,6 +1140,7 @@ async fn publish_rejects_a_fifo_without_waiting_for_a_writer() {
 
 // Catches incorrect transitions, mutable non-drafts, non-idempotent retries, and published deletion.
 #[tokio::test]
+/// 验证电影生命周期转换、只读、幂等与删除规则。
 async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1296,6 +1332,7 @@ async fn lifecycle_state_machine_enforces_read_only_idempotency_and_delete_rules
 
 // Catches a missing version predicate or a check-then-write race that accepts both writers.
 #[tokio::test]
+/// 验证过期版本和并发写入产生确定冲突且仅一个成功。
 async fn stale_and_concurrent_writes_have_one_winner_and_deterministic_conflicts() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1352,6 +1389,7 @@ async fn stale_and_concurrent_writes_have_one_winner_and_deterministic_conflicts
 
 // Catches a partial media stage deleting content or leaving the first file quarantined.
 #[tokio::test]
+/// 验证后续媒体暂存失败时恢复电影先前暂存的文件。
 async fn delete_restores_staged_movie_media_when_a_later_stage_fails() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1407,6 +1445,7 @@ async fn delete_restores_staged_movie_media_when_a_later_stage_fails() {
 }
 
 #[tokio::test]
+/// 验证数据库删除事务失败时恢复电影媒体文件。
 async fn delete_restores_movie_media_when_the_database_transaction_fails() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1459,12 +1498,14 @@ async fn delete_restores_movie_media_when_the_database_transaction_fails() {
 }
 
 #[cfg(unix)]
+/// 在暂存后将操作目录设为只读，以触发清理收尾失败。
 struct MakeOperationReadOnlyAfterStage {
     root: PathBuf,
 }
 
 #[cfg(unix)]
 impl StorageHooks for MakeOperationReadOnlyAfterStage {
+    /// 在暂存重命名后将操作目录设为只读，触发删除收尾失败。
     fn on_event(&self, event: &StorageEvent) -> io::Result<()> {
         if matches!(event, StorageEvent::AfterStageRename(_)) {
             let operation = std::fs::read_dir(self.root.join(".operations"))?
@@ -1479,6 +1520,7 @@ impl StorageHooks for MakeOperationReadOnlyAfterStage {
 
 #[cfg(unix)]
 #[tokio::test]
+/// 验证数据库提交后文件收尾失败会向调用方报告。
 async fn delete_reports_finish_failure_after_the_database_commit() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1540,6 +1582,7 @@ async fn delete_reports_finish_failure_after_the_database_commit() {
 // Catches confirmation data being inferred from a stale detail response and shared media being
 // reported as files that deletion will remove.
 #[tokio::test]
+/// 验证删除影响统计及实际删除覆盖电影全部媒体。
 async fn delete_impact_and_delete_cover_all_movie_media() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1622,6 +1665,7 @@ async fn delete_impact_and_delete_cover_all_movie_media() {
 // Catches a pre-commit storage permission failure deleting content or media metadata.
 #[cfg(unix)]
 #[tokio::test]
+/// 验证媒体无法暂存时电影内容保持不变。
 async fn delete_preserves_content_when_media_staging_is_not_permitted() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1676,6 +1720,7 @@ async fn delete_preserves_content_when_media_staging_is_not_permitted() {
 
 // Catches malformed identifiers being confused with absent resources.
 #[tokio::test]
+/// 验证无效和不存在的电影标识按一致规则映射错误。
 async fn invalid_and_missing_movie_identifiers_are_mapped_consistently() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1712,6 +1757,7 @@ async fn invalid_and_missing_movie_identifiers_are_mapped_consistently() {
 }
 
 #[tokio::test]
+/// 验证创建电影要求显式访问范围并返回该范围。
 async fn private_movie_creation_requires_explicit_scope_and_returns_it() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1758,6 +1804,7 @@ async fn private_movie_creation_requires_explicit_scope_and_returns_it() {
 }
 
 #[tokio::test]
+/// 验证电影私密切换独立于生命周期并拒绝过期版本。
 async fn private_movie_switch_is_independent_of_lifecycle_and_rejects_stale_versions() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1850,6 +1897,7 @@ async fn private_movie_switch_is_independent_of_lifecycle_and_rejects_stale_vers
 }
 
 #[tokio::test]
+/// 验证并发切换电影私密范围时只有一个版本获胜。
 async fn private_movie_concurrent_switch_has_exactly_one_winner() {
     let db = database().await;
     let root = TempRoot::new();
@@ -1924,6 +1972,7 @@ async fn private_movie_concurrent_switch_has_exactly_one_winner() {
 
 // Administrator creation must keep its legacy two-field semantics even with new optional fields.
 #[tokio::test]
+/// 验证管理员创建电影时忽略 MCP 专用元数据。
 async fn admin_movie_create_ignores_mcp_metadata() {
     let db = database().await;
     let root = TempRoot::new();
