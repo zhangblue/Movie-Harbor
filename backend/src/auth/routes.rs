@@ -45,6 +45,8 @@ pub async fn require_session(
     if !state.origin_policy.host_allowed(request.headers()) {
         return Err(AuthError(StatusCode::FORBIDDEN));
     }
+    // 仅对白名单路由尝试 Bearer 凭据；验证成功即以 MCP 主体进入业务处理器，跳过 Cookie 和 CSRF。
+    // 路由不在白名单或凭据无效时回退管理员会话认证，未通过会话校验则不会执行后续处理。
     if mcp::route_allowed(request.method(), request.uri().path())
         && let Some(principal) =
             mcp::authenticate(request.headers(), state.mcp_api_key_digest.as_deref())

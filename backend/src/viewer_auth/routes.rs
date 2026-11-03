@@ -187,6 +187,7 @@ async fn change_password(
         .await?
         .ok_or(AuthError(StatusCode::UNAUTHORIZED))?;
     let verified_hash = viewer.password_hash.clone();
+    // 已有会话仍需验证旧密码；密码不匹配时返回 400 并停止，校验出错则直接传播错误。
     if !password::verify_limited(
         &state.password_work,
         input.current_password,
@@ -200,6 +201,7 @@ async fn change_password(
         )
             .into_response());
     }
+    // 在开启事务和获取行锁之前计算新哈希，缩短锁持有时间；计算失败不会进入写入阶段。
     let hash = password::hash_limited(&state.password_work, input.new_password).await?;
     let tx = state.db.begin().await?;
     let viewer = viewer_user::Entity::find_by_id(current.viewer.id)
