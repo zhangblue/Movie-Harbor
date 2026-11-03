@@ -568,11 +568,13 @@ async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() 
     let storage = LocalMediaStorage::initialize(&root).await.unwrap();
     let _response = staged(&db, &storage).await;
     db.execute_unprepared("UPDATE mcp_staged_poster SET expires_at=CURRENT_TIMESTAMP-INTERVAL '1 minute'; CREATE FUNCTION reject_staged_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected deletion failure'; END $$").await.unwrap();
+    // 分别在 DELETE 当场和延迟到 COMMIT 注入错误，覆盖已知回滚与提交结果未知。
     for trigger in [
         "CREATE TRIGGER reject_staged_delete BEFORE DELETE ON media_asset FOR EACH ROW EXECUTE FUNCTION reject_staged_delete()",
         "CREATE CONSTRAINT TRIGGER reject_staged_delete AFTER DELETE ON media_asset DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_staged_delete()",
     ] {
         db.execute_unprepared(trigger).await.unwrap();
+        // 清理失败后两条记录都应保留；立即错误会直接恢复已暂存的文件。
         assert!(
             staged_poster::cleanup_expired(&db, &storage, Utc::now().fixed_offset(), 25)
                 .await
@@ -589,6 +591,7 @@ async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() 
             .unwrap()
             .unwrap();
         if trigger.starts_with("CREATE CONSTRAINT") {
+            // 延迟触发器在 COMMIT 报错：保留隔离文件及清单，等待按数据库引用恢复。
             assert!(
                 !root
                     .join(row.try_get::<String>("", "storage_key").unwrap())
@@ -600,6 +603,7 @@ async fn cleanup_operation_error_restores_and_commit_error_waits_for_recovery() 
                 .collect();
             assert_eq!(operations.len(), 1);
             assert!(operations[0].join("manifest.json").is_file());
+            // 回滚后资产仍被引用，恢复应将文件放回原处并完成清单清理。
             media::removal::recover(&db, &storage).await.unwrap();
         }
         assert!(

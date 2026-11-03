@@ -910,6 +910,8 @@ async fn common_delete_commit_unknown_retains_manifest_until_database_state_reco
         .await
         .unwrap();
         db.execute_unprepared("CREATE FUNCTION reject_delete_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$; CREATE CONSTRAINT TRIGGER reject_delete_commit AFTER DELETE ON movie DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_delete_commit()").await.unwrap();
+        // 上面的延迟触发器将删除错误推迟到 COMMIT，以测试提交结果未知时的处理。
+        // 先暂存文件再执行数据库删除，才能检查错误后隔离区和清单是否保留。
         let staged = removal::stage(&storage, "commit-unknown", std::slice::from_ref(&file))
             .await
             .unwrap();
@@ -922,6 +924,7 @@ async fn common_delete_commit_unknown_retains_manifest_until_database_state_reco
             .exec(&tx)
             .await
             .unwrap();
+        // 触发 COMMIT 错误后必须保留暂存文件和清单，等待查询最终数据库状态。
         let result =
             removal::finish_delete_transaction::<sea_orm::DbErr>(tx, staged, 1, Ok(())).await;
         assert!(matches!(result, Err(removal::FinishDeleteError::Commit)));
@@ -937,7 +940,7 @@ async fn common_delete_commit_unknown_retains_manifest_until_database_state_reco
             .await
             .unwrap();
         if !final_reference_exists {
-            // Model a delete that ultimately committed after the client had observed an error.
+            // 手动删除引用和资产，模拟客户端看到错误后删除实际上已提交的另一种最终状态。
             movie::Entity::delete_by_id(content.id)
                 .exec(&db)
                 .await
@@ -947,6 +950,7 @@ async fn common_delete_commit_unknown_retains_manifest_until_database_state_reco
                 .await
                 .unwrap();
         }
+        // 按最终引用恢复或删除隔离文件，再验证两种状态均清理完成清单。
         removal::recover(&db, &storage).await.unwrap();
         assert_eq!(
             root.as_ref().join(&file.storage_key).is_file(),

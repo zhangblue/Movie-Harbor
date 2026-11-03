@@ -3818,6 +3818,7 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
                     }
                     .insert(tx)
                     .await?;
+                    // 登记仍处于事务中：通知外层已抵达取消点，再暂停以保持事务未提交。
                     signal.notify_one();
                     std::future::pending::<Result<(), MediaError>>().await
                 })
@@ -3825,9 +3826,11 @@ async fn atomic_registration_preserves_committed_recovery_and_cleans_cancelled_r
         )
         .await
     });
+    // 等待回调通知后再取消，确保测试覆盖已写入登记记录但尚未提交的窗口。
     tokio::time::timeout(Duration::from_secs(5), entered.notified())
         .await
         .unwrap();
+    // 等待任务取消完成并释放其持有的资源，再让恢复扫描处理未提交的数据。
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
     movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage2, Duration::ZERO)
@@ -3867,6 +3870,7 @@ async fn registration_commit_unknown_retains_pending_file_until_database_state_r
         let root = TempRoot::new();
         let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
         db.execute_unprepared("CREATE FUNCTION reject_registration_commit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected commit failure'; END $$; CREATE CONSTRAINT TRIGGER reject_registration_commit AFTER INSERT ON mcp_staged_poster DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_registration_commit()").await.unwrap();
+        // 延迟触发器在 COMMIT 而非插入时失败；捕获资产用于模拟两种最终状态。
         let observed = Arc::new(Mutex::new(None::<media_asset::Model>));
         let capture = observed.clone();
         let result = movie_harbor_api::media::upload::store_new_asset_with_registration(
@@ -3897,6 +3901,7 @@ async fn registration_commit_unknown_retains_pending_file_until_database_state_r
             },
         )
         .await;
+        // 提交报错时先保留新文件与 pending 标记，不能根据当前查询擅自清理。
         assert!(matches!(result, Err(MediaError::Database(_))));
         let asset = observed.lock().unwrap().take().unwrap();
         assert!(
@@ -3920,13 +3925,14 @@ async fn registration_commit_unknown_retains_pending_file_until_database_state_r
             .await
             .unwrap();
         if final_asset_exists {
-            // Model a commit that ultimately succeeded after the client had observed an error.
+            // 手动重插资产和暂存记录，模拟客户端看到错误后事务实际上已提交。
             asset.clone().into_active_model().insert(&db).await.unwrap();
             movie_harbor_api::entities::mcp_staged_poster::ActiveModel {
                 id:Set(Uuid::new_v4()), token_hash:Set("unknown-commit-token".into()), principal_hash:Set("principal".into()), asset_id:Set(asset.id),
                 created_at:Set(chrono::Utc::now().fixed_offset()), expires_at:Set((chrono::Utc::now()+chrono::Duration::minutes(30)).fixed_offset()),
             }.insert(&db).await.unwrap();
         }
+        // 按最终资产引用保留或删除文件；两种情况下都应清除已处理的 pending 标记。
         movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
             .await
             .unwrap();
