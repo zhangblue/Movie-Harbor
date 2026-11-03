@@ -18,8 +18,10 @@ import {
 } from "../test/server";
 import styles from "../styles.css?raw";
 
+// 测试执行后清理组件及模拟状态，避免影响后续用例。
 afterEach(() => { cleanup(); clearCsrfToken(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
+// 生成带序号的列表数据，在分页测试准备多页结果时调用。
 function numberedItems(first: number, count: number) {
   return Array.from({ length: count }, (_, index) => {
     const number = first + index;
@@ -27,9 +29,11 @@ function numberedItems(first: number, count: number) {
   });
 }
 
+// 模拟浏览器下载相关接口，在内容导出测试开始时调用。
 function stubDownloadBrowser() {
   const createObjectURL = vi.fn(() => "blob:content-export");
   const revokeObjectURL = vi.fn();
+  // 模拟下载对象地址的创建和释放，在导出测试中替代浏览器 URL。
   class DownloadUrl extends URL {
     static createObjectURL = createObjectURL;
     static revokeObjectURL = revokeObjectURL;
@@ -40,6 +44,7 @@ function stubDownloadBrowser() {
 }
 
 // Catches exporting through a separate control, an untrusted response filename, or retaining object URLs.
+// 验证标题操作按响应文件名只下载一次完整导出。
 it("downloads the content export once from the adjacent title action using the response filename", async () => {
   const browser = stubDownloadBrowser();
   const requests = server((request) => request.url === "/api/admin/contents/export"
@@ -65,6 +70,7 @@ it("downloads the content export once from the adjacent title action using the r
   expect(requests.filter((request) => request.url === "/api/admin/contents/export")).toHaveLength(1);
 });
 
+// 验证导出进行中禁用重复导出且保留当前页。
 it("disables a pending export without changing the current list page", async () => {
   stubDownloadBrowser();
   const pending = deferred<Response>();
@@ -92,6 +98,7 @@ it("disables a pending export without changing the current list page", async () 
   expect(requests.filter((request) => request.url.startsWith("/api/admin/contents?"))).toHaveLength(2);
 });
 
+// 验证导出期间卸载后不创建下载或更新状态。
 it("does not create a download or write export state after unmounting during a pending export", async () => {
   const browser = stubDownloadBrowser();
   const pending = deferred<Response>();
@@ -106,6 +113,7 @@ it("does not create a download or write export state after unmounting during a p
   expect(browser.revokeObjectURL).not.toHaveBeenCalled();
 });
 
+// 验证未认证导出触发会话失效，其他错误仅显示导出失败。
 it("expires the session for an unauthorized export and otherwise shows an export-only failure", async () => {
   let status = 401;
   const browser = stubDownloadBrowser();
@@ -128,6 +136,7 @@ it("expires the session for an unauthorized export and otherwise shows an export
 });
 
 // Catches a regression to the two legacy list endpoints or client-only filtering.
+// 验证加载统一列表并向接口提交名称和下拉筛选。
 it("loads the unified list and submits compact name and dropdown filters to the API", async () => {
   const requests = server((request) => request.url.includes("status=archived")
     ? json(adminContentPage([
@@ -155,6 +164,7 @@ it("loads the unified list and submits compact name and dropdown filters to the 
 });
 
 // Catches omitting privacy from server filtering or losing it when returning to all content.
+// 验证查询公开或私密范围并可恢复全部内容。
 it.each(["public", "private"] as const)("queries %s access scope and clears it for all content", async (privacy) => {
   const requests = server();
   const user = userEvent.setup();
@@ -172,6 +182,7 @@ it.each(["public", "private"] as const)("queries %s access scope and clears it f
 });
 
 // Catches coupling privacy to lifecycle, using the wrong endpoint/version, or retaining stale scope.
+// 验证使用显示的版本切换不同内容状态的访问范围并刷新。
 it.each([
   { kind: "movie", status: "draft", isPrivate: false },
   { kind: "movie", status: "published", isPrivate: true },
@@ -208,6 +219,7 @@ it.each([
   expect(requests.filter((request) => request.url.endsWith("/privacy")).at(-1)!.body).toEqual({ version: 5, is_private: isPrivate });
 });
 
+// 验证切换访问范围期间禁用写入并抑制重复请求。
 it("disables list writes and suppresses duplicate privacy requests while switching", async () => {
   const pending = deferred<Response>();
   const requests = server((request) => request.url.endsWith("/privacy") ? pending.promise : undefined);
@@ -226,6 +238,7 @@ it("disables list writes and suppresses duplicate privacy requests while switchi
   await user.click(screen.getByRole("button", { name: "查询" }));
 });
 
+// 验证访问范围冲突后锁定写入直到重新加载版本。
 it("locks privacy writes after a conflict until the displayed version is reloaded", async () => {
   let changed = false;
   const requests = server((request) => {
@@ -244,6 +257,7 @@ it("locks privacy writes after a conflict until the displayed version is reloade
   expect(requests.filter((request) => request.url.endsWith("/privacy")).at(-1)!.body).toEqual({ version: 5, is_private: false });
 });
 
+// 验证访问范围写入返回 401 时回到管理员登录。
 it("returns to administrator login when a privacy write reports 401", async () => {
   server((request) => request.url.endsWith("/privacy") ? json({ error: "authentication failed" }, 401) : undefined);
   const user = userEvent.setup();
@@ -254,6 +268,7 @@ it("returns to administrator login when a privacy write reports 401", async () =
 });
 
 // Catches sequence numbers restarting at one or pagination controls omitting the current page semantics.
+// 验证二十一条结果分页且第二页序号连续。
 it("paginates 21 results and continues the sequence number on page two", async () => {
   const requests = server((request) => {
     if (request.url === "/api/admin/contents?kind=all&page=1") return json(adminContentPage(numberedItems(1, 20), 21, 1));
@@ -270,6 +285,7 @@ it("paginates 21 results and continues the sequence number on page two", async (
   expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=all&page=2");
 });
 
+// 验证仅按受支持或未知状态展示对应操作。
 it("renders actions from the four supported or unknown statuses only", async () => {
   server((request) => request.url.startsWith("/api/admin/contents") ? json(adminContentPage([
     adminContentItem(),
@@ -288,6 +304,7 @@ it("renders actions from the four supported or unknown statuses only", async () 
 });
 
 // Catches a lifecycle refresh resetting the current page.
+// 验证状态转换提交显示的版本并刷新当前页。
 it("sends the displayed version on transition and refreshes the current page", async () => {
   let archived = false;
   const requests = server((request) => {
@@ -313,6 +330,7 @@ it("sends the displayed version on transition and refreshes the current page", a
   expect(requests.filter((request) => request.url === "/api/admin/contents?kind=all&page=2")).toHaveLength(2);
 });
 
+// 验证409 后锁定过期操作并重新加载服务器当前页。
 it("locks stale actions on 409 and reloads the current server page", async () => {
   let changed = false;
   server((request) => {
@@ -332,6 +350,7 @@ it("locks stale actions on 409 and reloads the current server page", async () =>
 });
 
 // Catches an obsolete page request overwriting a newer first-page query.
+// 验证新查询完成后丢弃较旧的分页响应。
 it("discards an older page response after a newer query has completed", async () => {
   const pending = deferred<Response>();
   server((request) => {
@@ -357,6 +376,7 @@ it("discards an older page response after a newer query has completed", async ()
   expect(screen.getByText("新查询结果")).toBeInTheDocument();
 });
 
+// 验证最新列表刷新报告会话过期时返回登录。
 it("returns to login when the latest list reload reports session expiration", async () => {
   let expired = false;
   server((request) => expired && request.url.startsWith("/api/admin/contents")
@@ -371,6 +391,7 @@ it("returns to login when the latest list reload reports session expiration", as
   expect(screen.queryByRole("button", { name: session.name })).not.toBeInTheDocument();
 });
 
+// 验证分页布局及序号、操作列宽度符合要求。
 it("keeps pagination in layout A and reserves narrow sequence and action columns", async () => {
   server();
   render(<><style>{styles}</style><App /></>);
@@ -393,6 +414,7 @@ it("keeps pagination in layout A and reserves narrow sequence and action columns
 });
 
 // Catches clearing the old page or moving its summary when the next page request fails.
+// 验证后续分页失败时保留原表格并可刷新恢复。
 it("keeps the existing table after a later page fails and recovers on reload", async () => {
   let unavailable = true;
   server((request) => {
@@ -415,6 +437,7 @@ it("keeps the existing table after a later page fails and recovers on reload", a
 });
 
 // Catches a successful deletion leaving the app stranded on an empty out-of-range page.
+// 验证删除末行后回退到最后有效页。
 it("returns from deleting the last row and falls back to the last valid page", async () => {
   let deleted = false;
   const requests = server((request) => {
@@ -446,6 +469,7 @@ it("returns from deleting the last row and falls back to the last valid page", a
   ]);
 });
 
+// 验证从详情返回后保留筛选和页码。
 it("preserves filters and page when returning from a detail view", async () => {
   const requests = server((request) => {
     if (request.url === "/api/admin/contents?kind=all&page=1") return json(adminContentPage(numberedItems(1, 20), 21, 1));
@@ -470,6 +494,7 @@ it("preserves filters and page when returning from a detail view", async () => {
   expect(requests.filter((request) => request.url === "/api/admin/contents?kind=movie&page=2")).toHaveLength(2);
 });
 
+// 验证第二页发起新查询时重置到第一页。
 it("resets a new query from page two to page one", async () => {
   const requests = server((request) => {
     if (request.url === "/api/admin/contents?kind=all&page=1") return json(adminContentPage(numberedItems(1, 20), 21, 1));
@@ -488,6 +513,7 @@ it("resets a new query from page two to page one", async () => {
 });
 
 // Cookie rotation in another tab leaves this tab's in-memory CSRF stale. Recovery must not replay writes.
+// 验证生命周期写入被拒后刷新令牌并要求明确重试。
 it("refreshes stale CSRF after a forbidden lifecycle write and requires explicit retries", async () => {
   let token = session.csrf_token;
   let forbidden = true;
@@ -520,6 +546,7 @@ it("refreshes stale CSRF after a forbidden lifecycle write and requires explicit
     .toEqual(["session-csrf", "renewed-csrf", "renewed-csrf"]);
 });
 
+// 验证新查询成功后忽略过期请求迟到的 401。
 it("ignores an obsolete page request's delayed 401 after a newer query succeeds", async () => {
   const pending = deferred<Response>();
   server((request) => {

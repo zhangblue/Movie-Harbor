@@ -2,6 +2,7 @@ import { ApiError } from "@movie-harbor/api-client";
 import { expect, test } from "vitest";
 import { classifyEditorWriteError, mergeGenreChoices } from "./editorSupport";
 
+// 验证合并题材时保留可选顺序并追加一次关联停用题材。
 test("mergeGenreChoices keeps available order and appends linked inactive genres once", () => {
   const available = [
     { id: "g1", name: "剧情", enabled: true, sort_order: 1 },
@@ -14,6 +15,7 @@ test("mergeGenreChoices keeps available order and appends linked inactive genres
   expect(linked.map((genre) => genre.id)).toEqual(["g1", "g3"]);
 });
 
+// 验证合并题材时按首次出现顺序去重。
 test("mergeGenreChoices removes duplicate available genre IDs while preserving first occurrence order", () => {
   const available = [
     { id: "g1", name: "剧情", enabled: true },
@@ -24,6 +26,7 @@ test("mergeGenreChoices removes duplicate available genre IDs while preserving f
   expect(mergeGenreChoices(available, []).map((genre) => genre.id)).toEqual(["g1", "g2"]);
 });
 
+// 验证编辑错误分类保留媒体及校验结果。
 test("classifyEditorWriteError preserves stable media and validation outcomes", () => {
   expect(classifyEditorWriteError(new ApiError(500, "", "", { code: "media_delete_failed" })))
     .toEqual({ kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" });

@@ -1,12 +1,15 @@
 import { ApiError, apiErrorCode, type GenreResponse } from "@movie-harbor/api-client";
 
+// 描述编辑写入错误分类，在处理版本冲突和校验失败时使用。
 export type EditorWriteError =
   | { kind: "conflict" }
   | { kind: "validation"; fields: string[] }
   | { kind: "message"; message: string };
 
+// 定义编辑器题材选项所需字段，在合并可选和已关联题材时使用。
 export type GenreChoice = Pick<GenreResponse, "id" | "name" | "enabled">;
 
+// 合并可选题材与已关联题材并去重，在初始化编辑选项时调用。
 export function mergeGenreChoices(available: GenreChoice[], linked: GenreChoice[]): GenreChoice[] {
   const seen = new Set<string>();
   return [...available, ...linked].filter((genre) => {
@@ -16,6 +19,7 @@ export function mergeGenreChoices(available: GenreChoice[], linked: GenreChoice[
   });
 }
 
+// 将写入错误分类为冲突、校验或消息，在编辑器写入失败时调用。
 export function classifyEditorWriteError(cause: Error): EditorWriteError {
   if (!(cause instanceof ApiError)) return { kind: "message", message: "操作失败，请检查网络后重试。" };
 

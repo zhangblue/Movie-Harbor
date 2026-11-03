@@ -1,5 +1,6 @@
 import { useId } from "react";
 
+// 展示公开或私密选择，在创建或查看内容时使用。
 export function PrivacySelector({ value, onChange, disabled = false, series = false }: {
   value: boolean;
   onChange: (value: boolean) => void;

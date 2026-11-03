@@ -13,8 +13,10 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
+    // 包装状态更新以检测卸载后的更新，在组件异步回归测试中使用。
     useState<T>(initial: T | (() => T)) {
       const [value, setValue] = actual.useState(initial);
+      // 拦截组件卸载后的状态更新，在测试延迟事件时调用。
       const guardedSetValue: typeof setValue = (next) => {
         if (stateUpdateGuard.afterUnmount) {
           stateUpdateGuard.violation();
@@ -29,10 +31,13 @@ vi.mock("react", async (importOriginal) => {
 
 const base = "/api/admin/series/series-1";
 const episodePath = `${base}/seasons/s1/episodes/e1`;
+// 构造可覆盖字段的单集数据，在剧集测试准备层级时调用。
 function episode(overrides: Partial<EpisodeResponse> = {}): EpisodeResponse {
   return { id: "e1", season_id: "s1", number: 1, name: "来信", duration_seconds: 2700, status: "draft", version: 2, video: null, published_at: null, archived_at: null, created_at: "2026-09-01", updated_at: "2026-09-01", ...overrides };
 }
+// 构造带季和单集的剧集详情，在编辑器测试准备数据时调用。
 function detail(overrides: Partial<SeriesResponse> = {}) { return series({ status: "draft", seasons: [{ id: "s1", number: 1, episodes: [episode()] }], ...overrides }); }
+// 构造可拦截写入的测试数据和模拟服务，在编辑器测试准备时调用。
 function fixture(initial = detail(), intercept?: (r: Request) => Response | Promise<Response> | undefined) {
   let current = initial; let sequence = 1;
   const requests: Request[] = [];
@@ -91,6 +96,7 @@ function fixture(initial = detail(), intercept?: (r: Request) => Response | Prom
   });
   return requests;
 }
+// 测试执行前准备隔离状态，避免用例互相影响。
 beforeEach(() => {
   stateUpdateGuard.afterUnmount = false;
   stateUpdateGuard.violation.mockClear();
@@ -99,11 +105,15 @@ beforeEach(() => {
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:${++n}`), revokeObjectURL: vi.fn() }));
   installUploadXhr();
 });
+// 测试执行后清理组件及模拟状态，避免影响后续用例。
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
+// 渲染待测编辑器，在编辑器测试启动时调用。
 function editor(id: string | null = "series-1") { return render(<SeriesEditor seriesId={id} onBack={() => {}} onExpired={() => {}} />); }
+// 展开第一季，在需要操作单集的测试开始时调用。
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
 
 // Catches ignoring the initial scope or adding independent privacy controls to children.
+// 验证创建整剧时保存访问范围且季不单独保存范围。
 it.each([false, true])("creates a whole series with selected privacy %s and keeps privacy out of its seasons", async (isPrivate) => {
   const requests = fixture();
   const user = userEvent.setup();
@@ -126,6 +136,7 @@ it.each([false, true])("creates a whole series with selected privacy %s and keep
   expect(requests.find((request) => request.url.endsWith("/seasons"))!.body).not.toHaveProperty("is_private");
 });
 
+// 验证各状态剧集仅在基本信息显示访问范围。
 it.each(["draft", "published", "archived"] as const)("shows existing %s series scope only in basic information and never in child editors", async (status) => {
   const requests = fixture(detail({ status, is_private: true }));
   const user = userEvent.setup();
@@ -145,6 +156,7 @@ it.each(["draft", "published", "archived"] as const)("shows existing %s series s
   expect(requests.some((request) => request.url.endsWith("/privacy"))).toBe(false);
 });
 
+// 验证显示已保存单集的视频路径，无视频时不显示路径。
 it("shows each persisted episode video path and no path for an episode without a video", async () => {
   fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [
     episode({ id: "e1", video: {
@@ -169,6 +181,7 @@ it("shows each persisted episode video path and no path for an episode without a
   expect(within(noVideoEpisode).queryByText("本地存储路径：")).not.toBeInTheDocument();
 });
 
+// 验证首集视频进度与处理状态不影响其他单集草稿。
 it("isolates first-episode video progress through processing and preserves its sibling draft", async () => {
   const uploads = installUploadXhr({ manual: true });
   fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [
@@ -202,6 +215,7 @@ it("isolates first-episode video progress through processing and preserves its s
   expect(within(secondEpisode).getByLabelText("单集名称")).toHaveValue("未保存回声");
 });
 
+// 验证单集上传失败时清除进度、保留文件并跳过发布。
 it("clears a failed episode upload progress, retains its file, and skips publication", async () => {
   const uploads = installUploadXhr({ manual: true });
   const requests = fixture(detail(), (request) => request.url.includes("/media/episodes/")
@@ -228,6 +242,7 @@ it("clears a failed episode upload progress, retains its file, and skips publica
   expect(requests.some((request) => request.url === `${episodePath}/publish`)).toBe(false);
 });
 
+// 验证卸载后上传事件不再更新单集行状态。
 it("does not update episode-row state when upload events settle after unmount", async () => {
   const uploads = installUploadXhr({ manual: true });
   fixture(detail());
@@ -251,6 +266,7 @@ it("does not update episode-row state when upload events settle after unmount", 
   expect(stateUpdateGuard.violation).not.toHaveBeenCalled();
 });
 
+// 验证剧集海报通过普通请求上传而不创建上传请求对象。
 it("keeps series poster uploads on fetch without creating an upload XMLHttpRequest", async () => {
   const uploads = installUploadXhr({ manual: true });
   const requests = fixture(detail());
@@ -268,6 +284,7 @@ it("keeps series poster uploads on fetch without creating an upload XMLHttpReque
   expect(requests.filter((request) => request.url.includes("/media/series/") && request.method === "POST")).toHaveLength(1);
 });
 
+// 验证既有季默认独立折叠且不丢失输入。
 it("defaults existing seasons to independent accessible collapses without losing input", async () => {
   fixture(detail({ seasons: [
     { id: "s1", number: 1, episodes: [episode()] },
@@ -311,6 +328,7 @@ it("defaults existing seasons to independent accessible collapses without losing
   expect(within(screen.getByRole("form", { name: "新单集草稿" })).getByLabelText("单集名称")).toHaveValue("新草稿");
 });
 
+// 验证草稿转查看模式时折叠既有季且后续刷新不重置。
 it("collapses existing seasons when a draft enters view mode without resetting later view refreshes", async () => {
   fixture();
   const user = userEvent.setup();
@@ -327,6 +345,7 @@ it("collapses existing seasons when a draft enters view mode without resetting l
   expect(await screen.findByRole("button", { name: "折叠第 1 季" })).toHaveAttribute("aria-expanded", "true");
 });
 
+// 验证只展开新增季并在层级更新时保留已展开季。
 it("opens only a newly added season and keeps opened seasons across hierarchy updates", async () => {
   fixture();
   const user = userEvent.setup();
@@ -344,6 +363,7 @@ it("opens only a newly added season and keeps opened seasons across hierarchy up
   expect(screen.getByRole("form", { name: "新单集草稿" })).toBeVisible();
 });
 
+// 验证季的保存和删除按钮等高且底部对齐。
 it("renders the season save and delete actions at the same explicit height and bottom alignment", async () => {
   fixture();
   const user = userEvent.setup();
@@ -363,6 +383,7 @@ it("renders the season save and delete actions at the same explicit height and b
   expect(getComputedStyle(controls as HTMLElement).alignItems).toBe("flex-end");
 });
 
+// 验证子项同步删除后停留剧集页并刷新。
 it("stays on the series page, reports synchronous child deletion, and refreshes", async () => {
   const requests = fixture();
   const user = userEvent.setup();
@@ -378,6 +399,7 @@ it("stays on the series page, reports synchronous child deletion, and refreshes"
   expect(requests.slice(deletionIndex + 1).some((r) => r.url === base && r.method === "GET")).toBe(true);
 });
 
+// 验证子项删除使用服务端最新影响及返回版本。
 it("requires the authoritative child impact and deletes with its returned version", async () => {
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
     ? json({ display_name: "服务器最新单集名", version: 9, season_count: 0, episode_count: 1, media_count: 1 }) : undefined);
@@ -392,6 +414,7 @@ it("requires the authoritative child impact and deletes with its returned versio
   await waitFor(() => expect(requests.find((r) => r.url === episodePath && r.method === "DELETE")?.body).toEqual({ version: 9 }));
 });
 
+// 验证媒体删除失败时保留子项删除弹窗和表单。
 it("keeps a child deletion dialog and its form when media deletion fails", async () => {
   const requests = fixture(detail(), (r) => r.url === episodePath && r.method === "DELETE"
     ? json({ error: "media deletion failed", code: "media_delete_failed" }, 500)
@@ -407,6 +430,7 @@ it("keeps a child deletion dialog and its form when media deletion fails", async
   expect(requests.filter((r) => r.url === episodePath && r.method === "DELETE")).toHaveLength(1);
 });
 
+// 验证子项删除已提交但收尾失败时刷新并警告而非重试。
 it("refreshes a committed child deletion and warns instead of offering a retry", async () => {
   let committed = false;
   const requests = fixture(detail(), (r) => {
@@ -429,6 +453,7 @@ it("refreshes a committed child deletion and warns instead of offering a retry",
   expect(requests.slice(deletionIndex + 1).some((r) => r.url === base && r.method === "GET")).toBe(true);
 });
 
+// 验证剧集海报替换已提交但收尾失败时刷新并警告。
 it("reloads a committed series-poster replacement and shows the finalization warning", async () => {
   let committed = false;
   const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
@@ -447,6 +472,7 @@ it("reloads a committed series-poster replacement and shows the finalization war
   expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
 });
 
+// 验证单集视频替换已提交后刷新并清除待上传文件。
 it("reloads a committed episode-video replacement and clears its pending file", async () => {
   let committed = false;
   const savedVideo = { id: "new-video", url: "/media/new-video", local_path: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
@@ -467,6 +493,7 @@ it("reloads a committed episode-video replacement and clears its pending file", 
   expect(screen.queryByText(/待上传：new.mp4/)).not.toBeInTheDocument();
 });
 
+// 验证剧集海报收尾失败只清除海报并保留待上传单集视频。
 it("a series-poster finalization clears only that target and retains a pending episode video", async () => {
   let committed = false;
   const authoritative = detail({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
@@ -487,6 +514,7 @@ it("a series-poster finalization clears only that target and retains a pending e
   expect(requests.filter((r) => r.url.includes("/api/admin/media/")).map((r) => r.url)).toEqual(["/api/admin/media/series/series-1/poster?version=4"]);
 });
 
+// 验证单集视频收尾失败只清除视频并保留待上传海报。
 it("an episode finalization clears only its video and retains a pending series poster", async () => {
   let committed = false;
   const savedVideo = { id: "new-video", url: "/media/new-video", local_path: "/media/new-video", original_name: "new.mp4", mime_type: "video/mp4", byte_size: 3 };
@@ -508,6 +536,7 @@ it("an episode finalization clears only its video and retains a pending series p
   expect(screen.getByText(/待上传：later.png/)).toBeInTheDocument();
 });
 
+// 验证整剧删除已提交但收尾失败时返回并保留警告。
 it("returns from a committed whole-series deletion and leaves a persistent warning", async () => {
   let committed = false;
   fixture(detail(), (r) => {
@@ -528,6 +557,7 @@ it("returns from a committed whole-series deletion and leaves a persistent warni
   expect(screen.queryByRole("dialog", { name: "永久删除剧集" })).not.toBeInTheDocument();
 });
 
+// 验证替换失败时使用固定提示并保留原海报。
 it("uses the fixed replacement failure message and keeps the original series poster", async () => {
   fixture(detail(), (r) => r.url.includes("/media/series/")
     ? json({ error: "replacement failed", code: "media_replace_failed" }, 500)
@@ -539,6 +569,7 @@ it("uses the fixed replacement failure message and keeps the original series pos
   expect(screen.getByRole("link", { name: /已保存海报/ })).toBeInTheDocument();
 });
 
+// 验证媒体内容不匹配时显示本地化提示。
 it("shows a localized upload message for a media content mismatch", async () => {
   fixture(detail(), (r) => r.url.includes("/media/series/")
     ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
@@ -549,6 +580,7 @@ it("shows a localized upload message for a media content mismatch", async () => 
   expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
 });
 
+// 验证无法加载最新删除影响时不打开子项确认框。
 it("does not open child deletion confirmation when authoritative impact cannot load", async () => {
   const requests = fixture(detail(), (r) => r.url === `${episodePath}/delete-impact`
     ? json({ error: "offline" }, 503) : undefined);
@@ -561,6 +593,7 @@ it("does not open child deletion confirmation when authoritative impact cannot l
 });
 
 // Absent fields, accidental season titles, leaked preview URLs, or resetting a cancelled picker fail here.
+// 验证加载基本信息、仅含序号的季及可释放海报预览。
 it("loads basic information and number-only seasons with a disposable poster preview", async () => {
   fixture(); const user = userEvent.setup(); const view = editor();
   expect(await screen.findByLabelText("剧集名称")).toHaveValue("长夜航线");
@@ -578,6 +611,7 @@ it("loads basic information and number-only seasons with a disposable poster pre
   view.unmount(); expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:2");
 });
 
+// 验证创建具名剧集及首季并要求管理员输入首集名称。
 it("creates a named series and one season, requiring the administrator to name its initial episode", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(null);
   await user.type(await screen.findByLabelText("剧集名称"), "新剧"); await user.click(screen.getByRole("button", { name: "创建草稿" }));
@@ -594,6 +628,7 @@ it("creates a named series and one season, requiring the administrator to name i
 });
 
 // Catches leaving App keyed to the pre-create null identity and losing the initial episode row.
+// 验证离开后返回时保留已创建剧集身份与首集。
 it("keeps the created series identity and initial episode when navigating away and back", async () => {
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
   await user.click(await screen.findByRole("button", { name: /新建内容/ }));
@@ -609,6 +644,7 @@ it("keeps the created series identity and initial episode when navigating away a
 });
 
 // Catches an inaccessible orphan when series creation succeeds but default-season creation fails.
+// 验证保留部分初始化的剧集以便明确重试创建首季。
 it("preserves a partially initialized series so its first season can be retried explicitly", async () => {
   let failInitialSeason = true;
   const requests = fixture(undefined, (r) => r.url.endsWith("/seasons") && r.method === "POST" && failInitialSeason ? json({ error: "offline" }, 503) : undefined);
@@ -628,6 +664,7 @@ it("preserves a partially initialized series so its first season can be retried 
 });
 
 // Catches publishing with the pre-save/pre-upload parent version or leaking the poster preview.
+// 验证发布时串联剧集和海报保存返回的版本。
 it("chains the saved series and poster versions into publication", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor();
   await screen.findByLabelText("剧集名称");
@@ -640,6 +677,7 @@ it("chains the saved series and poster versions into publication", async () => {
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:1");
 });
 
+// 验证提示剧集需要已发布可播放单集但不强制海报。
 it("explains that a series needs a published playable episode without requiring a poster", async () => {
   fixture(detail({ poster: null }), (r) => r.url.endsWith("/publish")
     ? json({ error: "validation", fields: ["poster", "episodes"] }, 422)
@@ -654,6 +692,7 @@ it("explains that a series needs a published playable episode without requiring 
 });
 
 // Ensures the update/upload boundary is one episode and propagates both versions to later writes.
+// 验证独立保存单集和视频并保留其他单集未保存输入。
 it("saves one episode and its video independently, retaining another episode's unsaved input", async () => {
   const requests = fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [episode(), episode({ id: "e2", number: 2, name: "回信" })] }] }));
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
@@ -670,6 +709,7 @@ it("saves one episode and its video independently, retaining another episode's u
   expect(writes[2].body).toEqual({ version: 5, number: 2 });
 });
 
+// 验证不展示或提交单集简介。
 it("does not render or submit an episode synopsis", async () => {
   const requests = fixture(detail());
   const user = userEvent.setup();
@@ -682,6 +722,7 @@ it("does not render or submit an episode synopsis", async () => {
     .toEqual({ version: 2, number: 1, name: "来信", duration_seconds: 2700 });
 });
 
+// 验证已发布剧集字段及含已发布单集的季锁定但允许新草稿。
 it("locks published series fields and seasons with published episodes while permitting new drafts", async () => {
   fixture(detail({ status: "published", seasons: [{ id: "s1", number: 1, episodes: [episode({ status: "published" })] }] }));
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
@@ -694,6 +735,7 @@ it("locks published series fields and seasons with published episodes while perm
 });
 
 // Catches incorrectly freezing descendants merely because the parent series itself is archived.
+// 验证归档剧集字段只读但草稿子项仍可编辑。
 it("keeps an archived parent's fields read-only while preserving draft child editing", async () => {
   fixture(detail({ status: "archived" })); const user = userEvent.setup(); editor();
   await screen.findByLabelText("剧集名称");
@@ -707,6 +749,7 @@ it("keeps an archived parent's fields read-only while preserving draft child edi
 });
 
 // Catches calculating the next draft number from stale initial values after an unsaved edit.
+// 验证新增单集草稿序号跟随当前输入的最大序号。
 it("numbers the next unsaved episode after the highest currently entered draft number", async () => {
   fixture(); const user = userEvent.setup(); editor(); await expandFirst(user); await screen.findByLabelText("单集名称");
   await user.click(screen.getByRole("button", { name: "添加一集" }));
@@ -716,6 +759,7 @@ it("numbers the next unsaved episode after the highest currently entered draft n
   expect(screen.getAllByLabelText("集序号")[2]).toHaveValue(6);
 });
 
+// 验证单集状态转换后刷新完整层级并重新计算季锁定。
 it("reloads the full hierarchy after episode transitions and derives season locks from the result", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(); await expandFirst(user); await screen.findByLabelText("单集名称");
   await user.click(screen.getByRole("button", { name: "发布单集" }));
@@ -725,6 +769,7 @@ it("reloads the full hierarchy after episode transitions and derives season lock
   for (const r of requests.filter((r) => /\/(publish|archive)$/.test(r.url))) expect(requests[requests.indexOf(r) + 1].url).toBe(base);
 });
 
+// 验证父级状态转换后刷新失败时锁定所有写入。
 it("reloads the parent lifecycle and locks all writes if its follow-up read fails", async () => {
   let reads = 0; const requests = fixture(detail({ status: "published" }), (r) => r.url === base && r.method === "GET" && ++reads > 1 ? json({ error: "offline" }, 503) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
@@ -732,6 +777,7 @@ it("reloads the parent lifecycle and locks all writes if its follow-up read fail
   expect(screen.getByRole("button", { name: "添加一季" })).toBeDisabled(); expect(requests.at(-1)?.url).toBe(base);
 });
 
+// 验证增删季与单集草稿时使用最新影响和名称确认。
 it("adds and removes season and episode drafts with fresh, name-confirmed deletion scope", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
   await expandFirst(user);
@@ -745,6 +791,7 @@ it("adds and removes season and episode drafts with fresh, name-confirmed deleti
   expect(requests.filter((r) => r.method === "DELETE").map((r) => requestJson<{ version: number }>(r).version)).toEqual([2, 4]);
 });
 
+// 验证冲突后锁定编辑直到明确重新加载。
 it("locks on conflict and only restores editing after an explicit reload", async () => {
   const requests = fixture(detail(), (r) => r.method === "PATCH" ? json({ error: "changed" }, 409) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称"); await expandFirst(user); await user.click(screen.getByRole("button", { name: "保存单集草稿" }));
@@ -753,6 +800,7 @@ it("locks on conflict and only restores editing after an explicit reload", async
   expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
 });
 
+// 验证认证错误后恢复会话且不重放被拒写入。
 it.each([401, 403])("recovers %s without replaying the rejected write", async (status) => {
   const requests = fixture(detail(), (r) => r.method === "PATCH" ? json({ error: "denied" }, status) : undefined);
   const user = userEvent.setup(); render(<App />);
@@ -763,6 +811,7 @@ it.each([401, 403])("recovers %s without replaying the rejected write", async (s
   expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
 });
 
+// 验证被拒写入仅在明确重试后使用更新令牌。
 it("uses the renewed CSRF token only after an explicit retry of a forbidden write", async () => {
   let token = "session-csrf";
   const requests = fixture(detail(), (r) => {
@@ -781,6 +830,7 @@ it("uses the renewed CSRF token only after an explicit retry of a forbidden writ
   expect(requests.filter((r) => r.method === "PATCH").map((r) => r.headers.get("X-CSRF-Token"))).toEqual(["session-csrf", "renewed-csrf"]);
 });
 
+// 验证从内容列表打开已发布或归档剧集时默认折叠季。
 it.each(["published", "archived"] as const)("opens a %s series from the content list with its seasons collapsed", async (status) => {
   fixture(detail({ status }));
   const user = userEvent.setup();
@@ -791,6 +841,7 @@ it.each(["published", "archived"] as const)("opens a %s series from the content 
   expect(screen.getByRole("button", { name: "展开第 1 季" })).toHaveAttribute("aria-expanded", "false");
 });
 
+// 验证从内容类型选择器创建剧集并从列表行删除。
 it("opens series creation from the content kind selector and deletion from a list row", async () => {
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
   await user.click(await screen.findByRole("button", { name: /新建内容/ })); await user.selectOptions(screen.getByLabelText("新建内容形态"), "series");
@@ -803,6 +854,7 @@ it("opens series creation from the content kind selector and deletion from a lis
   expect(screen.getByRole("status")).toHaveTextContent("内容及其媒体文件已删除");
 });
 
+// 验证无法加载最新层级时禁止删除。
 it("does not permit deletion when the fresh hierarchy cannot be loaded", async () => {
   let reads = 0;
   const requests = fixture(detail(), (r) => r.url === base && r.method === "GET" && ++reads > 1 ? json({ error: "unavailable" }, 503) : undefined);
@@ -813,6 +865,7 @@ it("does not permit deletion when the fresh hierarchy cannot be loaded", async (
   expect(requests.some((r) => r.method === "DELETE")).toBe(false);
 });
 
+// 验证上传后父级权威版本不一致时停止发布。
 it("stops publication if an upload's authoritative parent version differs", async () => {
   let reads = 0; const requests = fixture(detail(), (r) => r.url === base && r.method === "GET" && ++reads > 1 ? json(detail({ version: 99 })) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");
@@ -821,6 +874,7 @@ it("stops publication if an upload's authoritative parent version differs", asyn
   expect(await screen.findByRole("alert")).toHaveTextContent(/刷新/); expect(requests.some((r) => r.url.endsWith("/publish"))).toBe(false);
 });
 
+// 验证编辑器卸载后不继续上传链。
 it("does not continue an upload chain after the editor is unmounted", async () => {
   const pending = deferred<Response>(); const requests = fixture(detail(), (r) => r.method === "PATCH" ? pending.promise : undefined);
   const user = userEvent.setup(); const view = editor(); await screen.findByLabelText("剧集名称");
@@ -831,6 +885,7 @@ it("does not continue an upload chain after the editor is unmounted", async () =
 });
 
 // A publish validation failure must not turn a successful atomic upload into a pending replacement.
+// 验证发布校验失败后保留已保存视频并仅重试发布。
 it("retains the saved video and retries only publication after a validation failure", async () => {
   const requests = fixture(detail(), (r) => r.url.endsWith("/publish") ? json({ error: "validation", fields: ["video"] }, 422) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("剧集名称");

@@ -2,9 +2,11 @@ import { useState } from "react";
 import type { CatalogKind, ContentStatus } from "@movie-harbor/api-client";
 import { Button, Field } from "@movie-harbor/ui";
 
+// 定义内容列表筛选条件，在提交查询和恢复列表状态时使用。
 export type Filters = { kind: CatalogKind; status: ContentStatus | "all"; privacy: "all" | "public" | "private"; name: string };
 export const initialFilters: Filters = { kind: "all", status: "all", privacy: "all", name: "" };
 
+// 展示并提交内容筛选条件，在内容列表加载时使用。
 export function ContentFilters({ initialValue, onQuery, disabled }: { initialValue: Filters; onQuery: (filters: Filters) => void; disabled: boolean }) {
   const [filters, setFilters] = useState(initialValue);
   return <form className="filter-bar" aria-label="内容查询" onSubmit={(event) => {

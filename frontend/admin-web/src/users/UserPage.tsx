@@ -5,11 +5,13 @@ import { ContentPagination } from "../content/ContentPagination";
 import { UserDialog, type UserOperation } from "./UserDialog";
 import { trimViewerWhitespace } from "./userInput";
 
+// 格式化用户日期供列表展示，在渲染用户行时调用。
 function dateLabel(value: string | null) {
   if (!value) return "从未登录";
   return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value));
 }
 
+// 管理用户列表、搜索和操作弹窗，在进入用户管理时使用。
 export function UserPage({ onExpired }: { onExpired: () => void }) {
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
@@ -38,6 +40,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
     return () => { ignore = true; };
   }, [search, page, revision, onExpired]);
 
+  // 提交用户名筛选并重置分页，在搜索表单提交时调用。
   function submitSearch(event: FormEvent) {
     event.preventDefault();
     setSearch(trimViewerWhitespace(query));
@@ -45,6 +48,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
     setRevision((value) => value + 1);
     setNotice("");
   }
+  // 打开或初始化当前操作，在对应入口触发时调用。
   function open(mode: "password" | "delete", user: ViewerUserSummary) {
     setNotice("");
     setOperation({ mode, user });

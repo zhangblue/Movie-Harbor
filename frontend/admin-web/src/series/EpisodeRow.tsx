@@ -5,7 +5,9 @@ import { useMounted } from "../app/useMounted";
 import { VideoPicker } from "../movies/VideoPicker";
 import { canAct, statusNames } from "./permissions";
 
+// 定义单集可编辑字段，在单集表单与保存回调间传递。
 export type EpisodeFields = { number: number; name: string; duration_seconds: number | null };
+// 定义单集保存、转换和删除回调，在季卡片与单集行间传递。
 export type EpisodeActions = {
   save: (
     episode: EpisodeResponse,
@@ -18,6 +20,7 @@ export type EpisodeActions = {
   transition: (episode: EpisodeResponse, action: "publish" | "archive" | "draft") => void;
   remove: (episode: EpisodeResponse) => void;
 };
+// 展示单集表单、上传进度和生命周期操作，在展开季时使用。
 export function EpisodeRow({ episode, disabled, actions }: { episode: EpisodeResponse; disabled: boolean; actions: EpisodeActions }) {
   const [name, setName] = useState(episode.name);
   const [number, setNumber] = useState(String(episode.number));

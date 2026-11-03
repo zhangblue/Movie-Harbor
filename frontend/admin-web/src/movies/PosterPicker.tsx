@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { MediaSummary } from "@movie-harbor/api-client";
 
+// 展示当前海报或待替换预览，供内容编辑时选择文件。
 export function PosterPicker({ current, file, onSelect, readOnly, disabled }: {
   current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean;
 }) {

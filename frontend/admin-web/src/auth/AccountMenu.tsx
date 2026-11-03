@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from "react";
 import { Button } from "@movie-harbor/ui";
 
+// 展示管理员账户菜单，支持键盘和外部点击关闭。
 export function AccountMenu({ name, onPassword, onLogout, disabled }: {
   name: string; onPassword: () => void; onLogout: () => void; disabled: boolean;
 }) {
@@ -13,9 +14,11 @@ export function AccountMenu({ name, onPassword, onLogout, disabled }: {
   useEffect(() => {
     if (!open) return;
     menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    // 在菜单展开时检测外部点击并关闭菜单。
     function outside(event: PointerEvent) {
       if (event.target instanceof Node && !root.current?.contains(event.target)) setOpen(false);
     }
+    // 在菜单展开时响应 Escape 并关闭菜单。
     function escape(event: globalThis.KeyboardEvent) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -31,6 +34,7 @@ export function AccountMenu({ name, onPassword, onLogout, disabled }: {
     };
   }, [open]);
 
+  // 处理菜单键盘导航，在菜单获得焦点后调用。
   function navigate(event: KeyboardEvent<HTMLDivElement>) {
     const buttons = Array.from(menu.current?.querySelectorAll<HTMLButtonElement>("button") ?? []);
     const index = buttons.findIndex((button) => button === document.activeElement);
@@ -40,6 +44,7 @@ export function AccountMenu({ name, onPassword, onLogout, disabled }: {
     if (destination !== undefined) { event.preventDefault(); buttons[destination]?.focus(); }
   }
 
+  // 关闭菜单并执行选定操作，在选择菜单项时调用。
   function select(action: () => void) {
     setOpen(false);
     trigger.current?.focus();

@@ -4,6 +4,7 @@ import { Button, Dialog, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "./recoverForbiddenWrite";
 
+// 展示管理员修改密码表单，在账户菜单选择改密时使用。
 export function ChangePasswordDialog({ onClose, onChanged, onExpired }: {
   onClose: () => void; onChanged: () => void; onExpired: () => void;
 }) {
@@ -14,6 +15,7 @@ export function ChangePasswordDialog({ onClose, onChanged, onExpired }: {
   const [busy, setBusy] = useState(false);
   const mounted = useMounted();
 
+  // 校验并提交当前表单，在用户提交相应操作时调用。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;

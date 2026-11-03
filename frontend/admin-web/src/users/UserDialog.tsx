@@ -5,8 +5,10 @@ import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
 import { trimViewerWhitespace } from "./userInput";
 
+// 描述创建、改密或删除用户操作，在用户弹窗中区分目标。
 export type UserOperation = { mode: "create" } | { mode: "password" | "delete"; user: ViewerUserSummary };
 
+// 展示用户操作表单并提交写入，在用户管理选择操作时使用。
 export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: {
   operation: UserOperation; onClose: () => void; onDone: (message: string) => void; onReload: () => void; onExpired: () => void;
 }) {
@@ -21,6 +23,7 @@ export function UserDialog({ operation, onClose, onDone, onReload, onExpired }: 
   const creating = operation.mode === "create";
   const title = creating ? "添加用户" : deleting ? "删除用户？" : "修改密码";
 
+  // 校验并提交当前表单，在用户提交相应操作时调用。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (pending.current || conflict) return;

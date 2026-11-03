@@ -6,8 +6,10 @@ import { apiRequest, clearCsrfToken } from "@movie-harbor/api-client";
 import { App } from "./App";
 import { deferred, json, server, session } from "../test/server";
 
+// 测试执行后清理组件及模拟状态，避免影响后续用例。
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+// 验证导航进入用户管理且会话过期后返回登录。
 it("opens viewer management from navigation and returns to login when its session expires", async () => {
   server((request) => request.url.startsWith("/api/admin/users") ? json({ error: "authentication failed" }, 401) : undefined);
   const user = userEvent.setup();
@@ -19,6 +21,7 @@ it("opens viewer management from navigation and returns to login when its sessio
 });
 
 // Catches entering the admin shell before a verified session and losing the session request after login.
+// 验证要求有效会话、显示登录失败并取得令牌后进入后台。
 it("requires a session, exposes failed login, then acquires CSRF before entering the shell", async () => {
   let loggedIn = false;
   const requests = server((request) => {
@@ -47,6 +50,7 @@ it("requires a session, exposes failed login, then acquires CSRF before entering
   expect(storage).not.toHaveBeenCalled();
 });
 
+// 验证从题材配置页创建题材。
 it("creates a genre from the genre configuration page", async () => {
   const genres: Array<{ id: string; name: string; sort_order: number; enabled: boolean }> = [];
   const requests = server((request) => {
@@ -67,6 +71,7 @@ it("creates a genre from the genre configuration page", async () => {
   expect(requests.find((request) => request.method === "POST" && request.url === "/api/admin/genres")?.body).toEqual({ name: "纪录片" });
 });
 
+// 验证重命名、排序、停用和删除题材。
 it("renames, reorders, deactivates, and deletes genres", async () => {
   vi.spyOn(window, "confirm").mockReturnValue(true);
   let genres = [
@@ -109,6 +114,7 @@ it("renames, reorders, deactivates, and deletes genres", async () => {
 });
 
 // Catches menu focus/closure regressions that leave controls inaccessible to keyboard users.
+// 验证键盘打开账户菜单并通过 Escape 或外部点击关闭。
 it("opens the account menu by keyboard and closes on Escape and outside click", async () => {
   server();
   const user = userEvent.setup();
@@ -130,6 +136,7 @@ it("opens the account menu by keyboard and closes on Escape and outside click", 
 });
 
 // Catches missing current-password verification payload, CSRF attachment, and retained credentials.
+// 验证携带令牌修改密码后清除令牌并返回登录。
 it("changes the password with CSRF and returns to login with the token cleared", async () => {
   const requests = server((r) => r.url === "/api/admin/password" || r.url === "/api/admin/probe" ? new Response(null, { status: 204 }) : undefined);
   const user = userEvent.setup();
@@ -155,6 +162,7 @@ it("changes the password with CSRF and returns to login with the token cleared",
   expect(requests.at(-1)!.headers.has("X-CSRF-Token")).toBe(false);
 });
 
+// 验证会话有效时在弹窗保留原密码错误提示。
 it("keeps wrong-current-password feedback in the dialog when the session remains valid", async () => {
   server((r) => r.url === "/api/admin/password" ? json({ error: "authentication failed" }, 401) : undefined);
   const user = userEvent.setup();
@@ -169,6 +177,7 @@ it("keeps wrong-current-password feedback in the dialog when the session remains
   expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
 
+// 验证使用会话令牌退出并清空后台界面。
 it("logs out with the session CSRF and clears the shell", async () => {
   const requests = server((r) => r.url === "/api/admin/logout" ? new Response(null, { status: 204 }) : undefined);
   const user = userEvent.setup();
@@ -180,6 +189,7 @@ it("logs out with the session CSRF and clears the shell", async () => {
   expect(requests.find((r) => r.url === "/api/admin/logout")!.headers.get("X-CSRF-Token")).toBe("session-csrf");
 });
 
+// 验证会话网络失败时提供重试而非假定已退出。
 it("offers retry for session network failure instead of pretending the user is logged out", async () => {
   let unavailable = true;
   server((r) => {
@@ -194,6 +204,7 @@ it("offers retry for session network failure instead of pretending the user is l
   await screen.findByRole("heading", { name: "内容管理" });
 });
 
+// 验证延迟响应不会恢复已卸载的登录页面。
 it("does not restore an unmounted login after a delayed response", async () => {
   const pending = deferred<Response>();
   const requests = server((r) => r.url === "/api/admin/session" ? json({ error: "authentication failed" }, 401) : r.url === "/api/admin/login" ? pending.promise : undefined);
@@ -209,6 +220,7 @@ it("does not restore an unmounted login after a delayed response", async () => {
   expect(requests.filter((r) => r.url === "/api/admin/session")).toHaveLength(1);
 });
 
+// 验证退出失败后恢复令牌以便重试撤销会话。
 it("recovers the CSRF token after failed logout so a retry can revoke the session", async () => {
   let attempts = 0;
   const requests = server((r) => {
@@ -228,6 +240,7 @@ it("recovers the CSRF token after failed logout so a retry can revoke the sessio
 });
 
 // A server may revoke a session before its logout response is lost on the network.
+// 验证退出响应丢失但恢复确认已撤销时返回登录。
 it("returns to login when logout loses its response but session recovery confirms revocation", async () => {
   let revoked = false;
   server((r) => {
@@ -242,6 +255,7 @@ it("returns to login when logout loses its response but session recovery confirm
   expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
 });
 
+// 验证改密令牌过期时刷新令牌但不自动重发密码。
 it("refreshes stale CSRF for password changes without automatically resubmitting the password", async () => {
   let token = session.csrf_token;
   const requests = server((r) => {
@@ -266,6 +280,7 @@ it("refreshes stale CSRF for password changes without automatically resubmitting
   expect(requests.filter((r) => r.url === "/api/admin/password").map((r) => r.headers.get("X-CSRF-Token"))).toEqual(["session-csrf", "renewed-csrf"]);
 });
 
+// 验证写入返回 403 后按会话恢复结果处理且不重放。
 it.each([
   ["lifecycle", 401], ["password", 401], ["lifecycle", 503], ["password", 503],
 ])("handles %s write 403 followed by session recovery %s without replaying it", async (action, recoveryStatus) => {

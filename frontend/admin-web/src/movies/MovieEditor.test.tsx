@@ -14,8 +14,10 @@ vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
   return {
     ...actual,
+    // 包装状态更新以检测卸载后的更新，在组件异步回归测试中使用。
     useState<T>(initial: T | (() => T)) {
       const [value, setValue] = actual.useState(initial);
+      // 拦截组件卸载后的状态更新，在测试延迟事件时调用。
       const guardedSetValue: typeof setValue = (next) => {
         if (stateUpdateGuard.afterUnmount) {
           stateUpdateGuard.violation();
@@ -28,6 +30,7 @@ vi.mock("react", async (importOriginal) => {
   };
 });
 
+// 构造可拦截写入的测试数据和模拟服务，在编辑器测试准备时调用。
 function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => Response | Promise<Response> | undefined) {
   let current = initial;
   const requests: Request[] = [];
@@ -66,6 +69,7 @@ function fixture(initial: MovieResponse = movie(), intercept?: (r: Request) => R
   });
   return requests;
 }
+// 测试执行前准备隔离状态，避免用例互相影响。
 beforeEach(() => {
   stateUpdateGuard.afterUnmount = false;
   stateUpdateGuard.violation.mockClear();
@@ -74,12 +78,15 @@ beforeEach(() => {
   vi.stubGlobal("URL", Object.assign(URL, { createObjectURL: vi.fn(() => `blob:preview-${++next}`), revokeObjectURL: vi.fn() }));
   installUploadXhr();
 });
+// 测试执行后清理组件及模拟状态，避免影响后续用例。
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
+// 渲染待测编辑器，在编辑器测试启动时调用。
 function editor(id: string | null = "movie-1") {
   return render(<><style>{styles}</style><MovieEditor movieId={id} onBack={() => {}} onExpired={() => {}} /></>);
 }
 
 // Catches a private default, ignoring the chosen scope, or resetting it after creation.
+// 验证创建电影时保存所选访问范围并以只读方式显示。
 it.each([false, true])("creates a movie with selected privacy %s and shows the saved scope read-only", async (isPrivate) => {
   const requests = fixture();
   const user = userEvent.setup();
@@ -102,6 +109,7 @@ it.each([false, true])("creates a movie with selected privacy %s and shows the s
   expect(requests.some((request) => request.url.endsWith("/privacy"))).toBe(false);
 });
 
+// 验证各生命周期的电影访问范围只读展示。
 it.each(["draft", "published", "archived"] as const)("shows existing %s movie privacy without enabling an editor write", async (status) => {
   fixture(movie({ status, is_private: true }));
   editor();
@@ -111,6 +119,7 @@ it.each(["draft", "published", "archived"] as const)("shows existing %s movie pr
 });
 
 // Catches absent/oversized fields, lossy duration conversion, and selecting inactive new genres.
+// 验证加载草稿字段并保留已停用的关联题材。
 it("loads bounded draft fields and retains existing inactive genres", async () => {
   fixture(movie({ genres: [{ id: "g2", name: "旧题材", enabled: false }] }));
   editor();
@@ -122,6 +131,7 @@ it("loads bounded draft fields and retains existing inactive genres", async () =
   expect(screen.getByRole("option", { name: /旧题材/ })).toHaveProperty("selected", true);
 });
 
+// 验证仅为已保存的视频显示实际路径。
 it("shows the persisted video path without inventing one for an upload", async () => {
   fixture(movie({ video: {
     id: "video-1", url: "/media/video/ab/ab000000000000000000000000000001.mp4",
@@ -134,6 +144,7 @@ it("shows the persisted video path without inventing one for an upload", async (
 });
 
 // Catches missing poster click wiring, cancellation clearing preview, and early/leaked object URLs.
+// 验证立即预览替换、允许取消并在不再使用时释放地址。
 it("previews replacement immediately, preserves cancellation, and releases URLs only when unused", async () => {
   fixture(); const user = userEvent.setup(); const view = editor();
   const button = await screen.findByRole("button", { name: "选择或替换海报" });
@@ -153,6 +164,7 @@ it("previews replacement immediately, preserves cancellation, and releases URLs 
   view.unmount(); expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-2");
 });
 
+// 验证先保存字段和题材，再按返回版本依次上传海报和视频。
 it("saves fields and genres before atomically uploading poster then video with returned versions", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor();
   await screen.findByLabelText("名称");
@@ -171,6 +183,7 @@ it("saves fields and genres before atomically uploading poster then video with r
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:preview-1");
 });
 
+// 验证视频上传进度单调更新、进入处理状态并在成功后清除。
 it("shows monotonic movie video progress through server processing and clears it on success", async () => {
   const uploads = installUploadXhr({ manual: true });
   fixture();
@@ -199,6 +212,7 @@ it("shows monotonic movie video progress through server processing and clears it
   expect(screen.queryByText(/待上传：feature.mp4/)).not.toBeInTheDocument();
 });
 
+// 验证上传失败清除进度但保留文件供重试。
 it("clears failed movie video progress but preserves its pending retry file", async () => {
   const uploads = installUploadXhr({ manual: true });
   fixture(movie(), (r) => r.url.includes("/video?") ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415) : undefined);
@@ -220,6 +234,7 @@ it("clears failed movie video progress but preserves its pending retry file", as
   expect(screen.getByText(/待上传：broken.mp4/)).toBeInTheDocument();
 });
 
+// 验证卸载后上传事件不再更新电影状态。
 it("does not update movie state when upload events arrive after unmount", async () => {
   const uploads = installUploadXhr({ manual: true });
   fixture();
@@ -242,6 +257,7 @@ it("does not update movie state when upload events arrive after unmount", async 
   expect(stateUpdateGuard.violation).not.toHaveBeenCalled();
 });
 
+// 验证同步替换失败时保留旧媒体与待上传选择。
 it("preserves old media and pending selection after a synchronous replacement failure", async () => {
   let failed = true;
   const requests = fixture(movie(), (r) => r.url.includes("/media/") && failed ? json({ error: "replacement failed", code: "media_replace_failed" }, 500) : undefined);
@@ -257,6 +273,7 @@ it("preserves old media and pending selection after a synchronous replacement fa
   expect(requests.filter((r) => r.url.includes("/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4", "/api/admin/media/movies/movie-1/poster?version=5"]);
 });
 
+// 验证媒体内容不匹配时显示本地化提示。
 it("shows a localized upload message for a media content mismatch", async () => {
   fixture(movie(), (r) => r.url.includes("/media/")
     ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
@@ -267,6 +284,7 @@ it("shows a localized upload message for a media content mismatch", async () => 
   expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
 });
 
+// 验证已发布或归档电影的字段与媒体均只读。
 it.each(["published", "archived"] as const)("keeps all %s fields and media read-only", async (status) => {
   fixture(movie({ status })); editor(); await screen.findByLabelText("名称");
   for (const label of ["名称", "年份", "时长（分钟）", "简介", "题材"]) expect(screen.getByLabelText(label)).toBeDisabled();
@@ -276,6 +294,7 @@ it.each(["published", "archived"] as const)("keeps all %s fields and media read-
   expect(screen.queryByRole("button", { name: "选择或替换海报" })).not.toBeInTheDocument();
 });
 
+// 验证发布校验失败时展示字段且保留草稿。
 it("shows structured publish validation without losing the draft", async () => {
   fixture(movie(), (r) => r.url.endsWith("/publish") ? json({ error: "movie validation failed", fields: ["name", "poster", "video"] }, 422) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
@@ -286,6 +305,7 @@ it("shows structured publish validation without losing the draft", async () => {
   expect(screen.getByLabelText("名称")).toBeEnabled();
 });
 
+// 验证空海报和预览失败均使用无障碍隐藏的占位图。
 it("uses the same aria-hidden blank poster for an empty or failed preview", async () => {
   fixture(movie({ poster: null }));
   editor();
@@ -302,6 +322,7 @@ it("uses the same aria-hidden blank poster for an empty or failed preview", asyn
   expect(screen.queryByRole("img", { name: "当前海报预览" })).not.toBeInTheDocument();
 });
 
+// 验证发布、归档及转草稿后重新加载权威详情。
 it("reloads authoritative details after publish, archive and return to draft", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
   for (const action of ["发布", "归档", "转为草稿"]) { await user.click(screen.getByRole("button", { name: action })); await waitFor(() => expect(requests.at(-1)?.method).toBe("GET")); }
@@ -311,6 +332,7 @@ it("reloads authoritative details after publish, archive and return to draft", a
   for (const r of transitions) expect(requests[requests.indexOf(r) + 1].url).toBe("/api/admin/movies/movie-1");
 });
 
+// 验证从内容入口创建并打开具名电影草稿。
 it("creates a named draft first and opens it from the App content entry", async () => {
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
   await user.click(await screen.findByRole("button", { name: /新建内容/ }));
@@ -323,6 +345,7 @@ it("creates a named draft first and opens it from the App content entry", async 
   expect(await screen.findByLabelText("名称")).toHaveValue("新片");
 });
 
+// 验证版本冲突后锁定写入直到明确刷新。
 it("locks stale writes after 409 and explicitly refreshes before retrying", async () => {
   let failed = true; const requests = fixture(movie(), (r) => r.method === "PATCH" && failed ? json({ error: "conflict" }, 409) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
@@ -334,6 +357,7 @@ it("locks stale writes after 409 and explicitly refreshes before retrying", asyn
   await waitFor(() => expect(screen.getByRole("button", { name: "保存草稿" })).toBeEnabled());
 });
 
+// 验证写入返回认证错误时恢复会话且不重放。
 it.each([401, 403])("handles write %s through session recovery without replay", async (code) => {
   let token = "session-csrf";
   const requests = fixture(movie(), (r) => r.method === "PATCH" ? json({ error: "denied" }, code) : r.url.endsWith("/session") ? json({ ...session, csrf_token: token }) : undefined);
@@ -346,6 +370,7 @@ it.each([401, 403])("handles write %s through session recovery without replay", 
   expect(requests.filter((r) => r.method === "PATCH").map((r) => r.headers.get("X-CSRF-Token"))).toEqual(code === 401 ? ["session-csrf"] : ["session-csrf", "renewed"]);
 });
 
+// 验证保存期间保留待处理预览并在刷新隐藏后释放。
 it("keeps pending preview alive during save and releases it when a refresh hides it", async () => {
   const pending = deferred<Response>(); const requests = fixture(movie(), (r) => r.method === "PATCH" ? pending.promise : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
@@ -359,6 +384,7 @@ it("keeps pending preview alive during save and releases it when a refresh hides
 });
 
 // Catches deleting based on stale list/detail data, approximate name matching, or skipped impact fetch.
+// 验证删除前获取最新影响并要求准确名称与版本。
 it("fetches fresh deletion scope and requires the exact server name and version", async () => {
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1/delete-impact"
     ? json({ name: "最新名称", version: 9, season_count: 0, episode_count: 0, media_count: 2 }) : undefined);
@@ -379,6 +405,7 @@ it("fetches fresh deletion scope and requires the exact server name and version"
   expect(requests.find((r) => r.method === "DELETE")?.body).toEqual({ version: 9 });
 });
 
+// 验证媒体同步删除失败时保留确认框及输入。
 it("keeps the deletion dialog and exact confirmation after synchronous media deletion fails", async () => {
   const requests = fixture(movie(), (r) => r.method === "DELETE"
     ? json({ error: "media deletion failed", code: "media_delete_failed" }, 500)
@@ -393,6 +420,7 @@ it("keeps the deletion dialog and exact confirmation after synchronous media del
   expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
 });
 
+// 验证删除已提交但收尾失败时返回列表并警告。
 it("coordinates a committed deletion finalization failure as deleted and warns on the list", async () => {
   let committed = false;
   const requests = fixture(movie(), (r) => {
@@ -414,6 +442,7 @@ it("coordinates a committed deletion finalization failure as deleted and warns o
   expect(requests.filter((r) => r.method === "DELETE")).toHaveLength(1);
 });
 
+// 验证替换已提交但收尾失败时刷新详情并警告。
 it("reloads committed replacement state and warns when finalization fails", async () => {
   let committed = false;
   const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
@@ -432,6 +461,7 @@ it("reloads committed replacement state and warns when finalization fails", asyn
   expect(screen.queryByText(/待上传：new.png/)).not.toBeInTheDocument();
 });
 
+// 验证视频尚未上传时只清除已提交的海报。
 it("clears only the committed poster when video upload has not started", async () => {
   let committed = false;
   const authoritative = movie({ version: 5, poster: { id: "new-poster", url: "/media/new-poster", local_path: "/media/new-poster", original_name: "new.png", mime_type: "image/png", byte_size: 3 } });
@@ -453,6 +483,7 @@ it("clears only the committed poster when video upload has not started", async (
   expect(requests.filter((r) => r.url.includes("/api/admin/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4"]);
 });
 
+// 验证删除影响读取失败时禁止删除。
 it("does not permit deletion when the fresh impact detail cannot be loaded", async () => {
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1/delete-impact" ? json({ error: "unavailable" }, 503) : undefined);
   const user = userEvent.setup(); editor(); await screen.findByLabelText("名称");
@@ -463,6 +494,7 @@ it("does not permit deletion when the fresh impact detail cannot be loaded", asy
 });
 
 // A new external edit between upload and GET must not silently become our next write's version.
+// 验证上传后检测到并发变更时停止剩余上传。
 it("stops the remaining upload when the authoritative detail changed concurrently", async () => {
   let reads = 0;
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1" && r.method === "GET" && ++reads > 1 ? json(movie({ version: 20, name: "另一位编辑修改" })) : undefined);
@@ -475,6 +507,7 @@ it("stops the remaining upload when the authoritative detail changed concurrentl
   expect(screen.getByRole("button", { name: "保存草稿" })).toBeDisabled();
 });
 
+// 验证视频上传失败时保留已成功保存的海报。
 it("preserves a successfully saved poster when the following video upload fails", async () => {
   let failed = true;
   const requests = fixture(movie(), (r) => r.url.includes("/video?") && failed ? json({ error: "video interrupted" }, 500) : undefined);
@@ -490,6 +523,7 @@ it("preserves a successfully saved poster when the following video upload fails"
   expect(requests.filter((r) => r.url.includes("/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4", "/api/admin/media/movies/movie-1/video?version=5", "/api/admin/media/movies/movie-1/video?version=6"]);
 });
 
+// 验证列表删除入口加载最新详情且取消时不写入。
 it("opens the list deletion entry with a fresh server detail and allows cancel without a write", async () => {
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
   await user.click(within(await screen.findByRole("row", { name: /潮汐/ })).getByRole("button", { name: "永久删除" }));
@@ -501,6 +535,7 @@ it("opens the list deletion entry with a fresh server detail and allows cancel w
   expect(requests.some((r) => r.method !== "GET")).toBe(false);
 });
 
+// 验证状态转换成功但详情刷新失败时锁定操作。
 it("locks lifecycle actions when a successful transition's detail reload fails", async () => {
   let reads = 0;
   const requests = fixture(movie({ status: "archived" }), (r) => r.url === "/api/admin/movies/movie-1" && r.method === "GET" && ++reads > 1 ? json({ error: "unavailable" }, 503) : undefined);

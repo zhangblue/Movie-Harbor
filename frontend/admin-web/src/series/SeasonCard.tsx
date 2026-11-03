@@ -4,6 +4,7 @@ import { Button, Field } from "@movie-harbor/ui";
 import { EpisodeRow, type EpisodeActions } from "./EpisodeRow";
 import { canChangeSeason, knownStatus, permits } from "./permissions";
 
+// 展示待创建单集输入，在新增季或单集草稿时使用。
 function NewEpisode({ number, disabled, create, remove, changeNumber }: { number: number; disabled: boolean; create: (number: number, name: string) => Promise<boolean>; remove: () => void; changeNumber: (number: number) => void }) {
   const [name, setName] = useState(""); const [value, setValue] = useState(String(number));
   return <form className="series-episode" aria-label="新单集草稿" onSubmit={(e) => { e.preventDefault(); if (name.trim()) void create(Number(value), name).then((saved) => { if (saved) remove(); }); }}>
@@ -12,6 +13,7 @@ function NewEpisode({ number, disabled, create, remove, changeNumber }: { number
     <div className="movie-form-actions"><Button type="submit" disabled={disabled}>保存单集草稿</Button><Button variant="danger" disabled={disabled} onClick={remove}>移除未保存单集</Button></div>
   </form>;
 }
+// 展示一季及其单集操作，在渲染剧集层级时使用。
 export function SeasonCard({ series, season, disabled, initialEpisode, expanded, onToggle, actions, create, update, remove }: {
   series: SeriesResponse; season: SeasonResponse; disabled: boolean; initialEpisode: boolean; actions: EpisodeActions;
   expanded: boolean; onToggle: () => void;

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ActionButtons, type ContentAction, type ContentRow } from "./ActionButtons";
 
+// 展示内容列表中的海报或占位图，在渲染内容行时使用。
 function Poster({ row }: { row: ContentRow }) {
   const [failedUrl, setFailedUrl] = useState<string>();
   const url = row.poster_url;
@@ -8,6 +9,7 @@ function Poster({ row }: { row: ContentRow }) {
     ? <img className="table-poster" src={url} alt={`${row.name}海报`} loading="lazy" onError={() => setFailedUrl(url)} />
     : <span className="table-poster poster-placeholder" aria-label={`${row.name}暂无海报`}>暂无<br />海报</span>;
 }
+// 展示内容行与可用操作，在列表数据加载后使用。
 export function ContentTable({ rows, startIndex, disabled, onAction }: {
   rows: ContentRow[]; startIndex: number; disabled: boolean; onAction: (row: ContentRow, action: ContentAction) => void;
 }) {

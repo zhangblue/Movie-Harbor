@@ -1,6 +1,7 @@
 import { paginationItems } from "@movie-harbor/ui";
 import { Button } from "@movie-harbor/ui";
 
+// 定义分页组件所需数据和回调，在渲染内容分页时使用。
 type Props = {
   page: number;
   size: number;
@@ -9,6 +10,7 @@ type Props = {
   onPage: (page: number) => void;
 };
 
+// 展示内容分页并转发页码选择，在列表需要翻页时使用。
 export function ContentPagination({ page, size, total, disabled, onPage }: Props) {
   const totalPages = Math.max(1, Math.ceil(total / size));
   return <nav className="content-pagination" aria-label="内容分页">

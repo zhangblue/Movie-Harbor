@@ -3,6 +3,7 @@ import { ApiError, getSession, login } from "@movie-harbor/api-client";
 import { Button, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 
+// 展示管理员登录表单并处理认证，在无有效会话时使用。
 export function LoginPage({ onLogin, notice }: { onLogin: (name: string) => void; notice: string }) {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -10,6 +11,7 @@ export function LoginPage({ onLogin, notice }: { onLogin: (name: string) => void
   const [busy, setBusy] = useState(false);
   const mounted = useMounted();
 
+  // 校验并提交当前表单，在用户提交相应操作时调用。
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (busy) return;

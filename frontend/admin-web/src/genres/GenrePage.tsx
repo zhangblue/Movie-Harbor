@@ -3,6 +3,7 @@ import { ApiError, normalizeError, type CaughtValue, createGenre, deactivateGenr
 import { Button, Field } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 
+// 管理题材加载、增删改与排序，在进入题材配置时使用。
 export function GenrePage({ onExpired }: { onExpired: () => void }) {
   const [genres, setGenres] = useState<GenreResponse[]>([]);
   const [name, setName] = useState("");
@@ -24,6 +25,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
     });
   }, [mounted, onExpired]);
 
+  // 校验并提交当前表单，在用户提交相应操作时调用。
   async function submit(event: FormEvent) {
     event.preventDefault();
     const normalized = name.trim();
@@ -46,6 +48,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
     }
   }
 
+  // 执行题材写入并统一处理会话与冲突，在题材操作时调用。
   async function mutate(action: () => Promise<GenreResponse[] | GenreResponse | void>, accept: (value: GenreResponse[] | GenreResponse | void) => void, conflict: string) {
     if (busy) return;
     setBusy(true);
@@ -64,10 +67,12 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
     }
   }
 
+  // 用服务端返回的题材替换列表中的对应项，在更新成功后调用。
   function replace(updated: GenreResponse) {
     setGenres((items) => items.map((item) => item.id === updated.id ? updated : item));
   }
 
+  // 根据目标位置调整题材顺序，在点击排序按钮时调用。
   function move(index: number, offset: number) {
     const target = index + offset;
     if (target < 0 || target >= genres.length) return;
@@ -97,6 +102,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
   </section>;
 }
 
+// 展示单个题材及其管理操作，在渲染题材列表时使用。
 function GenreRow({ genre, busy, first, last, onRename, onMove, onDeactivate, onDelete }: {
   genre: GenreResponse; busy: boolean; first: boolean; last: boolean;
   onRename: (name: string) => void; onMove: (offset: number) => void; onDeactivate: () => void; onDelete: () => void;

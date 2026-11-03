@@ -6,20 +6,25 @@ import { clearCsrfToken, setCsrfToken, type JsonValue, type ViewerUserPage, type
 import { server } from "../test/server";
 import { UserPage } from "./UserPage";
 
+// 测试执行后清理组件及模拟状态，避免影响后续用例。
 afterEach(() => { cleanup(); clearCsrfToken(); vi.unstubAllGlobals(); });
 
 const summer: ViewerUserSummary = { id: "u1", username: "Summer", version: 3, created_at: "2026-10-08T00:00:00Z", last_login_at: null, has_active_session: false };
 const robin: ViewerUserSummary = { ...summer, id: "u2", username: "robin", version: 7, last_login_at: "2026-10-10T00:00:00Z", has_active_session: true };
+// 构造用户接口模拟响应，在用户管理测试准备数据时调用。
 function response(body: JsonValue | ViewerUserPage | ViewerUserSummary, status = 200) { return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } }); }
+// 构造用户分页响应，在用户管理测试准备数据时调用。
 function page(items = [summer, robin], total = items.length, current = 1): ViewerUserPage {
   return { items, total, page: current, size: 20, summary: { total_users: total, active_users: 1, latest_user: robin } };
 }
+// 安装用户模拟服务并渲染页面，在用户管理测试开始时调用。
 function setup(handler?: Parameters<typeof server>[0]) {
   setCsrfToken("session-csrf");
   return server((request) => handler?.(request) ?? (request.method === "GET" && request.url.startsWith("/api/admin/users?") ? response(page()) : undefined));
 }
 
 // A missing overview or an editable username/role would break the accepted account model.
+// 验证展示全局概览及仅能改密或删除的普通用户。
 it("shows global overview and immutable ordinary users with only password and delete actions", async () => {
   setup();
   render(<UserPage onExpired={() => {}} />);
@@ -36,6 +41,7 @@ it("shows global overview and immutable ordinary users with only password and de
 });
 
 // Search must return to page one while the overview stays independent of the filtered result.
+// 验证服务端搜索用户名并重置每页二十项的分页。
 it("searches usernames on the server and resets fixed twenty-item pagination", async () => {
   const requests = setup((request) => {
     if (request.url.includes("q=Summer")) return response({ ...page([summer]), summary: page().summary });
@@ -55,6 +61,7 @@ it("searches usernames on the server and resets fixed twenty-item pagination", a
 });
 
 // FEFF must remain searchable; NEL is whitespace under the server's Unicode rules.
+// 验证搜索 Unicode 用户名时遵循创建账号的归一化规则。
 it.each([
   ["\u0085Summer\u0085", "Summer"],
   ["\uFEFFSummer\uFEFF", "\uFEFFSummer\uFEFF"],
@@ -68,6 +75,7 @@ it.each([
 });
 
 // Creating must send only ordinary-account fields and refresh both table and overview.
+// 验证创建用户后刷新列表与全局概览。
 it("creates a user then refreshes the list and global overview", async () => {
   let created = false;
   const requests = setup((request) => {
@@ -92,6 +100,7 @@ it("creates a user then refreshes the list and global overview", async () => {
 });
 
 // Catch client-only rejection or rewriting of credentials accepted by the server.
+// 验证用户名和密码按服务端规则处理 Unicode 空白并保留 FEFF。
 it("normalizes Unicode White_Space like the server while preserving FEFF in usernames and passwords", async () => {
   const requests = setup((request) => request.method === "POST" ? response({ ...summer, version: 4 }) : undefined);
   const user = userEvent.setup();
@@ -106,6 +115,7 @@ it("normalizes Unicode White_Space like the server while preserving FEFF in user
 });
 
 // Catches a UTF-16 code-unit check accepting fewer than eight ordinary-user password characters.
+// 验证创建和改密均拒绝七字符密码并接受八字符密码。
 it.each(["create", "password"])("rejects seven-character %s passwords and accepts exactly eight", async (mode) => {
   const requests = setup((request) => request.method === "POST" || request.method === "PUT" ? response({ ...summer, version: 4 }) : undefined);
   const user = userEvent.setup();
@@ -128,6 +138,7 @@ it.each(["create", "password"])("rejects seven-character %s passwords and accept
 });
 
 // Catches validation errors being misreported as network failures rather than the backend's localized feedback.
+// 验证创建和改密时保留后端本地化密码错误。
 it.each(["create", "password"])("preserves the localized backend password error for %s", async (mode) => {
   setup((request) => request.method === "POST" || request.method === "PUT" ? response({ error: "密码至少需要 8 个字符。" }, 400) : undefined);
   const user = userEvent.setup();
@@ -142,6 +153,7 @@ it.each(["create", "password"])("preserves the localized backend password error 
 });
 
 // The authoritative duplicate error must explain case-insensitive uniqueness without closing the form.
+// 验证解释服务端返回的不区分大小写用户名冲突。
 it("explains case-insensitive duplicate usernames returned by the server", async () => {
   setup((request) => request.method === "POST" ? response({ error: "conflict", code: "username_conflict" }, 409) : undefined);
   const user = userEvent.setup();
@@ -156,6 +168,7 @@ it("explains case-insensitive duplicate usernames returned by the server", async
 });
 
 // A stale version or username write on password change must be caught at the real HTTP boundary.
+// 验证使用当前版本仅修改密码并解释会话失效。
 it("changes only the password with the current version and explains session invalidation", async () => {
   let changed = false;
   const requests = setup((request) => {
@@ -182,6 +195,7 @@ it("changes only the password with the current version and explains session inva
 });
 
 // The first click must never delete; only the dialog's explicit confirmation authorizes the request.
+// 验证删除要求二次确认并在完成后刷新概览。
 it("requires a second confirmation to delete and refreshes the overview afterwards", async () => {
   let deleted = false;
   const requests = setup((request) => {
@@ -190,6 +204,7 @@ it("requires a second confirmation to delete and refreshes the overview afterwar
   });
   const user = userEvent.setup();
   render(<UserPage onExpired={() => {}} />);
+  // 打开目标用户的删除确认框，在删除测试中重复进入确认步骤时调用。
   const open = async () => user.click(within(await screen.findByRole("row", { name: /Summer/ })).getByRole("button", { name: "删除" }));
   await open();
   expect(screen.getByRole("dialog", { name: "删除用户？" })).toHaveTextContent(/Summer.*现有会话.*立即失效.*不可撤销/);
@@ -205,6 +220,7 @@ it("requires a second confirmation to delete and refreshes the overview afterwar
 });
 
 // Conflict must block blind retries, then a reload must acquire the new version before reopening.
+// 验证版本过期时阻止改密直至明确刷新。
 it("blocks stale password changes until an explicit reload obtains the latest version", async () => {
   let conflict = false;
   const requests = setup((request) => {
@@ -225,6 +241,7 @@ it("blocks stale password changes until an explicit reload obtains the latest ve
   expect(requests.filter((request) => request.method === "PUT").at(-1)?.body).toEqual({ version: 9, new_password: "new-password" });
 });
 
+// 验证用户管理各操作收到 401 时使管理员会话失效。
 it.each(["list", "create", "password", "delete"])("expires the administrator session on a 401 %s response", async (operation) => {
   const expired = vi.fn();
   setup((request) => {

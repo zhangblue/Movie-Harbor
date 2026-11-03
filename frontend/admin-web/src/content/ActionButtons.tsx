@@ -1,18 +1,22 @@
 import type { AdminContentListItem } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 
+// 列举内容列表支持的操作，在计算和分发行操作时使用。
 export type ContentAction = "edit" | "view" | "publish" | "archive" | "draft" | "delete" | "privacy";
+// 表示统一内容列表行，在表格和操作组件间传递。
 export type ContentRow = AdminContentListItem;
 const actions: Record<string, ContentAction[]> = {
   draft: ["edit", "publish", "delete"],
   published: ["view", "archive"],
   archived: ["view", "publish", "draft", "delete"],
 };
+// 根据内容状态计算可用操作，在渲染或执行操作前调用。
 export function availableActions(row: ContentRow): ContentAction[] {
   const lifecycleActions = actions[row.status];
   return lifecycleActions ? ["privacy", ...lifecycleActions] : [];
 }
 
+// 展示当前内容行可执行的按钮，在渲染列表行时使用。
 export function ActionButtons({ row, disabled, onAction }: {
   row: ContentRow; disabled: boolean; onAction: (row: ContentRow, action: ContentAction) => void;
 }) {

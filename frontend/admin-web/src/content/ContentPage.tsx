@@ -8,9 +8,11 @@ import { ContentFilters, initialFilters, type Filters } from "./ContentFilters";
 import { ContentPagination } from "./ContentPagination";
 import { ContentTable } from "./ContentTable";
 
+// 保存内容筛选、页码和刷新版本，在列表与详情间导航时使用。
 export type ContentListState = { filters: Filters; page: number; revision: number };
 export const initialContentListState: ContentListState = { filters: initialFilters, page: 1, revision: 0 };
 
+// 管理内容分页、状态操作和导出，在进入内容管理时使用。
 export function ContentPage({ state, setState, onExpired, onOpen }: {
   state: ContentListState;
   setState: Dispatch<SetStateAction<ContentListState>>;
@@ -56,6 +58,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     return () => { ignore = true; };
   }, [state.filters, state.page, state.revision, setState, onExpired]);
 
+  // 按内容类型执行状态或可见性操作，列表操作触发时调用。
   async function act(row: ContentRow, action: ContentAction) {
     if (operation.current || loading || conflict || !availableActions(row).includes(action)) return;
     if (action === "edit" || action === "view" || action === "delete") { onOpen(row, action); return; }
@@ -63,6 +66,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     setMutating(true);
     setError("");
     try {
+      // 使用当前行版本执行可见性或生命周期写入；成功后刷新当前页取得新状态。
       if (action === "privacy") await (row.kind === "movie" ? setMoviePrivacy : setSeriesPrivacy)(row.id, row.version, !row.is_private);
       else await (row.kind === "movie" ? transitionMovie : transitionSeries)(row.id, action, row.version);
       if (mounted.current) setState((value) => ({ ...value, revision: value.revision + 1 }));
@@ -71,6 +75,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       if (!mounted.current) return;
       if (error instanceof ApiError && error.status === 401) onExpired();
       else if (error instanceof ApiError && error.status === 403) {
+        // 恢复会话和令牌但不自动重放写入，避免操作结果不明时重复提交。
         const recovery = await recoverForbiddenWrite();
         if (!mounted.current) return;
         if (recovery.expired) onExpired();
@@ -85,12 +90,14 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     }
   }
 
+  // 下载服务端完整内容导出，在管理员点击导出时调用。
   async function exportContent() {
     if (exportOperation.current) return;
     exportOperation.current = true;
     setExporting(true);
     setExportError("");
     try {
+      // 一次请求服务端一致性快照，避免按当前筛选或分页拼接出不完整导出。
       const { blob, filename } = await downloadAdminContentExport();
       if (!mounted.current) return;
       const url = URL.createObjectURL(blob);

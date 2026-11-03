@@ -9,13 +9,16 @@ import { PosterPicker } from "./PosterPicker";
 import { VideoPicker } from "./VideoPicker";
 import { PublishErrors } from "./PublishErrors";
 
+// 保存编辑表单字段，在详情与表单之间转换时使用。
 type Fields = { name: string; synopsis: string; year: string; minutes: string; genreIds: string[] };
 const empty: Fields = { name: "", synopsis: "", year: "", minutes: "", genreIds: [] };
 const statusNames = { draft: "草稿", published: "已发布", archived: "已归档" };
+// 将服务端详情转换为编辑表单字段，在加载或刷新详情时使用。
 function fieldsOf(movie: MovieResponse): Fields {
   return { name: movie.name, synopsis: movie.synopsis, year: movie.year?.toString() ?? "", minutes: movie.duration_seconds === null ? "" : String(movie.duration_seconds / 60), genreIds: movie.genres.map((g) => g.id) };
 }
 
+// 管理电影详情、媒体、状态和删除流程，在打开电影编辑页时使用。
 export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () => {}, onDeleteFinalization = () => {}, initialDelete = false }: { movieId: string | null; onBack: () => void; onExpired: () => void; onDeleteSuccess?: () => void; onDeleteFinalization?: () => void; initialDelete?: boolean }) {
   const [movie, setMovie] = useState<MovieResponse | null>(null);
   const [fields, setFields] = useState<Fields>(empty);
@@ -38,7 +41,9 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   const mounted = useMounted();
   const id = movie?.id ?? movieId;
 
+  // 接收服务端最新详情并同步界面，在加载或成功写入后调用。
   function accept(value: MovieResponse) { setMovie(value); setFields(fieldsOf(value)); }
+  // 同步视频上传进度，上传事件到达且页面仍挂载时调用。
   function updateVideoUploadProgress(progress: ApiUploadProgress) {
     if (mounted.current) setVideoUploadProgress(progress);
   }
@@ -46,6 +51,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
     setPoster(null); setVideo(null); setVideoUploadProgress(null);
+    // 检查异步请求的会话失效状态，在并行加载详情时调用。
     const watch = <T,>(promise: Promise<T>) => promise.catch((cause: CaughtValue) => {
       const error = normalizeError(cause);
       if (!ignore && error instanceof ApiError && error.status === 401) onExpired();
@@ -67,10 +73,12 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     // A new editor is keyed by movieId in App; revision is the explicit refresh boundary.
   }, [movieId, revision, onExpired]);
 
+  // 按会话、冲突和校验错误更新反馈，在写入失败时调用。
   async function fail(error: Error) {
     if (!mounted.current) return;
     if (error instanceof ApiError && error.status === 401) onExpired();
     else if (error instanceof ApiError && error.status === 403) {
+      // 写入被拒后先确认会话并更新令牌；保留用户操作供其明确重试，避免重复写入。
       const recovery = await recoverForbiddenWrite();
       if (!mounted.current) return;
       if (recovery.expired) onExpired(); else setError(recovery.message);
@@ -81,12 +89,14 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       else setError(result.message);
     }
   }
+  // 串行执行写入并统一处理忙碌状态和错误，在用户发起操作时调用。
   async function run(action: () => Promise<void>) {
     if (operation.current || loading || conflict) return;
     operation.current = true; setBusy(true); setError(""); setInvalid([]); setNotice(""); setWarning("");
     try { await action(); } catch (cause) { const error = normalizeError(cause as CaughtValue); await fail(error); }
     finally { operation.current = false; if (mounted.current) setBusy(false); }
   }
+  // 写入后重新读取电影权威版本，读取失败时保持写入锁定。
   async function refreshAfterWrite() {
     if (!id || !mounted.current) return;
     // A lost follow-up read must not leave the previous version writable.
@@ -94,6 +104,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     const fresh = await getMovie(id);
     if (mounted.current) { accept(fresh); setConflict(false); }
   }
+  // 依次保存电影字段和待替换媒体，保存或发布草稿时调用。
   async function saveDraft(): Promise<MovieResponse | null> {
     if (!movie || movie.status !== "draft") return null;
     let saved = await updateMovie(movie.id, {
@@ -103,6 +114,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     });
     if (!mounted.current) return null;
     accept(saved);
+    // 字段先保存，海报和视频依次使用上一步返回的版本；任一失败即停止后续操作。
     for (const [slot, file] of [["poster", poster], ["video", video]] as const) {
       if (!file) continue;
       let uploaded;
@@ -111,6 +123,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
           { kind: "movies", id: saved.id, slot },
           file,
           saved.version,
+          // 仅视频上传上报进度；组件卸载后的事件由回调忽略。
           slot === "video" ? updateVideoUploadProgress : undefined,
         );
       } catch (cause) {
@@ -131,6 +144,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       setConflict(true);
       saved = await getMovie(saved.id);
       if (!mounted.current) return null;
+      // 若上传后发生并发写入，停止剩余媒体和发布，要求用户刷新最新版本。
       if (saved.version !== uploaded.version) {
         throw new ApiError(409, "Conflict", "Content changed after upload", undefined);
       }
@@ -139,21 +153,26 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     }
     return saved;
   }
+  // 先保存草稿并按需发布，表单提交时调用。
   async function save(publish: boolean) {
     await run(async () => {
       const saved = await saveDraft();
       if (!saved || !mounted.current) return;
+      // 仅在草稿和媒体全部保存后发布，随后刷新状态以免继续使用旧版本。
       if (publish) { await transitionMovie(saved.id, "publish", saved.version); await refreshAfterWrite(); }
       else setNotice("草稿已保存。");
     });
   }
+  // 使用当前版本转换电影状态，管理员选择发布、归档或转草稿时调用。
   async function transition(action: "publish" | "archive" | "draft") {
     if (!movie) return;
     await run(async () => { await transitionMovie(movie.id, action, movie.version); await refreshAfterWrite(); });
   }
+  // 获取最新删除影响并准备确认，管理员请求删除时调用。
   async function prepareDelete(targetId = movie?.id) {
     if (!targetId || movie?.status === "published") return;
     await run(async () => {
+      // 删除确认显示服务端最新影响及版本；读取失败时不打开确认框。
       const fresh = await getMovieDeleteImpact(targetId);
       if (!mounted.current) return;
       setConfirmation(""); setDeleting(fresh);

@@ -1,6 +1,7 @@
 import { Field } from "@movie-harbor/ui";
 import type { ApiUploadProgress, MediaSummary } from "@movie-harbor/api-client";
 
+// 展示当前视频、待上传文件和进度，供内容编辑时选择视频。
 export function VideoPicker({ current, file, onSelect, readOnly, disabled, progress }: {
   current: MediaSummary | null; file: File | null; onSelect: (file: File) => void; readOnly: boolean; disabled: boolean; progress: ApiUploadProgress | null;
 }) {

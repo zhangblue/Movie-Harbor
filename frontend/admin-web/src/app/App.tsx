@@ -13,7 +13,9 @@ import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
 
+// 描述认证加载、匿名、错误和已认证状态，在应用切换页面时使用。
 type Auth = { state: "loading" } | { state: "anonymous" } | { state: "error" } | { state: "authenticated"; name: string };
+// 协调认证及后台页面导航，在管理后台启动时渲染。
 export function App() {
   const [auth, setAuth] = useState<Auth>({ state: "loading" });
   const [attempt, setAttempt] = useState(0);
@@ -59,6 +61,7 @@ export function App() {
     return () => { ignore = true; };
   }, [attempt, expire]);
 
+  // 撤销管理员会话并处理恢复，在点击退出登录时调用。
   async function signOut() {
     if (busy) return;
     setBusy(true);

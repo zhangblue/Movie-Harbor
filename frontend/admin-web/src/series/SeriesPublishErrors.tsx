@@ -1,6 +1,7 @@
 import { ValidationFieldList } from "../content/ValidationFieldList";
 
 const labels: Record<string, string> = { name: "名称", video: "可播放视频", number: "集序号", season_number: "季序号", episode_number: "集序号", year: "年份", duration_seconds: "时长" };
+// 展示剧集发布校验字段，在发布失败时使用。
 export function SeriesPublishErrors({ fields }: { fields: string[] }) {
   const needsEpisode = fields.some((field) => field === "episodes" || field === "published_episode");
   const remaining = fields.filter((field) => field !== "poster" && field !== "episodes" && field !== "published_episode");
