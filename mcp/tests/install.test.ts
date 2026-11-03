@@ -150,7 +150,7 @@ async function writeExistingConfig(f: Awaited<ReturnType<typeof fixture>>, confi
   return paths;
 }
 
-// 验证安装、凭据、服务器场景：'first and repeated install keep one owned global server and private reusable credentials'。
+// 验证首次及重复安装只保留一个归属当前项目的全局注册，并复用私有凭据。
 test('first and repeated install keep one owned global server and private reusable credentials', async t => {
   const f = await fixture(t);
   const first = await runInstall(f);
@@ -183,7 +183,7 @@ test('first and repeated install keep one owned global server and private reusab
   assert.ok(repeatedCalls.some(call => call.slice(0, 4).join(' ') === 'codex mcp remove movie-harbor'));
 });
 
-// 验证注册场景：'fails before registration when each required command is missing'。
+// 验证缺少任一必需命令时在注册前失败。
 test('fails before registration when each required command is missing', async t => {
   for (const missing of ['node', 'npm', 'codex', 'ffmpeg', 'ffprobe']) {
     const f = await fixture(t);
@@ -195,7 +195,7 @@ test('fails before registration when each required command is missing', async t 
   }
 });
 
-// 验证注册场景：'build failure leaves an existing owned registration untouched and precedes codex mutation'。
+// 验证构建失败发生在 Codex 注册修改之前，并保留已有注册。
 test('build failure leaves an existing owned registration untouched and precedes codex mutation', async t => {
   const f = await fixture(t);
   const config = join(f.home, 'Config Root', 'movie-harbor-mcp', 'config.env');
@@ -210,7 +210,7 @@ test('build failure leaves an existing owned registration untouched and precedes
   assert.equal(recorded.some(call => call[0] === 'codex'), false);
 });
 
-// 验证服务器场景：'refuses a same-name server owned by another project without removing it'。
+// 验证拒绝覆盖其他项目的同名服务且不删除它。
 test('refuses a same-name server owned by another project without removing it', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -229,7 +229,7 @@ test('refuses a same-name server owned by another project without removing it', 
   assert.equal((await lstat(paths.credentials)).mode & 0o777, 0o600);
 });
 
-// 验证注册场景：'fails closed on malformed codex JSON without registration mutation'。
+// 验证 Codex 列表 JSON 格式错误时停止且不修改注册。
 test('fails closed on malformed codex JSON without registration mutation', async t => {
   const f = await fixture(t);
   const result = await runInstall(f, { FAKE_CODEX_MALFORMED: '1' });
@@ -239,7 +239,7 @@ test('fails closed on malformed codex JSON without registration mutation', async
   await assert.rejects(lstat(installedPaths(f).directory), (error: NodeJS.ErrnoException) => error.code === 'ENOENT');
 });
 
-// 验证相关功能场景：'fails closed when codex returns valid JSON with a failing exit status'。
+// 验证 Codex 即使返回有效 JSON，只要退出状态失败也停止安装。
 test('fails closed when codex returns valid JSON with a failing exit status', async t => {
   const f = await fixture(t);
   const result = await runInstall(f, { FAKE_CODEX_LIST_FAIL: '1' });
@@ -248,7 +248,7 @@ test('fails closed when codex returns valid JSON with a failing exit status', as
   assert.equal((await calls(f)).some(call => ['remove', 'add'].includes(call[2] ?? '')), false);
 });
 
-// 验证配置场景：'get failure leaves existing configuration bytes and modes unchanged'。
+// 验证读取注册失败时已有配置内容与权限均不变。
 test('get failure leaves existing configuration bytes and modes unchanged', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -265,7 +265,7 @@ test('get failure leaves existing configuration bytes and modes unchanged', asyn
   assert.deepEqual(await state(f), [owned]);
 });
 
-// 验证注册、配置场景：'atomic config rewrite failure preserves the old file and registration'。
+// 验证配置原子重写失败时保留旧文件和注册。
 test('atomic config rewrite failure preserves the old file and registration', async t => {
   const f = await fixture(t);
   const first = await runInstall(f);
@@ -285,7 +285,7 @@ test('atomic config rewrite failure preserves the old file and registration', as
   assert.deepEqual((await readdir(paths.directory)).filter(name => name.startsWith('.config.env.') && name.endsWith('.tmp')), []);
 });
 
-// 验证注册、配置场景：'directory fsync failure after config rename restores old bytes mode and registration'。
+// 验证配置重命名后目录同步失败时恢复旧内容、权限与注册。
 test('directory fsync failure after config rename restores old bytes mode and registration', async t => {
   const f = await fixture(t);
   const first = await runInstall(f);
@@ -306,7 +306,7 @@ test('directory fsync failure after config rename restores old bytes mode and re
   assert.deepEqual((await readdir(paths.directory)).filter(name => name.endsWith('.restore.tmp')), []);
 });
 
-// 验证符号链接、生成文件场景：'custom generated root uses a canonical real parent and rejects missing or symlink parents'。
+// 验证自定义生成目录使用规范化真实父目录，并拒绝缺失或符号链接父目录。
 test('custom generated root uses a canonical real parent and rejects missing or symlink parents', async t => {
   const success = await fixture(t);
   const parent = join(success.root, 'Generated Parent');
@@ -330,7 +330,7 @@ test('custom generated root uses a canonical real parent and rejects missing or 
   assert.deepEqual(await state(linked), []);
 });
 
-// 验证凭据、配置、符号链接场景：'rejects symlinked credential or config files'。
+// 验证拒绝作为符号链接的凭据或配置文件。
 test('rejects symlinked credential or config files', async t => {
   for (const name of ['credentials.env', 'config.env']) {
     const f = await fixture(t);
@@ -345,7 +345,7 @@ test('rejects symlinked credential or config files', async t => {
   }
 });
 
-// 验证注册场景：'remove success followed by add failure removes the partial entry and restores the exact owned registration'。
+// 验证删除旧注册成功但添加失败时清理残留并完整恢复旧注册。
 test('remove success followed by add failure removes the partial entry and restores the exact owned registration', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -370,7 +370,7 @@ test('remove success followed by add failure removes the partial entry and resto
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证回滚场景：'rollback continues when cleanup remove deletes the new entry before returning nonzero'。
+// 验证清理命令删除新注册后返回失败时，回滚仍继续。
 test('rollback continues when cleanup remove deletes the new entry before returning nonzero', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f, 'OLD_CONFIG=cleanup-remove\n');
@@ -387,7 +387,7 @@ test('rollback continues when cleanup remove deletes the new entry before return
   assert.match(result.stderr, /恢复|回滚/);
 });
 
-// 验证回滚场景：'rollback cleanup fails closed without deleting a foreign replacement after remove failure'。
+// 验证清理删除失败后出现的其他项目同名注册时停止，避免误删。
 test('rollback cleanup fails closed without deleting a foreign replacement after remove failure', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f, 'OLD_CONFIG=foreign-cleanup\n');
@@ -405,7 +405,7 @@ test('rollback cleanup fails closed without deleting a foreign replacement after
   assert.match(result.stderr, /严重.*无法清理/);
 });
 
-// 验证注册场景：'successful add with failed verification removes the new entry and restores the exact owned registration'。
+// 验证添加成功但校验失败时移除新注册并完整恢复旧注册。
 test('successful add with failed verification removes the new entry and restores the exact owned registration', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -431,7 +431,7 @@ test('successful add with failed verification removes the new entry and restores
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证回滚、安装场景：'rollback failure is reported as a serious error and never claims installation success'。
+// 验证回滚失败被报告为严重错误，不能声称安装成功。
 test('rollback failure is reported as a serious error and never claims installation success', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -452,7 +452,7 @@ test('rollback failure is reported as a serious error and never claims installat
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证注册、配置场景：'remove failure restores the old config before leaving the owned registration untouched'。
+// 验证删除旧注册失败时恢复旧配置并保留原注册。
 test('remove failure restores the old config before leaving the owned registration untouched', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f, 'OLD_CONFIG=A\n');
@@ -468,7 +468,7 @@ test('remove failure restores the old config before leaving the owned registrati
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证注册、配置场景：'remove that deletes state before failing restores both old config and registration'。
+// 验证删除命令先删除状态再失败时恢复旧配置及注册。
 test('remove that deletes state before failing restores both old config and registration', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f, 'OLD_CONFIG=remove-after\n');
@@ -482,7 +482,7 @@ test('remove that deletes state before failing restores both old config and regi
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证注册、安装场景：'failed first install removes a partially-created registration'。
+// 验证首次安装失败时移除部分创建的注册。
 test('failed first install removes a partially-created registration', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -500,7 +500,7 @@ test('failed first install removes a partially-created registration', async t =>
   assert.deepEqual(await readFile(paths.credentials), credentialsBefore);
 });
 
-// 验证注册场景：'fails closed before removal when an owned registration has fields add cannot restore'。
+// 验证旧注册含添加命令无法恢复的字段时，在删除前停止。
 test('fails closed before removal when an owned registration has fields add cannot restore', async t => {
   for (const extra of [
     { transport: { cwd: '/private/working-directory' } },
@@ -533,7 +533,7 @@ test('fails closed before removal when an owned registration has fields add cann
   }
 });
 
-// 验证注册场景：'extra literal env fails closed before files or registration are changed and never leaks its value'。
+// 验证额外环境变量使安装在修改文件或注册前停止，且不泄露变量值。
 test('extra literal env fails closed before files or registration are changed and never leaks its value', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);
@@ -561,7 +561,7 @@ test('extra literal env fails closed before files or registration are changed an
   assert.equal((await lstat(paths.config)).mode & 0o777, 0o600);
 });
 
-// 验证回滚场景：'rollback verification rejects non-default fields and reports a serious failure'。
+// 验证回滚校验拒绝非默认字段并报告严重失败。
 test('rollback verification rejects non-default fields and reports a serious failure', async t => {
   const f = await fixture(t);
   const paths = await writeExistingConfig(f);

@@ -73,7 +73,7 @@ async function registeredTools(client: any, dependencies: any) {
   } };
 }
 
-// 验证上传、发布场景：'upload, replace and publish tools register independently with strict write annotations'。
+// 验证上传、替换及发布工具分别注册，并具有严格的写操作标注。
 test('upload, replace and publish tools register independently with strict write annotations', async t => {
   const f = await fixture(t); const c = fakeClient([]); const tools = await registeredTools(c.client, f);
   assert.deepEqual([...tools.registrations.keys()], ['upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','publish_movie','publish_episode','publish_series']);
@@ -87,7 +87,7 @@ test('upload, replace and publish tools register independently with strict write
 });
 
 // Bypassing the confirmation schema must fail before probing the remote target or uploading.
-// 验证上传场景：'every ordinary and replacement upload requires import confirmation'。
+// 验证普通上传和替换上传均需要入库确认。
 test('every ordinary and replacement upload requires import confirmation', async t => {
   const f = await fixture(t);
   for (const [name, input] of [
@@ -104,7 +104,7 @@ test('every ordinary and replacement upload requires import confirmation', async
   }
 });
 
-// 验证上传、发布、电影场景：'ordinary movie upload refuses an occupied slot and never uploads or publishes'。
+// 验证普通电影上传遇到已有视频槽时不上传也不发布。
 test('ordinary movie upload refuses an occupied slot and never uploads or publishes', async t => {
   const f = await fixture(t); const c = fakeClient([{ ...movie, video: media }]);
   const tools = await registeredTools(c.client, f);
@@ -112,7 +112,7 @@ test('ordinary movie upload refuses an occupied slot and never uploads or publis
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path]), [['json','GET',`/api/admin/movies/${movieId}`]]);
 });
 
-// 验证上传、发布、电影场景：'movie upload validates compatible media, streams once, filters output and does not publish'。
+// 验证电影上传检查兼容媒体、仅流式上传一次、过滤输出且不自动发布。
 test('movie upload validates compatible media, streams once, filters output and does not publish', async t => {
   const f = await fixture(t); const c = fakeClient([movie, uploadResponse]); const tools = await registeredTools(c.client, f);
   const out = await tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:true });
@@ -126,7 +126,7 @@ test('movie upload validates compatible media, streams once, filters output and 
 });
 
 // Catches consulting or uploading to the remote service before incompatible local MP4 tracks are rejected.
-// 验证上传、电影、转换场景：'movie upload rejects incompatible MP4 tracks before every HTTP call and points to convert_video'。
+// 验证不兼容 MP4 轨道在任何 HTTP 请求前被拒绝，并提示使用视频转换工具。
 test('movie upload rejects incompatible MP4 tracks before every HTTP call and points to convert_video', async t => {
   const f = await fixture(t);
   const video = { index: 0, codec: 'h264', pixelFormat: 'yuv420p' };
@@ -150,7 +150,7 @@ test('movie upload rejects incompatible MP4 tracks before every HTTP call and po
   }
 });
 
-// 验证上传场景：'replace requires an occupied target and explicit confirmation while upload rejects incompatible files'。
+// 验证替换需要已有视频和明确确认，普通上传拒绝不兼容文件。
 test('replace requires an occupied target and explicit confirmation while upload rejects incompatible files', async t => {
   const f = await fixture(t); const webm = join(f.allowed,'video.webm'); const mkv = join(f.allowed,'video.mkv');
   await Promise.all([writeFile(webm,'webm'),writeFile(mkv,'mkv')]);
@@ -165,7 +165,7 @@ test('replace requires an occupied target and explicit confirmation while upload
   assert.equal(blocked.calls.filter(call => call.kind === 'upload').length, 0);
 });
 
-// 验证上传、单集场景：'episode upload validates hierarchy and returns episode and parent versions'。
+// 验证单集上传检查层级归属，并返回单集及父剧集版本。
 test('episode upload validates hierarchy and returns episode and parent versions', async t => {
   const f = await fixture(t); const response = { ...uploadResponse, version:5, series_version:9 };
   const c = fakeClient([episodeEnvelope,response]); const tools = await registeredTools(c.client, f);
@@ -181,7 +181,7 @@ test('episode upload validates hierarchy and returns episode and parent versions
   assert.equal(wrong.calls.length,1);
 });
 
-// 验证上传、电影场景：'upload rejects semantically impossible movie responses before cleanup'。
+// 验证电影上传响应语义不可能时，在清理生成文件前拒绝响应。
 test('upload rejects semantically impossible movie responses before cleanup', async t => {
   const f = await fixture(t);
   for (const [index,response] of [
@@ -206,7 +206,7 @@ test('upload rejects semantically impossible movie responses before cleanup', as
   }
 });
 
-// 验证上传、单集场景：'episode upload rejects target or parent version jumps before cleanup'。
+// 验证单集或父剧集版本异常跳跃时，在清理生成文件前拒绝响应。
 test('episode upload rejects target or parent version jumps before cleanup', async t => {
   const f = await fixture(t); const input={series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path,confirmed:true};
   for(const [index,response] of [
@@ -229,7 +229,7 @@ test('episode upload rejects target or parent version jumps before cleanup', asy
   }
 });
 
-// 验证上传、生成文件场景：'successful generated upload deletes only registered conversion output and failures retain it'。
+// 验证生成视频上传成功后只删除已登记的转换输出，失败时保留文件。
 test('successful generated upload deletes only registered conversion output and failures retain it', async t => {
   const f = await fixture(t); await prepareGeneratedRoot(f.config);
   const source = await inspectAllowedFile(f.path, f.config.allowedRoots);
@@ -248,7 +248,7 @@ test('successful generated upload deletes only registered conversion output and 
   assert.equal(await stat(generated2).then(() => true),true);
 });
 
-// 验证发布场景：'publishing rejects archived targets, is idempotent when published and validates ownership'。
+// 验证发布拒绝归档目标、已发布时保持幂等，并检查内容归属。
 test('publishing rejects archived targets, is idempotent when published and validates ownership', async t => {
   const f = await fixture(t);
   for (const target of [{...movie,status:'archived'},{...movie,status:'published'}]) {
@@ -262,7 +262,7 @@ test('publishing rejects archived targets, is idempotent when published and vali
   assert.equal(wrong.calls.length,1);
 });
 
-// 验证发布、单集、剧集场景：'movie, episode and parent series publish only through separate confirmed calls'。
+// 验证电影、单集和父剧集只能通过各自独立确认的调用发布。
 test('movie, episode and parent series publish only through separate confirmed calls', async t => {
   const f = await fixture(t);
   const publishedMovie = {...movie,status:'published',version:4};
@@ -281,7 +281,7 @@ test('movie, episode and parent series publish only through separate confirmed c
   ]);
 });
 
-// 验证发布场景：'publishing rejects impossible version transitions without later calls'。
+// 验证发布结果出现不可能的版本变化时停止后续调用。
 test('publishing rejects impossible version transitions without later calls', async t => {
   const f=await fixture(t);
   for(const response of [{...movie,status:'published',version:3},{...movie,status:'published',version:5}]){
@@ -309,7 +309,7 @@ test('publishing rejects impossible version transitions without later calls', as
   }
 });
 
-// 验证发布、单集场景：'episode publishing stops before transition when its parent is archived'。
+// 验证父剧集已归档时，单集发布在状态转换前停止。
 test('episode publishing stops before transition when its parent is archived', async t => {
   const f = await fixture(t); const c = fakeClient([{...series,status:'archived'}]); const tools = await registeredTools(c.client,f);
   await assert.rejects(tools.call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/父剧集.*归档/);

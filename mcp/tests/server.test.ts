@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
 
-// 验证服务器场景：'server exposes identity, workflow instructions, complete atomic tool schemas and structured output in memory'。
+// 在内存连接中验证服务器身份、工作流说明、工具输入输出结构和完整注册。
 test('server exposes identity, workflow instructions, complete atomic tool schemas and structured output in memory', async () => {
   const config = { baseUrl:new URL('http://localhost/'),apiKey:'mhmcp_secret',credentialDirectory:'/tmp/credentials',allowedRoots:[],generatedRoot:'/tmp/generated',requestTimeoutMs:1000 };
   const clientApi = { /* 内存服务器测试时返回固定的电影列表并拒绝其他请求。 */ async json(method:string,path:string) {
@@ -54,7 +54,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
   } finally { await client.close(); await server.close(); }
 });
 
-// 验证相关功能场景：'stdio entry emits only protocol JSON on stdout and keeps startup diagnostics off stdout'。
+// 验证标准输入输出入口只在标准输出写协议 JSON，启动诊断不会混入协议。
 test('stdio entry emits only protocol JSON on stdout and keeps startup diagnostics off stdout', async t => {
   const mcpRoot=fileURLToPath(new URL('../',import.meta.url));
   const build=await mkdtemp(join(mcpRoot,'.server-build-'));

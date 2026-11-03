@@ -27,7 +27,7 @@ async function fixture(t: TestContext, handler: (req: IncomingMessage, res: Serv
 }
 
 // Catches falling back to browser authentication or sending JSON with the wrong byte length.
-// 验证配置、客户端场景：'client sends Bearer only and exact JSON bytes to the configured API'。
+// 验证客户端仅向配置的 API 发送 Bearer 凭据和准确 JSON 字节。
 test('client sends Bearer only and exact JSON bytes to the configured API', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   const requests: Array<{ url: string | undefined; method: string | undefined; headers: IncomingMessage['headers']; body: Buffer }> = [];
@@ -51,7 +51,7 @@ test('client sends Bearer only and exact JSON bytes to the configured API', asyn
 });
 
 // Catches absolute/cross-origin paths and URL normalization escaping the administrative API.
-// 验证路径、客户端场景：'client rejects uncontrolled paths before any network request'。
+// 验证客户端在发送网络请求前拒绝非受控路径。
 test('client rejects uncontrolled paths before any network request', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let requests = 0;
@@ -65,7 +65,7 @@ test('client rejects uncontrolled paths before any network request', async t => 
 });
 
 // Catches reflecting arbitrary backend text or credentials, and losing stable status classifications.
-// 验证客户端场景：'client maps HTTP errors to safe Chinese messages and bounded string fields'。
+// 验证 HTTP 错误映射为安全中文消息并限制返回字段。
 test('client maps HTTP errors to safe Chinese messages and bounded string fields', async t => {
   const { createMovieHarborClient, MovieHarborClientError } = await import('../src/services/movie-harbor-client.js');
   let status = 401;
@@ -95,7 +95,7 @@ test('client maps HTTP errors to safe Chinese messages and bounded string fields
 });
 
 // Catches reflecting local paths or terminal control sequences through backend field names.
-// 验证客户端场景：'client accepts only safe remote field names and drops the entire invalid array'。
+// 验证只接受安全的远端字段名，数组中有无效值时丢弃整个数组。
 test('client accepts only safe remote field names and drops the entire invalid array', async t => {
   const { createMovieHarborClient, MovieHarborClientError } = await import('../src/services/movie-harbor-client.js');
   let fields: unknown;
@@ -120,7 +120,7 @@ test('client accepts only safe remote field names and drops the entire invalid a
     { label: 'nonstring field', input: ['name', 1], expected: [] },
   ];
   for (const { label, input, expected } of cases) {
-    await /* 验证相关功能场景：label。 */ t.test(label, async () => {
+    await /* 验证各种有效和无效字段名的子场景分别执行并核对过滤结果。 */ t.test(label, async () => {
       fields = input;
       await assert.rejects(client.json('GET', '/api/admin/movies'), error => {
         assert.ok(error instanceof MovieHarborClientError);
@@ -133,7 +133,7 @@ test('client accepts only safe remote field names and drops the entire invalid a
 });
 
 // Catches unbounded buffering, accepting non-JSON responses, or following redirects.
-// 验证客户端场景：'client bounds success and error response bodies and validates JSON'。
+// 验证成功及错误响应体大小受限，且成功响应须为有效 JSON。
 test('client bounds success and error response bodies and validates JSON', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let status = 200; let payload = 'not json';
@@ -149,7 +149,7 @@ test('client bounds success and error response bodies and validates JSON', async
 });
 
 // Catches a missing deadline, resolving truncated responses, and ignoring caller cancellation.
-// 验证客户端场景：'client handles timeout, remote interruption, and abort without exposing transport errors'。
+// 验证超时、远端中断和取消被安全处理，不暴露底层传输错误。
 test('client handles timeout, remote interruption, and abort without exposing transport errors', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let mode = 'hang';
@@ -171,7 +171,7 @@ test('client handles timeout, remote interruption, and abort without exposing tr
 });
 
 // Catches using the requested path without revalidation or reporting bytes before write callbacks.
-// 验证流式上传、上传、客户端场景：'client multipart uploads a checked file with exact length and file-only progress'。
+// 验证分段上传已检查文件时长度准确，进度只计文件字节。
 test('client multipart uploads a checked file with exact length and file-only progress', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let body: Buffer | undefined; let headers: IncomingMessage['headers'] | undefined;
@@ -195,7 +195,7 @@ test('client multipart uploads a checked file with exact length and file-only pr
 });
 
 // Catches missing pre/post identity checks, including same-size mutation during delivery.
-// 验证流式上传、上传、客户端场景：'client multipart rejects files changed before or during upload'。
+// 验证分段上传拒绝上传前或上传期间发生变化的文件。
 test('client multipart rejects files changed before or during upload', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   const { config, directory } = await fixture(t, async (req, res) => { for await (const _ of req) {} res.end('{}'); });
@@ -213,7 +213,7 @@ test('client multipart rejects files changed before or during upload', async t =
 });
 
 // Catches treating uploads as a total deadline instead of measuring inactivity.
-// 验证流式上传、客户端场景：'client multipart refreshes inactivity on response progress while JSON keeps total deadline'。
+// 验证分段上传收到响应进展时刷新空闲超时，而 JSON 请求使用总时限。
 test('client multipart refreshes inactivity on response progress while JSON keeps total deadline', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   const { config, directory } = await fixture(t, async (req, res) => {
@@ -234,7 +234,7 @@ test('client multipart refreshes inactivity on response progress while JSON keep
 });
 
 // Catches a request or file source surviving a remote close or timeout during upload.
-// 验证流式上传、客户端场景：'client multipart fails on remote close and timeout'。
+// 验证远端关闭连接或超时时分段上传失败。
 test('client multipart fails on remote close and timeout', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let cut = true;
@@ -249,7 +249,7 @@ test('client multipart fails on remote close and timeout', async t => {
 });
 
 // Catches reopening a replaced pathname after preflight, rather than using the validated descriptor.
-// 验证流式上传、路径场景：'multipart keeps the opened file identity when the path is replaced before reading'。
+// 验证读取前路径被替换时，分段上传仍使用原打开文件并识别变化。
 test('multipart keeps the opened file identity when the path is replaced before reading', async t => {
   const { createUploadStream } = await import('../src/services/upload-stream.js');
   const { renameSync } = await import('node:fs');
@@ -275,7 +275,7 @@ test('multipart keeps the opened file identity when the path is replaced before 
 });
 
 // Catches rejecting authorized converted output or accidentally trusting its parent/sibling directory.
-// 验证流式上传、生成文件、客户端场景：'client multipart accepts an independent generated root but refuses its parent and siblings'。
+// 验证上传接受独立生成目录，但拒绝其父目录和兄弟目录。
 test('client multipart accepts an independent generated root but refuses its parent and siblings', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   const { mkdir } = await import('node:fs/promises');

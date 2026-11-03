@@ -31,7 +31,7 @@ async function fixture(t: TestContext) {
 }
 
 // Catches rounding down duration, leaking raw probe tags or dropping selected tracks.
-// 验证视频场景：'video metadata includes compatibility and a conversion plan without file bytes or raw tags'。
+// 验证视频元数据包含兼容性及转换计划，且不返回文件字节或原始标签。
 test('video metadata includes compatibility and a conversion plan without file bytes or raw tags', async t => {
   const f = await fixture(t);
   const result = await inspectVideoTool({ path: f.input }, f.deps);
@@ -52,7 +52,7 @@ test('video metadata includes compatibility and a conversion plan without file b
 });
 
 // Catches accepting MP4 by extension while its selected tracks still require conversion.
-// 验证相关功能场景：'MP4 compatibility rejects every required track conversion and accepts the target track set'。
+// 验证 MP4 兼容性拒绝任何需要转换的轨道，并接受目标轨道组合。
 test('MP4 compatibility rejects every required track conversion and accepts the target track set', async t => {
   const f = await fixture(t);
   const mp4 = join(f.allowed, 'compatibility.mp4');
@@ -82,7 +82,7 @@ test('MP4 compatibility rejects every required track conversion and accepts the 
 });
 
 // Catches bypassing path checks or forwarding arbitrary external-process diagnostics.
-// 验证视频、路径场景：'video rejects invalid paths and sanitizes probe errors'。
+// 验证视频检查拒绝无效路径且清理探测错误中的敏感信息。
 test('video rejects invalid paths and sanitizes probe errors', async t => {
   const f = await fixture(t);
   await assert.rejects(inspectVideoTool({ path: 'relative.mp4' }, f.deps), /绝对路径/);
@@ -94,7 +94,7 @@ test('video rejects invalid paths and sanitizes probe errors', async t => {
 });
 
 // Catches trusting extension only or accepting truncated image signatures.
-// 验证海报场景：'poster checks bounded content, extension and serialized identity'。
+// 验证海报检查限制读取内容、核对扩展名并返回序列化文件身份。
 test('poster checks bounded content, extension and serialized identity', async t => {
   const f = await fixture(t);
   const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000049454e44ae426082', 'hex');
@@ -109,7 +109,7 @@ test('poster checks bounded content, extension and serialized identity', async t
 });
 
 // Catches implicit conversion, missing persistence, open permissions or source deletion.
-// 验证转换、生成文件场景：'convert requires confirmation and persists generated identity for deletion'。
+// 验证转换需要确认，且生成文件身份持久登记以供删除。
 test('convert requires confirmation and persists generated identity for deletion', async t => {
   const f = await fixture(t);
   await assert.rejects(convertVideoTool({ path: f.input, confirmed: false }, f.deps), /需要明确确认/);
@@ -132,7 +132,7 @@ test('convert requires confirmation and persists generated identity for deletion
 });
 
 // Catches skipping source revalidation or deleting a replacement file under a registered name.
-// 验证符号链接、转换、生成文件场景：'convert revalidates sources and generated deletion rejects replacements and symlink escapes'。
+// 验证转换重新检查源文件，删除生成文件时拒绝替换和符号链接逃逸。
 test('convert revalidates sources and generated deletion rejects replacements and symlink escapes', async t => {
   const f = await fixture(t);
   const mutating = { ...f.deps, probeMedia: async (path: string) => { const media = await f.deps.probeMedia!(path); await writeFile(f.input, 'changed source'); return media; } };
@@ -149,7 +149,7 @@ test('convert revalidates sources and generated deletion rejects replacements an
 });
 
 // Catches missing independent registrations, result schemas or side-effect hints.
-// 验证海报、视频场景：'video and poster tools register independent schemas and safety annotations'。
+// 验证视频和海报工具分别注册独立 schema 与安全标注。
 test('video and poster tools register independent schemas and safety annotations', async t => {
   const f = await fixture(t);
   const registrations = new Map<string, any>();
@@ -163,7 +163,7 @@ test('video and poster tools register independent schemas and safety annotations
 });
 
 // Catches trusting a generatedRoot symlink that has been replaced after conversion.
-// 验证生成文件场景：'generated deletion rejects a retargeted generated directory'。
+// 验证生成目录目标变化后拒绝删除生成文件。
 test('generated deletion rejects a retargeted generated directory', async t => {
   const f = await fixture(t);
   const converted = await convertVideoTool({ path: f.input, confirmed: true }, f.deps);
@@ -175,7 +175,7 @@ test('generated deletion rejects a retargeted generated directory', async t => {
 });
 
 // Catches recording output after its controlled directory is swapped during conversion.
-// 验证注册、转换、生成文件场景：'convert refuses registration after the generated directory escapes allowed roots'。
+// 验证生成目录逃逸允许范围后转换结果不能登记。
 test('convert refuses registration after the generated directory escapes allowed roots', async t => {
   const f = await fixture(t);
   const outside = join(f.directory, 'escaped-generated');
@@ -189,7 +189,7 @@ test('convert refuses registration after the generated directory escapes allowed
 });
 
 // Catches failure to reuse encoder checks and accepting unsupported image subtitles.
-// 验证转换场景：'convert reuses required encoder checks and refuses image subtitles before execution'。
+// 验证转换复用所需编码器检查，并在执行前拒绝图像字幕。
 test('convert reuses required encoder checks and refuses image subtitles before execution', async t => {
   const f = await fixture(t);
   f.env.MEDIA_FIXTURE = JSON.stringify({ ...f.media, streams: [{ ...f.media.streams[0], codec_name: 'hevc' }] });
@@ -207,7 +207,7 @@ test('convert reuses required encoder checks and refuses image subtitles before 
 });
 
 // Catches rejecting JPEG/WebP or accepting mismatched declared RIFF sizes.
-// 验证海报场景：'poster supports JPEG and WebP signatures with bounded structural checks'。
+// 验证海报检查支持 JPEG 和 WebP 签名及受限结构校验。
 test('poster supports JPEG and WebP signatures with bounded structural checks', async t => {
   const f = await fixture(t);
   const jpeg = join(f.allowed, 'photo.jpeg');
@@ -223,7 +223,7 @@ test('poster supports JPEG and WebP signatures with bounded structural checks', 
 });
 
 // Catches registering output from a source that changes while FFmpeg is running.
-// 验证转换场景：'convert rejects source identity changes during execution before registering output'。
+// 验证转换期间源文件身份变化时拒绝登记输出。
 test('convert rejects source identity changes during execution before registering output', async t => {
   const f = await fixture(t);
   const changing = { ...f.deps, executeConversion: async (conversion: VideoConversion.Conversion) => {
@@ -236,7 +236,7 @@ test('convert rejects source identity changes during execution before registerin
 });
 
 // Catches requiring the private output root to be part of the media input allowlist.
-// 验证转换、生成文件场景：'convert accepts an independent private generated root without expanding input access'。
+// 验证独立私有生成目录可用于转换，但不扩大输入文件访问范围。
 test('convert accepts an independent private generated root without expanding input access', async t => {
   const f = await fixture(t);
   f.config.generatedRoot = join(f.credentialDirectory, 'generated');
@@ -254,7 +254,7 @@ test('convert accepts an independent private generated root without expanding in
 });
 
 // Catches relaxing generated-directory and output-child checks when roots are separate.
-// 验证生成文件场景：'independent generated roots still reject directory replacement and escaped outputs'。
+// 验证独立生成目录仍拒绝目录替换及逃逸的输出。
 test('independent generated roots still reject directory replacement and escaped outputs', async t => {
   const f = await fixture(t);
   f.config.generatedRoot = join(f.credentialDirectory, 'generated');
@@ -279,7 +279,7 @@ test('independent generated roots still reject directory replacement and escaped
 });
 
 // Catches following a configured output parent that is retargeted during conversion.
-// 验证生成文件、路径场景：'independent generated root rejects parent path retargeting during conversion'。
+// 验证转换期间独立生成目录的父路径被重定向时拒绝输出。
 test('independent generated root rejects parent path retargeting during conversion', async t => {
   const f = await fixture(t);
   const parent = join(f.directory, 'private-output');

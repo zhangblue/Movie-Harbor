@@ -26,7 +26,7 @@ async function fixture(t: TestContext, mode = 0o600, overrides: Record<string, s
 }
 
 // Catches missing parsing, secret shell expansion, and absent defaults.
-// 验证凭据、路径场景：'loads private credentials and canonical paths with defaults'。
+// 验证使用默认值加载私有凭据并规范化目录路径。
 test('loads private credentials and canonical paths with defaults', async (t) => {
   const f = await fixture(t);
   const config = await loadConfig(f.env);
@@ -40,7 +40,7 @@ test('loads private credentials and canonical paths with defaults', async (t) =>
 });
 
 // The conversion registry must follow the private credential file, not chmod an arbitrary config directory.
-// 验证凭据场景：'derives the private registry directory from the canonical credential file'。
+// 验证私有登记目录由凭据文件的真实路径推导。
 test('derives the private registry directory from the canonical credential file', async t => {
   const f = await fixture(t);
   const privateDirectory = join(f.dir, 'private');
@@ -52,12 +52,12 @@ test('derives the private registry directory from the canonical credential file'
   assert.equal((await loadConfig(f.env)).credentialDirectory, privateDirectory);
 });
 
-// 验证凭据场景：'rejects credential files with permissions other than 0600'。
+// 验证拒绝权限不是 0600 的凭据文件。
 test('rejects credential files with permissions other than 0600', async (t) => {
   await assert.rejects(loadConfig((await fixture(t, 0o644)).env), /0600/);
 });
 
-// 验证凭据、配置、符号链接场景：'rejects symlink config and credentials'。
+// 验证配置或凭据为符号链接时拒绝加载。
 test('rejects symlink config and credentials', async (t) => {
   for (const target of ['configPath', 'credentials'] as const) {
     const f = await fixture(t);
@@ -70,7 +70,7 @@ test('rejects symlink config and credentials', async (t) => {
   }
 });
 
-// 验证凭据场景：'rejects unsafe base URLs without exposing credentials'。
+// 验证拒绝不安全的服务地址且错误不暴露凭据。
 test('rejects unsafe base URLs without exposing credentials', async (t) => {
   for (const url of ['file:///tmp', 'https://user:secret@example.com', 'https://example.com/api', 'https://example.com/?x=1', 'https://example.com/#frag', 'https://example.com/?', 'https://example.com/#']) {
     const f = await fixture(t, 0o600, { MOVIE_HARBOR_BASE_URL: url });
@@ -78,7 +78,7 @@ test('rejects unsafe base URLs without exposing credentials', async (t) => {
   }
 });
 
-// 验证路径场景：'validates absolute paths, roots, positive safe timeout and API key'。
+// 验证绝对路径、允许目录、正安全整数超时和 API 密钥的配置约束。
 test('validates absolute paths, roots, positive safe timeout and API key', async (t) => {
   await assert.rejects(loadConfig({}), /MOVIE_HARBOR_MCP_CONFIG/);
   await assert.rejects(loadConfig({ MOVIE_HARBOR_MCP_CONFIG: 'config.env' }), /绝对路径/);
@@ -97,7 +97,7 @@ test('validates absolute paths, roots, positive safe timeout and API key', async
   await assert.rejects(loadConfig(f.env), /API_KEY/);
 });
 
-// 验证符号链接、生成文件场景：'canonicalizes symlink roots and generated parent and accepts explicit timeout'。
+// 验证符号链接允许目录和生成目录父级规范化，并接受显式超时。
 test('canonicalizes symlink roots and generated parent and accepts explicit timeout', async (t) => {
   const f = await fixture(t);
   const alias = join(f.dir, 'alias');
@@ -113,7 +113,7 @@ test('canonicalizes symlink roots and generated parent and accepts explicit time
 
 // Running the loader in a child bounds the regression even if FIFO open blocks forever.
 for (const target of ['configPath', 'credentials'] as const) {
-  // 验证相关功能场景：`rejects FIFO ${target} without waiting for a writer`。
+  // 验证配置文件或凭据为 FIFO 时立即拒绝，不等待写入者。
   test(`rejects FIFO ${target} without waiting for a writer`, async (t) => {
     const f = await fixture(t);
     await rm(f[target]);
