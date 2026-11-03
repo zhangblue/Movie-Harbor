@@ -23,7 +23,7 @@ function setup(handler?: Parameters<typeof server>[0]) {
   return server((request) => handler?.(request) ?? (request.method === "GET" && request.url.startsWith("/api/admin/users?") ? response(page()) : undefined));
 }
 
-// A missing overview or an editable username/role would break the accepted account model.
+// 缺少概览或允许修改用户名和角色都会破坏已确认的账号模型。
 // 验证展示全局概览及仅能改密或删除的普通用户。
 it("shows global overview and immutable ordinary users with only password and delete actions", async () => {
   setup();
@@ -40,7 +40,7 @@ it("shows global overview and immutable ordinary users with only password and de
   expect(screen.getByText("从未登录")).toBeInTheDocument();
 });
 
-// Search must return to page one while the overview stays independent of the filtered result.
+// 搜索必须返回第一页，且全局概览不受筛选结果影响。
 // 验证服务端搜索用户名并重置每页二十项的分页。
 it("searches usernames on the server and resets fixed twenty-item pagination", async () => {
   const requests = setup((request) => {
@@ -60,7 +60,7 @@ it("searches usernames on the server and resets fixed twenty-item pagination", a
   expect(screen.getByRole("button", { name: "第 1 页" })).toHaveAttribute("aria-current", "page");
 });
 
-// FEFF must remain searchable; NEL is whitespace under the server's Unicode rules.
+// FEFF 必须仍可搜索；按照服务端 Unicode 规则，NEL 属于空白。
 // 验证搜索 Unicode 用户名时遵循创建账号的归一化规则。
 it.each([
   ["\u0085Summer\u0085", "Summer"],
@@ -74,7 +74,7 @@ it.each([
   await waitFor(() => expect(requests.at(-1)?.url).toBe(`/api/admin/users?q=${encodeURIComponent(normalized)}&page=1&size=20`));
 });
 
-// Creating must send only ordinary-account fields and refresh both table and overview.
+// 创建请求只能包含普通账号字段，并需同时刷新表格和概览。
 // 验证创建用户后刷新列表与全局概览。
 it("creates a user then refreshes the list and global overview", async () => {
   let created = false;
@@ -99,7 +99,7 @@ it("creates a user then refreshes the list and global overview", async () => {
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
 });
 
-// Catch client-only rejection or rewriting of credentials accepted by the server.
+// 检查客户端是否错误拒绝或改写服务端接受的凭据。
 // 验证用户名和密码按服务端规则处理 Unicode 空白并保留 FEFF。
 it("normalizes Unicode White_Space like the server while preserving FEFF in usernames and passwords", async () => {
   const requests = setup((request) => request.method === "POST" ? response({ ...summer, version: 4 }) : undefined);
@@ -114,7 +114,7 @@ it("normalizes Unicode White_Space like the server while preserving FEFF in user
   expect(requests.find((request) => request.method === "POST")?.body).toEqual({ username: "\uFEFFSummer\uFEFF", password: "\uFEFF".repeat(8) });
 });
 
-// Catches a UTF-16 code-unit check accepting fewer than eight ordinary-user password characters.
+// 防止以 UTF-16 代码单元计数，错误接受不足八字符的普通用户密码。
 // 验证创建和改密均拒绝七字符密码并接受八字符密码。
 it.each(["create", "password"])("rejects seven-character %s passwords and accepts exactly eight", async (mode) => {
   const requests = setup((request) => request.method === "POST" || request.method === "PUT" ? response({ ...summer, version: 4 }) : undefined);
@@ -137,7 +137,7 @@ it.each(["create", "password"])("rejects seven-character %s passwords and accept
   expect(requests.find((request) => request.method === (mode === "create" ? "POST" : "PUT"))?.body).toEqual(mode === "create" ? { username: "new-user", password: "12345678" } : { version: 3, new_password: "12345678" });
 });
 
-// Catches validation errors being misreported as network failures rather than the backend's localized feedback.
+// 防止将后端本地化校验错误误报为网络故障。
 // 验证创建和改密时保留后端本地化密码错误。
 it.each(["create", "password"])("preserves the localized backend password error for %s", async (mode) => {
   setup((request) => request.method === "POST" || request.method === "PUT" ? response({ error: "密码至少需要 8 个字符。" }, 400) : undefined);
@@ -152,7 +152,7 @@ it.each(["create", "password"])("preserves the localized backend password error 
   expect(screen.getByRole("dialog")).toBeInTheDocument();
 });
 
-// The authoritative duplicate error must explain case-insensitive uniqueness without closing the form.
+// 服务端报告重名时应解释不区分大小写的唯一性，并保持表单打开。
 // 验证解释服务端返回的不区分大小写用户名冲突。
 it("explains case-insensitive duplicate usernames returned by the server", async () => {
   setup((request) => request.method === "POST" ? response({ error: "conflict", code: "username_conflict" }, 409) : undefined);
@@ -167,7 +167,7 @@ it("explains case-insensitive duplicate usernames returned by the server", async
   expect(screen.getByLabelText("用户名")).toHaveValue("summer");
 });
 
-// A stale version or username write on password change must be caught at the real HTTP boundary.
+// 在真实 HTTP 请求边界检查改密时是否误用旧版本或写入用户名。
 // 验证使用当前版本仅修改密码并解释会话失效。
 it("changes only the password with the current version and explains session invalidation", async () => {
   let changed = false;
@@ -194,7 +194,7 @@ it("changes only the password with the current version and explains session inva
   expect(requests.find((request) => request.method === "DELETE")?.body).toEqual({ version: 4 });
 });
 
-// The first click must never delete; only the dialog's explicit confirmation authorizes the request.
+// 第一次点击不得删除，只有弹窗中的明确确认才发起请求。
 // 验证删除要求二次确认并在完成后刷新概览。
 it("requires a second confirmation to delete and refreshes the overview afterwards", async () => {
   let deleted = false;
@@ -219,7 +219,7 @@ it("requires a second confirmation to delete and refreshes the overview afterwar
   expect(requests.find((request) => request.method === "DELETE")?.body).toEqual({ version: 3 });
 });
 
-// Conflict must block blind retries, then a reload must acquire the new version before reopening.
+// 冲突必须阻止盲目重试，重新打开前须刷新并取得新版本。
 // 验证版本过期时阻止改密直至明确刷新。
 it("blocks stale password changes until an explicit reload obtains the latest version", async () => {
   let conflict = false;

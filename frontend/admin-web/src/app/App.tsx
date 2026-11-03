@@ -31,6 +31,7 @@ export function App() {
   const [contentList, setContentList] = useState(initialContentListState);
   const mounted = useMounted();
 
+  // 会话失效或退出成功时清除令牌与后台导航状态，再回到登录页并显示相应提示。
   const expire = useCallback((message = "会话已失效，请重新登录。") => {
     clearCsrfToken();
     setAuth({ state: "anonymous" });
@@ -41,12 +42,14 @@ export function App() {
     setSection("内容管理");
     setNotice(message);
   }, []);
+  // 子页面收到会话失效通知时复用统一清理，避免保留已认证界面。
   const onExpired = useCallback(() => expire(), [expire]);
 
+  // 启动或用户重试时确认会话；401 返回登录，网络等其他失败显示重试界面。
   useEffect(() => {
     let ignore = false;
     setAuth({ state: "loading" });
-    // Skip the discarded StrictMode setup before issuing a shared-client session request.
+    // 延迟到微任务后请求，跳过严格模式中已清理的首次执行，避免多余共享会话请求。
     void Promise.resolve().then(async () => {
       if (ignore) return;
       try {
@@ -58,6 +61,7 @@ export function App() {
         else setAuth({ state: "error" });
       }
     });
+    // 卸载或重试时丢弃旧响应，防止过期请求覆盖当前认证状态。
     return () => { ignore = true; };
   }, [attempt, expire]);
 
@@ -73,12 +77,14 @@ export function App() {
       if (!mounted.current) return;
       if (cause instanceof ApiError && cause.status === 401) expire();
       else {
-        // logout clears the client token even on a transport error; recover it before more writes.
+        // 退出即使网络失败也会清除本地令牌，重新读取会话可恢复令牌并判断退出是否已生效。
         try {
           await getSession();
+          // 会话仍有效时保留后台并提示用户明确重试，不自动重复退出。
           if (mounted.current) setError("退出登录失败，请重试。");
         } catch (sessionError) {
           if (mounted.current) {
+            // 会话已撤销则按成功退出处理；无法确认时进入会话重试页。
             if (sessionError instanceof ApiError && sessionError.status === 401) expire("已退出登录。");
             else { setAuth({ state: "error" }); setPasswordOpen(false); }
           }

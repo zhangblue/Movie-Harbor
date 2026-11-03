@@ -112,7 +112,7 @@ function editor(id: string | null = "series-1") { return render(<SeriesEditor se
 // 展开第一季，在需要操作单集的测试开始时调用。
 async function expandFirst(user: ReturnType<typeof userEvent.setup>) { await user.click(await screen.findByRole("button", { name: "展开第 1 季" })); }
 
-// Catches ignoring the initial scope or adding independent privacy controls to children.
+// 防止忽略初始访问范围或为子项增加独立的隐私控制。
 // 验证创建整剧时保存访问范围且季不单独保存范围。
 it.each([false, true])("creates a whole series with selected privacy %s and keeps privacy out of its seasons", async (isPrivate) => {
   const requests = fixture();
@@ -592,7 +592,7 @@ it("does not open child deletion confirmation when authoritative impact cannot l
   expect(requests.some((r) => r.url === episodePath && r.method === "DELETE")).toBe(false);
 });
 
-// Absent fields, accidental season titles, leaked preview URLs, or resetting a cancelled picker fail here.
+// 检查字段缺失、误加季标题、预览地址泄漏和取消选择后重置。
 // 验证加载基本信息、仅含序号的季及可释放海报预览。
 it("loads basic information and number-only seasons with a disposable poster preview", async () => {
   fixture(); const user = userEvent.setup(); const view = editor();
@@ -627,7 +627,7 @@ it("creates a named series and one season, requiring the administrator to name i
   expect(requests.find((r) => r.url.endsWith("/episodes"))?.body).toEqual({ version: 2, number: 1, name: "第一封信" });
 });
 
-// Catches leaving App keyed to the pre-create null identity and losing the initial episode row.
+// 防止 App 仍使用创建前的空身份而丢失首集输入行。
 // 验证离开后返回时保留已创建剧集身份与首集。
 it("keeps the created series identity and initial episode when navigating away and back", async () => {
   const requests = fixture(); const user = userEvent.setup(); render(<App />);
@@ -643,7 +643,7 @@ it("keeps the created series identity and initial episode when navigating away a
   expect(requests.filter((r) => r.url === "/api/admin/series" && r.method === "POST")).toHaveLength(1);
 });
 
-// Catches an inaccessible orphan when series creation succeeds but default-season creation fails.
+// 防止剧集创建成功但默认季创建失败时留下无法访问的孤立内容。
 // 验证保留部分初始化的剧集以便明确重试创建首季。
 it("preserves a partially initialized series so its first season can be retried explicitly", async () => {
   let failInitialSeason = true;
@@ -663,7 +663,7 @@ it("preserves a partially initialized series so its first season can be retried 
   expect(requests.filter((r) => r.url === "/api/admin/series" && r.method === "POST")).toHaveLength(1);
 });
 
-// Catches publishing with the pre-save/pre-upload parent version or leaking the poster preview.
+// 防止使用保存或上传前的父级版本发布，以及海报预览地址泄漏。
 // 验证发布时串联剧集和海报保存返回的版本。
 it("chains the saved series and poster versions into publication", async () => {
   const requests = fixture(); const user = userEvent.setup(); editor();
@@ -691,7 +691,7 @@ it("explains that a series needs a published playable episode without requiring 
   expect(alert).not.toHaveTextContent("海报");
 });
 
-// Ensures the update/upload boundary is one episode and propagates both versions to later writes.
+// 确保更新和上传只影响单集，并将两个版本传递给后续写入。
 // 验证独立保存单集和视频并保留其他单集未保存输入。
 it("saves one episode and its video independently, retaining another episode's unsaved input", async () => {
   const requests = fixture(detail({ seasons: [{ id: "s1", number: 1, episodes: [episode(), episode({ id: "e2", number: 2, name: "回信" })] }] }));
@@ -734,7 +734,7 @@ it("locks published series fields and seasons with published episodes while perm
   expect(screen.getAllByLabelText("单集名称")[1]).toBeEnabled(); expect(screen.getByRole("button", { name: "添加一季" })).toBeEnabled();
 });
 
-// Catches incorrectly freezing descendants merely because the parent series itself is archived.
+// 防止仅因父剧集归档就错误锁定所有子项。
 // 验证归档剧集字段只读但草稿子项仍可编辑。
 it("keeps an archived parent's fields read-only while preserving draft child editing", async () => {
   fixture(detail({ status: "archived" })); const user = userEvent.setup(); editor();
@@ -748,7 +748,7 @@ it("keeps an archived parent's fields read-only while preserving draft child edi
   await screen.findByText("单集草稿已保存。");
 });
 
-// Catches calculating the next draft number from stale initial values after an unsaved edit.
+// 防止未保存编辑后仍用过期初始值计算下一个草稿序号。
 // 验证新增单集草稿序号跟随当前输入的最大序号。
 it("numbers the next unsaved episode after the highest currently entered draft number", async () => {
   fixture(); const user = userEvent.setup(); editor(); await expandFirst(user); await screen.findByLabelText("单集名称");
@@ -884,7 +884,7 @@ it("does not continue an upload chain after the editor is unmounted", async () =
   expect(requests.some((r) => r.url.includes("/media/"))).toBe(false);
 });
 
-// A publish validation failure must not turn a successful atomic upload into a pending replacement.
+// 发布校验失败不得将已成功的原子上传重新标记为待替换。
 // 验证发布校验失败后保留已保存视频并仅重试发布。
 it("retains the saved video and retries only publication after a validation failure", async () => {
   const requests = fixture(detail(), (r) => r.url.endsWith("/publish") ? json({ error: "validation", fields: ["video"] }, 422) : undefined);

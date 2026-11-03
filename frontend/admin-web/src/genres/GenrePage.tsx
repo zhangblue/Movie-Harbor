@@ -12,6 +12,7 @@ export function GenrePage({ onExpired }: { onExpired: () => void }) {
   const [error, setError] = useState("");
   const mounted = useMounted();
 
+  // 进入题材页时加载列表；会话失效通知上层，卸载后忽略异步结果。
   useEffect(() => {
     void listGenres().then((items) => {
       if (mounted.current) setGenres(items);

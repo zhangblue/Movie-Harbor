@@ -20,6 +20,7 @@ export function LoginPage({ onLogin, notice }: { onLogin: (name: string) => void
     try {
       await login({ name: name.trim(), password });
       if (!mounted.current) return;
+      // 登录成功后再次读取会话以取得共享客户端的 CSRF 令牌；确认成功才进入后台。
       const session = await getSession();
       if (mounted.current) onLogin(session.name);
     } catch (cause) {

@@ -3,8 +3,8 @@ import type { EpisodeResponse, SeasonResponse, SeriesResponse } from "@movie-har
 export const statusNames: Record<string, string> = { draft: "草稿", published: "已发布", archived: "已归档" };
 // 识别受支持的生命周期状态，在决定是否开放写入前调用。
 export const knownStatus = (status: string) => ["draft", "published", "archived"].includes(status);
-// Current endpoints return states, not permission objects. If a future response supplies
-// permissions, intersect them with the domain constraints; unknown values never grant access.
+// 当前接口返回状态而非权限对象；若未来响应提供权限，
+// 则将权限与领域约束取交集，未知值不授予操作权限。
 // 检查服务端返回的操作权限，在渲染和执行层级操作时调用。
 export function permits(value: object, action: string) {
   if (!("allowed_actions" in value)) return true;

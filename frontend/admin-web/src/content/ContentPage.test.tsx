@@ -43,7 +43,7 @@ function stubDownloadBrowser() {
   return { createObjectURL, revokeObjectURL, click };
 }
 
-// Catches exporting through a separate control, an untrusted response filename, or retaining object URLs.
+// 检查导出入口、响应文件名和对象地址释放。
 // 验证标题操作按响应文件名只下载一次完整导出。
 it("downloads the content export once from the adjacent title action using the response filename", async () => {
   const browser = stubDownloadBrowser();
@@ -135,7 +135,7 @@ it("expires the session for an unauthorized export and otherwise shows an export
   expect(browser.createObjectURL).not.toHaveBeenCalled();
 });
 
-// Catches a regression to the two legacy list endpoints or client-only filtering.
+// 防止回退到两个旧列表接口或仅在客户端筛选。
 // 验证加载统一列表并向接口提交名称和下拉筛选。
 it("loads the unified list and submits compact name and dropdown filters to the API", async () => {
   const requests = server((request) => request.url.includes("status=archived")
@@ -163,7 +163,7 @@ it("loads the unified list and submits compact name and dropdown filters to the 
   expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=series&status=archived&name=%E9%95%BF%E5%A4%9C&page=1");
 });
 
-// Catches omitting privacy from server filtering or losing it when returning to all content.
+// 检查服务端筛选是否包含访问范围及切回全部时是否正确清除。
 // 验证查询公开或私密范围并可恢复全部内容。
 it.each(["public", "private"] as const)("queries %s access scope and clears it for all content", async (privacy) => {
   const requests = server();
@@ -181,7 +181,7 @@ it.each(["public", "private"] as const)("queries %s access scope and clears it f
   expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=all&page=1");
 });
 
-// Catches coupling privacy to lifecycle, using the wrong endpoint/version, or retaining stale scope.
+// 防止访问范围绑定生命周期、使用错误接口或版本，以及保留过期范围。
 // 验证使用显示的版本切换不同内容状态的访问范围并刷新。
 it.each([
   { kind: "movie", status: "draft", isPrivate: false },
@@ -267,7 +267,7 @@ it("returns to administrator login when a privacy write reports 401", async () =
   await screen.findByRole("heading", { name: "管理员登录" });
 });
 
-// Catches sequence numbers restarting at one or pagination controls omitting the current page semantics.
+// 防止跨页序号重新从一开始或分页控件缺少当前页语义。
 // 验证二十一条结果分页且第二页序号连续。
 it("paginates 21 results and continues the sequence number on page two", async () => {
   const requests = server((request) => {
@@ -303,7 +303,7 @@ it("renders actions from the four supported or unknown statuses only", async () 
   expect(within(screen.getByRole("row", { name: /未知状态/ })).queryByRole("button")).not.toBeInTheDocument();
 });
 
-// Catches a lifecycle refresh resetting the current page.
+// 防止生命周期操作后的刷新重置当前页。
 // 验证状态转换提交显示的版本并刷新当前页。
 it("sends the displayed version on transition and refreshes the current page", async () => {
   let archived = false;
@@ -349,7 +349,7 @@ it("locks stale actions on 409 and reloads the current server page", async () =>
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
-// Catches an obsolete page request overwriting a newer first-page query.
+// 防止过期分页请求覆盖较新的首页查询。
 // 验证新查询完成后丢弃较旧的分页响应。
 it("discards an older page response after a newer query has completed", async () => {
   const pending = deferred<Response>();
@@ -413,7 +413,7 @@ it("keeps pagination in layout A and reserves narrow sequence and action columns
   expect(getComputedStyle(actionCell.firstElementChild!).justifyContent).toBe("flex-end");
 });
 
-// Catches clearing the old page or moving its summary when the next page request fails.
+// 检查下一页请求失败时是否错误清空旧页或移动其摘要。
 // 验证后续分页失败时保留原表格并可刷新恢复。
 it("keeps the existing table after a later page fails and recovers on reload", async () => {
   let unavailable = true;
@@ -436,7 +436,7 @@ it("keeps the existing table after a later page fails and recovers on reload", a
   expect(screen.getByText("共 21 条 · 第 2/2 页")).toBeInTheDocument();
 });
 
-// Catches a successful deletion leaving the app stranded on an empty out-of-range page.
+// 防止删除成功后停留在空白的越界页。
 // 验证删除末行后回退到最后有效页。
 it("returns from deleting the last row and falls back to the last valid page", async () => {
   let deleted = false;
@@ -512,7 +512,7 @@ it("resets a new query from page two to page one", async () => {
   expect(requests.at(-1)!.url).toBe("/api/admin/contents?kind=all&name=fresh&page=1");
 });
 
-// Cookie rotation in another tab leaves this tab's in-memory CSRF stale. Recovery must not replay writes.
+// 其他标签页更新 Cookie 会使本页内存中的 CSRF 过期，恢复时不得重放写入。
 // 验证生命周期写入被拒后刷新令牌并要求明确重试。
 it("refreshes stale CSRF after a forbidden lifecycle write and requires explicit retries", async () => {
   let token = session.csrf_token;

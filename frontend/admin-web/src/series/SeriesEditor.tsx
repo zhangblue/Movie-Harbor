@@ -44,6 +44,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
   const [newSeasons, setNewSeasons] = useState<string[]>([]);
   const [expandedSeasons, setExpandedSeasons] = useState<Set<string>>(() => new Set());
   const viewOnly = !!series && series.status !== "draft";
+  // 进入只读查看模式时收起季，避免保留草稿编辑时的展开状态。
   useEffect(() => {
     if (viewOnly) setExpandedSeasons(new Set());
   }, [viewOnly]);
@@ -58,6 +59,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     setExpandedSeasons((ids) => new Set([...ids].filter((id) => value.seasons.some((season) => season.id === id))));
     if (resetFields) setFields(fieldsOf(value));
   }
+  // 打开或刷新剧集时读取完整层级和题材；丢弃过期响应并按需恢复未完成创建。
   useEffect(() => {
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setPoster(null); setDeleting(null); setNewSeasons([]); setExpandedSeasons(new Set());
@@ -85,7 +87,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
     }).catch((cause: CaughtValue) => { const error = normalizeError(cause); if (!ignore && !(error instanceof ApiError && error.status === 401)) { setError("剧集详情加载失败，请重新加载。"); setConflict(true); } })
       .finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
-    // App keys the editor by identity; revision explicitly discards pending local drafts.
+    // App 按身份区分编辑器；revision 表示主动刷新并丢弃待处理的本地草稿。
   }, [revision, onExpired]);
 
   // 按会话、冲突和校验错误更新反馈，在写入失败时调用。
@@ -182,7 +184,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           return;
         }
         if (!mounted.current) return;
-        // Both episode and parent versions must agree with the atomic upload result.
+        // 单集和父级版本都必须与原子上传结果一致，否则停止后续发布。
         setConflict(true);
         if (uploaded.series_version === undefined) throw new Error("Upload response omitted the series version");
         const fresh = await refresh(uploaded.series_version);
@@ -293,6 +295,7 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
         {error && <p role="alert">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
         <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleteName || !deletionAllowed(deleting)} onClick={() => { void run(async () => {
+          // 使用影响查询返回的版本；媒体同步删除失败保留确认框，已提交但收尾失败则停止重试并警告。
           const target = deleting;
           try {
             if (target.episode && target.season) await deleteEpisode(target.series.id, target.season.id, target.episode.id, target.impact.version);
@@ -301,12 +304,14 @@ export function SeriesEditor({ seriesId, onBack, onExpired, onCreated = () => {}
           } catch (cause) {
             const error = normalizeError(cause as CaughtValue);
             if (!(error instanceof ApiError) || apiErrorCode(error) !== "media_delete_finalization_failed") throw error;
+            // 整剧已删除时返回列表；子项已删除时留在编辑页并刷新层级，刷新失败则锁定写入。
             if (!target.season) { if (mounted.current) { onDeleteFinalization(); onBack(); } return; }
             if (mounted.current) setDeleting(null);
             try { await refresh(); } catch { setConflict(true); }
             if (mounted.current) setWarning("内容已删除，但媒体文件清理未完成。请检查媒体目录权限并重启服务，系统将在启动时继续恢复。");
             return;
           }
+          // 成功删除整剧返回列表；删除季或单集后保留当前页面并读取最新层级。
           if (!target.season) { if (mounted.current) { onDeleteSuccess(); onBack(); } return; }
           if (mounted.current) { setDeleting(null); setNotice("内容及其媒体文件已删除"); }
           await refresh();

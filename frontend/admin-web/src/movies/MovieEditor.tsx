@@ -47,6 +47,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   function updateVideoUploadProgress(progress: ApiUploadProgress) {
     if (mounted.current) setVideoUploadProgress(progress);
   }
+  // 打开电影或主动刷新时并行读取详情和题材；旧请求清理后不得覆盖新编辑状态。
   useEffect(() => {
     let ignore = false;
     setLoading(true); setError(""); setInvalid([]); setNotice(""); setWarning(""); setDeleting(null);
@@ -70,7 +71,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
     }).catch((cause: CaughtValue) => { const error = normalizeError(cause); if (!ignore && !(error instanceof ApiError && error.status === 401)) { setError("电影详情加载失败，请重新加载。"); setConflict(true); } })
       .finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
-    // A new editor is keyed by movieId in App; revision is the explicit refresh boundary.
+    // App 按电影 ID 区分编辑器；revision 是主动刷新并丢弃旧加载结果的边界。
   }, [movieId, revision, onExpired]);
 
   // 按会话、冲突和校验错误更新反馈，在写入失败时调用。
@@ -99,7 +100,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
   // 写入后重新读取电影权威版本，读取失败时保持写入锁定。
   async function refreshAfterWrite() {
     if (!id || !mounted.current) return;
-    // A lost follow-up read must not leave the previous version writable.
+    // 后续读取失败时保持锁定，避免继续使用写入前的旧版本。
     setConflict(true);
     const fresh = await getMovie(id);
     if (mounted.current) { accept(fresh); setConflict(false); }
@@ -139,7 +140,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
         if (slot === "video" && mounted.current) setVideoUploadProgress(null);
       }
       if (!mounted.current) return null;
-      // Upload already atomically associates the file; an extra association PUT would be incorrect.
+      // 上传已原子关联文件；再次发送关联请求会错误地重复操作。
       setMovie({ ...saved, version: uploaded.version });
       setConflict(true);
       saved = await getMovie(saved.id);
@@ -218,7 +219,7 @@ export function MovieEditor({ movieId, onBack, onExpired, onDeleteSuccess = () =
       {deleting && <><p>将永久删除“{deleting.name}”，不可恢复，没有回收站。</p><p>根据服务器最新删除影响，影响范围：</p><ul><li>季：{deleting.season_count}</li><li>单集：{deleting.episode_count}</li><li>媒体文件：{deleting.media_count}</li></ul>
         {error && <p role="alert" className="error-message">{error}</p>}
         <Field label="输入完整内容名称"><input disabled={busy} value={confirmation} onChange={(e) => setConfirmation(e.target.value)} /></Field>
-        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { void run(async () => { if (!movie) return; try { await deleteMovie(movie.id, deleting.version); } catch (cause) { const error = normalizeError(cause as CaughtValue); if (error instanceof ApiError && apiErrorCode(error) === "media_delete_finalization_failed") { if (mounted.current) { onDeleteFinalization(); onBack(); } return; } throw error; } if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
+        <div className="dialog-actions"><Button disabled={busy} onClick={() => setDeleting(null)}>取消</Button><Button variant="danger" disabled={locked || confirmation !== deleting.name} onClick={() => { /* 使用删除影响返回的版本；媒体同步删除失败保留确认框和输入，已提交但收尾失败则返回列表并警告，成功则返回并刷新列表。 */ void run(async () => { if (!movie) return; try { await deleteMovie(movie.id, deleting.version); } catch (cause) { const error = normalizeError(cause as CaughtValue); if (error instanceof ApiError && apiErrorCode(error) === "media_delete_finalization_failed") { if (mounted.current) { onDeleteFinalization(); onBack(); } return; } throw error; } if (mounted.current) { onDeleteSuccess(); onBack(); } }); }}>确认永久删除</Button></div>
       </>}
     </Dialog>
   </section>;

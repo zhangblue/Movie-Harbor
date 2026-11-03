@@ -8,6 +8,7 @@ export function PosterPicker({ current, file, onSelect, readOnly, disabled }: {
   const input = useRef<HTMLInputElement>(null);
   const [preview, setPreview] = useState<string | null>(null);
   const [posterFailed, setPosterFailed] = useState(false);
+  // 文件变化时创建预览地址；更换文件、转只读或卸载时释放地址，避免占用资源。
   useEffect(() => {
     if (!file || readOnly) { setPreview(null); return; }
     const url = URL.createObjectURL(file);

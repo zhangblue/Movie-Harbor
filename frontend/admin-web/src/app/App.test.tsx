@@ -20,7 +20,7 @@ it("opens viewer management from navigation and returns to login when its sessio
   expect(screen.queryByRole("navigation")).not.toBeInTheDocument();
 });
 
-// Catches entering the admin shell before a verified session and losing the session request after login.
+// 防止会话未经确认就进入后台，或登录后遗漏会话请求。
 // 验证要求有效会话、显示登录失败并取得令牌后进入后台。
 it("requires a session, exposes failed login, then acquires CSRF before entering the shell", async () => {
   let loggedIn = false;
@@ -113,7 +113,7 @@ it("renames, reorders, deactivates, and deletes genres", async () => {
   expect(requests.some((request) => request.url.endsWith("/order") && request.method === "PUT")).toBe(true);
 });
 
-// Catches menu focus/closure regressions that leave controls inaccessible to keyboard users.
+// 检查菜单焦点和关闭行为，避免键盘用户无法操作。
 // 验证键盘打开账户菜单并通过 Escape 或外部点击关闭。
 it("opens the account menu by keyboard and closes on Escape and outside click", async () => {
   server();
@@ -135,7 +135,7 @@ it("opens the account menu by keyboard and closes on Escape and outside click", 
   expect(within(screen.getByRole("navigation", { name: "后台导航" })).queryByText("退出登录")).not.toBeInTheDocument();
 });
 
-// Catches missing current-password verification payload, CSRF attachment, and retained credentials.
+// 检查当前密码验证参数、CSRF 令牌和凭据清理。
 // 验证携带令牌修改密码后清除令牌并返回登录。
 it("changes the password with CSRF and returns to login with the token cleared", async () => {
   const requests = server((r) => r.url === "/api/admin/password" || r.url === "/api/admin/probe" ? new Response(null, { status: 204 }) : undefined);
@@ -239,7 +239,7 @@ it("recovers the CSRF token after failed logout so a retry can revoke the sessio
   expect(writes.every((r) => r.headers.get("X-CSRF-Token") === "session-csrf")).toBe(true);
 });
 
-// A server may revoke a session before its logout response is lost on the network.
+// 服务端可能已撤销会话，但退出响应在网络中丢失。
 // 验证退出响应丢失但恢复确认已撤销时返回登录。
 it("returns to login when logout loses its response but session recovery confirms revocation", async () => {
   let revoked = false;

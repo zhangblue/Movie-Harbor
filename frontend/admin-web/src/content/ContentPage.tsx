@@ -30,6 +30,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   const operation = useRef(false);
   const exportOperation = useRef(false);
 
+  // 筛选、页码或刷新版本变化时加载列表；清理旧请求，防止迟到响应覆盖新结果。
   useEffect(() => {
     let ignore = false;
     setLoading(true);

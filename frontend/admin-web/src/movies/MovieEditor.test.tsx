@@ -85,7 +85,7 @@ function editor(id: string | null = "movie-1") {
   return render(<><style>{styles}</style><MovieEditor movieId={id} onBack={() => {}} onExpired={() => {}} /></>);
 }
 
-// Catches a private default, ignoring the chosen scope, or resetting it after creation.
+// 防止默认私密、忽略所选范围或创建后重置范围。
 // 验证创建电影时保存所选访问范围并以只读方式显示。
 it.each([false, true])("creates a movie with selected privacy %s and shows the saved scope read-only", async (isPrivate) => {
   const requests = fixture();
@@ -118,7 +118,7 @@ it.each(["draft", "published", "archived"] as const)("shows existing %s movie pr
   within(selector).getAllByRole("radio").forEach((radio) => expect(radio).toBeDisabled());
 });
 
-// Catches absent/oversized fields, lossy duration conversion, and selecting inactive new genres.
+// 检查字段缺失或越界、时长转换丢失精度以及错误选择已停用题材。
 // 验证加载草稿字段并保留已停用的关联题材。
 it("loads bounded draft fields and retains existing inactive genres", async () => {
   fixture(movie({ genres: [{ id: "g2", name: "旧题材", enabled: false }] }));
@@ -143,7 +143,7 @@ it("shows the persisted video path without inventing one for an upload", async (
   expect(screen.getByText("本地存储路径：")).toBeInTheDocument();
 });
 
-// Catches missing poster click wiring, cancellation clearing preview, and early/leaked object URLs.
+// 检查海报点击、取消选择和预览地址的释放时机。
 // 验证立即预览替换、允许取消并在不再使用时释放地址。
 it("previews replacement immediately, preserves cancellation, and releases URLs only when unused", async () => {
   fixture(); const user = userEvent.setup(); const view = editor();
@@ -383,7 +383,7 @@ it("keeps pending preview alive during save and releases it when a refresh hides
   expect(requests.filter((r) => r.method === "PATCH")).toHaveLength(1);
 });
 
-// Catches deleting based on stale list/detail data, approximate name matching, or skipped impact fetch.
+// 防止依据过期数据删除、模糊匹配名称或跳过影响查询。
 // 验证删除前获取最新影响并要求准确名称与版本。
 it("fetches fresh deletion scope and requires the exact server name and version", async () => {
   const requests = fixture(movie(), (r) => r.url === "/api/admin/movies/movie-1/delete-impact"
@@ -493,7 +493,7 @@ it("does not permit deletion when the fresh impact detail cannot be loaded", asy
   expect(requests.some((r) => r.method === "DELETE")).toBe(false);
 });
 
-// A new external edit between upload and GET must not silently become our next write's version.
+// 上传与重新读取之间发生外部编辑时，不得静默将其版本用于下一次写入。
 // 验证上传后检测到并发变更时停止剩余上传。
 it("stops the remaining upload when the authoritative detail changed concurrently", async () => {
   let reads = 0;

@@ -29,12 +29,13 @@ export function ChangePasswordDialog({ onClose, onChanged, onExpired }: {
     } catch (cause) {
       if (!mounted.current) return;
       if (cause instanceof ApiError && cause.status === 403) {
+        // 先恢复会话和令牌，失效则返回登录，否则提示用户明确重试，不自动重发密码。
         const recovery = await recoverForbiddenWrite();
         if (!mounted.current) return;
         if (recovery.expired) onExpired();
         else setError(recovery.message);
       } else if (cause instanceof ApiError && cause.status === 401) {
-        // A wrong current password and an expired session share HTTP 401 in the auth API.
+        // 原密码错误与会话失效均返回 401；再次查询会话以区分留在弹窗提示还是返回登录。
         try {
           await getSession();
           if (mounted.current) setError("当前密码不正确，请重试。");

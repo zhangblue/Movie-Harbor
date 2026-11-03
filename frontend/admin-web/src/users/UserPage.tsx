@@ -23,6 +23,7 @@ export function UserPage({ onExpired }: { onExpired: () => void }) {
   const [notice, setNotice] = useState("");
   const [operation, setOperation] = useState<UserOperation | null>(null);
 
+  // 搜索、页码或刷新版本变化时加载用户；忽略旧请求并在当前页越界时回退。
   useEffect(() => {
     let ignore = false;
     setLoading(true);

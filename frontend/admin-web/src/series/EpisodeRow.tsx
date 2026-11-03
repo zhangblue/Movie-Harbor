@@ -32,12 +32,13 @@ export function EpisodeRow({ episode, disabled, actions }: { episode: EpisodeRes
     setName(episode.name); setNumber(String(episode.number));
     setMinutes(episode.duration_seconds === null ? "" : String(episode.duration_seconds / 60));
     if (episode.status !== "draft") { setFile(null); setUploadProgress(null); }
-    // Keep a sibling's unsaved fields when a full hierarchy read returns its unchanged version.
+    // 完整层级刷新但单集版本未变时不重置字段，保留其他单集尚未保存的输入。
   }, [episode.id, episode.version, episode.status]);
   const readOnly = !canAct(episode, "edit");
   return <form className="series-episode" aria-label={`第 ${episode.number} 集 · ${episode.name}`} onSubmit={(event) => {
     event.preventDefault(); if (!name.trim() || readOnly) return;
     const publish = (event.nativeEvent as SubmitEvent).submitter?.getAttribute("value") === "publish";
+    // 保存当前单集并单独跟踪其上传进度；成功关联后清除文件，结束时清除进度。
     void actions.save(
       episode,
       { number: Number(number), name, duration_seconds: minutes === "" ? null : Math.round(Number(minutes) * 60) },
