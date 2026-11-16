@@ -465,6 +465,45 @@ async fn viewer_chat(
     chat(&state, Owner::Viewer(session.viewer.id), input).await
 }
 
+// 识别明确的私密片单请求，让已登录用户直接命中目录筛选。
+fn private_list_request(prompt: &str) -> Option<ListContent> {
+    let compact: String = prompt
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    let request = compact.trim_end_matches(['。', '？', '?', '！', '!']);
+    let request = request.strip_prefix("请").unwrap_or(request);
+    let request = ["帮我", "给我"]
+        .iter()
+        .find_map(|prefix| request.strip_prefix(prefix))
+        .unwrap_or(request);
+    let action = ["列出", "显示", "查看", "看看", "查询", "有哪些"]
+        .iter()
+        .find_map(|prefix| request.strip_prefix(prefix));
+    let subject = action.unwrap_or(request);
+    let subject = subject.strip_prefix("所有").unwrap_or(subject);
+    let subject = subject.strip_prefix("已发布的").unwrap_or(subject);
+    let subject = subject.strip_prefix("私密")?;
+    let suffix = ["列表", "片单", "有哪些"]
+        .iter()
+        .find_map(|suffix| subject.strip_suffix(suffix));
+    let kind = match suffix.unwrap_or(subject) {
+        "电影" => Some(ContentKind::Movie),
+        "剧集" => Some(ContentKind::Series),
+        "影片" | "内容" => None,
+        "" if subject == "片单" => None,
+        _ => return None,
+    };
+    if action.is_none() && suffix.is_none() {
+        return None;
+    }
+    Some(ListContent {
+        kind,
+        page: None,
+        private_only: true,
+    })
+}
+
 // 加载当前账号的上下文，生成回复后以单条记录原子保存问答。
 async fn chat(
     state: &AgentState,
@@ -475,38 +514,16 @@ async fn chat(
     if prompt.is_empty() || prompt.chars().count() > 2000 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let key = state
-        .api_key
-        .as_deref()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let _permit = state
         .capacity
         .try_acquire()
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    // 只传最近五轮由服务端恢复的历史。片库答复使用不含片库资料的上下文。
-    let past = history(&state.db, Some(owner), None, 5).await?;
-    let mut messages = Vec::with_capacity(11);
-    for turn in past.items.into_iter().rev() {
-        messages.push(Message {
-            role: Role::User,
-            content: turn.prompt,
-        });
-        messages.push(Message {
-            role: Role::Assistant,
-            content: turn.model_reply,
-        });
-    }
-    messages.push(Message {
-        role: Role::User,
-        content: prompt.to_owned(),
-    });
-    let is_admin = matches!(owner, Owner::Admin(_));
-    let mut reply = tokio::time::timeout(
-        Duration::from_secs(45),
-        respond(state, key, messages, is_admin),
-    )
-    .await
-    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)??;
+    // 明确的私密片单可直接查询，含糊或需要模型处理的问题继续走原聊天流程。
+    let mut reply = if let Some(list) = private_list_request(prompt) {
+        list_content(&state.db, list).await?
+    } else {
+        model_reply(state, owner, prompt).await?
+    };
     let (admin, viewer) = owner.ids();
     // 成功写入后才返回回复，避免界面显示一条实际未保存的历史。
     let saved = state
@@ -533,6 +550,42 @@ async fn chat(
     Ok(Json(reply))
 }
 
+// 确认存在模型配置后恢复可外发的上下文，并执行需要模型理解的聊天请求。
+async fn model_reply(
+    state: &AgentState,
+    owner: Owner,
+    prompt: &str,
+) -> Result<ChatReply, StatusCode> {
+    let key = state
+        .api_key
+        .as_deref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    // 只传最近五轮由服务端恢复的历史。片库答复使用不含片库资料的上下文。
+    let past = history(&state.db, Some(owner), None, 5).await?;
+    let mut messages = Vec::with_capacity(11);
+    for turn in past.items.into_iter().rev() {
+        messages.push(Message {
+            role: Role::User,
+            content: turn.prompt,
+        });
+        messages.push(Message {
+            role: Role::Assistant,
+            content: turn.model_reply,
+        });
+    }
+    messages.push(Message {
+        role: Role::User,
+        content: prompt.to_owned(),
+    });
+    let is_admin = matches!(owner, Owner::Admin(_));
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        respond(state, key, messages, is_admin),
+    )
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
+}
+
 // 向 DeepSeek 注册允许的工具，并在有限轮次内完成查询或草稿提议。
 async fn respond(
     state: &AgentState,
@@ -546,11 +599,11 @@ async fn respond(
             "parameters":{"type":"object","properties":{"name":{"type":"string"}},"required":["name"],"additionalProperties":false}
         }}),
         json!({"type":"function","function":{
-            "name":"list_content","description":"列出当前账号可见的已发布电影和剧集，每页20条。用户要求只看私密内容时设置 private_only。翻页沿用上一页筛选。",
+            "name":"list_content","description":"列出当前账号可见的已发布电影和剧集，每页20条。用户要看私密片单或问有哪些私密影片时，必须设置 private_only 为 true。翻页沿用上一页筛选。",
             "parameters":{"type":"object","properties":{"kind":{"type":"string","enum":["movie","series"]},"page":{"type":"integer","minimum":1,"maximum":1000000},"private_only":{"type":"boolean"}},"additionalProperties":false}
         }}),
         json!({"type":"function","function":{
-            "name":"list_content_names","description":"查询已发布的电影或剧集名称。用户问名称名单或数量时使用，工具只返回匹配的名称数组，需要数量时由你按数组元素计数，每个元素对应一部作品。privacy 指定 public 或 private，省略或用 all 返回两组名称；kind 省略时包含电影和剧集。",
+            "name":"list_content_names","description":"查询已发布的电影或剧集名称。用户明确问名称名单或数量时使用，工具只返回匹配的名称数组，需要数量时由你按数组元素计数，每个元素对应一部作品。privacy 指定 public 或 private，省略或用 all 返回两组名称；kind 省略时包含电影和剧集。",
             "parameters":{"type":"object","properties":{"kind":{"type":"string","enum":["movie","series"]},"privacy":{"type":"string","enum":["public","private","all"]}},"additionalProperties":false}
         }}),
         json!({"type":"function","function":{

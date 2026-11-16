@@ -17,3 +17,5 @@ tests/e2e/.generated/
 test-results/
 playwright-report/
 .idea/
+/.openidea/
+/.team/

@@ -202,5 +202,44 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
         }
     }
     assert!(calls[2].to_string().contains("page=1"));
+    drop(calls);
+    // 明确请求私密片单时，后端直接按权限查库，不依赖模型选择工具或补齐筛选参数。
+    let local_only = AgentState {
+        api_key: None,
+        ..state
+    };
+    for (owner, prompt, include_series) in [
+        (viewer, "请列出私密影片。", true),
+        (admin, "私密电影列表", false),
+        (viewer, "有哪些私密电影？", false),
+    ] {
+        let response = chat(
+            &local_only,
+            owner,
+            ChatRequest {
+                message: prompt.to_owned(),
+            },
+        )
+        .await;
+        let reply = response
+            .map_err(|status| status.to_string())
+            .unwrap()
+            .0
+            .reply;
+        assert!(reply.contains("验收私片"));
+        assert_eq!(reply.contains("验收私剧"), include_series);
+        assert!(!reply.contains("验收公片"));
+        assert!(!reply.contains("验收私密草稿"));
+    }
+    let response = chat(
+        &local_only,
+        viewer,
+        ChatRequest {
+            message: "有多少部私密影片？".to_owned(),
+        },
+    )
+    .await;
+    assert_eq!(response.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
+
     server.abort();
 }

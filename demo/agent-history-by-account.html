@@ -1,0 +1,112 @@
+<div id="mh-history-preview">
+  <header class="mh-demo-brand"><span aria-hidden="true">M</span><strong>Movie Harbor</strong><small>管理后台</small></header>
+  <main>
+    <h1>助手对话记录</h1>
+    <div class="mh-demo-grid">
+      <section class="mh-demo-accounts" aria-labelledby="mh-demo-accounts-title">
+        <div class="mh-demo-panel-title"><h2 id="mh-demo-accounts-title">用户</h2><span>4 个账号</span></div>
+        <div class="mh-demo-account-list"></div>
+      </section>
+      <section class="mh-demo-detail" aria-labelledby="mh-demo-person">
+        <div class="mh-demo-panel-title"><div><h2 id="mh-demo-person"></h2><p id="mh-demo-account-meta"></p></div><span id="mh-demo-total"></span></div>
+        <div class="mh-demo-turns"></div>
+        <footer class="mh-demo-pages" aria-label="对话分页">
+          <span id="mh-demo-page" aria-live="polite"></span>
+          <button class="cursor-interaction" type="button" data-page="-1">上一页</button>
+          <button class="cursor-interaction" type="button" data-page="1">下一页</button>
+        </footer>
+      </section>
+    </div>
+  </main>
+</div>
+<style>
+#mh-history-preview { color-scheme:dark; --ink:#edf1f8; --muted:#aab5c8; --border:#2a3445; --panel:#141c29; --accent:#a8bdf3; background:#0e141e; color:var(--ink); font:14px/1.55 system-ui,sans-serif; }
+#mh-history-preview * { box-sizing:border-box; }
+#mh-history-preview h1,#mh-history-preview h2,#mh-history-preview p { margin:0; }
+#mh-history-preview .mh-demo-brand { display:flex; align-items:center; gap:12px; padding:14px 24px; border-bottom:1px solid var(--border); }
+#mh-history-preview .mh-demo-brand > span { display:grid; place-items:center; width:32px; height:32px; border-radius:9px; background:var(--accent); color:#101827; font-weight:800; }
+#mh-history-preview .mh-demo-brand small { border-left:1px solid var(--border); padding-left:12px; color:var(--muted); }
+#mh-history-preview main { padding:24px; }
+#mh-history-preview h1 { font-size:26px; margin-bottom:18px; }
+#mh-history-preview h2 { font-size:16px; }
+#mh-history-preview .mh-demo-grid { display:grid; grid-template-columns:minmax(188px, 1fr) minmax(0, 2.6fr); align-items:start; gap:16px; }
+#mh-history-preview .mh-demo-accounts,#mh-history-preview .mh-demo-detail { border:1px solid var(--border); border-radius:12px; background:var(--panel); overflow:hidden; }
+#mh-history-preview .mh-demo-panel-title { display:flex; align-items:center; justify-content:space-between; gap:12px; min-height:62px; padding:12px 16px; border-bottom:1px solid var(--border); }
+#mh-history-preview .mh-demo-panel-title span,#mh-history-preview .mh-demo-panel-title p,#mh-history-preview time,#mh-history-preview .mh-demo-pages span { color:var(--muted); font-size:12px; }
+#mh-history-preview .mh-demo-account-list { padding:7px; }
+#mh-history-preview button { font:inherit; color:inherit; background:#1b2637; border:1px solid var(--border); border-radius:8px; min-height:36px; padding:5px 10px; }
+#mh-history-preview button:hover:enabled { background:#26354b; }
+#mh-history-preview button:disabled { opacity:.42; }
+#mh-history-preview .mh-demo-account { display:grid; grid-template-columns:minmax(0,1fr) auto; column-gap:8px; text-align:left; width:100%; min-height:56px; padding:7px 9px; border-color:transparent; background:transparent; }
+#mh-history-preview .mh-demo-account[aria-pressed="true"] { background:#23324a; border-color:#6179a7; }
+#mh-history-preview .mh-demo-account small { color:var(--muted); }
+#mh-history-preview .mh-demo-account > span { grid-column:2; grid-row:1 / 3; align-self:center; color:var(--accent); font-variant-numeric:tabular-nums; }
+#mh-history-preview .mh-demo-turns { padding:0 16px; }
+#mh-history-preview article { padding:14px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+#mh-history-preview article:last-child { border-bottom:0; }
+#mh-history-preview article p { margin-top:5px; }
+#mh-history-preview article b { display:inline-block; width:3.4em; color:var(--accent); font-size:12px; }
+#mh-history-preview .mh-demo-pages { display:flex; align-items:center; gap:8px; padding:10px 16px; border-top:1px solid var(--border); }
+#mh-history-preview .mh-demo-pages span { margin-right:auto; }
+@media(max-width:560px){ #mh-history-preview main { padding:14px; } #mh-history-preview .mh-demo-grid { grid-template-columns:minmax(0,1fr); } #mh-history-preview .mh-demo-account-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:4px; } }
+@media(pointer:coarse){ #mh-history-preview button { min-height:44px; } }
+</style>
+<script>
+(() => {
+  const root = document.getElementById("mh-history-preview");
+  const accounts = [
+    {name:"Summer", role:"普通用户", turns:[
+      ["15:20","《漫长的季节》有几集？","片库中有 1 季，共 12 集。"],
+      ["15:08","今天有哪些新上线的影片？","最近上线了《宇宙探索编辑部》和《漫长的季节》。"],
+      ["14:36","《星际穿越》有多长？","片库记录的时长是 169 分钟。"],
+      ["14:19","查一下《雄狮少年》。","片库中有这部电影，题材包括动画和喜剧。"],
+      ["13:44","只看最新发布的电影。","最近发布的电影包括《宇宙探索编辑部》。"]
+    ]},
+    {name:"小林", role:"普通用户", turns:[
+      ["14:56","介绍一下《宇宙探索编辑部》。","这是一部以寻找外星人为线索的科幻喜剧。"],
+      ["14:42","片库有《流浪地球》吗？","片库中有《流浪地球》，年份是 2019 年。"]
+    ]},
+    {name:"管理员", role:"管理员", turns:[
+      ["13:35","创建电影《雨中曲》的草稿。","请核对片名和内容类型，再确认创建。"],
+      ["12:50","现在有哪些剧集？","公开片单包含《漫长的季节》和《开端》。"]
+    ]},
+    {name:"阿宁", role:"普通用户", turns:[
+      ["12:14","《开端》有多少集？","片库中有 1 季，共 15 集。"]
+    ]}
+  ];
+  const size = 3;
+  let selected = 0;
+  let page = 0;
+  const list = root.querySelector(".mh-demo-account-list");
+  const turnList = root.querySelector(".mh-demo-turns");
+  const previous = root.querySelector('[data-page="-1"]');
+  const next = root.querySelector('[data-page="1"]');
+
+  // 按选中账号刷新对话，并更新该账号内部的页码。
+  function render() {
+    const account = accounts[selected];
+    const pages = Math.ceil(account.turns.length / size);
+    root.querySelector("#mh-demo-person").textContent = account.name;
+    root.querySelector("#mh-demo-account-meta").textContent = account.role;
+    root.querySelector("#mh-demo-total").textContent = account.turns.length + " 轮对话";
+    root.querySelector("#mh-demo-page").textContent = "第 " + (page + 1) + " / " + pages + " 页";
+    list.querySelectorAll("button").forEach((button, index) => button.setAttribute("aria-pressed", String(index === selected)));
+    turnList.innerHTML = account.turns.slice(page * size, (page + 1) * size).map(([time, question, reply]) =>
+      '<article><time>11 月 16 日 · '+time+'</time><p><b>用户</b>'+question+'</p><p><b>助手</b>'+reply+'</p></article>'
+    ).join("");
+    previous.disabled = page === 0;
+    next.disabled = page + 1 >= pages;
+  }
+  accounts.forEach((account, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "mh-demo-account cursor-interaction";
+    button.innerHTML = "<strong>"+account.name+"</strong><small>"+account.role+"</small><span>"+account.turns.length+" 轮</span>";
+    button.addEventListener("click", () => { selected = index; page = 0; render(); });
+    list.append(button);
+  });
+  previous.addEventListener("click", () => { page--; render(); });
+  next.addEventListener("click", () => { page++; render(); });
+  render();
+})();
+</script>
