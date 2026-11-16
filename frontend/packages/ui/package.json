@@ -11,6 +11,9 @@
     "build": "tsc --noEmit",
     "test": "vitest run --environment jsdom"
   },
+  "dependencies": {
+    "@movie-harbor/api-client": "0.1.0"
+  },
   "peerDependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

@@ -14,4 +14,5 @@ pub mod media;
 pub mod movies;
 pub mod route_params;
 pub mod series;
+pub mod site_agent;
 pub mod viewer_auth;

@@ -39,6 +39,7 @@ docker compose -p movie-harbor up -d --build --wait
 | `COOKIE_SECURE` | `false` | 本机和显式开启的可信局域网 HTTP 使用 `false`；正式 HTTPS 部署设为 `true`。 |
 | `ALLOW_INSECURE_LAN_HTTP` | `false` | 默认只允许本机完整操作后台；仅在受信任局域网中显式设为 `true`，允许同端口的私有数字 IP HTTP 管理访问。 |
 | `TRUST_PROXY_SECRET` | 无安全默认值 | Caddy 与 API 之间的独立代理认证秘密，至少 32 字节。 |
+| `DEEPSEEK_API_KEY` | 留空 | 影片助手的可选服务端密钥。 |
 | `MAX_UPLOAD_BYTES` | `53687091200` | 单文件上限，默认 50 GiB。 |
 | `VIDEO_MIME_ALLOWLIST` | `video/mp4,video/webm` | 允许进入结构化格式校验的视频 MIME。 |
 
@@ -59,6 +60,20 @@ docker compose -p movie-harbor up -d --build --wait
 ```
 
 `docker compose down` 不会删除当前通过 bind mount 保存的数据库和媒体目录；真正的数据边界是 `DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 指向的宿主机路径。不要在未完成一致备份时删除、清空或改指这两个目录。
+
+## 启用影片助手
+
+1. 将 DeepSeek API 密钥写入部署目录的 `.env`（`DEEPSEEK_API_KEY`），确保 API 容器可以通过 HTTPS 访问 `api.deepseek.com`。
+2. 在已包含影片助手的版本上运行 `docker compose -p movie-harbor up -d --wait api`，使新环境变量生效。如果部署时指定了其他 Compose 项目名，请沿用该名称。源码首次升级仍按上面的构建命令启动。
+3. 登录 `/admin/`，点击页头的「影片助手」。例如发送「片库有星际穿越吗？」或「创建剧集《漫长的季节》的草稿」。新建提议会显示名称与类型，点击「确认创建草稿」后可在「内容管理」中找到它。
+
+浮窗打开时可继续操作页面。按住标题栏可移动浮窗，键盘聚焦标题后可用方向键移动。
+
+- 「现在有哪些影片？」按发布时间倒序列出公开的已发布内容，每页 20 条，可继续问「看下一页」。
+- 「《某剧》有几季，每季几集？」返回有公开播放内容的季、各季的已发布集数及总集数。
+- 「介绍一下《某片》」查找已发布公开影片的简介、年份和题材，电影有时长时也会返回。
+
+助手使用 `deepseek-flash`。对话和工具取得的公开条目资料会发送给 DeepSeek。普通用户可以从公开站页头打开助手，查询已发布且访问范围为公开的内容。成功问答保存在 PostgreSQL，重新登录同一账号可恢复历史，删除该账号会同时删除其记录。管理员可在后台「助手对话记录」选择有对话的账号，再逐页查看该账号的问答，每页 20 轮。请避免在输入框中粘贴密钥或私密资料。
 
 ## 内容访问与会话
 

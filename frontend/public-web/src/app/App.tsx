@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
+import { AgentLauncher } from "@movie-harbor/ui";
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { CatalogPage } from "../catalog/CatalogPage";
 import { MovieDetails } from "../details/MovieDetails";
 import { SeriesDetails } from "../details/SeriesDetails";
@@ -136,8 +137,9 @@ export function App() {
     return () => { window.removeEventListener("focus", onFocus); document.removeEventListener("visibilitychange", onVisible); };
   }, [validate]);
   const authenticated = viewer.status === "authenticated";
-  const account = <div className="viewer-account" aria-label="用户账号">
-    {authenticated ? <><span className="viewer-username">{viewer.username}</span>
+  // 将助手入口放到当前页头，浮窗由路由外的同一个组件管理。
+  const renderAccount = (assistant?: ReactNode) => <div className="viewer-account" aria-label="用户账号">
+    {authenticated ? <>{assistant}<span className="viewer-username">{viewer.username}</span>
       <button className="pill" type="button" disabled={loggingOut} onClick={() => setDialog("password")}>修改密码</button>
       <button className="pill" type="button" disabled={loggingOut} onClick={async () => {
         // 用户主动退出时记录身份代次；验证、退出及收尾均只作用于这一代会话。
@@ -171,10 +173,10 @@ export function App() {
     navigate(target.pathname + target.search);
   }
 
-  const loginGeneration = identity.current;
-  return (
-    <ViewerContext.Provider value={{ revision, authenticated, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
-    <main className="site-shell" ref={mainRef} tabIndex={-1} onClick={followLink} onErrorCapture={() => { void validate(); }}>
+  // 渲染当前站内路由，入口移动时由路由外的助手保留浮窗和输入内容。
+  function renderSite(assistant?: ReactNode) {
+    const account = renderAccount(assistant);
+    return <main className="site-shell" ref={mainRef} tabIndex={-1} onClick={followLink} onErrorCapture={() => { void validate(); }}>
       {message && <p className="viewer-notice" role="status">{message}</p>}
       {url.pathname === "/" ? <CatalogPage search={url.search} navigate={navigate} account={account} /> : (
         <>
@@ -187,7 +189,13 @@ export function App() {
             : <NotFound />}
         </>
       )}
-    </main>
+    </main>;
+  }
+
+  const loginGeneration = identity.current;
+  return (
+    <ViewerContext.Provider value={{ revision, authenticated, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
+    <AgentLauncher enabled={authenticated} sessionKey={identity.current} role="viewer" onExpired={expire} renderTrigger={renderSite} />
     {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
     {dialog === "password" && <ViewerPasswordDialog isCurrent={() => loginGeneration === identity.current} onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}
     </ViewerContext.Provider>

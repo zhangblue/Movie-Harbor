@@ -8,6 +8,8 @@ import { ContentPage, initialContentListState } from "../content/ContentPage";
 import { MovieEditor } from "../movies/MovieEditor";
 import { SeriesEditor } from "../series/SeriesEditor";
 import { GenrePage } from "../genres/GenrePage";
+import { AgentAuditPage } from "../agent/AgentAuditPage";
+import { AgentPage } from "../agent/AgentPage";
 import { UserPage } from "../users/UserPage";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
@@ -99,10 +101,16 @@ export function App() {
   return <>
     <div className="admin-shell" inert={passwordOpen || busy}>
       <header className="admin-header"><a href="/" className="brand"><span className="brand-mark" aria-hidden="true">M</span>Movie Harbor<span className="admin-label">管理后台</span></a>
-        <AccountMenu name={auth.name} onPassword={() => setPasswordOpen(true)} onLogout={() => { void signOut(); }} disabled={busy} />
+        <div className="admin-header-actions">
+          <AgentPage onExpired={onExpired} onCreated={() => {
+            // 草稿创建成功后使内容管理列表重新读取。
+            setContentList((value) => ({ ...value, revision: value.revision + 1 }));
+          }} />
+          <AccountMenu name={auth.name} onPassword={() => setPasswordOpen(true)} onLogout={() => { void signOut(); }} disabled={busy} />
+        </div>
       </header>
       <div className="admin-layout"><nav className="sidebar" aria-label="后台导航"><p className="eyebrow">工作台</p>
-        {["内容管理", "用户管理", "题材配置", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
+        {["内容管理", "用户管理", "题材配置", "助手对话记录", "系统设置"].map((label) => <button key={label} type="button" className="side-link" aria-current={section === label ? "page" : undefined} onClick={() => setSection(label)}>{label}</button>)}
       </nav><main className="admin-content">
         {error && <p role="alert" className="error-message">{error}</p>}
         {deletionNotice && <p role={deletionNotice.warning ? "alert" : "status"} className={deletionNotice.warning ? "error-message" : undefined}>{deletionNotice.message}</p>}
@@ -117,7 +125,7 @@ export function App() {
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });
           else setSeriesPage({ id: row.id, deleting: action === "delete" });
-        }} /> : section === "用户管理" ? <UserPage onExpired={onExpired} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
+        }} /> : section === "用户管理" ? <UserPage onExpired={onExpired} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : section === "助手对话记录" ? <AgentAuditPage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
       </main></div>
     </div>
     {busy && <p className="session-state" role="status">正在退出登录…</p>}

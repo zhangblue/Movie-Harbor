@@ -89,7 +89,8 @@ async fn count(db: &support::TestDatabase, table: &str) -> i64 {
 /// 验证暂存海报结构升级和唯一性约束。
 async fn staging_schema_upgrade_and_unique_constraints() {
     let db = support::TestDatabase::at_migration("staged_upgrade", Some(6)).await;
-    migration::Migrator::up(&*db, None).await.unwrap();
+    // 仅应用暂存海报迁移，让后面回滚的目标始终是同一版本。
+    migration::Migrator::up(&*db, Some(1)).await.unwrap();
     let row = db
         .query_one(Statement::from_string(
             DbBackend::Postgres,

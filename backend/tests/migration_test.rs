@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 mod support;
 
-const TABLES: [&str; 14] = [
+// 列出最新迁移后的数据表，供全部建表和回滚检查复用。
+const TABLES: [&str; 15] = [
     "admin_user",
     "admin_session",
     "genre",
@@ -21,6 +22,7 @@ const TABLES: [&str; 14] = [
     "viewer_user",
     "viewer_session",
     "mcp_staged_poster",
+    "agent_turn",
 ];
 
 /// 验证旧内容升级后默认公开，以及私密字段和用户表可回滚。

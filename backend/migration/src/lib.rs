@@ -8,6 +8,7 @@ mod m20260912_000005_media_ownership;
 mod m20261010_000006_private_content_and_viewers;
 
 mod m20261026_000007_mcp_staged_poster;
+mod m20261116_000008_agent_turn;
 
 /// 提供迁移器入口，供数据库升级和回滚时选择有序迁移。
 pub struct Migrator;
@@ -24,6 +25,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260912_000005_media_ownership::Migration),
             Box::new(m20261010_000006_private_content_and_viewers::Migration),
             Box::new(m20261026_000007_mcp_staged_poster::Migration),
+            Box::new(m20261116_000008_agent_turn::Migration),
         ]
     }
 }

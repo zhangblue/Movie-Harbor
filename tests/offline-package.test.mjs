@@ -830,6 +830,7 @@ test("renders an image-only Compose deployment with the production topology", ()
       MAX_UPLOAD_BYTES: "${MAX_UPLOAD_BYTES:-53687091200}",
       VIDEO_MIME_ALLOWLIST: "${VIDEO_MIME_ALLOWLIST:-video/mp4,video/webm}",
       MCP_API_KEY_SHA256: "${MCP_API_KEY_SHA256:-}",
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}",
       ADMIN_NAME: "${ADMIN_NAME:-}",
       ADMIN_INITIAL_PASSWORD: "${ADMIN_INITIAL_PASSWORD:-}",
     },

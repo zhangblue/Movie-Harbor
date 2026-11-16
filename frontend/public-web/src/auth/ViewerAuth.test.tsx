@@ -22,6 +22,13 @@ function server(initial = false) {
   vi.stubGlobal("fetch", async (input: string, init?: RequestInit) => {
     const url = new URL(input, "http://localhost");
     state.requests.push({ url, init });
+    if (url.pathname === "/api/viewer/agent/history") {
+      return json({ items: [{ id: "17", account: state.username, account_role: "viewer", prompt: "之前问的片名", reply: "之前的回答", created_at: "2026-11-16T00:00:00Z" }], next: null });
+    }
+    if (url.pathname === "/api/viewer/agent/chat") {
+      if (new Headers(init?.headers).get("x-csrf-token") !== state.csrfToken) return json({}, 403);
+      return json({ id: "18", reply: "新回复" });
+    }
     if (url.pathname === "/api/viewer/session") {
       if (state.sessionResponse) return state.sessionResponse;
       if (state.sessionNetworkError) throw new TypeError("network unavailable");
@@ -553,4 +560,29 @@ it("preserves an initial anonymous catalog page deep link", async () => {
   await screen.findByText("41 部影片");
   expect(new URLSearchParams(location.search).get("page")).toBe("2");
   expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("page")).toBe("2");
+});
+
+
+// 验证登录后才可打开影片助手，并恢复历史、通过普通用户接口发送消息。
+it("restores agent history after viewer login", async () => {
+  const state = server();
+  render(<App />);
+  await screen.findByRole("button", { name: "登录" });
+  expect(screen.queryByRole("button", { name: "影片助手" })).toBeNull();
+  const user = await login();
+  await user.click(await screen.findByRole("button", { name: "影片助手" }));
+  await screen.findByRole("dialog", { name: "影片助手" });
+  expect(await screen.findByText("之前的回答")).toBeVisible();
+  // 窗口保持打开时点击背景中的影片卡片，路由切换后应保留输入和历史。
+  await user.type(screen.getByLabelText("消息"), "查找电影");
+  await user.click(screen.getByRole("link", { name: "查看远方来信详情" }));
+  await waitFor(() => expect(window.location.pathname).toMatch(/^\/movies\//));
+  expect(screen.getByRole("dialog", { name: "影片助手" })).toBeVisible();
+  expect(screen.getByLabelText("消息")).toHaveValue("查找电影");
+  await user.click(screen.getByRole("button", { name: "发送" }));
+  expect(await screen.findByText("新回复")).toBeVisible();
+  expect(state.requests.some(({ url }) => url.pathname === "/api/viewer/agent/chat")).toBe(true);
+  screen.getByLabelText("消息").focus();
+  await user.keyboard("{Escape}");
+  expect(screen.queryByRole("dialog", { name: "影片助手" })).toBeNull();
 });

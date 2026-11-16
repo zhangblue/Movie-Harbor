@@ -185,3 +185,30 @@ export interface ChildDeleteImpactResponse {
 export interface DeleteResultResponse {
   deleted_media_count: number;
 }
+
+// 区分两个独立的会话域，供助手选择对应的接口。
+export type AgentAccountRole = "admin" | "viewer";
+// 描述管理员可以确认创建的草稿。
+export interface AgentDraft { kind: "movie" | "series"; name: string }
+// 表示已保存的回复及当前待确认的草稿操作。
+export interface AgentReply { id: string; reply: string; draft?: AgentDraft }
+// 表示一轮已保存的问答及所属账号。
+export interface AgentTurn {
+  id: string;
+  account: string;
+  account_role: AgentAccountRole;
+  prompt: string;
+  reply: string;
+  created_at: string;
+}
+// 表示按最新记录排序的历史页及下一页游标。
+export interface AgentHistory { items: AgentTurn[]; next: string | null }
+
+
+// 汇总一个有助手对话的账号，供管理员按账号审阅。
+export interface AgentAuditAccount {
+  id: string;
+  account: string;
+  account_role: AgentAccountRole;
+  turn_count: number;
+}
