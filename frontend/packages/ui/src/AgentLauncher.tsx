@@ -129,7 +129,7 @@ function AgentChat({ role, onExpired, onConfirmDraft }: AgentLauncherProps) {
   }
 
   return <>
-    <p className="mh-agent-disclosure">对话会发送给 DeepSeek，并保存到你的账号。管理员可以查看对话记录。</p>
+    <p className="mh-agent-disclosure">你输入的消息会发给 DeepSeek。查询名单或数量时，匹配的公开或私密片名也会发送。对话保存在你的账号，管理员可以查看。</p>
     <div className="mh-agent-history" ref={scroll} role="log" aria-label="对话">
       {next && <Button type="button" disabled={busy} onClick={() => { void loadOlder(); }}>更早的对话</Button>}
       {!loading && turns.length === 0 && <p>可以问我「片库里有哪些影片？」</p>}

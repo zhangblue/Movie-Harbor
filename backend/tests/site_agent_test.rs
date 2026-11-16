@@ -1,7 +1,7 @@
 use movie_harbor_api::site_agent::classify_tool;
 use serde_json::json;
 
-// 验证模型工具参数只允许公开范围查询和草稿提议。
+// 验证模型工具参数只允许受控片库查询和草稿提议。
 #[test]
 fn validates_tool_allowlist() {
     assert!(classify_tool("search_content", r#"{"name":"星际","privacy":"private"}"#).is_err());
@@ -126,4 +126,33 @@ fn validates_catalog_tool_calls() {
         .is_ok()
     );
     assert!(classify_tool("content_details", r#"{"kind":"all","id":"unknown"}"#).is_err());
+    assert!(classify_tool("series_counts", r#"{"name":"私密剧集"}"#).is_ok());
+    assert!(classify_tool("content_details", r#"{"kind":"movie","name":"私密电影"}"#).is_ok());
+    assert!(classify_tool("content_details", r#"{"kind":"movie","name":"   "}"#).is_err());
+    assert!(classify_tool("series_counts", "{}").is_err());
+    assert!(
+        classify_tool(
+            "series_counts",
+            r#"{"name":"私密剧集","id":"00000000-0000-0000-0000-000000000001"}"#
+        )
+        .is_err()
+    );
+}
+
+// 验证影片名称工具接受公开、私密和合计范围，并拒绝绕过发布规则的参数。
+#[test]
+fn validates_catalog_names_tool() {
+    assert!(classify_tool("list_content_names", r#"{"privacy":"private"}"#).is_ok());
+    assert!(
+        classify_tool(
+            "list_content_names",
+            r#"{"privacy":"public","kind":"movie"}"#
+        )
+        .is_ok()
+    );
+    assert!(classify_tool("list_content_names", r#"{"privacy":"all","kind":"series"}"#).is_ok());
+    assert!(classify_tool("list_content_names", "{}").is_ok());
+    assert!(classify_tool("list_content_names", r#"{"privacy":"any"}"#).is_err());
+    assert!(classify_tool("list_content_names", r#"{"kind":"episode"}"#).is_err());
+    assert!(classify_tool("list_content_names", r#"{"include_drafts":true}"#).is_err());
 }

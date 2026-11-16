@@ -1,6 +1,6 @@
 use super::dto::{
-    CatalogCard, CatalogFilter, CatalogPage, MovieDetail, PublicEpisode, PublicGenre, PublicSeason,
-    SeriesDetail, media_url, public_genre, published_at_string,
+    CatalogCard, CatalogFilter, CatalogKind, CatalogPage, MovieDetail, PublicEpisode, PublicGenre,
+    PublicSeason, SeriesDetail, media_url, public_genre, published_at_string,
 };
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
@@ -30,6 +30,27 @@ FROM (
       AND ((series.is_private = false AND $2::boolean)
           OR (series.is_private = true AND $3::boolean))
 ) candidates
+"#;
+
+// 助手只读取有效发布条目的名称和分组依据，保留同名作品并排除未发布状态。
+const CATALOG_NAMES_SQL: &str = r#"
+SELECT name, is_private
+FROM (
+    SELECT name, is_private
+    FROM movie
+    WHERE $1::text IN ('all', 'movie')
+      AND status = 'published'
+      AND published_at IS NOT NULL
+      AND ((NOT is_private AND $2::boolean) OR (is_private AND $3::boolean))
+    UNION ALL
+    SELECT name, is_private
+    FROM series
+    WHERE $1::text IN ('all', 'series')
+      AND status = 'published'
+      AND published_at IS NOT NULL
+      AND ((NOT is_private AND $2::boolean) OR (is_private AND $3::boolean))
+) candidates
+ORDER BY is_private, name
 "#;
 
 const CATALOG_SEARCH_COUNT_SQL: &str = r#"
@@ -290,6 +311,32 @@ impl GenreRow {
             name: row.try_get("", "name")?,
         })
     }
+}
+
+// 承载名称及所属范围，供助手构建按可见性分组的名称列表。
+#[derive(FromQueryResult)]
+pub(crate) struct PublishedName {
+    pub name: String,
+    pub is_private: bool,
+}
+
+// 在同一数据库快照中查询指定范围的已发布名称，供助手回答名单或数量问题。
+pub(crate) async fn published_names(
+    db: &DatabaseConnection,
+    kind: CatalogKind,
+    allow_public: bool,
+    allow_private: bool,
+) -> Result<Vec<PublishedName>, DbErr> {
+    query_models(
+        db,
+        CATALOG_NAMES_SQL,
+        vec![
+            kind.as_str().into(),
+            allow_public.into(),
+            allow_private.into(),
+        ],
+    )
+    .await
 }
 
 // 在一致性快照中读取公开目录分页，供目录路由调用。
