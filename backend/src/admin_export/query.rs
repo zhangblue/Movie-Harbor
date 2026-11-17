@@ -1,8 +1,12 @@
 use super::dto::{ContentExport, ExportEpisode, ExportMovie, ExportSeries};
-use crate::media::path::controlled_media_path;
+use crate::{
+    entities::{episode, genre, media_asset, movie, movie_genre, season, series, series_genre},
+    media::path::controlled_media_path,
+};
 use sea_orm::{
-    AccessMode, ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, FromQueryResult,
-    IsolationLevel, Statement, TransactionTrait,
+    AccessMode, ColumnTrait, DatabaseConnection, DbErr, EntityTrait, FromQueryResult,
+    IsolationLevel, JoinType, QueryFilter, QueryOrder, QuerySelect, QueryTrait, RelationTrait,
+    TransactionTrait, sea_query::UnionType,
 };
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -65,48 +69,117 @@ pub async fn export(db: &DatabaseConnection, exported_at: String) -> Result<Cont
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    let movies = MovieRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT movie.id, movie.is_private, movie.name, movie.synopsis, movie.year, movie.poster_asset_id, movie.video_asset_id, movie.duration_seconds FROM movie ORDER BY movie.name ASC, movie.id ASC",
-    )).all(&tx).await?;
-    let series = SeriesRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT series.id, series.is_private, series.name, series.synopsis, series.year, series.poster_asset_id FROM series ORDER BY series.name ASC, series.id ASC",
-    )).all(&tx).await?;
+    let movies = movie::Entity::find()
+        .select_only()
+        .columns([
+            movie::Column::Id,
+            movie::Column::IsPrivate,
+            movie::Column::Name,
+            movie::Column::Synopsis,
+            movie::Column::Year,
+            movie::Column::PosterAssetId,
+            movie::Column::VideoAssetId,
+            movie::Column::DurationSeconds,
+        ])
+        .order_by_asc(movie::Column::Name)
+        .order_by_asc(movie::Column::Id)
+        .into_model::<MovieRow>()
+        .all(&tx)
+        .await?;
+    let series = series::Entity::find()
+        .select_only()
+        .columns([
+            series::Column::Id,
+            series::Column::IsPrivate,
+            series::Column::Name,
+            series::Column::Synopsis,
+            series::Column::Year,
+            series::Column::PosterAssetId,
+        ])
+        .order_by_asc(series::Column::Name)
+        .order_by_asc(series::Column::Id)
+        .into_model::<SeriesRow>()
+        .all(&tx)
+        .await?;
     // 批量读取全部父级题材并按系统顺序归组，既避免 N+1，也保留已停用的历史关联。
-    let movie_genres = GenreRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT movie_genre.movie_id AS content_id, genre.name FROM movie_genre JOIN genre ON genre.id = movie_genre.genre_id ORDER BY movie_genre.movie_id ASC, genre.sort_order ASC, genre.id ASC",
-    )).all(&tx).await?;
-    let series_genres = GenreRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT series_genre.series_id AS content_id, genre.name FROM series_genre JOIN genre ON genre.id = series_genre.genre_id ORDER BY series_genre.series_id ASC, genre.sort_order ASC, genre.id ASC",
-    )).all(&tx).await?;
-    let episodes = EpisodeRow::find_by_statement(Statement::from_string(
-        DatabaseBackend::Postgres,
-        "SELECT season.series_id, season.number AS season_number, episode.number AS episode_number, episode.name, episode.video_asset_id, episode.duration_seconds FROM episode JOIN season ON season.id = episode.season_id ORDER BY series_id ASC, season.number ASC, episode.number ASC, episode.id ASC",
-    )).all(&tx).await?;
-    // 只有受控存储键才能写入导出路径；无效记录在响应前失败关闭，避免泄露或伪造容器路径。
-    let media = tx
-        .query_all(Statement::from_string(
-            DatabaseBackend::Postgres,
-            r#"
-SELECT media_asset.id, media_asset.storage_key FROM media_asset
-WHERE media_asset.id IN (
-    SELECT poster_asset_id FROM movie
-    UNION ALL SELECT video_asset_id FROM movie
-    UNION ALL SELECT poster_asset_id FROM series
-    UNION ALL SELECT video_asset_id FROM episode
-)
-"#,
-        ))
+    let movie_genres = movie_genre::Entity::find()
+        .select_only()
+        .column_as(movie_genre::Column::MovieId, "content_id")
+        .column(genre::Column::Name)
+        .join(JoinType::InnerJoin, movie_genre::Relation::Genre.def())
+        .order_by_asc(movie_genre::Column::MovieId)
+        .order_by_asc(genre::Column::SortOrder)
+        .order_by_asc(genre::Column::Id)
+        .into_model::<GenreRow>()
+        .all(&tx)
+        .await?;
+    let series_genres = series_genre::Entity::find()
+        .select_only()
+        .column_as(series_genre::Column::SeriesId, "content_id")
+        .column(genre::Column::Name)
+        .join(JoinType::InnerJoin, series_genre::Relation::Genre.def())
+        .order_by_asc(series_genre::Column::SeriesId)
+        .order_by_asc(genre::Column::SortOrder)
+        .order_by_asc(genre::Column::Id)
+        .into_model::<GenreRow>()
+        .all(&tx)
+        .await?;
+    let episodes = episode::Entity::find()
+        .select_only()
+        .column(season::Column::SeriesId)
+        .column_as(season::Column::Number, "season_number")
+        .column_as(episode::Column::Number, "episode_number")
+        .columns([
+            episode::Column::Name,
+            episode::Column::VideoAssetId,
+            episode::Column::DurationSeconds,
+        ])
+        .join(JoinType::InnerJoin, episode::Relation::Season.def())
+        .order_by_asc(season::Column::SeriesId)
+        .order_by_asc(season::Column::Number)
+        .order_by_asc(episode::Column::Number)
+        .order_by_asc(episode::Column::Id)
+        .into_model::<EpisodeRow>()
+        .all(&tx)
+        .await?;
+    // 只查询被内容引用的媒体；通过数据库子查询汇总外键，避免把全部 ID 作为绑定参数传入。
+    let mut referenced_assets = movie::Entity::find()
+        .select_only()
+        .column(movie::Column::PosterAssetId)
+        .into_query();
+    referenced_assets.unions([
+        (
+            UnionType::All,
+            movie::Entity::find()
+                .select_only()
+                .column(movie::Column::VideoAssetId)
+                .into_query(),
+        ),
+        (
+            UnionType::All,
+            series::Entity::find()
+                .select_only()
+                .column(series::Column::PosterAssetId)
+                .into_query(),
+        ),
+        (
+            UnionType::All,
+            episode::Entity::find()
+                .select_only()
+                .column(episode::Column::VideoAssetId)
+                .into_query(),
+        ),
+    ]);
+    let media = media_asset::Entity::find()
+        .select_only()
+        .columns([media_asset::Column::Id, media_asset::Column::StorageKey])
+        .filter(media_asset::Column::Id.in_subquery(referenced_assets))
+        .into_model::<MediaRow>()
+        .all(&tx)
         .await?
-        .iter()
-        .map(|row| {
-            let media = MediaRow::from_query_result(row, "")?;
-            Ok((media.id, media.storage_key))
-        })
-        .collect::<Result<HashMap<_, _>, DbErr>>()?;
+        .into_iter()
+        .map(|row| (row.id, row.storage_key))
+        .collect::<HashMap<_, _>>();
 
     let mut movie_genres = group_genres(movie_genres);
     let movies = movies

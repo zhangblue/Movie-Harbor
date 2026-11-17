@@ -2,248 +2,272 @@ use super::dto::{
     CatalogCard, CatalogFilter, CatalogKind, CatalogPage, MovieDetail, PublicEpisode, PublicGenre,
     PublicSeason, SeriesDetail, media_url, public_genre, published_at_string,
 };
+use crate::entities::{
+    episode, genre, media_asset, movie, movie_genre, season, series, series_genre,
+};
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    AccessMode, ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, FromQueryResult,
-    IsolationLevel, QueryResult, Statement, TransactionTrait, Value,
+    AccessMode, ConnectionTrait, DatabaseConnection, DbErr, FromQueryResult, IsolationLevel,
+    TransactionTrait,
+    sea_query::{
+        Alias, Asterisk, BinOper, CommonTableExpression, Expr, Func, JoinType, Order, Query,
+        SelectStatement, SimpleExpr, UnionType, WithClause,
+    },
 };
 use std::collections::HashMap;
 use uuid::Uuid;
 
-// 公开目录仅统计同时具备发布状态和发布时间的有效父内容。
-const CATALOG_COUNT_SQL: &str = r#"
-SELECT count(*)::bigint AS total
-FROM (
-    SELECT movie.id
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND movie.status = 'published'
-      AND movie.published_at IS NOT NULL
-      AND ((movie.is_private = false AND $2::boolean)
-          OR (movie.is_private = true AND $3::boolean))
-    UNION ALL
-    SELECT series.id
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND series.status = 'published'
-      AND series.published_at IS NOT NULL
-      AND ((series.is_private = false AND $2::boolean)
-          OR (series.is_private = true AND $3::boolean))
-) candidates
-"#;
+// 根据待查类型构造已发布内容的查询基础，供目录卡片、计数和片名名单共享。
+fn published_source(kind: CatalogKind, allow_public: bool, allow_private: bool) -> SelectStatement {
+    let mut query = Query::select();
+    match kind {
+        CatalogKind::Movie => query.from(movie::Entity),
+        CatalogKind::Series => query.from(series::Entity),
+        CatalogKind::All => unreachable!("published_source requires a single content type"),
+    };
+    query
+        .columns(
+            [
+                "id",
+                "name",
+                "year",
+                "is_private",
+                "poster_asset_id",
+                "published_at",
+            ]
+            .map(Alias::new),
+        )
+        .expr_as(
+            Expr::val(kind.as_str()).cast_as(Alias::new("text")),
+            Alias::new("kind"),
+        )
+        .and_where(Expr::col(Alias::new("status")).eq(SimpleExpr::Constant("published".into())))
+        .and_where(Expr::col(Alias::new("published_at")).is_not_null());
+    match (allow_public, allow_private) {
+        (true, true) => {}
+        (false, false) => {
+            query.and_where(SimpleExpr::Constant(false.into()));
+        }
+        (public, _) => {
+            query.and_where(
+                Expr::col(Alias::new("is_private")).eq(SimpleExpr::Constant((!public).into())),
+            );
+        }
+    }
+    query
+}
 
-// 助手只读取有效发布条目的名称和分组依据，保留同名作品并排除未发布状态。
-const CATALOG_NAMES_SQL: &str = r#"
-SELECT name, is_private
-FROM (
-    SELECT name, is_private
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND status = 'published'
-      AND published_at IS NOT NULL
-      AND ((NOT is_private AND $2::boolean) OR (is_private AND $3::boolean))
-    UNION ALL
-    SELECT name, is_private
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND status = 'published'
-      AND published_at IS NOT NULL
-      AND ((NOT is_private AND $2::boolean) OR (is_private AND $3::boolean))
-) candidates
-ORDER BY is_private, name
-"#;
+// 生成 PostgreSQL 小写匹配和显式转义表达式，以继续使用规范化搜索索引。
+fn name_match(column: &'static str, pattern: &str, operator: BinOper) -> SimpleExpr {
+    let escaped = SimpleExpr::from(Func::lower(Expr::val(pattern)))
+        .binary(BinOper::Escape, SimpleExpr::Constant("!".into()));
+    SimpleExpr::from(Func::lower(Expr::col(Alias::new(column)))).binary(operator, escaped)
+}
 
-const CATALOG_SEARCH_COUNT_SQL: &str = r#"
-SELECT count(*)::bigint AS total
-FROM (
-    SELECT movie.id
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND movie.status = 'published'
-      AND movie.published_at IS NOT NULL
-      AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
-      AND ((movie.is_private = false AND $3::boolean)
-          OR (movie.is_private = true AND $4::boolean))
-    UNION ALL
-    SELECT movie.id
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND movie.status = 'published'
-      AND movie.published_at IS NOT NULL
-      AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
-      AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
-      AND ((movie.is_private = false AND $3::boolean)
-          OR (movie.is_private = true AND $4::boolean))
-    UNION ALL
-    SELECT series.id
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND series.status = 'published'
-      AND series.published_at IS NOT NULL
-      AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
-      AND ((series.is_private = false AND $3::boolean)
-          OR (series.is_private = true AND $4::boolean))
-    UNION ALL
-    SELECT series.id
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND series.status = 'published'
-      AND series.published_at IS NOT NULL
-      AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
-      AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
-      AND ((series.is_private = false AND $3::boolean)
-          OR (series.is_private = true AND $4::boolean))
-) candidates
-"#;
+// 为单类目录查询组合名称与简介匹配，分支互斥以防同一作品重复出现。
+fn matching_source(source: SelectStatement, pattern: Option<&str>) -> SelectStatement {
+    let Some(pattern) = pattern else {
+        return source;
+    };
+    let mut by_name = source.clone();
+    by_name.and_where(name_match("name", pattern, BinOper::Like));
+    let mut by_synopsis = source;
+    by_synopsis
+        .and_where(name_match("synopsis", pattern, BinOper::Like))
+        .and_where(name_match("name", pattern, BinOper::NotLike));
+    by_name.union(UnionType::All, by_synopsis);
+    by_name
+}
 
-/// 保持对集成级 EXPLAIN 验证可见，并确保验证使用的正是生产查询。
-pub const CATALOG_ITEMS_SQL: &str = r#"
-WITH candidates AS (
-    SELECT * FROM (
-        SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
-               movie.poster_asset_id, movie.published_at
-        FROM movie
-        WHERE $1::text IN ('all', 'movie')
-          AND movie.status = 'published'
-          AND movie.published_at IS NOT NULL
-          AND ((movie.is_private = false AND $5::boolean)
-              OR (movie.is_private = true AND $6::boolean))
-        ORDER BY published_at DESC, id
-        LIMIT $4
-    ) movie_candidates
-    UNION ALL
-    SELECT * FROM (
-        SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
-               series.poster_asset_id, series.published_at
-        FROM series
-        WHERE $1::text IN ('all', 'series')
-          AND series.status = 'published'
-          AND series.published_at IS NOT NULL
-          AND ((series.is_private = false AND $5::boolean)
-              OR (series.is_private = true AND $6::boolean))
-        ORDER BY published_at DESC, id
-        LIMIT $4
-    ) series_candidates
-), page AS MATERIALIZED (
-    SELECT * FROM candidates
-    ORDER BY published_at DESC, kind, id
-    LIMIT $2 OFFSET $3
-)
-SELECT page.id, page.kind, page.name, page.year, page.is_private, page.published_at,
-       poster.storage_key AS poster_storage_key
-FROM page
-LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
-ORDER BY page.published_at DESC, page.kind, page.id
-"#;
+// 合并分类查询，分页时先为每类应用安全窗口，避免给后续媒体连接传入无界集合。
+fn catalog_sources(
+    kind: CatalogKind,
+    allow_public: bool,
+    allow_private: bool,
+    pattern: Option<&str>,
+    window: Option<u64>,
+) -> SelectStatement {
+    let source = |kind| {
+        let query = matching_source(published_source(kind, allow_public, allow_private), pattern);
+        let Some(window) = window else { return query };
+        Query::select()
+            .column(Asterisk)
+            .from_subquery(query, Alias::new("matches"))
+            .order_by(Alias::new("published_at"), Order::Desc)
+            .order_by(Alias::new("id"), Order::Asc)
+            .limit(window)
+            .to_owned()
+    };
+    match kind {
+        CatalogKind::All => {
+            // 聚合前包住两侧窗口，避免第一个分支的 LIMIT 被解释为 UNION 全体的限制。
+            let bounded = |kind| {
+                let query = source(kind);
+                if window.is_none() {
+                    query
+                } else {
+                    Query::select()
+                        .column(Asterisk)
+                        .from_subquery(query, Alias::new("bounded"))
+                        .to_owned()
+                }
+            };
+            let mut query = bounded(CatalogKind::Movie);
+            query.union(UnionType::All, bounded(CatalogKind::Series));
+            query
+        }
+        kind => source(kind),
+    }
+}
 
-/// 供集成级 EXPLAIN 验证使用的生产查询搜索变体。
-pub const CATALOG_SEARCH_ITEMS_SQL: &str = r#"
-WITH candidates AS (
-    SELECT * FROM (
-        SELECT * FROM (
-            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
-                   movie.poster_asset_id, movie.published_at
-            FROM movie
-            WHERE $1::text IN ('all', 'movie')
-              AND movie.status = 'published'
-              AND movie.published_at IS NOT NULL
-              AND ((movie.is_private = false AND $6::boolean)
-                  OR (movie.is_private = true AND $7::boolean))
-              AND lower(movie.name) LIKE lower($2::text) ESCAPE '!'
-            UNION ALL
-            SELECT movie.id, 'movie'::text AS kind, movie.name, movie.year, movie.is_private,
-                   movie.poster_asset_id, movie.published_at
-            FROM movie
-            WHERE $1::text IN ('all', 'movie')
-              AND movie.status = 'published'
-              AND movie.published_at IS NOT NULL
-              AND ((movie.is_private = false AND $6::boolean)
-                  OR (movie.is_private = true AND $7::boolean))
-              AND lower(movie.synopsis) LIKE lower($2::text) ESCAPE '!'
-              AND lower(movie.name) NOT LIKE lower($2::text) ESCAPE '!'
-        ) movie_matches
-        ORDER BY published_at DESC, id
-        LIMIT $5
-    ) movie_candidates
-    UNION ALL
-    SELECT * FROM (
-        SELECT * FROM (
-            SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
-                   series.poster_asset_id, series.published_at
-            FROM series
-            WHERE $1::text IN ('all', 'series')
-              AND series.status = 'published'
-              AND series.published_at IS NOT NULL
-              AND ((series.is_private = false AND $6::boolean)
-                  OR (series.is_private = true AND $7::boolean))
-              AND lower(series.name) LIKE lower($2::text) ESCAPE '!'
-            UNION ALL
-            SELECT series.id, 'series'::text AS kind, series.name, series.year, series.is_private,
-                   series.poster_asset_id, series.published_at
-            FROM series
-            WHERE $1::text IN ('all', 'series')
-              AND series.status = 'published'
-              AND series.published_at IS NOT NULL
-              AND ((series.is_private = false AND $6::boolean)
-                  OR (series.is_private = true AND $7::boolean))
-              AND lower(series.synopsis) LIKE lower($2::text) ESCAPE '!'
-              AND lower(series.name) NOT LIKE lower($2::text) ESCAPE '!'
-        ) series_matches
-        ORDER BY published_at DESC, id
-        LIMIT $5
-    ) series_candidates
-), page AS MATERIALIZED (
-    SELECT * FROM candidates
-    ORDER BY published_at DESC, kind, id
-    LIMIT $3 OFFSET $4
-)
-SELECT page.id, page.kind, page.name, page.year, page.is_private, page.published_at,
-       poster.storage_key AS poster_storage_key
-FROM page
-LEFT JOIN media_asset poster ON poster.id = page.poster_asset_id
-ORDER BY page.published_at DESC, page.kind, page.id
-"#;
+/// 构造实际分页语句，集成测试可用同一构建结果验证索引和媒体连接规模。
+pub fn catalog_items_query(filter: &CatalogFilter, include_private: bool) -> SelectStatement {
+    let candidates = Alias::new("candidates");
+    let page = Alias::new("page");
+    let media = Alias::new("poster");
+    let candidates_cte = CommonTableExpression::new()
+        .table_name(candidates.clone())
+        .query(catalog_sources(
+            filter.kind,
+            !filter.private_only,
+            include_private,
+            filter.search_pattern.as_deref(),
+            Some(filter.window),
+        ))
+        .to_owned();
+    let page_query = Query::select()
+        .column(Asterisk)
+        .from(candidates)
+        .order_by(Alias::new("published_at"), Order::Desc)
+        .order_by(Alias::new("kind"), Order::Asc)
+        .order_by(Alias::new("id"), Order::Asc)
+        .offset(filter.offset)
+        .limit(filter.size)
+        .to_owned();
+    // 固化分页结果后才读取海报，以免 PostgreSQL 将媒体连接提前到分页之前。
+    let page_cte = CommonTableExpression::new()
+        .table_name(page.clone())
+        .query(page_query)
+        .materialized(true)
+        .to_owned();
+    let clause = WithClause::new()
+        .cte(candidates_cte)
+        .cte(page_cte)
+        .to_owned();
+    Query::select()
+        .column((page.clone(), Asterisk))
+        .expr_as(
+            Expr::col((media.clone(), media_asset::Column::StorageKey)),
+            Alias::new("poster_storage_key"),
+        )
+        .from(page.clone())
+        .join_as(
+            JoinType::LeftJoin,
+            media_asset::Entity,
+            media.clone(),
+            Expr::col((media, media_asset::Column::Id))
+                .equals((page.clone(), Alias::new("poster_asset_id"))),
+        )
+        .order_by((page.clone(), Alias::new("published_at")), Order::Desc)
+        .order_by((page.clone(), Alias::new("kind")), Order::Asc)
+        .order_by((page, Alias::new("id")), Order::Asc)
+        .with_cte(clause)
+        .to_owned()
+}
 
-const MOVIE_DETAIL_SQL: &str = r#"
-SELECT movie.id, movie.name, movie.synopsis, movie.year, movie.is_private, movie.duration_seconds,
-       poster.storage_key AS poster_storage_key,
-       video.storage_key AS video_storage_key
-FROM movie
-LEFT JOIN media_asset poster ON poster.id = movie.poster_asset_id
-LEFT JOIN media_asset video ON video.id = movie.video_asset_id
-WHERE movie.id = $1
-  AND movie.status = 'published'
-  AND movie.published_at IS NOT NULL
-  AND ($2::boolean OR movie.is_private = false)
-"#;
+// 生成电影或剧集详情查询，复用发布规则并按需加入电影视频。
+fn detail_query(kind: CatalogKind, id: Uuid, include_private: bool) -> SelectStatement {
+    let mut content = published_source(kind, true, include_private);
+    content
+        .column(Alias::new("synopsis"))
+        .and_where(Expr::col(Alias::new("id")).eq(id));
+    if kind == CatalogKind::Movie {
+        content.columns([movie::Column::DurationSeconds, movie::Column::VideoAssetId]);
+    }
+    let item = Alias::new("item");
+    let poster = Alias::new("poster");
+    let mut query = Query::select();
+    query
+        .column((item.clone(), Asterisk))
+        .from_subquery(content, item.clone())
+        .expr_as(
+            Expr::col((poster.clone(), media_asset::Column::StorageKey)),
+            Alias::new("poster_storage_key"),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            media_asset::Entity,
+            poster.clone(),
+            Expr::col((poster, media_asset::Column::Id))
+                .equals((item.clone(), Alias::new("poster_asset_id"))),
+        );
+    if kind == CatalogKind::Movie {
+        let video = Alias::new("video");
+        query
+            .expr_as(
+                Expr::col((video.clone(), media_asset::Column::StorageKey)),
+                Alias::new("video_storage_key"),
+            )
+            .join_as(
+                JoinType::LeftJoin,
+                media_asset::Entity,
+                video.clone(),
+                Expr::col((video, media_asset::Column::Id))
+                    .equals((item, movie::Column::VideoAssetId)),
+            );
+    }
+    query
+}
 
-const SERIES_DETAIL_SQL: &str = r#"
-SELECT series.id, series.name, series.synopsis, series.year, series.is_private,
-       poster.storage_key AS poster_storage_key
-FROM series
-LEFT JOIN media_asset poster ON poster.id = series.poster_asset_id
-WHERE series.id = $1
-  AND series.status = 'published'
-  AND series.published_at IS NOT NULL
-  AND ($2::boolean OR series.is_private = false)
-"#;
-
-// 单集公开可见时，剧集父级和单集自身都必须处于有效发布状态。
-const SERIES_EPISODES_SQL: &str = r#"
-SELECT season.id AS season_id, season.number AS season_number,
-       episode.id, episode.number, episode.name, episode.duration_seconds,
-       video.storage_key AS video_storage_key
-FROM season
-JOIN series parent ON parent.id = season.series_id
-                  AND parent.status = 'published'
-                  AND parent.published_at IS NOT NULL
-JOIN episode ON episode.season_id = season.id
-            AND episode.status = 'published'
-            AND episode.published_at IS NOT NULL
-LEFT JOIN media_asset video ON video.id = episode.video_asset_id
-WHERE season.series_id = $1
-ORDER BY season.number, season.id, episode.number, episode.id
-"#;
+// 已确认可见的父剧集仍在当前事务快照内，按季、集顺序读取有效发布单集。
+fn episode_query(id: Uuid) -> SelectStatement {
+    Query::select()
+        .expr_as(
+            Expr::col((season::Entity, season::Column::Id)),
+            Alias::new("season_id"),
+        )
+        .expr_as(
+            Expr::col((season::Entity, season::Column::Number)),
+            Alias::new("season_number"),
+        )
+        .columns(
+            [
+                episode::Column::Id,
+                episode::Column::Number,
+                episode::Column::Name,
+                episode::Column::DurationSeconds,
+            ]
+            .map(|column| (episode::Entity, column)),
+        )
+        .expr_as(
+            Expr::col((media_asset::Entity, media_asset::Column::StorageKey)),
+            Alias::new("video_storage_key"),
+        )
+        .from(season::Entity)
+        .join(
+            JoinType::InnerJoin,
+            episode::Entity,
+            Expr::col((episode::Entity, episode::Column::SeasonId))
+                .equals((season::Entity, season::Column::Id)),
+        )
+        .join(
+            JoinType::LeftJoin,
+            media_asset::Entity,
+            Expr::col((media_asset::Entity, media_asset::Column::Id))
+                .equals((episode::Entity, episode::Column::VideoAssetId)),
+        )
+        .and_where(Expr::col((season::Entity, season::Column::SeriesId)).eq(id))
+        .and_where(
+            Expr::col((episode::Entity, episode::Column::Status))
+                .eq(SimpleExpr::Constant("published".into())),
+        )
+        .and_where(Expr::col((episode::Entity, episode::Column::PublishedAt)).is_not_null())
+        .order_by((season::Entity, season::Column::Number), Order::Asc)
+        .order_by((season::Entity, season::Column::Id), Order::Asc)
+        .order_by((episode::Entity, episode::Column::Number), Order::Asc)
+        .order_by((episode::Entity, episode::Column::Id), Order::Asc)
+        .to_owned()
+}
 
 #[derive(Debug, FromQueryResult)]
 // 承载目录列表查询行，供转换公开卡片时使用。
@@ -294,23 +318,11 @@ struct EpisodeRow {
 }
 
 // 承载题材查询行，供公开内容题材分组使用。
+#[derive(FromQueryResult)]
 struct GenreRow {
-    content_kind: String,
     content_id: Uuid,
     genre_id: Uuid,
     name: String,
-}
-
-impl GenreRow {
-    // 从数据库结果读取题材行，供题材批量查询转换时调用。
-    fn from_query_result(row: &QueryResult) -> Result<Self, DbErr> {
-        Ok(Self {
-            content_kind: row.try_get("", "content_kind")?,
-            content_id: row.try_get("", "content_id")?,
-            genre_id: row.try_get("", "genre_id")?,
-            name: row.try_get("", "name")?,
-        })
-    }
 }
 
 // 承载名称及所属范围，供助手构建按可见性分组的名称列表。
@@ -327,16 +339,14 @@ pub(crate) async fn published_names(
     allow_public: bool,
     allow_private: bool,
 ) -> Result<Vec<PublishedName>, DbErr> {
-    query_models(
-        db,
-        CATALOG_NAMES_SQL,
-        vec![
-            kind.as_str().into(),
-            allow_public.into(),
-            allow_private.into(),
-        ],
-    )
-    .await
+    let candidates = catalog_sources(kind, allow_public, allow_private, None, None);
+    let query = Query::select()
+        .columns([Alias::new("name"), Alias::new("is_private")])
+        .from_subquery(candidates, Alias::new("published"))
+        .order_by(Alias::new("is_private"), Order::Asc)
+        .order_by(Alias::new("name"), Order::Asc)
+        .to_owned();
+    query_models(db, &query).await
 }
 
 // 在一致性快照中读取公开目录分页，供目录路由调用。
@@ -363,62 +373,25 @@ async fn list_on<C: ConnectionTrait>(
     filter: CatalogFilter,
     include_private: bool,
 ) -> Result<CatalogPage, DbErr> {
-    let allow_public = !filter.private_only;
-    let allow_private = include_private;
-    // 组装计数和分页查询参数时生成同一内容类型的绑定值，确保总数与条目使用一致筛选。
-    let kind_value = || filter.kind.as_str().into();
-    let (count_sql, count_values) = match &filter.search_pattern {
-        Some(pattern) => (
-            CATALOG_SEARCH_COUNT_SQL,
-            vec![
-                kind_value(),
-                pattern.clone().into(),
-                allow_public.into(),
-                allow_private.into(),
-            ],
-        ),
-        None => (
-            CATALOG_COUNT_SQL,
-            vec![kind_value(), allow_public.into(), allow_private.into()],
-        ),
-    };
+    let candidates = catalog_sources(
+        filter.kind,
+        !filter.private_only,
+        include_private,
+        filter.search_pattern.as_deref(),
+        None,
+    );
+    let count = Query::select()
+        .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("total"))
+        .from_subquery(candidates, Alias::new("published"))
+        .to_owned();
     let total_row = db
-        .query_one(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            count_sql,
-            count_values,
-        ))
+        .query_one(db.get_database_backend().build(&count))
         .await?
         .ok_or_else(|| DbErr::Custom("catalog count returned no row".into()))?;
     let total = u64::try_from(total_row.try_get::<i64>("", "total")?)
         .map_err(|_| DbErr::Custom("catalog count was negative".into()))?;
-
-    let (items_sql, values) = match &filter.search_pattern {
-        Some(pattern) => (
-            CATALOG_SEARCH_ITEMS_SQL,
-            vec![
-                kind_value(),
-                pattern.clone().into(),
-                i64::try_from(filter.size).unwrap().into(),
-                i64::try_from(filter.offset).unwrap().into(),
-                i64::try_from(filter.window).unwrap().into(),
-                allow_public.into(),
-                allow_private.into(),
-            ],
-        ),
-        None => (
-            CATALOG_ITEMS_SQL,
-            vec![
-                kind_value(),
-                i64::try_from(filter.size).unwrap().into(),
-                i64::try_from(filter.offset).unwrap().into(),
-                i64::try_from(filter.window).unwrap().into(),
-                allow_public.into(),
-                allow_private.into(),
-            ],
-        ),
-    };
-    let rows = query_models::<CatalogRow>(db, items_sql, values).await?;
+    let rows =
+        query_models::<CatalogRow>(db, &catalog_items_query(&filter, include_private)).await?;
     let references = rows
         .iter()
         .map(|row| (row.kind.as_str(), row.id))
@@ -476,12 +449,10 @@ async fn movie_detail_on<C: ConnectionTrait>(
     id: Uuid,
     include_private: bool,
 ) -> Result<Option<MovieDetail>, DbErr> {
-    let Some(row) = query_model::<MovieRow>(
-        db,
-        MOVIE_DETAIL_SQL,
-        vec![id.into(), include_private.into()],
-    )
-    .await?
+    let query = detail_query(CatalogKind::Movie, id, include_private);
+    let Some(row) = MovieRow::find_by_statement(db.get_database_backend().build(&query))
+        .one(db)
+        .await?
     else {
         return Ok(None);
     };
@@ -524,17 +495,15 @@ async fn series_detail_on<C: ConnectionTrait>(
     id: Uuid,
     include_private: bool,
 ) -> Result<Option<SeriesDetail>, DbErr> {
-    let Some(row) = query_model::<SeriesRow>(
-        db,
-        SERIES_DETAIL_SQL,
-        vec![id.into(), include_private.into()],
-    )
-    .await?
+    let query = detail_query(CatalogKind::Series, id, include_private);
+    let Some(row) = SeriesRow::find_by_statement(db.get_database_backend().build(&query))
+        .one(db)
+        .await?
     else {
         return Ok(None);
     };
     let mut genres = genres_for(db, &[("series", id)]).await?;
-    let episode_rows = query_models::<EpisodeRow>(db, SERIES_EPISODES_SQL, vec![id.into()]).await?;
+    let episode_rows = query_models::<EpisodeRow>(db, &episode_query(id)).await?;
     let mut seasons = Vec::<PublicSeason>::new();
     for episode in episode_rows {
         if seasons
@@ -568,89 +537,78 @@ async fn series_detail_on<C: ConnectionTrait>(
     }))
 }
 
-// 执行参数化查询并映射多行，供目录查询内部调用。
+// 执行 SeaQuery 生成的语句并映射投影结果，供目录内部读取使用。
 async fn query_models<T: FromQueryResult>(
     db: &impl ConnectionTrait,
-    sql: &str,
-    values: Vec<Value>,
+    query: &SelectStatement,
 ) -> Result<Vec<T>, DbErr> {
-    db.query_all(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await?
-    .iter()
-    .map(|row| T::from_query_result(row, ""))
-    .collect()
+    T::find_by_statement(db.get_database_backend().build(query))
+        .all(db)
+        .await
 }
 
-// 执行参数化查询并映射单行，供目录详情查询内部调用。
-async fn query_model<T: FromQueryResult>(
-    db: &impl ConnectionTrait,
-    sql: &str,
-    values: Vec<Value>,
-) -> Result<Option<T>, DbErr> {
-    db.query_one(Statement::from_sql_and_values(
-        DatabaseBackend::Postgres,
-        sql,
-        values,
-    ))
-    .await?
-    .as_ref()
-    .map(|row| T::from_query_result(row, ""))
-    .transpose()
-}
-
-// 批量查询内容题材，供目录和详情结果组装时调用。
+// 为当前页或详情批量读取题材，避免逐条卡片查询。
 async fn genres_for(
     db: &impl ConnectionTrait,
     references: &[(&str, Uuid)],
 ) -> Result<HashMap<(String, Uuid), Vec<PublicGenre>>, DbErr> {
-    if references.is_empty() {
-        return Ok(HashMap::new());
-    }
-    // 将当前页或详情中的父级一次传入查询，避免逐张卡片读取题材造成 N+1。
-    let mut placeholders = Vec::with_capacity(references.len());
-    let mut values = Vec::with_capacity(references.len() * 2);
-    for (index, (kind, id)) in references.iter().enumerate() {
-        let first = index * 2 + 1;
-        placeholders.push(format!("(${first}::text, ${}::uuid)", first + 1));
-        values.push((*kind).into());
-        values.push((*id).into());
-    }
-    let sql = format!(
-        r#"
-WITH requested(kind, id) AS (VALUES {})
-SELECT 'movie'::text AS content_kind, movie_genre.movie_id AS content_id,
-       genre.id AS genre_id, genre.name, genre.sort_order
-FROM requested
-JOIN movie_genre ON requested.kind = 'movie' AND movie_genre.movie_id = requested.id
-JOIN genre ON genre.id = movie_genre.genre_id
-UNION ALL
-SELECT 'series'::text AS content_kind, series_genre.series_id AS content_id,
-       genre.id AS genre_id, genre.name, genre.sort_order
-FROM requested
-JOIN series_genre ON requested.kind = 'series' AND series_genre.series_id = requested.id
-JOIN genre ON genre.id = series_genre.genre_id
-ORDER BY content_kind, content_id, sort_order, genre_id
-"#,
-        placeholders.join(", ")
-    );
     let mut result = HashMap::<(String, Uuid), Vec<PublicGenre>>::new();
-    for row in db
-        .query_all(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            sql,
-            values,
-        ))
-        .await?
-    {
-        let row = GenreRow::from_query_result(&row)?;
-        result
-            .entry((row.content_kind, row.content_id))
-            .or_default()
-            .push(public_genre(row.genre_id, row.name));
+    for kind in ["movie", "series"] {
+        let ids = references
+            .iter()
+            .filter(|(content_kind, _)| *content_kind == kind)
+            .map(|(_, id)| *id)
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            continue;
+        }
+        let mut query = Query::select();
+        match kind {
+            "movie" => query
+                .expr_as(
+                    Expr::col((movie_genre::Entity, movie_genre::Column::MovieId)),
+                    Alias::new("content_id"),
+                )
+                .from(movie_genre::Entity)
+                .join(
+                    JoinType::InnerJoin,
+                    genre::Entity,
+                    Expr::col((genre::Entity, genre::Column::Id))
+                        .equals((movie_genre::Entity, movie_genre::Column::GenreId)),
+                )
+                .and_where(
+                    Expr::col((movie_genre::Entity, movie_genre::Column::MovieId)).is_in(ids),
+                ),
+            _ => query
+                .expr_as(
+                    Expr::col((series_genre::Entity, series_genre::Column::SeriesId)),
+                    Alias::new("content_id"),
+                )
+                .from(series_genre::Entity)
+                .join(
+                    JoinType::InnerJoin,
+                    genre::Entity,
+                    Expr::col((genre::Entity, genre::Column::Id))
+                        .equals((series_genre::Entity, series_genre::Column::GenreId)),
+                )
+                .and_where(
+                    Expr::col((series_genre::Entity, series_genre::Column::SeriesId)).is_in(ids),
+                ),
+        };
+        query
+            .expr_as(
+                Expr::col((genre::Entity, genre::Column::Id)),
+                Alias::new("genre_id"),
+            )
+            .column((genre::Entity, genre::Column::Name))
+            .order_by((genre::Entity, genre::Column::SortOrder), Order::Asc)
+            .order_by((genre::Entity, genre::Column::Id), Order::Asc);
+        for row in query_models::<GenreRow>(db, &query).await? {
+            result
+                .entry((kind.to_owned(), row.content_id))
+                .or_default()
+                .push(public_genre(row.genre_id, row.name));
+        }
     }
     Ok(result)
 }

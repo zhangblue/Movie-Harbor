@@ -62,6 +62,7 @@ pub async fn list<C: ConnectionTrait>(db: &C) -> Result<Vec<genre::Model>, Genre
 pub async fn create(db: &DatabaseConnection, name: String) -> Result<genre::Model, GenreError> {
     let name = normalized_name(name)?;
     let tx = db.begin().await?;
+    // 题材集合（包括空表）需要防止并发插入，SeaORM 的行锁无法覆盖该范围。
     tx.execute_unprepared("LOCK TABLE genre IN EXCLUSIVE MODE")
         .await?;
     let last = genre::Entity::find()
@@ -139,6 +140,7 @@ pub async fn reorder(
 
     // 重排请求必须覆盖全部现有题材，避免遗漏或重复位置留下不可判定的系统顺序。
     let tx = db.begin().await?;
+    // 题材集合（包括空表）需要防止并发插入，SeaORM 的行锁无法覆盖该范围。
     tx.execute_unprepared("LOCK TABLE genre IN EXCLUSIVE MODE")
         .await?;
     let current = genre::Entity::find().all(&tx).await?;

@@ -22,7 +22,7 @@ pub async fn set_privacy(
             series::Column::Version,
             Expr::col(series::Column::Version).add(1),
         )
-        .col_expr(series::Column::UpdatedAt, Expr::cust("CURRENT_TIMESTAMP"))
+        .col_expr(series::Column::UpdatedAt, Expr::current_timestamp().into())
         .filter(series::Column::Id.eq(id))
         .filter(series::Column::Version.eq(expected_version))
         .exec_with_returning(tx)

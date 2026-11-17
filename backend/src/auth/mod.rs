@@ -37,6 +37,7 @@ pub async fn initialize(
     // 管理员初始化必须在同一事务内完成，避免并发启动分别观察到空表后各自创建账号。
     let tx = db.begin().await?;
     // 在查询唯一管理员前锁定整张表，使并发启动只能按顺序判断是否需要初始化。
+    // SeaORM 只提供查询行锁，初始化在空表上仍需 PostgreSQL 的表锁。
     tx.execute_unprepared("LOCK TABLE admin_user IN EXCLUSIVE MODE")
         .await?;
     // 已有管理员时完全忽略环境变量中的初始凭据，避免重启服务意外重置既有账号。

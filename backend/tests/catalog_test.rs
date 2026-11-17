@@ -8,8 +8,8 @@ use http_body_util::BodyExt;
 use movie_harbor_api::{
     app, auth,
     catalog::{
-        dto::{CatalogFilter, CatalogKind},
-        query::{self, CATALOG_ITEMS_SQL, CATALOG_SEARCH_ITEMS_SQL},
+        dto::{CatalogFilter, CatalogKind, CatalogRequest},
+        query::{self, catalog_items_query},
     },
     config::Config,
     entities::{admin_user, viewer_user},
@@ -896,7 +896,7 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
     });
 
     // 等待读取进入锁定的关联表后再修改父剧和单集，确保构造跨快照竞争。
-    wait_for_locked_query(&db, "series_genre", "WITH requested(kind, id)").await;
+    wait_for_locked_query(&db, "series_genre", "JOIN \"genre\"").await;
     blocker
         .execute_unprepared(
             r#"
@@ -962,7 +962,7 @@ INSERT INTO movie_genre (movie_id, genre_id) VALUES
     });
 
     // 确认详情读取已等待关联表，再提交电影与题材的并发更改。
-    wait_for_locked_query(&db, "movie_genre", "WITH requested(kind, id)").await;
+    wait_for_locked_query(&db, "movie_genre", "JOIN \"genre\"").await;
     blocker
         .execute_unprepared(
             r#"
@@ -1032,7 +1032,7 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
     });
 
     // 等候目录查询被媒体表锁阻塞，再改变发布状态以检验总数和项目的快照。
-    wait_for_locked_query(&db, "media_asset", "WITH candidates AS").await;
+    wait_for_locked_query(&db, "media_asset", "WITH \"candidates\"").await;
     blocker
         .execute_unprepared(
             r#"
@@ -1221,19 +1221,9 @@ WHERE name ~ '^Series [0-9]+$'
         "{search_plan}"
     );
 
-    let production_home_plan = explain_json_statement(
-        &db,
-        CATALOG_ITEMS_SQL,
-        vec![
-            "all".into(),
-            20_i64.into(),
-            0_i64.into(),
-            20_i64.into(),
-            true.into(),
-            false.into(),
-        ],
-    )
-    .await;
+    let filter = CatalogFilter::try_from(CatalogRequest::default()).unwrap();
+    let home = DatabaseBackend::Postgres.build(&catalog_items_query(&filter, false));
+    let production_home_plan = explain_json_statement(&db, &home.sql, home.values.unwrap().0).await;
     assert!(
         plan_uses_index(&production_home_plan, "movie_public_catalog_idx"),
         "{production_home_plan:#}"
@@ -1244,19 +1234,8 @@ WHERE name ~ '^Series [0-9]+$'
     );
     assert_media_reads_are_bounded(&production_home_plan, 20);
 
-    let viewer_home_plan = explain_json_statement(
-        &db,
-        CATALOG_ITEMS_SQL,
-        vec![
-            "all".into(),
-            20_i64.into(),
-            0_i64.into(),
-            20_i64.into(),
-            true.into(),
-            true.into(),
-        ],
-    )
-    .await;
+    let home = DatabaseBackend::Postgres.build(&catalog_items_query(&filter, true));
+    let viewer_home_plan = explain_json_statement(&db, &home.sql, home.values.unwrap().0).await;
     assert!(
         plan_uses_index(&viewer_home_plan, "movie_public_published_idx"),
         "{viewer_home_plan:#}"
@@ -1267,20 +1246,13 @@ WHERE name ~ '^Series [0-9]+$'
     );
     assert_media_reads_are_bounded(&viewer_home_plan, 20);
 
-    let production_search_plan = explain_statement(
-        &db,
-        CATALOG_SEARCH_ITEMS_SQL,
-        vec![
-            "all".into(),
-            "%needle-catalog-token%".into(),
-            20_i64.into(),
-            0_i64.into(),
-            20_i64.into(),
-            true.into(),
-            false.into(),
-        ],
-    )
-    .await;
+    let search_filter = CatalogFilter {
+        search_pattern: Some("%needle-catalog-token%".into()),
+        ..filter
+    };
+    let search = DatabaseBackend::Postgres.build(&catalog_items_query(&search_filter, false));
+    let production_search_plan =
+        explain_statement(&db, &search.sql, search.values.unwrap().0).await;
     assert!(
         production_search_plan.contains("movie_synopsis_search_idx"),
         "{production_search_plan}"

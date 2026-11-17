@@ -1,5 +1,7 @@
 use super::*;
 use axum::{extract::State, routing::post};
+use sea_orm::ConnectionTrait;
+use serde_json::{Value, json};
 use tokio::{net::TcpListener, sync::Mutex};
 
 #[path = "../../tests/support/mod.rs"]
@@ -11,9 +13,24 @@ async fn model(
     Json(request): Json<Value>,
 ) -> Json<Value> {
     let mut calls = calls.lock().await;
-    let last = request["messages"].as_array().unwrap().last().unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    assert_eq!(request["model"], "deepseek-flash");
+    assert_eq!(request["thinking"], json!({"type":"disabled"}));
+    assert_eq!(request["max_tokens"], 1200);
+    assert_eq!(messages[0]["role"], "system");
+    let last = messages.last().unwrap();
     if last["role"] == "tool" {
         assert_eq!(last["tool_call_id"], "call_test");
+        let replay = &messages[messages.len() - 2];
+        assert_eq!(replay["role"], "assistant");
+        assert!(replay["content"].is_null());
+        assert_eq!(replay["tool_calls"][0]["id"], last["tool_call_id"]);
+        assert_eq!(replay["tool_calls"][0]["type"], "function");
+        assert_eq!(
+            replay["tool_calls"][0]["function"]["name"],
+            "list_content_names"
+        );
+        assert!(replay["tool_calls"][0]["function"]["arguments"].is_string());
         let lists: Value = serde_json::from_str(last["content"].as_str().unwrap()).unwrap();
         let public = lists["public"].as_array().map(Vec::len);
         let private = lists["private"].as_array().map(Vec::len);
@@ -55,7 +72,7 @@ async fn model(
     calls.push(request);
     Json(json!({"choices":[{"message":{
         "content":null,
-        "tool_calls":[{"id":"call_test","function":{"name":name,"arguments":arguments.to_string()}}]
+        "tool_calls":[{"id":"call_test","type":"function","function":{"name":name,"arguments":arguments.to_string()}}]
     }}]}))
 }
 
@@ -95,7 +112,7 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let state = AgentState {
         db: db.connection(),
-        client: reqwest::Client::new(),
+        client: deepseek::client().unwrap(),
         api_key: Some(Arc::from("test-key")),
         capacity: Arc::new(Semaphore::new(1)),
         model_endpoint: Some(endpoint),
@@ -161,6 +178,40 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
             .unwrap()
             .iter()
             .any(|tool| tool["function"]["name"] == "list_content_names")
+    );
+    // 校验模型看到的参数约束和管理工具可见性，防止类型序列化改变协议。
+    let declarations = calls[0]["tools"].as_array().unwrap();
+    let list = declarations
+        .iter()
+        .find(|tool| tool["function"]["name"] == "list_content")
+        .unwrap();
+    assert_eq!(list["type"], "function");
+    assert_eq!(
+        list["function"]["parameters"],
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": ["movie", "series"]},
+                "page": {"type": "integer", "minimum": 1, "maximum": 1_000_000},
+                "private_only": {"type": "boolean"}
+            },
+            "additionalProperties": false
+        })
+    );
+    assert!(
+        declarations
+            .iter()
+            .all(|tool| tool["function"]["name"] != "propose_draft")
+    );
+    let admin_draft = calls[5]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["function"]["name"] == "propose_draft")
+        .unwrap();
+    assert_eq!(
+        admin_draft["function"]["parameters"]["required"],
+        json!(["kind", "name"])
     );
     let expected_lists = [
         (7, json!({"private":["验收私剧","验收私片"]})),
@@ -241,5 +292,74 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
     .await;
     assert_eq!(response.err(), Some(StatusCode::SERVICE_UNAVAILABLE));
 
+    server.abort();
+}
+
+// 模拟 DeepSeek 返回畸形工具字段，验证类型不符时拒绝将正文误当成正常答复。
+#[tokio::test]
+async fn malformed_tool_calls_are_rejected() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/chat", listener.local_addr().unwrap());
+    let app = Router::new().route(
+        "/chat",
+        post(|| async {
+            Json(json!({"choices": [{"message": {
+                "content": "不应显示的回复",
+                "tool_calls": {"id": "不是数组"}
+            }}]}))
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let state = AgentState {
+        db: DatabaseConnection::Disconnected,
+        client: deepseek::client().unwrap(),
+        api_key: None,
+        capacity: Arc::new(Semaphore::new(1)),
+        model_endpoint: Some(endpoint),
+    };
+    let status = respond(&state, "test-key", Vec::new(), false).await.err();
+    assert_eq!(status, Some(StatusCode::BAD_GATEWAY));
+    server.abort();
+}
+
+// 用合法 JSON 填满指定字节数，验证限制取决于 HTTP 响应体大小而非 JSON 解析结果。
+fn padded_response(size: usize) -> String {
+    let mut body =
+        r#"{"choices":[{"message":{"content":"正常回复","tool_calls":null}}]}"#.to_owned();
+    body.push_str(&" ".repeat(size - body.len()));
+    body
+}
+
+// 用与应用相同的客户端核对重定向策略和 128 KiB 响应边界，不连接外部模型。
+#[tokio::test]
+async fn model_transport_keeps_response_limit_and_rejects_redirects() {
+    use axum::response::Redirect;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}", listener.local_addr().unwrap());
+    let app = Router::new()
+        .route("/limit", post(|| async { padded_response(128 * 1024) }))
+        .route("/over", post(|| async { padded_response(128 * 1024 + 1) }))
+        .route(
+            "/redirect",
+            post(|| async { Redirect::temporary("/limit") }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut state = AgentState {
+        db: DatabaseConnection::Disconnected,
+        client: deepseek::client().unwrap(),
+        api_key: None,
+        capacity: Arc::new(Semaphore::new(1)),
+        model_endpoint: Some(format!("{origin}/limit")),
+    };
+    let reply = request_model(&state, "test-key", &[], &[]).await.unwrap();
+    assert_eq!(reply.content.as_deref(), Some("正常回复"));
+    assert!(reply.tool_calls.is_none());
+
+    for path in ["over", "redirect"] {
+        state.model_endpoint = Some(format!("{origin}/{path}"));
+        let status = request_model(&state, "test-key", &[], &[]).await.err();
+        assert_eq!(status, Some(StatusCode::BAD_GATEWAY), "{path}");
+    }
     server.abort();
 }

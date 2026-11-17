@@ -13,9 +13,10 @@ use axum::{
 };
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    AccessMode, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseBackend,
-    DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait, FromQueryResult, IsolationLevel,
-    QueryFilter, QuerySelect, Set, SqlErr, Statement, TransactionTrait,
+    AccessMode, ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, DbErr,
+    EntityTrait, FromQueryResult, IsolationLevel, QueryFilter, QueryOrder, QuerySelect, Select,
+    Set, SqlErr, TransactionTrait,
+    sea_query::{Asterisk, CaseStatement, Expr, LikeExpr, Query, SimpleExpr},
 };
 use uuid::Uuid;
 
@@ -64,8 +65,48 @@ impl IntoResponse for ViewerUserError {
     }
 }
 
-const USER_COLUMNS: &str = "u.id, u.username, u.version, u.created_at, u.last_login_at,
-    EXISTS (SELECT 1 FROM viewer_session s WHERE s.viewer_user_id = u.id AND s.expires_at > CURRENT_TIMESTAMP) AS has_active_session";
+// 构造与用户关联的有效会话存在条件，供列表和总览使用同一数据库时钟。
+fn has_active_session() -> SimpleExpr {
+    Expr::exists(
+        Query::select()
+            .expr(Expr::val(1))
+            .from(viewer_session::Entity)
+            .and_where(
+                Expr::col((viewer_session::Entity, viewer_session::Column::ViewerUserId))
+                    .equals((viewer_user::Entity, viewer_user::Column::Id)),
+            )
+            .and_where(
+                Expr::col((viewer_session::Entity, viewer_session::Column::ExpiresAt))
+                    .gt(Expr::current_timestamp()),
+            )
+            .take(),
+    )
+}
+
+// 构造用户摘要的稳定查询顺序，供分页和最新用户概览复用。
+fn summaries() -> Select<viewer_user::Entity> {
+    use viewer_user::Column;
+    viewer_user::Entity::find()
+        .select_only()
+        .columns([
+            Column::Id,
+            Column::Username,
+            Column::Version,
+            Column::CreatedAt,
+            Column::LastLoginAt,
+        ])
+        .expr_as(has_active_session(), "has_active_session")
+        .order_by_desc(Column::CreatedAt)
+        .order_by_asc(Column::Id)
+}
+
+// 承载同一查询快照中的全局及筛选计数，供列表和概览转换使用。
+#[derive(FromQueryResult)]
+struct ViewerUserCounts {
+    total_users: i64,
+    active_users: i64,
+    matching_users: i64,
+}
 
 // 数据库时间类型停留在查询边界，响应使用项目统一的 RFC 3339 字符串格式。
 #[derive(FromQueryResult)]
@@ -105,29 +146,49 @@ pub async fn list(
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    let counts = tx.query_one(Statement::from_sql_and_values(DatabaseBackend::Postgres,
-        "SELECT count(*)::bigint AS total_users,
-        count(*) FILTER (WHERE EXISTS (SELECT 1 FROM viewer_session s WHERE s.viewer_user_id = u.id AND s.expires_at > CURRENT_TIMESTAMP))::bigint AS active_users,
-        count(*) FILTER (WHERE $1::text IS NULL OR u.normalized_username LIKE $1::text ESCAPE '!')::bigint AS total
-        FROM viewer_user u", [filter.pattern.clone().into()])).await?.ok_or(ViewerUserError::Database)?;
-    // 在组装分页和概览前读取非负计数；字段读取或数值转换失败时中止本次查询响应。
-    let count = |key: &str| -> Result<u64, ViewerUserError> {
-        u64::try_from(counts.try_get::<i64>("", key)?).map_err(|_| ViewerUserError::Database)
+    let search = filter.pattern.map(|pattern| {
+        Expr::col((viewer_user::Entity, viewer_user::Column::NormalizedUsername))
+            .like(LikeExpr::new(pattern).escape('!'))
+    });
+    // CASE 只给满足条件的用户产生非空值，COUNT 因此只计算匹配用户，各会话不会重复计数。
+    let matching_count = match &search {
+        Some(condition) => Expr::expr(CaseStatement::new().case(condition.clone(), 1)).count(),
+        None => Expr::col(Asterisk).count(),
     };
-    let total = count("total")?;
-    let total_users = count("total_users")?;
-    let active_users = count("active_users")?;
-    // SQL 结构只拼接固定列，搜索、LIMIT 和 OFFSET 均使用绑定参数。
-    let rows = tx.query_all(Statement::from_sql_and_values(DatabaseBackend::Postgres,
-        format!("SELECT {USER_COLUMNS} FROM viewer_user u WHERE $1::text IS NULL OR u.normalized_username LIKE $1::text ESCAPE '!' ORDER BY u.created_at DESC, u.id ASC LIMIT $2 OFFSET $3"),
-        [filter.pattern.into(), (PAGE_SIZE as i64).into(), (filter.offset as i64).into()])).await?;
-    let items = rows
-        .iter()
-        .map(|row| ViewerUserRow::from_query_result(row, "").map(Into::into))
-        .collect::<Result<Vec<_>, _>>()?;
-    let latest_user = tx.query_one(Statement::from_string(DatabaseBackend::Postgres,
-        format!("SELECT {USER_COLUMNS} FROM viewer_user u ORDER BY u.created_at DESC, u.id ASC LIMIT 1"))).await?
-        .as_ref().map(|row| ViewerUserRow::from_query_result(row, "").map(Into::into)).transpose()?;
+    let counts = viewer_user::Entity::find()
+        .select_only()
+        .expr_as(Expr::col(Asterisk).count(), "total_users")
+        .expr_as(
+            Expr::expr(CaseStatement::new().case(has_active_session(), 1)).count(),
+            "active_users",
+        )
+        .expr_as(matching_count, "matching_users")
+        .into_model::<ViewerUserCounts>()
+        .one(&tx)
+        .await?
+        .ok_or(ViewerUserError::Database)?;
+    let count = |value: i64| u64::try_from(value).map_err(|_| ViewerUserError::Database);
+    let total = count(counts.matching_users)?;
+    let total_users = count(counts.total_users)?;
+    let active_users = count(counts.active_users)?;
+    let mut page = summaries();
+    if let Some(search) = search {
+        page = page.filter(search);
+    }
+    let items = page
+        .limit(PAGE_SIZE)
+        .offset(filter.offset)
+        .into_model::<ViewerUserRow>()
+        .all(&tx)
+        .await?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let latest_user = summaries()
+        .into_model::<ViewerUserRow>()
+        .one(&tx)
+        .await?
+        .map(Into::into);
     tx.commit().await?;
     Ok(ViewerUserPage {
         page: filter.page,

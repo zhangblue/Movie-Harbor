@@ -1,60 +1,108 @@
 use super::dto::{ADMIN_CONTENT_PAGE_SIZE, AdminContentFilter, AdminContentItem, AdminContentPage};
+use crate::entities::{media_asset, movie, series};
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    AccessMode, ConnectionTrait, DatabaseBackend, DatabaseConnection, DbErr, FromQueryResult,
-    IsolationLevel, Statement, TransactionTrait,
+    AccessMode, ConnectionTrait, DatabaseConnection, DbErr, FromQueryResult, IsolationLevel,
+    TransactionTrait,
+    sea_query::{
+        Alias, Asterisk, BinOper, Expr, Func, IntoTableRef, JoinType, Order, Query,
+        SelectStatement, UnionType,
+    },
 };
 use uuid::Uuid;
 
-// 电影和剧集先投影为同一结构，随后才能按统一筛选条件统计总数。
-const ADMIN_CONTENT_COUNT_SQL: &str = r#"
-WITH candidates AS (
-    SELECT movie.id, 'movie'::text AS kind, movie.name, movie.status,
-           movie.version, movie.created_at, movie.poster_asset_id, movie.is_private
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND ($2::text IS NULL OR movie.status = $2::text)
-      AND ($3::text IS NULL OR lower(movie.name) LIKE lower($3::text) ESCAPE '!')
-      AND ($4::boolean IS NULL OR movie.is_private = $4::boolean)
-    UNION ALL
-    SELECT series.id, 'series'::text AS kind, series.name, series.status,
-           series.version, series.created_at, series.poster_asset_id, series.is_private
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND ($2::text IS NULL OR series.status = $2::text)
-      AND ($3::text IS NULL OR lower(series.name) LIKE lower($3::text) ESCAPE '!')
-      AND ($4::boolean IS NULL OR series.is_private = $4::boolean)
-)
-SELECT count(*)::bigint AS total
-FROM candidates
-"#;
+// 构造单种内容的公共投影，供后台列表在数据库内统一筛选与分页。
+fn content_branch(
+    table: impl IntoTableRef,
+    kind: &'static str,
+    filter: &AdminContentFilter,
+) -> SelectStatement {
+    let mut query = Query::select();
+    query
+        .columns(
+            [
+                "id",
+                "name",
+                "status",
+                "version",
+                "created_at",
+                "poster_asset_id",
+                "is_private",
+            ]
+            .map(Alias::new),
+        )
+        .expr_as(
+            Expr::val(kind).cast_as(Alias::new("text")),
+            Alias::new("kind"),
+        )
+        .from(table);
+    if let Some(status) = &filter.status {
+        query.and_where(Expr::col(Alias::new("status")).eq(status));
+    }
+    if let Some(is_private) = filter.is_private {
+        query.and_where(Expr::col(Alias::new("is_private")).eq(is_private));
+    }
+    if let Some(pattern) = &filter.name_pattern {
+        // 两端都交给 PostgreSQL 转换大小写，并显式保留搜索的字面通配符转义。
+        query.and_where(
+            Expr::expr(Func::lower(Expr::col(Alias::new("name")))).binary(
+                BinOper::Like,
+                Expr::expr(Func::lower(Expr::val(pattern))).binary(BinOper::Escape, Expr::val("!")),
+            ),
+        );
+    }
+    query
+}
 
-pub const ADMIN_CONTENT_ITEMS_SQL: &str = r#"
-WITH candidates AS (
-    SELECT movie.id, 'movie'::text AS kind, movie.name, movie.status,
-           movie.version, movie.created_at, movie.poster_asset_id, movie.is_private
-    FROM movie
-    WHERE $1::text IN ('all', 'movie')
-      AND ($2::text IS NULL OR movie.status = $2::text)
-      AND ($3::text IS NULL OR lower(movie.name) LIKE lower($3::text) ESCAPE '!')
-      AND ($4::boolean IS NULL OR movie.is_private = $4::boolean)
-    UNION ALL
-    SELECT series.id, 'series'::text AS kind, series.name, series.status,
-           series.version, series.created_at, series.poster_asset_id, series.is_private
-    FROM series
-    WHERE $1::text IN ('all', 'series')
-      AND ($2::text IS NULL OR series.status = $2::text)
-      AND ($3::text IS NULL OR lower(series.name) LIKE lower($3::text) ESCAPE '!')
-      AND ($4::boolean IS NULL OR series.is_private = $4::boolean)
-)
-SELECT candidates.id, candidates.kind, candidates.name, candidates.status,
-       candidates.version, candidates.created_at, candidates.is_private,
-       poster.storage_key AS poster_storage_key
-FROM candidates
-LEFT JOIN media_asset poster ON poster.id = candidates.poster_asset_id
-ORDER BY candidates.created_at DESC, candidates.kind ASC, candidates.id ASC
-LIMIT $5 OFFSET $6
-"#;
+// 合并选中的内容类型，供总数和条目查询复用同一组筛选条件。
+fn candidates(filter: &AdminContentFilter) -> SelectStatement {
+    if filter.kind == "series" {
+        return content_branch(series::Entity, "series", filter);
+    }
+    let mut query = content_branch(movie::Entity, "movie", filter);
+    if filter.kind != "movie" {
+        query.union(
+            UnionType::All,
+            content_branch(series::Entity, "series", filter),
+        );
+    }
+    query
+}
+
+// 构造带海报及稳定排序的分页查询，只读取当前页需要的字段。
+fn items_query(candidates: SelectStatement, offset: u64) -> SelectStatement {
+    let content = Alias::new("candidates");
+    Query::select()
+        .columns(
+            [
+                "id",
+                "kind",
+                "name",
+                "status",
+                "version",
+                "created_at",
+                "is_private",
+            ]
+            .map(|column| (content.clone(), Alias::new(column))),
+        )
+        .expr_as(
+            Expr::col((media_asset::Entity, media_asset::Column::StorageKey)),
+            Alias::new("poster_storage_key"),
+        )
+        .from_subquery(candidates, content.clone())
+        .join(
+            JoinType::LeftJoin,
+            media_asset::Entity,
+            Expr::col((media_asset::Entity, media_asset::Column::Id))
+                .equals((content.clone(), Alias::new("poster_asset_id"))),
+        )
+        .order_by((content.clone(), Alias::new("created_at")), Order::Desc)
+        .order_by((content.clone(), Alias::new("kind")), Order::Asc)
+        .order_by((content, Alias::new("id")), Order::Asc)
+        .limit(ADMIN_CONTENT_PAGE_SIZE)
+        .offset(offset)
+        .take()
+}
 
 #[derive(Debug, FromQueryResult)]
 // 承载管理内容查询行，供映射分页响应时使用。
@@ -81,40 +129,24 @@ pub async fn list(
             Some(AccessMode::ReadOnly),
         )
         .await?;
-    // 所有筛选值都作为绑定参数传入，名称中的通配符不会改变 SQL 的筛选结构。
+    // 两条语句共享候选集合，筛选、分页和投影均由查询构造器生成。
+    let candidates = candidates(&filter);
+    let backend = transaction.get_database_backend();
+    let total_query = Query::select()
+        .expr_as(Expr::col(Asterisk).count(), Alias::new("total"))
+        .from_subquery(candidates.clone(), Alias::new("candidates"))
+        .take();
     let total_row = transaction
-        .query_one(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            ADMIN_CONTENT_COUNT_SQL,
-            vec![
-                filter.kind.clone().into(),
-                filter.status.clone().into(),
-                filter.name_pattern.clone().into(),
-                filter.is_private.into(),
-            ],
-        ))
+        .query_one(backend.build(&total_query))
         .await?
         .ok_or_else(|| DbErr::Custom("admin content count returned no row".into()))?;
     let total = u64::try_from(total_row.try_get::<i64>("", "total")?)
         .map_err(|_| DbErr::Custom("admin content count was negative".into()))?;
-    // 用创建时间、内容类型和 ID 的稳定顺序分页，避免相同时间的记录在翻页时重排。
-    let rows = transaction
-        .query_all(Statement::from_sql_and_values(
-            DatabaseBackend::Postgres,
-            ADMIN_CONTENT_ITEMS_SQL,
-            vec![
-                filter.kind.into(),
-                filter.status.into(),
-                filter.name_pattern.into(),
-                filter.is_private.into(),
-                i64::try_from(ADMIN_CONTENT_PAGE_SIZE).unwrap().into(),
-                i64::try_from(filter.offset).unwrap().into(),
-            ],
-        ))
-        .await?
-        .iter()
-        .map(|row| AdminContentRow::from_query_result(row, ""))
-        .collect::<Result<Vec<_>, _>>()?;
+    // 只有分页查询读取海报，可独立验证先后的查询共享同一快照。
+    let items_statement = backend.build(&items_query(candidates, filter.offset));
+    let rows = AdminContentRow::find_by_statement(items_statement)
+        .all(&transaction)
+        .await?;
     let items = rows
         .into_iter()
         .map(|row| AdminContentItem {

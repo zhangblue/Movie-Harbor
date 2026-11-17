@@ -2,10 +2,11 @@ use super::{
     LocalMediaStorage, MediaError,
     storage::{RemovalOperation, RemovalSource},
 };
-use crate::entities::media_asset;
+use crate::entities::{episode, mcp_staged_poster, media_asset, movie, series};
 use sea_orm::{
-    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbBackend, DbErr,
-    EntityTrait, QueryFilter, Statement,
+    ColumnTrait, ConnectionTrait, DatabaseConnection, DatabaseTransaction, DbErr, EntityTrait,
+    QueryFilter, QuerySelect,
+    sea_query::{Condition, Expr, Query},
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::OwnedMutexGuard;
@@ -214,26 +215,46 @@ async fn is_referenced(
     asset_id: Uuid,
     storage_key: &str,
 ) -> Result<bool, MediaError> {
-    let row = db
-        .query_one(Statement::from_sql_and_values(
-            DbBackend::Postgres,
-            r#"SELECT EXISTS (
-                SELECT 1 FROM media_asset a
-                WHERE a.id = $1 AND a.storage_key = $2 AND EXISTS (
-                    SELECT 1 FROM movie WHERE poster_asset_id = a.id OR video_asset_id = a.id
-                    UNION ALL SELECT 1 FROM series WHERE poster_asset_id = a.id
-                    UNION ALL SELECT 1 FROM episode WHERE video_asset_id = a.id
-                    UNION ALL SELECT 1 FROM mcp_staged_poster WHERE asset_id = a.id
-                )
-            ) AS referenced"#,
-            [asset_id.into(), storage_key.into()],
-        ))
+    // 在同一条查询中确认完整的资产键和引用，防止恢复跨越事务可见性边界。
+    let movie = Query::select()
+        .expr(Expr::value(1))
+        .from(movie::Entity)
+        .cond_where(
+            Condition::any()
+                .add(Expr::col(movie::Column::PosterAssetId).eq(asset_id))
+                .add(Expr::col(movie::Column::VideoAssetId).eq(asset_id)),
+        )
+        .to_owned();
+    let series = Query::select()
+        .expr(Expr::value(1))
+        .from(series::Entity)
+        .and_where(Expr::col(series::Column::PosterAssetId).eq(asset_id))
+        .to_owned();
+    let episode = Query::select()
+        .expr(Expr::value(1))
+        .from(episode::Entity)
+        .and_where(Expr::col(episode::Column::VideoAssetId).eq(asset_id))
+        .to_owned();
+    let staged_poster = Query::select()
+        .expr(Expr::value(1))
+        .from(mcp_staged_poster::Entity)
+        .and_where(Expr::col(mcp_staged_poster::Column::AssetId).eq(asset_id))
+        .to_owned();
+    Ok(media_asset::Entity::find_by_id(asset_id)
+        .select_only()
+        .column(media_asset::Column::Id)
+        .filter(media_asset::Column::StorageKey.eq(storage_key))
+        .filter(
+            Condition::any()
+                .add(Expr::exists(movie))
+                .add(Expr::exists(series))
+                .add(Expr::exists(episode))
+                .add(Expr::exists(staged_poster)),
+        )
+        .into_tuple::<Uuid>()
+        .one(db)
         .await?
-        .ok_or(MediaError::Database(sea_orm::DbErr::RecordNotFound(
-            "recovery reference result".into(),
-        )))?;
-    row.try_get::<bool>("", "referenced")
-        .map_err(MediaError::Database)
+        .is_some())
 }
 
 /// 在媒体删除或恢复开始时取得全局变更锁。

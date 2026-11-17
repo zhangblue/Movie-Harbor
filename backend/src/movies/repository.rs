@@ -22,7 +22,7 @@ pub async fn set_privacy(
             movie::Column::Version,
             Expr::col(movie::Column::Version).add(1),
         )
-        .col_expr(movie::Column::UpdatedAt, Expr::cust("CURRENT_TIMESTAMP"))
+        .col_expr(movie::Column::UpdatedAt, Expr::current_timestamp().into())
         .filter(movie::Column::Id.eq(id))
         .filter(movie::Column::Version.eq(expected_version))
         .exec_with_returning(tx)

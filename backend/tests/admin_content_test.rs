@@ -9,10 +9,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use movie_harbor_api::{
-    admin_content::{
-        dto::AdminContentFilter,
-        query::{self, ADMIN_CONTENT_ITEMS_SQL},
-    },
+    admin_content::{dto::AdminContentFilter, query},
     app,
     config::Config,
 };
@@ -122,12 +119,8 @@ async fn list(app: &Router, cookie: &str, query: &str) -> Value {
 
 /// 在快照并发测试中等待列表查询进入数据库锁等待。
 async fn wait_for_locked_items_query(db: &DatabaseConnection) {
-    let marker = ADMIN_CONTENT_ITEMS_SQL
-        .trim()
-        .lines()
-        .take(3)
-        .collect::<Vec<_>>()
-        .join("\n");
+    // 只匹配条目查询特有的结果列，避免把仅统计总数的查询误识别为分页语句。
+    let marker = "poster_storage_key";
     for _ in 0..300 {
         let row = db
             .query_one(Statement::from_sql_and_values(
@@ -144,7 +137,7 @@ SELECT EXISTS (
       AND lock.relation = to_regclass('media_asset')::oid
 ) AS blocked
 "#,
-                vec![marker.clone().into()],
+                vec![marker.into()],
             ))
             .await
             .unwrap()
