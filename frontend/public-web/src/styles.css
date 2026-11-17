@@ -88,7 +88,8 @@ h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; o
 .episode-navigation { margin-top: 22px; }
 .episode-navigation .pill { white-space: normal; text-align: left; }
 .episode-picker { min-width: 0; padding: 22px; border: 1px solid var(--mh-color-border); border-radius: var(--mh-radius-lg); background: var(--mh-color-surface); }
-.episode-picker h2 { margin-top: 0; }
+.episode-picker-series-name { margin: 0 0 4px; color: var(--mh-color-accent); font-size: 1rem; font-weight: 600; overflow-wrap: anywhere; }
+.episode-picker h2 { margin: 0 0 10px; font-size: 1.125rem; }
 .episode-picker-list { display: grid; gap: 7px; margin-top: 18px; }
 .episode-picker-list button { width: 100%; padding: 12px; border: 1px solid var(--mh-color-border); border-radius: 8px; background: #121721; color: var(--mh-color-text); text-align: left; cursor: pointer; }
 .episode-picker-list button:hover, .episode-picker-list button.is-current { border-color: #7485ad; background: var(--mh-color-surface-hover); }

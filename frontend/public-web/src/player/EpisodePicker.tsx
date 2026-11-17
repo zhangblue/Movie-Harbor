@@ -2,8 +2,9 @@ import { useState } from "react";
 import type { PublicSeason } from "@movie-harbor/api-client";
 import { orderedPlayableEpisodes, orderSeasons, type OrderedEpisode } from "../series/ordering";
 
-// 由剧集播放器渲染季和单集选择入口。
-export function EpisodePicker({ seasons, current, select }: {
+// 由剧集播放器显示当前剧名，并渲染季和单集的选择入口。
+export function EpisodePicker({ seriesName, seasons, current, select }: {
+  seriesName: string;
   seasons: PublicSeason[];
   current: OrderedEpisode;
   select: (episode: OrderedEpisode) => void;
@@ -13,6 +14,7 @@ export function EpisodePicker({ seasons, current, select }: {
   const seasonNumber = pickedSeason?.episodeId === current.id ? pickedSeason.number : current.seasonNumber;
   const episodes = orderedPlayableEpisodes(orderedSeasons).filter((item) => item.seasonNumber === seasonNumber);
   return <aside className="episode-picker" aria-labelledby="episode-picker-title">
+    <p className="episode-picker-series-name">{seriesName}</p>
     <h2 id="episode-picker-title">选集</h2>
     <div className="season-switch" role="group" aria-label="选择季">
       {orderedSeasons.map((season) => <button key={season.id} type="button"

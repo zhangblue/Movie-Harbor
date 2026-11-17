@@ -42,3 +42,49 @@ test("按账号查看和翻阅对话", async () => {
   expect(screen.queryByText("较早的问题")).toBeNull();
   expect(listAgentAudit).toHaveBeenLastCalledWith(admin, undefined);
 });
+
+// 从第二页筛选时应回到首页，切换账号和翻页应沿用已应用的日期。
+test("按包含首尾两天的日期范围筛选对话", async () => {
+  vi.resetAllMocks();
+  const viewer = { id: "viewer", account: "Alice", account_role: "viewer", turn_count: 30 } as const;
+  const admin = { id: "admin", account: "Admin", account_role: "admin", turn_count: 9 } as const;
+  vi.mocked(listAgentAuditAccounts).mockResolvedValue([viewer, admin]);
+  vi.mocked(listAgentAudit)
+    .mockResolvedValueOnce({ items: [], next: "unfiltered" })
+    .mockResolvedValueOnce({ items: [], next: null })
+    .mockResolvedValueOnce({ items: [], next: "filtered", total: 21 })
+    .mockResolvedValueOnce({ items: [], next: null, total: 21 })
+    .mockResolvedValueOnce({ items: [], next: null, total: 0 })
+    .mockResolvedValueOnce({ items: [], next: null });
+  render(<AgentAuditPage onExpired={vi.fn()} />);
+  await screen.findByText("暂无对话记录。");
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByText("第 2 页");
+  const start = screen.getByLabelText("开始日期");
+  const end = screen.getByLabelText("结束日期");
+  fireEvent.change(start, { target: { value: "2026-11-17" } });
+  fireEvent.change(end, { target: { value: "2026-11-16" } });
+  fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+  await screen.findByText("开始日期不能晚于结束日期。");
+  expect(listAgentAudit).toHaveBeenCalledTimes(2);
+  fireEvent.change(start, { target: { value: "2026-11-16" } });
+  fireEvent.click(screen.getByRole("button", { name: "筛选" }));
+  await screen.findByText("匹配 21 轮对话");
+  expect(screen.getByText("第 1 页")).toBeTruthy();
+  const range = {
+    startAt: new Date("2026-11-16T00:00:00").toISOString(),
+    endBefore: new Date("2026-11-17T00:00:00").toISOString(),
+  };
+  expect(listAgentAudit).toHaveBeenLastCalledWith(viewer, undefined, range);
+  fireEvent.click(screen.getByRole("button", { name: "下一页" }));
+  await screen.findByText("匹配 21 轮对话");
+  expect(listAgentAudit).toHaveBeenLastCalledWith(viewer, "filtered", range);
+  fireEvent.click(screen.getByRole("button", { name: /Admin/ }));
+  await screen.findByText("所选日期范围内没有对话。");
+  expect(screen.getByText("第 1 页")).toBeTruthy();
+  expect(listAgentAudit).toHaveBeenLastCalledWith(admin, undefined, range);
+  expect(screen.getAllByDisplayValue("2026-11-16", { exact: true })).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: "清除" }));
+  await screen.findByText("暂无对话记录。");
+  expect(listAgentAudit).toHaveBeenLastCalledWith(admin, undefined);
+});

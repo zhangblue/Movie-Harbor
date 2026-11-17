@@ -21,9 +21,11 @@ use axum::{
     middleware,
     routing::{get, post},
 };
+use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, FromQueryResult, JoinType,
-    QueryFilter, QueryOrder, QuerySelect, RelationTrait, Select, Set,
+    AccessMode, ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    FromQueryResult, IsolationLevel, JoinType, PaginatorTrait, QueryFilter, QueryOrder,
+    QuerySelect, RelationTrait, Select, Set, TransactionTrait,
     sea_query::{Asterisk, Expr, Func, SimpleExpr},
 };
 use serde::{Deserialize, Serialize};
@@ -320,6 +322,9 @@ struct HistoryQuery {
 struct History {
     items: Vec<Turn>,
     next: Option<String>,
+    // 仅日期筛选时返回匹配总数；翻页游标不影响该数字。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
 }
 
 // 保留两类账号独立的外键关联，供个人历史和聚合审阅查询复用。
@@ -346,17 +351,74 @@ fn turn_account_role() -> SimpleExpr {
         .into()
 }
 
+// 记录按浏览器时区换算后的起止时刻，起点包含，终点排除。
+#[derive(Clone, Copy, Default)]
+struct HistoryDates {
+    start_at: Option<DateTime<FixedOffset>>,
+    end_before: Option<DateTime<FixedOffset>>,
+}
+
+impl HistoryDates {
+    // 选择同一天时前端会传次日零点；两个时刻相同或逆序都属于无效请求。
+    fn validate(self) -> Result<Self, StatusCode> {
+        if matches!((self.start_at, self.end_before), (Some(start), Some(end)) if start >= end) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        Ok(self)
+    }
+
+    // 判断是否需要执行额外的匹配计数及快照事务。
+    fn is_filtered(self) -> bool {
+        self.start_at.is_some() || self.end_before.is_some()
+    }
+
+    // 复用账号和日期条件，确保计数与记录查询覆盖同一范围。
+    fn filter(
+        self,
+        mut query: Select<agent_turn::Entity>,
+        owner: Option<Owner>,
+    ) -> Select<agent_turn::Entity> {
+        use agent_turn::Column;
+        query = match owner {
+            Some(Owner::Admin(id)) => query.filter(Column::AdminId.eq(id)),
+            Some(Owner::Viewer(id)) => query.filter(Column::ViewerId.eq(id)),
+            None => query,
+        };
+        if let Some(start) = self.start_at {
+            query = query.filter(Column::CreatedAt.gte(start));
+        }
+        if let Some(end) = self.end_before {
+            query = query.filter(Column::CreatedAt.lt(end));
+        }
+        query
+    }
+}
+
 // 使用参数绑定查询历史；仅审阅入口可以请求所有账号的记录。
 async fn history(
-    db: &DatabaseConnection,
+    db: &impl ConnectionTrait,
     owner: Option<Owner>,
     before: Option<i64>,
     limit: i64,
+    dates: HistoryDates,
 ) -> Result<History, StatusCode> {
     use agent_turn::Column;
 
     // 有完整本地回复时优先展示它；同时投影原始 reply 给下轮模型使用。
-    let mut select = turns_with_accounts()
+    // 总数在应用游标前计算；审阅路由使用同一个只读快照执行两个查询。
+    let total = if dates.is_filtered() {
+        Some(
+            dates
+                .filter(agent_turn::Entity::find(), owner)
+                .count(db)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        )
+    } else {
+        None
+    };
+    let mut select = dates
+        .filter(turns_with_accounts(), owner)
         .column_as(Column::Id, "turn_id")
         .expr_as(turn_account_name(), "account")
         .expr_as(turn_account_role(), "account_role")
@@ -370,12 +432,6 @@ async fn history(
         )
         .column_as(Column::Reply, "model_reply")
         .column(Column::CreatedAt);
-    // 会话身份决定账号筛选。管理员的跨账号审阅可省略该条件。
-    select = match owner {
-        Some(Owner::Admin(id)) => select.filter(Column::AdminId.eq(id)),
-        Some(Owner::Viewer(id)) => select.filter(Column::ViewerId.eq(id)),
-        None => select,
-    };
     // 使用严格小于而不是偏移量，并发插入的新对话不会挤进下一页。
     if let Some(before) = before {
         select = select.filter(Column::Id.lt(before));
@@ -395,7 +451,7 @@ async fn history(
     } else {
         None
     };
-    Ok(History { items, next })
+    Ok(History { items, next, total })
 }
 
 // 返回当前管理员自己的聊天记录，供其打开聊天框时读取。
@@ -409,6 +465,7 @@ async fn admin_history(
         Some(Owner::Admin(session.admin.id)),
         query.before,
         20,
+        HistoryDates::default(),
     )
     .await
     .map(Json)
@@ -425,6 +482,7 @@ async fn viewer_history(
         Some(Owner::Viewer(session.viewer.id)),
         query.before,
         20,
+        HistoryDates::default(),
     )
     .await
     .map(Json)
@@ -487,6 +545,8 @@ struct AuditQuery {
     account_id: Option<Uuid>,
     account_role: Option<AuditRole>,
     before: Option<i64>,
+    start_at: Option<DateTime<FixedOffset>>,
+    end_before: Option<DateTime<FixedOffset>>,
 }
 
 // 管理员查看指定账号的历史；未指定账号时沿用已有跨账号分页接口。
@@ -502,7 +562,30 @@ async fn audit(
         (None, None) => None,
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    history(&state.db, owner, query.before, 20).await.map(Json)
+    let dates = HistoryDates {
+        start_at: query.start_at,
+        end_before: query.end_before,
+    }
+    .validate()?;
+    if !dates.is_filtered() {
+        return history(&state.db, owner, query.before, 20, dates)
+            .await
+            .map(Json);
+    }
+    // 并发写入时也应让匹配总数和该页记录来自同一个快照。
+    let tx = state
+        .db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let page = history(&tx, owner, query.before, 20, dates).await?;
+    tx.commit()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(page))
 }
 
 // 使用管理员会话提交聊天，并启用草稿提议。
@@ -613,7 +696,7 @@ async fn model_reply(
         .as_deref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     // 只读当前账号最近五轮问答，并使用不含本地片库资料的模型上下文。
-    let past = history(&state.db, Some(owner), None, 5).await?;
+    let past = history(&state.db, Some(owner), None, 5, HistoryDates::default()).await?;
     let mut messages = Vec::with_capacity(11);
     // 历史接口按新到旧返回；向模型发送时按时间正序排列。
     for turn in past.items.into_iter().rev() {

@@ -89,7 +89,8 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate }: {
           <button type="button" className="pill" disabled={!next} onClick={() => { if (next) choose(next); }}>{navigationLabel("下一集", next)}</button>
         </div>
       </div>
-      <EpisodePicker key={selected.id} seasons={detail.seasons} current={selected} select={choose} />
+      {/* 选集板块使用剧集详情的名称，切季或切集时继续标识当前剧集。 */}
+      <EpisodePicker key={selected.id} seriesName={detail.name} seasons={detail.seasons} current={selected} select={choose} />
     </div>
   </section>;
 }

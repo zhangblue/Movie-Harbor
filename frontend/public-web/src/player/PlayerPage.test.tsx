@@ -204,13 +204,17 @@ it("shows each available adjacent episode name while retaining boundary labels",
   expect(next).toHaveTextContent("下一集：第 3 集 · 灯塔");
 });
 
-// 验证：按季和集排序选集并在最后一集禁用下一集。
+// 验证：剧名位于选集标题上方，跨季播放后仍显示当前剧名。
 it("selects episodes in season and episode order and disables the final next button", async () => {
   window.history.replaceState(null, "", "/series/series-1/play/ep-1");
   serve(() => json(series));
   const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
   render(<App />);
   await screen.findByRole("heading", { name: "第 1 集 · 启程" });
+  const picker = within(screen.getByRole("complementary", { name: "选集" }));
+  const seriesName = picker.getByText(series.name, { exact: true });
+  expect(seriesName).toBeVisible();
+  expect(seriesName.nextElementSibling).toBe(picker.getByRole("heading", { name: "选集" }));
   expect(within(screen.getByRole("complementary", { name: "选集" })).getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))
     .toEqual(["第 1 集 · 启程", "第 3 集 · 灯塔"]);
   await user.click(screen.getByRole("button", { name: "第 2 季" }));
@@ -218,6 +222,7 @@ it("selects episodes in season and episode order and disables the final next but
   await user.click(screen.getByRole("button", { name: "第 1 集 · 归途" }));
   expect(screen.getByRole("button", { name: "下一集" })).toBeDisabled();
   expect(window.location.pathname).toBe("/series/series-1/play/ep-3");
+  expect(within(screen.getByRole("complementary", { name: "选集" })).getByText(series.name, { exact: true })).toBeVisible();
   await user.click(screen.getByRole("button", { name: "上一集：第 3 集 · 灯塔" }));
   expect(screen.getByRole("button", { name: "第 1 季" })).toHaveAttribute("aria-pressed", "true");
   expect(within(screen.getByRole("complementary", { name: "选集" })).getAllByRole("button", { name: /第 \d 集 ·/ }).map((item) => item.textContent))

@@ -111,6 +111,59 @@ async fn agent_turns_are_owned_and_auditable() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // 模拟浏览器 UTC+08:00 的日期边界，验证结束日完整包含、账号隔离及筛选后分页。
+    db.execute_unprepared(
+        r#"
+        INSERT INTO agent_turn (viewer_id, prompt, reply, created_at) VALUES
+          ('00000000-0000-0000-0000-000000000001', 'before range', 'reply', '2000-11-15T15:59:59Z'),
+          ('00000000-0000-0000-0000-000000000001', 'inclusive start', 'reply', '2000-11-15T16:00:00Z'),
+          ('00000000-0000-0000-0000-000000000001', 'exclusive end', 'reply', '2000-11-16T16:00:00Z'),
+          ('00000000-0000-0000-0000-000000000002', 'another viewer', 'reply', '2000-11-16T10:00:00Z');
+        INSERT INTO agent_turn (viewer_id, prompt, reply, created_at)
+          SELECT '00000000-0000-0000-0000-000000000001', 'inside range', 'reply', '2000-11-16T15:59:59Z'
+          FROM generate_series(1, 20);
+        "#,
+    )
+    .await
+    .unwrap();
+    let filtered =
+        format!("{alice_history}&start_at=2000-11-15T16:00:00Z&end_before=2000-11-16T16:00:00Z");
+    let (status, page) = read(&app, &filtered, &admin_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 21);
+    assert_eq!(page["items"].as_array().unwrap().len(), 20);
+    assert!(
+        page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["prompt"] == "inside range")
+    );
+    let next = page["next"].as_str().unwrap();
+    let (status, page) = read(&app, &format!("{filtered}&before={next}"), &admin_cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 21);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["items"][0]["prompt"], "inclusive start");
+    assert!(page["next"].is_null());
+
+    let (status, page) = read(
+        &app,
+        &format!("{alice_history}&end_before=2000-11-15T16:00:00Z"),
+        &admin_cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["prompt"], "before range");
+    let (status, _) = read(
+        &app,
+        &format!("{alice_history}&start_at=2000-11-17T00:00:00Z&end_before=2000-11-16T00:00:00Z"),
+        &admin_cookie,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 // 通过真实路由读取历史，业务拒绝时保留状态用于断言。

@@ -141,7 +141,9 @@ INSERT INTO episode (id, season_id, number, name, status, published_at) VALUES
         assert!(response.reply.contains(expected), "{}", response.reply);
         assert!(!response.reply.contains(excluded), "{}", response.reply);
     }
-    let saved = history(&db, Some(viewer), None, 20).await.unwrap();
+    let saved = history(&*db, Some(viewer), None, 20, HistoryDates::default())
+        .await
+        .unwrap();
     assert!(saved.items[2].reply.contains("仅限本机的私密简介"));
     assert!(
         serde_json::to_value(saved).unwrap()["items"][2]

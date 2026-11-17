@@ -204,6 +204,12 @@ export interface AgentTurn {
 // 表示按最新记录排序的历史页及下一页游标。
 export interface AgentHistory { items: AgentTurn[]; next: string | null }
 
+// 管理员审阅的日期边界使用 RFC 3339，开始时刻包含、结束时刻排除。
+export interface AgentAuditDateRange { startAt?: string; endBefore?: string }
+
+// 日期筛选的匹配总数独立于当前页；未筛选时使用账号摘要里的轮数。
+export interface AgentAuditHistory extends AgentHistory { total?: number }
+
 
 // 汇总一个有助手对话的账号，供管理员按账号审阅。
 export interface AgentAuditAccount {
