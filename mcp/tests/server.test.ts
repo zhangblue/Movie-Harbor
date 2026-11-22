@@ -33,6 +33,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
       'inspect_video','validate_poster','convert_video','delete_generated_video',
       'search_movies','search_series','get_series_structure','list_genres','create_genre','stage_poster',
       'create_movie','create_series','create_season','create_episode','update_movie_metadata','update_series_metadata','update_episode_metadata',
+      'update_content_synopsis',
       'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','publish_movie','publish_episode','publish_series',
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
@@ -41,6 +42,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
       ['create_movie', ['synopsis', 'duration_minutes', 'visibility', 'confirmed']],
       ['create_series', ['synopsis', 'visibility', 'confirmed']],
       ['create_episode', ['name', 'duration_seconds', 'confirmed']],
+      ['update_content_synopsis', ['content_type', 'content_id', 'version', 'synopsis']],
       ['upload_movie_video', ['confirmed']],
     ] as const) {
       const tool = listed.tools.find(tool => tool.name === name);

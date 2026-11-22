@@ -41,6 +41,13 @@ export const updateSeriesInput = z.strictObject({ series_id: id, version, ...met
 // 供单集更新工具严格接收层级 ID、版本及至少一个可修改字段。
 export const updateEpisodeInput = z.strictObject({ series_id: id, season_id: id, episode_id: id, version, number: positiveInt.max(2_147_483_647).optional(), name: name.optional(), duration_seconds: duration.optional() })
   .refine(value => [value.number, value.name, value.duration_seconds].some(v => v !== undefined), '至少提供一个修改字段');
+// 供统一简介工具区分电影和剧集，并携带调用者确认过的版本与可清空简介。
+export const updateContentSynopsisInput = z.strictObject({
+  content_type: z.enum(['movie', 'series']),
+  content_id: id,
+  version,
+  synopsis: z.string(),
+});
 
 // API 解析仅保留声明字段，避免媒体路径和其他未声明响应字段进入工具输出。
 // 供内容 API 响应只保留可空媒体 ID，不暴露媒体路径。

@@ -9,6 +9,7 @@ import { registerLocalMediaTools, type LocalMediaDependencies } from './tools/lo
 import { registerMovieTools } from './tools/movies.js';
 import { registerPublishingTools } from './tools/publishing.js';
 import { registerSeriesTools } from './tools/series.js';
+import { registerSynopsisTools } from './tools/synopsis.js';
 import { registerUploadTools } from './tools/uploads.js';
 
 // 描述服务启动时组装的客户端与本地媒体依赖。
@@ -38,6 +39,8 @@ export function buildServer(services: Services): McpServer {
   registerGenreTools(server,services.client);
   registerMovieTools(server,{client:services.client,allowedRoots:services.config.allowedRoots});
   registerSeriesTools(server,services.client);
+  // 电影和剧集共用一个简介修改工具，必要时自动转换生命周期并保留草稿。
+  registerSynopsisTools(server,services.client);
   registerUploadTools(server,services);
   registerPublishingTools(server,services.client);
   return server;
