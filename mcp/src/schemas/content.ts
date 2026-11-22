@@ -46,7 +46,7 @@ export const updateContentSynopsisInput = z.strictObject({
   content_type: z.enum(['movie', 'series']),
   content_id: id,
   version,
-  synopsis: z.string(),
+  synopsis: z.string().trim(),
 });
 
 // API 解析仅保留声明字段，避免媒体路径和其他未声明响应字段进入工具输出。
@@ -56,12 +56,16 @@ const media = z.object({ id }).nullable();
 const base = { id, name: z.string(), year: year.nullable(), status, version, is_private: z.boolean(), poster: media };
 // 供电影查询、创建和更新校验 API 响应，只保留声明的时长和媒体字段。
 export const apiMovie = z.object({ ...base, duration_seconds: duration.nullable(), video: media });
+// 供简介修改工具读回电影时额外校验简介，避免把并发的其他更新误判为本次成功。
+export const apiMovieWithSynopsis = apiMovie.extend({ synopsis: z.string() });
 // 供剧集结构及单集工具校验 API 单集字段和可空视频。
 export const apiEpisode = z.object({ id, number: positiveInt, name: z.string(), duration_seconds: duration.nullable(), status, version, video: media });
 // 供剧集 API 响应校验季标识、序号和单集列表。
 export const apiSeason = z.object({ id, number: positiveInt, episodes: z.array(apiEpisode) });
 // 供剧集工具校验 API 响应中的基本字段和季列表。
 export const apiSeries = z.object({ ...base, seasons: z.array(apiSeason) });
+// 供简介修改工具读回剧集时额外校验简介，支持响应丢失后的精确恢复判断。
+export const apiSeriesWithSynopsis = apiSeries.extend({ synopsis: z.string() });
 // 供题材工具校验 API 响应，只保留标识、名称和启用状态。
 export const apiGenre = z.object({ id, name: z.string(), enabled: z.boolean() });
 // 供单集工具校验 API 单集、季归属和父剧集版本。

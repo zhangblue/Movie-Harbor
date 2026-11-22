@@ -45,7 +45,8 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
         },
         Method::POST => match segments.as_slice() {
             ["genres" | "movies" | "series"] | ["media", "posters", "stage"] => true,
-            ["movies" | "series", id, "publish"] | ["series", id, "seasons"] => uuid(id),
+            ["movies" | "series", id, "publish" | "archive" | "draft"]
+            | ["series", id, "seasons"] => uuid(id),
             ["series", series, "seasons", season, "episodes"] => uuid(series) && uuid(season),
             [
                 "series",

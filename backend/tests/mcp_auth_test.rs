@@ -46,10 +46,26 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
             "POST",
             "/api/admin/movies/00000000-0000-4000-8000-000000000001/publish",
         ),
+        (
+            "POST",
+            "/api/admin/movies/00000000-0000-4000-8000-000000000001/archive",
+        ),
+        (
+            "POST",
+            "/api/admin/movies/00000000-0000-4000-8000-000000000001/draft",
+        ),
         ("POST", "/api/admin/series"),
         (
             "POST",
             "/api/admin/series/00000000-0000-4000-8000-000000000001/publish",
+        ),
+        (
+            "POST",
+            "/api/admin/series/00000000-0000-4000-8000-000000000001/archive",
+        ),
+        (
+            "POST",
+            "/api/admin/series/00000000-0000-4000-8000-000000000001/draft",
         ),
         (
             "POST",
@@ -98,10 +114,6 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
         ("GET", "/api/admin/genres/"),
         ("GET", "/api/admin/genres/anything"),
         ("GET", "/api/admin/movies/not-a-uuid"),
-        (
-            "POST",
-            "/api/admin/movies/00000000-0000-4000-8000-000000000001/archive",
-        ),
         (
             "POST",
             "/api/admin/media/movies/00000000-0000-4000-8000-000000000001/poster",
@@ -226,8 +238,6 @@ async fn bearer_denies_every_unlisted_management_operation() {
         ("HEAD", "/api/admin/genres".into()),
         ("PUT", format!("/api/admin/movies/{ID}/privacy")),
         ("DELETE", format!("/api/admin/movies/{ID}")),
-        ("POST", format!("/api/admin/movies/{ID}/archive")),
-        ("POST", format!("/api/admin/movies/{ID}/draft")),
         ("GET", format!("/api/admin/movies/{ID}/delete-impact")),
         ("POST", format!("/api/admin/media/movies/{ID}/poster")),
         ("POST", format!("/api/admin/media/series/{ID}/poster")),
@@ -240,6 +250,31 @@ async fn bearer_denies_every_unlisted_management_operation() {
                 .status(),
             StatusCode::UNAUTHORIZED,
             "{method} {path}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+// Catches allowing the route matcher but rejecting the Bearer principal before existing lifecycle handlers run.
+#[tokio::test]
+/// 验证 Bearer 凭据可进入电影和剧集的归档、转草稿接口，供统一简介工具复用。
+async fn bearer_can_reach_movie_and_series_archive_and_draft_routes() {
+    let (_db, app, root) = setup(true).await;
+    let bearer = format!("Bearer {KEY}");
+    let headers = [("host", "harbor.test"), ("authorization", bearer.as_str())];
+    for path in [
+        format!("/api/admin/movies/{ID}/archive"),
+        format!("/api/admin/movies/{ID}/draft"),
+        format!("/api/admin/series/{ID}/archive"),
+        format!("/api/admin/series/{ID}/draft"),
+    ] {
+        // 缺少版本时应在通过授权后由请求提取返回 422；若白名单遗漏则会提前返回 401。
+        assert_eq!(
+            send(&app, "POST", &path, json!({}), &headers)
+                .await
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "POST {path}"
         );
     }
     std::fs::remove_dir_all(root).unwrap();
