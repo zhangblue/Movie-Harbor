@@ -2,6 +2,26 @@ import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
 import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublishableMovie, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Movie, type ViewerUser } from "./helpers";
 
+// 验证匿名请求不能读取系统事实，管理员页面只展示卷、版本、统计和备份边界。
+test("system overview is administrator-only and exposes no operational write actions", async ({ page, request }) => {
+  expect((await request.get("/api/admin/system/overview")).status()).toBe(401);
+
+  // 通过真实后台会话进入系统设置，覆盖反向代理、认证、API 与页面的完整只读链路。
+  await page.goto("/admin/");
+  await page.getByLabel("管理员名称").fill(adminName);
+  await page.getByLabel("密码").fill(initialPassword);
+  await page.getByRole("button", { name: "登录" }).click();
+  await page.getByRole("button", { name: "系统设置", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "系统概览" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "媒体卷 0" })).toBeVisible();
+  await expect(page.getByText(/^版本 /)).toBeVisible();
+  await expect(page.getByRole("region", { name: "资源摘要" })).toContainText("电影");
+  await expect(page.getByRole("region", { name: "资源摘要" })).toContainText("海报");
+  await expect(page.getByRole("region", { name: "备份边界" })).toContainText("备份状态：应用无法验证");
+  await expect(page.getByRole("button", { name: /立即备份|恢复|清理|检查更新|迁移|重启/ })).toHaveCount(0);
+});
+
 // 验证用户管理保留 Unicode 用户名，改密或删除撤销全部会话。
 test("user management preserves Unicode usernames and resets or deletes every viewer session", async ({ page, playwright }) => {
   // 管理 API 会话用于核对浏览器操作结果，并为私密媒体断言准备内容。
