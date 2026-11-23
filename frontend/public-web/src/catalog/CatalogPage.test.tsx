@@ -14,7 +14,7 @@ styleElement.textContent = publicStyles.replace(/^@import[^;]+;/, "");
 document.head.append(styleElement);
 
 // 目录测试开始时回到首页，避免前一用例的搜索或页码参数残留。
-beforeEach(() => window.history.replaceState(null, "", "/"));
+beforeEach(() => window.history.replaceState(null, "", "/browse"));
 // 目录测试结束后卸载页面并恢复网络替身，隔离下一次加载。
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -66,12 +66,12 @@ it("searches the API including synopsis matches and renders an empty result", as
 
 // 验证：从查询深链和浏览器历史恢复目录。
 it("restores query deep links and browser navigation", async () => {
-  window.history.replaceState(null, "", "/?kind=movie&q=山海");
+  window.history.replaceState(null, "", "/browse?kind=movie&q=山海");
   serve((url) => catalog(url.searchParams.get("kind") === "series" ? [seriesCard] : [movieCard]));
   render(<App />);
   await screen.findByRole("link", { name: "查看远方来信详情" });
   expect(screen.getByRole("searchbox")).toHaveValue("山海");
-  act(() => { window.history.pushState(null, "", "/?kind=series"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  act(() => { window.history.pushState(null, "", "/browse?kind=series"); window.dispatchEvent(new PopStateEvent("popstate")); });
   await screen.findByRole("link", { name: "查看群星之间详情" });
   expect(screen.getByRole("button", { name: "剧集" })).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("searchbox")).toHaveValue("");
@@ -150,7 +150,7 @@ it("requests a fixed public page size of 20", async () => {
 
 // 验证：展示紧凑数字页码并直接跳转第六页。
 it("offers a compact numeric window and navigates directly to page 6", async () => {
-  window.history.replaceState(null, "", "/?page=5");
+  window.history.replaceState(null, "", "/browse?page=5");
   const requests: URL[] = [];
   serve((url) => {
     requests.push(url);
@@ -164,7 +164,7 @@ it("offers a compact numeric window and navigates directly to page 6", async () 
   await user.click(within(initialNavigation).getByRole("button", { name: "第 6 页" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
   expect(screen.getByRole("heading", { name: "全部影片" })).toHaveFocus();
-  expect(location.pathname + location.search).toBe("/?page=6");
+  expect(location.pathname + location.search).toBe("/browse?page=6");
   expect(requests.at(-1)?.searchParams.get("page")).toBe("6");
   expect(requests.at(-1)?.searchParams.get("size")).toBe("20");
 
@@ -178,7 +178,7 @@ it("offers a compact numeric window and navigates directly to page 6", async () 
 
 // 验证：越界页替换为最后一页且不闪现空结果。
 it("replaces an out-of-range page with the last page without flashing an empty result", async () => {
-  window.history.replaceState(null, "", "/?page=99");
+  window.history.replaceState(null, "", "/browse?page=99");
   const replaceState = vi.spyOn(window.history, "replaceState");
   const requestedPages: string[] = [];
   const renderedText: string[] = [];
@@ -193,15 +193,15 @@ it("replaces an out-of-range page with the last page without flashing an empty r
   render(<App />);
   expect(await screen.findByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
   observer.disconnect();
-  expect(location.pathname + location.search).toBe("/?page=2");
-  expect(replaceState).toHaveBeenCalledWith(null, "", "/?page=2");
+  expect(location.pathname + location.search).toBe("/browse?page=2");
+  expect(replaceState).toHaveBeenCalledWith(null, "", "/browse?page=2");
   expect(requestedPages).toEqual(["99", "99", "2"]);
   expect(renderedText.some((text) => text.includes("没有找到匹配内容"))).toBe(false);
 });
 
 // 验证：空目录的越界地址替换为首页地址。
 it("replaces an out-of-range empty catalog URL with the first-page URL", async () => {
-  window.history.replaceState(null, "", "/?page=99");
+  window.history.replaceState(null, "", "/browse?page=99");
   const replaceState = vi.spyOn(window.history, "replaceState");
   const requestedPages: string[] = [];
   serve((url) => {
@@ -211,8 +211,8 @@ it("replaces an out-of-range empty catalog URL with the first-page URL", async (
   });
 
   render(<App />);
-  await waitFor(() => expect(location.pathname + location.search).toBe("/"));
-  expect(replaceState).toHaveBeenCalledWith(null, "", "/");
+  await waitFor(() => expect(location.pathname + location.search).toBe("/browse"));
+  expect(replaceState).toHaveBeenCalledWith(null, "", "/browse");
   expect(requestedPages).toEqual(["99", "99", "1"]);
   expect(await screen.findByText("没有找到匹配内容")).toBeInTheDocument();
 });
@@ -264,7 +264,7 @@ it("restores page 2 from browser navigation", async () => {
   await screen.findByRole("link", { name: "查看远方来信详情" });
 
   act(() => {
-    window.history.pushState(null, "", "/?page=2");
+    window.history.pushState(null, "", "/browse?page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
 
@@ -274,7 +274,7 @@ it("restores page 2 from browser navigation", async () => {
 
 // 验证：更改类型或搜索词时从 URL 移除页码。
 it("removes page from the URL when changing kind or search", async () => {
-  window.history.replaceState(null, "", "/?page=2");
+  window.history.replaceState(null, "", "/browse?page=2");
   serve((url) => {
     const page = Number(url.searchParams.get("page") ?? 1);
     return json({ items: [movieCard], total: 40, page, size: 20 });
@@ -287,7 +287,7 @@ it("removes page from the URL when changing kind or search", async () => {
   await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
 
   act(() => {
-    window.history.pushState(null, "", "/?kind=movie&page=2");
+    window.history.pushState(null, "", "/browse?kind=movie&page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   await waitFor(() => expect(screen.getByRole("button", { name: "第 2 页" })).toHaveAttribute("aria-current", "page"));
@@ -310,7 +310,7 @@ it("ignores a stale page response after browser navigation selects another page"
   await user.click(screen.getByRole("button", { name: "第 2 页" }));
   expect(screen.getByRole("status")).toHaveTextContent("正在加载");
   act(() => {
-    window.history.pushState(null, "", "/");
+    window.history.pushState(null, "", "/browse");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   await screen.findByRole("link", { name: "查看远方来信详情" });

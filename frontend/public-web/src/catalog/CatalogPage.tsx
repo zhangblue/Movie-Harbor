@@ -40,7 +40,7 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
     if (nextPage !== 1) updated.set("page", String(nextPage));
     const encoded = updated.toString();
     if (next.page !== undefined && next.page !== page) focusAfterLoad.current = true;
-    navigate(encoded ? `/?${encoded}` : "/", replace);
+    navigate(encoded ? `/browse?${encoded}` : "/browse", replace);
   }, [kind, query, privateOnly, page, navigate]);
 
   // 身份确认或退出后去掉匿名用户无权使用的私密筛选，同时重置分页并替换当前历史项。

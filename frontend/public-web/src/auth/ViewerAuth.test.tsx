@@ -149,6 +149,7 @@ it("does not revalidate an anonymous viewer when a public poster fails", async (
 
 // 验证：初始会话返回 401 后丢弃身份发现前的私密目录。
 it("discards a pre-discovery private catalog after the initial session returns 401", async () => {
+  window.history.replaceState(null, "", "/browse");
   const state = server();
   const session = deferred<Response>(); const old = deferred<Response>();
   state.sessionResponse = session.promise; state.catalogResponse = old.promise;
@@ -204,7 +205,7 @@ it("keeps anonymous browsing available when session discovery has a network erro
 
 // 验证：登录后刷新当前目录查询并显示用户名及账号操作。
 it("logs in, refreshes the current catalog query, and exposes username and account actions", async () => {
-  window.history.replaceState(null, "", "/?kind=series&q=星&page=2");
+  window.history.replaceState(null, "", "/browse?kind=series&q=星&page=2");
   const state = server(); render(<App />); await login();
   expect(await screen.findByText("Summer")).toBeInTheDocument();
   expect(await screen.findByRole("link", { name: "查看群星之间详情" })).toBeInTheDocument();
@@ -289,6 +290,7 @@ it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series
 
 // 验证：焦点校验发现会话撤销后移除私密数据并忽略旧响应。
 it("removes private data after a revoked session on focus and ignores an old authenticated response", async () => {
+  window.history.replaceState(null, "", "/browse");
   const state = server(true); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
   const old = deferred<Response>(); state.catalogResponse = old.promise;
@@ -304,6 +306,7 @@ it("removes private data after a revoked session on focus and ignores an old aut
 
 // 验证：会话重新校验遇到网络错误时不注销已登录用户。
 it("does not sign out an authenticated viewer because session revalidation has a network error", async () => {
+  window.history.replaceState(null, "", "/browse");
   const state = server(true); render(<App />); await screen.findByText("Summer");
   state.sessionNetworkError = true; act(() => window.dispatchEvent(new Event("focus")));
   await screen.findByText("暂时无法确认登录状态，请稍后重试。");
@@ -314,6 +317,7 @@ it("does not sign out an authenticated viewer because session revalidation has a
 
 // 验证：内容请求前发现会话过期后恢复匿名目录。
 it("restores anonymous catalog after session expiration discovered before a content request", async () => {
+  window.history.replaceState(null, "", "/browse");
   const state = server(true); render(<App />); await screen.findByText("Summer"); await screen.findByText("私密");
   state.authenticated = false;
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "星" } });
@@ -473,13 +477,13 @@ it("does not let a previous viewer session response replace the new viewer's CSR
 
 // 验证：已登录目录按私密内容筛选并从 URL 恢复筛选。
 it("filters the authenticated catalog to private content and restores it from the URL", async () => {
-  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&page=2");
   const state = server(true); const user = userEvent.setup(); render(<App />);
   const filter = await screen.findByRole("checkbox", { name: "只看私密" });
   await screen.findByRole("link", { name: "查看远方来信详情" });
   state.catalogResponse = deferred<Response>().promise;
   act(() => {
-    window.history.pushState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+    window.history.pushState(null, "", "/browse?kind=series&q=%E6%98%9F&page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
@@ -492,9 +496,9 @@ it("filters the authenticated catalog to private content and restores it from th
   expect(location.search).toContain("privacy=private");
   expect(new URLSearchParams(location.search).get("page")).toBeNull();
   expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("privacy")).toBe("private");
-  act(() => { window.history.pushState(null, "", "/"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  act(() => { window.history.pushState(null, "", "/browse"); window.dispatchEvent(new PopStateEvent("popstate")); });
   expect(screen.getByRole("checkbox", { name: "只看私密" })).not.toBeChecked();
-  act(() => { window.history.pushState(null, "", "/?privacy=private"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  act(() => { window.history.pushState(null, "", "/browse?privacy=private"); window.dispatchEvent(new PopStateEvent("popstate")); });
   expect(await screen.findByRole("checkbox", { name: "只看私密" })).toBeChecked();
   await user.click(screen.getByRole("checkbox", { name: "只看私密" }));
   expect(new URLSearchParams(location.search).get("privacy")).toBeNull();
@@ -503,12 +507,12 @@ it("filters the authenticated catalog to private content and restores it from th
 
 // 验证：身份变化时清除私密筛选与页码并保留搜索词。
 it.each(["logout", "password", "expired"] as const)("clears private filtering and page but preserves the query after %s", async (operation) => {
-  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&privacy=private");
+  window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private");
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
   state.catalogResponse = deferred<Response>().promise;
   act(() => {
-    window.history.pushState(null, "", "/?kind=series&q=%E6%98%9F&privacy=private&page=2");
+    window.history.pushState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private&page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
@@ -529,6 +533,7 @@ it.each(["logout", "password", "expired"] as const)("clears private filtering an
 
 // 验证：切换私密筛选后忽略迟到的普通目录响应。
 it("ignores a delayed ordinary catalog after switching to the private filter", async () => {
+  window.history.replaceState(null, "", "/browse");
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
   const old = deferred<Response>(); state.catalogResponse = old.promise;
@@ -544,7 +549,7 @@ it("ignores a delayed ordinary catalog after switching to the private filter", a
 
 // 验证：会话发现完成前私密筛选深链保持加载状态。
 it("keeps a private filter deep link loading until session discovery finishes", async () => {
-  window.history.replaceState(null, "", "/?privacy=private");
+  window.history.replaceState(null, "", "/browse?privacy=private");
   const state = server(true); const session = deferred<Response>(); state.sessionResponse = session.promise;
   state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
   render(<App />);
@@ -561,7 +566,7 @@ it("keeps a private filter deep link loading until session discovery finishes", 
 
 // 验证：身份变化时即使匿名目录有多页也清除旧页码。
 it.each(["logout", "password", "expired"] as const)("clears the ordinary catalog page after %s even when the anonymous catalog has multiple pages", async (operation) => {
-  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&page=2");
   const state = server(true); state.catalogTotal = 41;
   const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("41 部影片");
@@ -584,7 +589,7 @@ it.each(["logout", "password", "expired"] as const)("clears the ordinary catalog
 
 // 验证：保留初始匿名目录的分页深链。
 it("preserves an initial anonymous catalog page deep link", async () => {
-  window.history.replaceState(null, "", "/?kind=series&q=%E6%98%9F&page=2");
+  window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&page=2");
   const state = server(); state.catalogTotal = 41; render(<App />);
   await screen.findByRole("button", { name: "登录" });
   await screen.findByText("41 部影片");

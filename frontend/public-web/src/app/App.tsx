@@ -1,6 +1,7 @@
 import { AgentLauncher } from "@movie-harbor/ui";
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { CatalogPage } from "../catalog/CatalogPage";
+import { HomePage } from "../catalog/HomePage";
 import { MovieDetails } from "../details/MovieDetails";
 import { SeriesDetails } from "../details/SeriesDetails";
 import { NotFound } from "./RequestState";
@@ -194,7 +195,7 @@ export function App() {
     if (!anchor || anchor.hasAttribute("download") || (anchor.target && anchor.target !== "_self")) return;
     const target = new URL(anchor.href);
     if (target.origin !== window.location.origin || target.hash) return;
-    if (target.pathname !== "/" && !/^\/(movies|series)\/[^/]+(?:\/play(?:\/[^/]+)?)?\/?$/.test(target.pathname)) return;
+    if (target.pathname !== "/" && target.pathname !== "/browse" && !/^\/(movies|series)\/[^/]+(?:\/play(?:\/[^/]+)?)?\/?$/.test(target.pathname)) return;
     event.preventDefault();
     navigate(target.pathname + target.search);
   }
@@ -204,7 +205,8 @@ export function App() {
     const account = renderAccount(assistant);
     return <main className="site-shell" ref={mainRef} tabIndex={-1} onClick={followLink} onErrorCapture={() => { void validate(); }}>
       {message && <p className="viewer-notice" role="status">{message}</p>}
-      {url.pathname === "/" ? <CatalogPage search={url.search} navigate={navigate} account={account} /> : (
+      {url.pathname === "/" ? <HomePage navigate={navigate} account={account} />
+        : url.pathname === "/browse" ? <CatalogPage search={url.search} navigate={navigate} account={account} /> : (
         <>
           <header className="public-header"><Brand />{account}</header>
           {moviePlayerMatch && id ? <MoviePlayerPage key={`movie-player:${id}`} id={id} resume={url.searchParams.get("resume") === "1"} />
