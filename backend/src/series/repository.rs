@@ -2,7 +2,8 @@ use crate::entities::{episode, genre, media_asset, season, series, series_genre}
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, sea_query::Expr,
+    QueryOrder, QuerySelect, Set,
+    sea_query::{Expr, OnConflict},
 };
 use uuid::Uuid;
 
@@ -298,6 +299,46 @@ pub async fn replace_genres(
         .insert(tx)
         .await?;
     }
+    Ok(())
+}
+
+/// 为剧集添加指定题材关联；已存在的关联保持不变，供批量增量操作缩小数据库锁范围。
+pub async fn add_genres(
+    tx: &DatabaseTransaction,
+    series_id: Uuid,
+    genre_ids: &[Uuid],
+) -> Result<(), SeriesError> {
+    for genre_id in genre_ids {
+        // 冲突忽略让重复添加保持幂等；只写请求题材，不重新插入其他既有关联。
+        series_genre::Entity::insert(series_genre::ActiveModel {
+            series_id: Set(series_id),
+            genre_id: Set(*genre_id),
+        })
+        .on_conflict(
+            OnConflict::columns([
+                series_genre::Column::SeriesId,
+                series_genre::Column::GenreId,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec_without_returning(tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// 从剧集移除指定题材关联；不存在的关联视为无效果成功。
+pub async fn remove_genres(
+    tx: &DatabaseTransaction,
+    series_id: Uuid,
+    genre_ids: &[Uuid],
+) -> Result<(), SeriesError> {
+    series_genre::Entity::delete_many()
+        .filter(series_genre::Column::SeriesId.eq(series_id))
+        .filter(series_genre::Column::GenreId.is_in(genre_ids.iter().copied()))
+        .exec(tx)
+        .await?;
     Ok(())
 }
 

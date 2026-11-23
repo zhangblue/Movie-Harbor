@@ -9,7 +9,6 @@ use crate::{
 };
 use chrono::Utc;
 use sea_orm::{DatabaseConnection, DbErr, EntityTrait, QuerySelect, TransactionTrait};
-use std::collections::BTreeSet;
 use uuid::Uuid;
 
 #[derive(Debug)]
@@ -93,9 +92,8 @@ pub async fn execute_bulk_action(
                 id: target.id,
                 reason: BulkTargetProblemReason::VersionConflict,
             });
-        } else if matches!(request, BulkActionRequest::Archive { .. })
-            && content.status() != "published"
-        {
+        }
+        if matches!(request, BulkActionRequest::Archive { .. }) && content.status() != "published" {
             problems.push(BulkProblem::Target {
                 kind: target.kind,
                 id: target.id,
@@ -230,7 +228,7 @@ fn apply_model_fields(
     }
 }
 
-/// 按添加或移除语义更新电影题材集合，无效果操作仍由外层电影持久化递增一次版本。
+/// 只对请求指定的电影题材关联执行增删，避免全量重建旧关联造成交叉外键锁等待。
 async fn update_movie_genres(
     tx: &sea_orm::DatabaseTransaction,
     request: &BulkActionRequest,
@@ -242,16 +240,14 @@ async fn update_movie_genres(
     else {
         return Ok(());
     };
-    let current = movies::repository::genres(tx, id)
-        .await
-        .map_err(|_| BulkActionError::Database)?;
-    let next = update_genre_set(current.into_iter().map(|genre| genre.id), *mode, genre_ids);
-    movies::repository::replace_genres(tx, id, &next)
-        .await
-        .map_err(|_| BulkActionError::Database)
+    match mode {
+        BulkGenreMode::Add => movies::repository::add_genres(tx, id, genre_ids).await,
+        BulkGenreMode::Remove => movies::repository::remove_genres(tx, id, genre_ids).await,
+    }
+    .map_err(|_| BulkActionError::Database)
 }
 
-/// 按添加或移除语义更新剧集题材集合，无效果操作仍由外层剧集持久化递增一次版本。
+/// 只对请求指定的剧集题材关联执行增删，保持不同内容并发写入时的锁范围最小。
 async fn update_series_genres(
     tx: &sea_orm::DatabaseTransaction,
     request: &BulkActionRequest,
@@ -263,33 +259,11 @@ async fn update_series_genres(
     else {
         return Ok(());
     };
-    let current = series_domain::repository::genres(tx, id)
-        .await
-        .map_err(|_| BulkActionError::Database)?;
-    let next = update_genre_set(current.into_iter().map(|genre| genre.id), *mode, genre_ids);
-    series_domain::repository::replace_genres(tx, id, &next)
-        .await
-        .map_err(|_| BulkActionError::Database)
-}
-
-/// 计算题材集合的稳定 UUID 顺序，供电影和剧集共享相同增删语义。
-fn update_genre_set(
-    current: impl Iterator<Item = Uuid>,
-    mode: BulkGenreMode,
-    genre_ids: &[Uuid],
-) -> Vec<Uuid> {
-    let mut values = current.collect::<BTreeSet<_>>();
-    for genre_id in genre_ids {
-        match mode {
-            BulkGenreMode::Add => {
-                values.insert(*genre_id);
-            }
-            BulkGenreMode::Remove => {
-                values.remove(genre_id);
-            }
-        }
+    match mode {
+        BulkGenreMode::Add => series_domain::repository::add_genres(tx, id, genre_ids).await,
+        BulkGenreMode::Remove => series_domain::repository::remove_genres(tx, id, genre_ids).await,
     }
-    values.into_iter().collect()
+    .map_err(|_| BulkActionError::Database)
 }
 
 /// 将电影模型与稳定排序题材转换为批量成功条目。

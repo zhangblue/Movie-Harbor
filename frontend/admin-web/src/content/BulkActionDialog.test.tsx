@@ -31,3 +31,28 @@ it("filters genre choices by mode and submits the selected genre action", async 
     targets: [{ kind: "movie", id: "movie-1", version: 3 }],
   });
 });
+
+// 验证题材上限在界面内即时生效，同时仍允许取消已选项。
+it("caps genre selections at twenty and explains the limit", async () => {
+  const manyGenres = Array.from({ length: 21 }, (_, index) => ({
+    id: `genre-${index + 1}`, name: `题材 ${index + 1}`, sort_order: index + 1, enabled: true,
+  }));
+  const user = userEvent.setup();
+  render(<BulkActionDialog action="genres" rows={rows} genres={manyGenres} pending={false} problems={[]} onClose={() => {}} onSubmit={() => {}} />);
+  const dialog = screen.getByRole("dialog", { name: "批量调整题材" });
+  for (let index = 1; index <= 20; index += 1) await user.click(within(dialog).getByLabelText(`题材 ${index}`));
+  expect(within(dialog).getByText("最多选择 20 个题材。")).toBeInTheDocument();
+  expect(within(dialog).getByLabelText("题材 21")).toBeDisabled();
+  expect(within(dialog).getByLabelText("题材 1")).not.toBeDisabled();
+});
+
+// 验证确认框将问题关联到具体内容或题材，便于管理员定位失败目标。
+it("labels validation problems with their content and genre names", () => {
+  render(<BulkActionDialog action="genres" rows={rows} genres={genres} pending={false} blocked problems={[
+    { scope: "target", kind: "movie", id: "movie-1", reason: "version_conflict" },
+    { scope: "genre", genre_id: "inactive", reason: "inactive" },
+  ]} onClose={() => {}} onSubmit={() => {}} />);
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent("电影一：内容版本已变化");
+  expect(alert).toHaveTextContent("旧题材：所选题材已停用");
+});

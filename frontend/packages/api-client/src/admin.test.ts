@@ -237,6 +237,7 @@ it("parses only explicit bulk validation problem details", () => {
     { error: "other", problems },
     { error: "bulk_validation_failed", problems: [{ scope: "target", kind: "episode", id: "x", reason: "not_found" }] },
     { error: "bulk_validation_failed", problems: [{ scope: "genre", genre_id: 1, reason: "inactive" }] },
+    { error: "bulk_validation_failed", problems: [{ scope: "genre", genre_id: "x", reason: ["inactive"] }] },
   ]) {
     expect(bulkActionProblems(new ApiError(409, "Conflict", "failed", details))).toBeUndefined();
   }

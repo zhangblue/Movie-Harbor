@@ -89,11 +89,11 @@ function isBulkProblem(value: JsonValue): value is AdminBulkProblem {
   if (value.scope === "target") {
     return isBulkContentKind(value.kind)
       && typeof value.id === "string"
-      && ["not_found", "version_conflict", "invalid_state"].includes(String(value.reason));
+      && (value.reason === "not_found" || value.reason === "version_conflict" || value.reason === "invalid_state");
   }
   return value.scope === "genre"
     && typeof value.genre_id === "string"
-    && ["not_found", "inactive"].includes(String(value.reason));
+    && (value.reason === "not_found" || value.reason === "inactive");
 }
 
 // 从显式 409 bulk_validation_failed 错误中解析类型安全问题列表，其他错误返回未定义。

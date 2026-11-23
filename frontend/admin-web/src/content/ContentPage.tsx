@@ -14,6 +14,14 @@ import { BulkActionDialog, type BulkDialogAction } from "./BulkActionDialog";
 export type ContentListState = { filters: Filters; page: number; revision: number };
 export const initialContentListState: ContentListState = { filters: initialFilters, page: 1, revision: 0 };
 
+// 将目标问题转换为表格行内提示，刷新成功前持续说明该行为何不可继续操作。
+function targetProblemMessage(problem: AdminBulkProblem): string | undefined {
+  if (problem.scope !== "target") return undefined;
+  if (problem.reason === "version_conflict") return "内容版本已变化";
+  if (problem.reason === "invalid_state") return "当前状态不允许此操作";
+  return "内容不存在";
+}
+
 // 管理内容分页、状态操作和导出，在进入内容管理时使用。
 export function ContentPage({ state, setState, onExpired, onOpen }: {
   state: ContentListState;
@@ -34,6 +42,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   const [bulkError, setBulkError] = useState("");
   const [genres, setGenres] = useState<GenreResponse[]>([]);
   const [stale, setStale] = useState(false);
+  const [bulkBlocked, setBulkBlocked] = useState(false);
   const mounted = useMounted();
   const operation = useRef(false);
   const exportOperation = useRef(false);
@@ -45,6 +54,8 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     // 页码、筛选、刷新和普通操作都会改变列表身份，因此旧页选择不能继续保留。
     setSelected(new Set());
     setBulkProblems([]);
+    setBulkAction(null);
+    setBulkError("");
     setLoading(true);
     setError("");
     void listAdminContent({
@@ -64,6 +75,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       setData(result);
       setConflict(false);
       setStale(false);
+      setBulkBlocked(false);
       committedRefresh.current = false;
     }).catch((cause: CaughtValue) => {
       // 认证失效交给根组件退出后台；其他失败保留列表上下文并展示重试入口。
@@ -82,7 +94,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
 
   // 按内容类型执行状态或可见性操作，列表操作触发时调用。
   async function act(row: ContentRow, action: ContentAction) {
-    if (operation.current || loading || conflict || !availableActions(row).includes(action)) return;
+    if (operation.current || loading || conflict || stale || bulkBlocked || !availableActions(row).includes(action)) return;
     // 单条操作开始前清空批量选择，避免刷新或详情返回后误用旧版本目标。
     setSelected(new Set());
     setBulkProblems([]);
@@ -123,19 +135,16 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       if (checked) next.add(key); else next.delete(key);
       return next;
     });
-    setBulkProblems([]);
   }
 
   // 选择或取消当前页全部行，绝不跨页保存隐藏目标。
   function selectAll(checked: boolean) {
     setSelected(checked ? new Set((data?.items ?? []).map((row) => `${row.kind}:${row.id}`)) : new Set());
-    setBulkProblems([]);
   }
 
   // 打开批量确认框；题材动作先读取最新管理题材，避免提交已停用的添加选项。
   async function openBulk(action: BulkDialogAction) {
-    if (selected.size === 0 || operation.current) return;
-    setBulkProblems([]);
+    if (selected.size === 0 || operation.current || stale || bulkBlocked) return;
     setBulkError("");
     if (action !== "genres") { setBulkAction(action); return; }
     setMutating(true);
@@ -176,11 +185,24 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
         // 恢复令牌但不重放批量写入，避免响应丢失时重复执行整批命令。
         const recovery = await recoverForbiddenWrite();
         if (!mounted.current) return;
-        if (recovery.expired) onExpired(); else setBulkError(recovery.message);
+        if (recovery.expired) onExpired();
+        else {
+          setBulkBlocked(true);
+          setBulkError(`${recovery.message} 请先重新加载列表，再决定是否重试。`);
+          setError("批量操作结果未知，请先重新加载列表。");
+        }
       } else {
         const problems = bulkActionProblems(error);
-        if (problems) setBulkProblems(problems);
-        else setBulkError(error instanceof ApiError ? `批量操作失败：${error.message}` : "批量操作失败，请检查网络后重试。");
+        setBulkBlocked(true);
+        if (problems) {
+          setBulkProblems(problems);
+          setError("部分目标已发生变化，请先重新加载列表后再操作。");
+        } else {
+          setBulkError(error instanceof ApiError
+            ? `批量操作结果未知（${error.message}），请先重新加载列表，再决定是否重试。`
+            : "批量操作结果未知，请先重新加载列表，再决定是否重试。");
+          setError("批量操作结果未知，请先重新加载列表。");
+        }
       }
     } finally {
       operation.current = false;
@@ -219,9 +241,14 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   }
 
   const rows = data?.items ?? [];
+  const problemMessages = new Map(bulkProblems.flatMap((problem) => {
+    const message = targetProblemMessage(problem);
+    return problem.scope === "target" && message ? [[`${problem.kind}:${problem.id}`, message] as const] : [];
+  }));
+  const writesDisabled = loading || mutating || conflict || stale || bulkBlocked;
   return <section>
     <div className="admin-title-row"><div><p className="eyebrow">CONTENT</p><h1>内容管理</h1></div><div className="admin-title-actions"><Button onClick={() => { void exportContent(); }} disabled={exporting}>导出 JSON</Button><Button variant="primary" onClick={() => onOpen(null, "create")} disabled={mutating}>＋ 新建内容</Button></div></div>
-    <ContentFilters initialValue={state.filters} onQuery={(filters) => {
+    <ContentFilters initialValue={state.filters} onChange={() => setSelected(new Set())} onQuery={(filters) => {
       setState((value) => ({ ...value, filters, page: 1 }));
     }} disabled={mutating} />
     {exportError && <p className="error-message" role="alert">{exportError}</p>}
@@ -229,9 +256,9 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     {loading && <p role="status">正在加载内容…</p>}
     {data && <>
       {rows.length === 0 && !error && !loading && <p role="status" className="empty-state">没有匹配的内容，请调整查询条件。</p>}
-      <BulkActionBar count={selected.size} disabled={loading || mutating || conflict} onAction={(action) => { void openBulk(action); }} />
-      <ContentTable rows={rows} startIndex={(data.page - 1) * data.size} disabled={loading || mutating || conflict} selected={selected} stale={stale}
-        problemKeys={new Set(bulkProblems.filter((problem) => problem.scope === "target").map((problem) => `${problem.kind}:${problem.id}`))}
+      <BulkActionBar count={selected.size} disabled={writesDisabled} onAction={(action) => { void openBulk(action); }} />
+      <ContentTable rows={rows} startIndex={(data.page - 1) * data.size} disabled={writesDisabled} selected={selected} stale={stale || bulkBlocked}
+        problemMessages={problemMessages}
         onSelect={selectRow} onSelectAll={selectAll} onAction={(row, action) => { void act(row, action); }} />
     </>}
     <div className="content-pagination-slot">
@@ -239,7 +266,7 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
         onPage={(page) => setState((value) => ({ ...value, page }))} />}
     </div>
     {bulkAction && <BulkActionDialog action={bulkAction} rows={rows.filter((row) => selected.has(`${row.kind}:${row.id}`))} genres={genres}
-      pending={mutating} problems={bulkProblems} error={bulkError} onClose={() => { setBulkAction(null); setBulkProblems([]); setBulkError(""); }}
+      pending={mutating} blocked={bulkBlocked} problems={bulkProblems} error={bulkError} onClose={() => { setBulkAction(null); setBulkError(""); }}
       onSubmit={(request) => { void submitBulk(request); }} />}
   </section>;
 }

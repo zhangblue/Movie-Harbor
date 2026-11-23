@@ -6,23 +6,23 @@ import { Button, Field } from "@movie-harbor/ui";
 export type Filters = { kind: CatalogKind; status: ContentStatus | "all"; privacy: "all" | "public" | "private"; name: string };
 export const initialFilters: Filters = { kind: "all", status: "all", privacy: "all", name: "" };
 
-// 展示并提交内容筛选条件，在内容列表加载时使用。
-export function ContentFilters({ initialValue, onQuery, disabled }: { initialValue: Filters; onQuery: (filters: Filters) => void; disabled: boolean }) {
+// 展示并提交内容筛选条件；字段变化时立即通知列表清除旧选择。
+export function ContentFilters({ initialValue, onChange, onQuery, disabled }: { initialValue: Filters; onChange: () => void; onQuery: (filters: Filters) => void; disabled: boolean }) {
   const [filters, setFilters] = useState(initialValue);
   return <form className="filter-bar" aria-label="内容查询" onSubmit={(event) => {
     event.preventDefault();
     if (!disabled) onQuery({ ...filters, name: filters.name.trim() });
   }}>
-    <Field label="内容形态"><select disabled={disabled} value={filters.kind} onChange={(e) => setFilters({ ...filters, kind: e.target.value as CatalogKind })}>
+    <Field label="内容形态"><select disabled={disabled} value={filters.kind} onChange={(e) => { onChange(); setFilters({ ...filters, kind: e.target.value as CatalogKind }); }}>
       <option value="all">全部</option><option value="movie">电影</option><option value="series">剧集</option>
     </select></Field>
-    <Field label="状态"><select disabled={disabled} value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value as Filters["status"] })}>
+    <Field label="状态"><select disabled={disabled} value={filters.status} onChange={(e) => { onChange(); setFilters({ ...filters, status: e.target.value as Filters["status"] }); }}>
       <option value="all">全部</option><option value="draft">草稿</option><option value="published">已发布</option><option value="archived">已归档</option>
     </select></Field>
-    <Field label="访问范围"><select disabled={disabled} value={filters.privacy} onChange={(e) => setFilters({ ...filters, privacy: e.target.value as Filters["privacy"] })}>
+    <Field label="访问范围"><select disabled={disabled} value={filters.privacy} onChange={(e) => { onChange(); setFilters({ ...filters, privacy: e.target.value as Filters["privacy"] }); }}>
       <option value="all">全部</option><option value="public">公开</option><option value="private">私密</option>
     </select></Field>
-    <Field label="名称" className="compact-query"><input type="search" placeholder="名称查询" disabled={disabled} value={filters.name} onChange={(e) => setFilters({ ...filters, name: e.target.value })} /></Field>
+    <Field label="名称" className="compact-query"><input type="search" placeholder="名称查询" disabled={disabled} value={filters.name} onChange={(e) => { onChange(); setFilters({ ...filters, name: e.target.value }); }} /></Field>
     <Button type="submit" disabled={disabled}>查询</Button>
   </form>;
 }

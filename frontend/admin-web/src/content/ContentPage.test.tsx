@@ -589,6 +589,18 @@ it("selects only the current page with an accessible tri-state header", async ()
   expect(screen.getByText("已选择 0 项")).toBeInTheDocument();
 });
 
+// 验证筛选字段一经修改就清空选择，避免管理员在提交查询前误用旧目标。
+it("clears selected rows as soon as a filter field changes", async () => {
+  server(() => undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("checkbox", { name: "选择潮汐尽头" }));
+  expect(screen.getByText("已选择 1 项")).toBeInTheDocument();
+  await user.selectOptions(screen.getByLabelText("访问范围"), "private");
+  expect(screen.getByText("已选择 0 项")).toBeInTheDocument();
+});
+
 // 验证批量归档携带显示版本，409 保留选择并标记冲突行。
 it("preserves selected rows and marks them after a bulk validation conflict", async () => {
   const requests = server((request) => request.url === "/api/admin/contents/bulk-actions"
@@ -601,9 +613,13 @@ it("preserves selected rows and marks them after a bulk validation conflict", as
   await user.click(screen.getByRole("button", { name: "批量归档" }));
   const dialog = await screen.findByRole("dialog", { name: "批量归档内容" });
   await user.click(within(dialog).getByRole("button", { name: "确认归档" }));
-  expect(await within(dialog).findByRole("alert")).toHaveTextContent("内容版本已变化");
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("潮汐尽头：内容版本已变化");
+  expect(within(dialog).getByRole("button", { name: "确认归档" })).toBeDisabled();
   expect(screen.getByRole("checkbox", { name: "选择潮汐尽头" })).toBeChecked();
   expect(screen.getByRole("row", { name: /潮汐尽头/ })).toHaveAttribute("data-bulk-error", "true");
+  expect(screen.getByRole("row", { name: /潮汐尽头/ })).toHaveTextContent("内容版本已变化");
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(screen.getByRole("row", { name: /潮汐尽头/ })).toHaveTextContent("内容版本已变化");
   expect(requests.find((request) => request.url.endsWith("bulk-actions"))?.body).toEqual({
     action: "archive", targets: [{ kind: "movie", id: "movie-1", version: 3 }],
   });
@@ -626,5 +642,25 @@ it("reports a committed bulk action when the following list refresh fails", asyn
   await user.click(within(dialog).getByRole("button", { name: "确认设置" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("操作已完成，列表刷新失败");
   expect(screen.getByRole("region", { name: "内容列表" })).toHaveAttribute("data-stale", "true");
+  expect(screen.getByRole("checkbox", { name: "选择潮汐尽头" })).toBeDisabled();
+  expect(requests.filter((request) => request.url.endsWith("bulk-actions"))).toHaveLength(1);
+});
+
+// 验证批量响应不明时必须先刷新列表，不能从同一旧快照重复提交写请求。
+it("blocks another bulk write after an unknown request failure until refresh", async () => {
+  const requests = server((request) => request.url === "/api/admin/contents/bulk-actions"
+    ? json({ error: "unavailable" }, 503)
+    : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("checkbox", { name: "选择潮汐尽头" }));
+  await user.click(screen.getByRole("button", { name: "批量设置访问范围" }));
+  const dialog = await screen.findByRole("dialog", { name: "批量设置访问范围" });
+  await user.click(within(dialog).getByRole("button", { name: "确认设置" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("请先重新加载");
+  expect(within(dialog).getByRole("button", { name: "确认设置" })).toBeDisabled();
+  await user.click(within(dialog).getByRole("button", { name: "取消" }));
+  expect(screen.getByRole("checkbox", { name: "选择潮汐尽头" })).toBeDisabled();
   expect(requests.filter((request) => request.url.endsWith("bulk-actions"))).toHaveLength(1);
 });

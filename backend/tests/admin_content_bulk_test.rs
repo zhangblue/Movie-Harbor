@@ -319,12 +319,12 @@ async fn bulk_service_collects_complete_problem_set_and_rolls_back() {
     let invalid_state = execute_bulk_action(
         &db,
         action(json!({"action":"archive","targets":[
-            {"kind":"movie","id":"10000000-0000-0000-0000-000000000002","version":2}
+            {"kind":"movie","id":"10000000-0000-0000-0000-000000000002","version":99}
         ]})),
     )
     .await
     .unwrap_err();
-    assert!(matches!(invalid_state, BulkActionError::Validation(problems) if problems.len() == 1));
+    assert!(matches!(invalid_state, BulkActionError::Validation(problems) if problems.len() == 2));
 }
 
 #[tokio::test]
@@ -383,6 +383,93 @@ async fn bulk_service_serializes_reverse_order_requests_without_deadlock() {
     assert_eq!(
         usize::from(outcomes.0.is_ok()) + usize::from(outcomes.1.is_ok()),
         1
+    );
+    let failed = if outcomes.0.is_err() {
+        outcomes.0.unwrap_err()
+    } else {
+        outcomes.1.unwrap_err()
+    };
+    assert!(matches!(failed, BulkActionError::Validation(problems) if
+        problems.len() == 2 && problems.iter().all(|problem| matches!(
+            problem,
+            movie_harbor_api::admin_content::dto::BulkProblem::Target {
+                reason: movie_harbor_api::admin_content::dto::BulkTargetProblemReason::VersionConflict,
+                ..
+            }
+        ))
+    ));
+    assert_eq!(
+        movie_state(&db, "10000000-0000-0000-0000-000000000001")
+            .await
+            .0,
+        2
+    );
+    let series_version = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT version FROM series WHERE id = '20000000-0000-0000-0000-000000000001'::uuid",
+        ))
+        .await
+        .unwrap()
+        .unwrap()
+        .try_get::<i64>("", "version")
+        .unwrap();
+    assert_eq!(series_version, 2);
+}
+
+#[tokio::test]
+/// 验证不同内容并发添加彼此既有关联题材时不会因外键锁和全量重建形成死锁。
+async fn bulk_service_updates_cross_linked_genres_without_deadlock() {
+    let db = seeded_database("bulk_genre_deadlock").await;
+    db.execute_unprepared(
+        r#"
+INSERT INTO genre (id, name, enabled, sort_order) VALUES
+('30000000-0000-0000-0000-000000000003', 'Drama', true, 3);
+INSERT INTO series_genre (series_id, genre_id) VALUES
+('20000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000001');
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('10000000-0000-0000-0000-000000000001', '30000000-0000-0000-0000-000000000003');
+"#,
+    )
+    .await
+    .unwrap();
+    let movie = action(
+        json!({"action":"update_genres","mode":"add","genre_ids":["30000000-0000-0000-0000-000000000001"],"targets":[
+            {"kind":"movie","id":"10000000-0000-0000-0000-000000000001","version":1}
+        ]}),
+    );
+    let series = action(
+        json!({"action":"update_genres","mode":"add","genre_ids":["30000000-0000-0000-0000-000000000003"],"targets":[
+            {"kind":"series","id":"20000000-0000-0000-0000-000000000001","version":1}
+        ]}),
+    );
+    let first = db.connection();
+    let second = db.connection();
+    let outcomes = tokio::time::timeout(Duration::from_secs(5), async move {
+        tokio::join!(
+            execute_bulk_action(&first, movie),
+            execute_bulk_action(&second, series)
+        )
+    })
+    .await
+    .expect("交叉既有题材的并发添加不应死锁");
+    assert!(outcomes.0.is_ok());
+    assert!(outcomes.1.is_ok());
+    let movie_result = outcomes.0.unwrap();
+    let series_result = outcomes.1.unwrap();
+    assert_eq!(movie_result.results[0].version, 2);
+    assert_eq!(series_result.results[0].version, 2);
+    assert!(
+        movie_result.results[0]
+            .genres
+            .iter()
+            .any(|genre| genre.id.to_string() == "30000000-0000-0000-0000-000000000001")
+    );
+    assert!(
+        series_result.results[0]
+            .genres
+            .iter()
+            .any(|genre| genre.id.to_string() == "30000000-0000-0000-0000-000000000003")
     );
 }
 

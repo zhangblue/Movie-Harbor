@@ -2,7 +2,8 @@ use crate::entities::{genre, media_asset, movie, movie_genre};
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseTransaction, EntityTrait, QueryFilter,
-    QueryOrder, QuerySelect, Set, sea_query::Expr,
+    QueryOrder, QuerySelect, Set,
+    sea_query::{Expr, OnConflict},
 };
 use uuid::Uuid;
 
@@ -161,6 +162,43 @@ pub async fn replace_genres(
         .insert(tx)
         .await?;
     }
+    Ok(())
+}
+
+/// 为电影添加指定题材关联；已存在的关联保持不变，供批量增量操作避免重建全部关系。
+pub async fn add_genres(
+    tx: &DatabaseTransaction,
+    movie_id: Uuid,
+    genre_ids: &[Uuid],
+) -> Result<(), MovieError> {
+    for genre_id in genre_ids {
+        // 冲突忽略让重复添加保持幂等；只触碰请求题材，避免为无关旧关联获取外键锁。
+        movie_genre::Entity::insert(movie_genre::ActiveModel {
+            movie_id: Set(movie_id),
+            genre_id: Set(*genre_id),
+        })
+        .on_conflict(
+            OnConflict::columns([movie_genre::Column::MovieId, movie_genre::Column::GenreId])
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec_without_returning(tx)
+        .await?;
+    }
+    Ok(())
+}
+
+/// 从电影移除指定题材关联；不存在的关联视为无效果成功。
+pub async fn remove_genres(
+    tx: &DatabaseTransaction,
+    movie_id: Uuid,
+    genre_ids: &[Uuid],
+) -> Result<(), MovieError> {
+    movie_genre::Entity::delete_many()
+        .filter(movie_genre::Column::MovieId.eq(movie_id))
+        .filter(movie_genre::Column::GenreId.is_in(genre_ids.iter().copied()))
+        .exec(tx)
+        .await?;
     Ok(())
 }
 
