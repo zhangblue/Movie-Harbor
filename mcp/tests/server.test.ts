@@ -7,6 +7,8 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
+import { mapHttpError } from '../src/services/error-mapper.js';
+import { MovieHarborClientError, type HttpMethod, type MovieHarborClient } from '../src/services/movie-harbor-client.js';
 
 // 在内存连接中验证服务器身份、工作流说明、工具输入输出结构和完整注册。
 test('server registers the complete atomic tool schemas and exposes its workflow instructions in memory', async () => {
@@ -99,6 +101,98 @@ test('server exposes the partial transition error code to MCP clients', async ()
   } finally {
     await client.close();
     await server.close();
+  }
+});
+
+// 在内存 MCP 协议调用中注入管理 API 响应，观察协议错误及真实工具发出的请求。
+async function callMaintenanceTool(name: string, args: Record<string, unknown>, responses: unknown[]) {
+  const config = { baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
+    allowedRoots: [], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000 };
+  const calls: Array<[HttpMethod, string, unknown]> = [];
+  const clientApi: MovieHarborClient = {
+    // 记录工具实际尝试的每次读写，并依次提供成功或失败的 API 响应。
+    async json<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
+      calls.push([method, path, body]);
+      assert.ok(responses.length, '发生了额外管理 API 请求');
+      const found = responses.shift();
+      if (found instanceof Error) throw found;
+      return found as T;
+    },
+    // 维护场景不使用文件上传。
+    async upload(): Promise<never> { throw new Error('发生了非预期上传'); },
+  };
+  const server = buildServer({ config, credentialDirectory: config.credentialDirectory, client: clientApi });
+  const client = new Client({ name: 'movie-harbor-test', version: '1.0.0' });
+  const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverEnd);
+  await client.connect(clientEnd);
+  try {
+    return { result: await client.callTool({ name, arguments: args }), calls };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+const maintenanceId = '11111111-1111-4111-8111-111111111111';
+
+// 验证发布条件错误只展示可识别字段的中文说明，兼容后台的电影和剧集校验结果。
+test('server localizes publishing requirements from HTTP 422 fields', async t => {
+  for (const [type, path, fields, expected] of [
+    ['movie', '/api/admin/movies/' + maintenanceId, ['video', 'internal_path'], /可访问且受支持的视频/],
+    ['series', '/api/admin/series/' + maintenanceId, ['name', 'episodes'], /名称.*至少.*已发布.*单集.*可访问.*受支持/],
+  ] as const) {
+    await t.test(type, async () => {
+      const { result, calls } = await callMaintenanceTool('transition_content_lifecycle', {
+        content_type: type, content_id: maintenanceId, version: 3, target_status: 'published', confirmed: true,
+      }, [
+        { id: maintenanceId, version: 3, status: 'draft' },
+        mapHttpError(422, { fields, error: 'raw /private/media/secret' }, 'mhmcp_secret'),
+      ]);
+      assert.equal(result.isError, true);
+      assert.match(JSON.stringify(result.content), expected);
+      assert.doesNotMatch(JSON.stringify(result), /internal_path|\/private\/media/);
+      assert.deepEqual(calls, [['GET', path, undefined], ['POST', path + '/publish', { version: 3 }]]);
+    });
+  }
+});
+
+// 验证隐私写入超时和生命周期写入断线时，协议结果要求重新查询目标，工具不会重试写入。
+test('server guides a targeted reread when a write result is unknown', async t => {
+  const moviePath = '/api/admin/movies/' + maintenanceId;
+  const seriesPath = '/api/admin/series/' + maintenanceId;
+  for (const scenario of [
+    {
+      name: 'set_content_visibility', type: 'movie', path: moviePath, method: 'PUT', action: 'privacy',
+      args: { visibility: 'private' }, detail: { id: maintenanceId, version: 3, is_private: false },
+      body: { version: 3, is_private: true }, error: 'timeout', nextAction: 'search_movies',
+    },
+    {
+      name: 'transition_content_lifecycle', type: 'series', path: seriesPath, method: 'POST', action: 'archive',
+      args: { target_status: 'draft' }, detail: { id: maintenanceId, version: 3, status: 'published' },
+      body: { version: 3 }, error: 'network_error', nextAction: 'search_series',
+    },
+    {
+      name: 'transition_content_lifecycle', type: 'movie', path: moviePath, method: 'POST', action: 'publish',
+      args: { target_status: 'published' }, detail: { id: maintenanceId, version: 3, status: 'draft' },
+      body: { version: 3 }, error: 'timeout', nextAction: 'search_movies',
+    },
+  ] as const) {
+    await t.test(scenario.action, async () => {
+      const { result, calls } = await callMaintenanceTool(scenario.name, {
+        content_type: scenario.type, content_id: maintenanceId, version: 3, confirmed: true, ...scenario.args,
+      }, [scenario.detail, new MovieHarborClientError(scenario.error)]);
+      assert.equal(result.isError, true);
+      assert.match(JSON.stringify(result.content), /写入结果待确认.*请重新查询/);
+      assert.deepEqual(result.structuredContent, {
+        code: 'write_result_unknown', content_type: scenario.type, content_id: maintenanceId,
+        next_actions: [scenario.nextAction],
+      });
+      assert.deepEqual(calls, [
+        ['GET', scenario.path, undefined],
+        [scenario.method, scenario.path + '/' + scenario.action, scenario.body],
+      ]);
+    });
   }
 });
 
