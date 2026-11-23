@@ -11,5 +11,8 @@ pub mod movie_genre;
 pub mod season;
 pub mod series;
 pub mod series_genre;
+pub mod viewer_playback_progress;
+pub mod viewer_playback_removal;
+pub mod viewer_series_cursor;
 pub mod viewer_session;
 pub mod viewer_user;

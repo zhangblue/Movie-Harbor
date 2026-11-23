@@ -7,7 +7,7 @@ use uuid::Uuid;
 mod support;
 
 // 列出最新迁移后的数据表，供全部建表和回滚检查复用。
-const TABLES: [&str; 15] = [
+const TABLES: [&str; 18] = [
     "admin_user",
     "admin_session",
     "genre",
@@ -23,6 +23,9 @@ const TABLES: [&str; 15] = [
     "viewer_session",
     "mcp_staged_poster",
     "agent_turn",
+    "viewer_playback_progress",
+    "viewer_series_cursor",
+    "viewer_playback_removal",
 ];
 
 /// 验证旧内容升级后默认公开，以及私密字段和用户表可回滚。
@@ -143,6 +146,67 @@ async fn private_viewer_schema_enforces_uniqueness_checks_and_session_cascade() 
         .unwrap();
     assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
     sql(&db, "INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES (gen_random_uuid(), 'summer', 'summer', 'new-password-hash')").await;
+    db.rollback().await.unwrap();
+}
+
+/// 验证观看进度、剧集游标和删除墓碑的目标约束、级联关系及可逆迁移。
+#[tokio::test]
+async fn viewer_progress_schema_is_reversible_and_enforces_targets() {
+    let db = isolated_database().await;
+    migration::Migrator::up(&db, None).await.unwrap();
+    sql(&db, "INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES ('30000000-0000-0000-0000-000000000010', 'Viewer', 'viewer', 'hash'); INSERT INTO movie (id, name) VALUES ('10000000-0000-0000-0000-000000000010', 'Movie'); INSERT INTO series (id, name) VALUES ('20000000-0000-0000-0000-000000000010', 'Series'); INSERT INTO season (id, series_id, number) VALUES ('21000000-0000-0000-0000-000000000010', '20000000-0000-0000-0000-000000000010', 1); INSERT INTO episode (id, season_id, number, name) VALUES ('22000000-0000-0000-0000-000000000010', '21000000-0000-0000-0000-000000000010', 1, 'Episode')").await;
+    sql(&db, "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES ('40000000-0000-0000-0000-000000000010', '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', 15, 120, CURRENT_TIMESTAMP); INSERT INTO viewer_playback_progress (id, viewer_user_id, episode_id, position_seconds, duration_seconds, completed, client_updated_at) VALUES ('40000000-0000-0000-0000-000000000011', '30000000-0000-0000-0000-000000000010', '22000000-0000-0000-0000-000000000010', 120, 120, true, CURRENT_TIMESTAMP); INSERT INTO viewer_series_cursor (viewer_user_id, series_id, episode_id, client_updated_at) VALUES ('30000000-0000-0000-0000-000000000010', '20000000-0000-0000-0000-000000000010', '22000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP); INSERT INTO viewer_playback_removal (id, viewer_user_id, series_id, removed_at) VALUES ('50000000-0000-0000-0000-000000000010', '30000000-0000-0000-0000-000000000010', '20000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP)").await;
+
+    for statement in [
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', 1, 2, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, episode_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', '22000000-0000-0000-0000-000000000010', 1, 2, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', -1, 2, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', 3, 2, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', 1, 'Infinity'::float8, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', 1, 'NaN'::float8, CURRENT_TIMESTAMP)",
+        "INSERT INTO viewer_playback_removal (id, viewer_user_id, movie_id, series_id, removed_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', '20000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP)",
+    ] {
+        rejects(&db, statement, "23514").await;
+    }
+    rejects(&db, "INSERT INTO viewer_playback_progress (id, viewer_user_id, movie_id, position_seconds, duration_seconds, client_updated_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '10000000-0000-0000-0000-000000000010', 30, 120, CURRENT_TIMESTAMP)", "23505").await;
+    rejects(&db, "INSERT INTO viewer_playback_removal (id, viewer_user_id, series_id, removed_at) VALUES (gen_random_uuid(), '30000000-0000-0000-0000-000000000010', '20000000-0000-0000-0000-000000000010', CURRENT_TIMESTAMP)", "23505").await;
+
+    sql(&db, "DELETE FROM episode WHERE id='22000000-0000-0000-0000-000000000010'; DELETE FROM movie WHERE id='10000000-0000-0000-0000-000000000010'").await;
+    let row = db.query_one(Statement::from_string(DbBackend::Postgres, "SELECT (SELECT count(*) FROM viewer_playback_progress) + (SELECT count(*) FROM viewer_series_cursor) AS count")).await.unwrap().unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+    sql(
+        &db,
+        "DELETE FROM viewer_user WHERE id='30000000-0000-0000-0000-000000000010'",
+    )
+    .await;
+    let row = db
+        .query_one(Statement::from_string(
+            DbBackend::Postgres,
+            "SELECT count(*) AS count FROM viewer_playback_removal",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.try_get::<i64>("", "count").unwrap(), 0);
+
+    migration::Migrator::down(&db, Some(1)).await.unwrap();
+    for table in [
+        "viewer_playback_progress",
+        "viewer_series_cursor",
+        "viewer_playback_removal",
+    ] {
+        let row = db
+            .query_one(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "SELECT to_regclass($1)::text AS relation",
+                [table.into()],
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.try_get::<Option<String>>("", "relation").unwrap(), None);
+    }
+    sql(&db, "SELECT * FROM viewer_user LIMIT 0; SELECT * FROM movie LIMIT 0; SELECT * FROM series LIMIT 0; SELECT * FROM episode LIMIT 0").await;
     db.rollback().await.unwrap();
 }
 
