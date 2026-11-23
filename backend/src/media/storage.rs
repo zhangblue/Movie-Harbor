@@ -4,10 +4,10 @@ use super::{
 };
 use axum::body::Bytes;
 use rustix::{
-    fd::{AsFd, OwnedFd},
+    fd::{AsFd, BorrowedFd, OwnedFd},
     fs::{
-        AtFlags, CWD, Mode, OFlags, RenameFlags, fsync, mkdirat, openat, renameat_with, statat,
-        unlinkat,
+        AtFlags, CWD, Mode, OFlags, RenameFlags, fstatvfs, fsync, mkdirat, openat, renameat_with,
+        statat, unlinkat,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -91,6 +91,41 @@ pub trait StorageHooks: Send + Sync {
 struct NoopHooks;
 impl StorageHooks for NoopHooks {}
 
+/// 表示当前文件系统对非特权 API 进程可见的总容量与可用容量。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StorageCapacity {
+    pub total_bytes: u64,
+    pub available_bytes: u64,
+}
+
+/// 抽象已打开媒体根目录的容量采样，供生产系统调用与确定性测试共用。
+pub trait StorageCapacityReader: Send + Sync {
+    /// 读取根目录所在文件系统的容量；失败由调用方降级为未知状态。
+    fn read(&self, root: BorrowedFd<'_>) -> io::Result<StorageCapacity>;
+}
+
+/// 使用 POSIX 文件系统统计读取真实容量，供常规存储实例初始化时安装。
+struct SystemCapacityReader;
+
+impl StorageCapacityReader for SystemCapacityReader {
+    /// 从已验证并保持打开的目录描述符读取容量，避免再次解析或跟随外部路径。
+    fn read(&self, root: BorrowedFd<'_>) -> io::Result<StorageCapacity> {
+        let stats = fstatvfs(root).map_err(io::Error::from)?;
+        let total_bytes = stats
+            .f_frsize
+            .checked_mul(stats.f_blocks)
+            .ok_or_else(|| io::Error::other("filesystem total capacity overflow"))?;
+        let available_bytes = stats
+            .f_frsize
+            .checked_mul(stats.f_bavail)
+            .ok_or_else(|| io::Error::other("filesystem available capacity overflow"))?;
+        Ok(StorageCapacity {
+            total_bytes,
+            available_bytes,
+        })
+    }
+}
+
 /// 应用初始化后共用的本地媒体存储句柄，持有受控目录描述符、变更锁和事件钩子。
 #[derive(Clone)]
 pub struct LocalMediaStorage {
@@ -102,6 +137,7 @@ pub struct LocalMediaStorage {
     // 同一存储实例及其克隆共用变更锁；上传、替换、删除及恢复协调持锁，避免归属判断相互交错。
     mutations: Arc<AsyncMutex<()>>,
     hooks: Arc<dyn StorageHooks>,
+    capacity_reader: Arc<dyn StorageCapacityReader>,
 }
 
 /// 删除预检后保存的正式文件位置与身份，供后续暂存和回滚使用。
@@ -390,13 +426,28 @@ impl LocalMediaStorage {
 
     /// 应用启动时以默认空钩子初始化目录句柄，并执行隔离记录恢复。
     pub async fn initialize(root: impl AsRef<Path>) -> Result<Self, MediaError> {
-        Self::initialize_with_hooks(root, Arc::new(NoopHooks)).await
+        Self::initialize_with_hooks_and_capacity_reader(
+            root,
+            Arc::new(NoopHooks),
+            Arc::new(SystemCapacityReader),
+        )
+        .await
     }
 
     /// 需要观察或注入存储事件时初始化带钩子的实例；目录准备和隔离恢复失败会阻止返回。
     pub async fn initialize_with_hooks(
         root: impl AsRef<Path>,
         hooks: Arc<dyn StorageHooks>,
+    ) -> Result<Self, MediaError> {
+        Self::initialize_with_hooks_and_capacity_reader(root, hooks, Arc::new(SystemCapacityReader))
+            .await
+    }
+
+    /// 测试或受控调用方需要替换容量系统调用时初始化存储，其他存储行为保持真实。
+    pub async fn initialize_with_hooks_and_capacity_reader(
+        root: impl AsRef<Path>,
+        hooks: Arc<dyn StorageHooks>,
+        capacity_reader: Arc<dyn StorageCapacityReader>,
     ) -> Result<Self, MediaError> {
         tokio::fs::create_dir_all(root.as_ref()).await?;
         let canonical = tokio::fs::canonicalize(root.as_ref()).await?;
@@ -446,12 +497,18 @@ impl LocalMediaStorage {
             operations_fd: Arc::new(operations_fd),
             mutations: Arc::new(AsyncMutex::new(())),
             hooks,
+            capacity_reader,
         })
     }
 
     /// 上层需要存储根路径时返回初始化阶段得到的规范路径。
     pub fn root(&self) -> &Path {
         self.root.as_ref()
+    }
+
+    /// 系统概览需要当前容量时只读采样已打开根目录，不触发存储写入或恢复事件。
+    pub fn capacity(&self) -> io::Result<StorageCapacity> {
+        self.capacity_reader.read(self.root_fd.as_fd())
     }
 
     /// 发布检查需要确认文件可用时，通过目录描述符逐级解析键并检查可读普通文件。

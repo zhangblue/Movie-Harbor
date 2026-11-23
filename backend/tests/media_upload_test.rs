@@ -12,10 +12,12 @@ use movie_harbor_api::{
     config::Config,
     entities::{episode, media_asset, movie, season, series},
     media::{
-        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, StorageEvent,
-        StorageHooks, UploadPolicy, replace_attachment, store_new_asset,
+        AttachmentTarget, ChunkSource, LocalMediaStorage, MediaError, MediaKind, StorageCapacity,
+        StorageCapacityReader, StorageEvent, StorageHooks, UploadPolicy, replace_attachment,
+        store_new_asset,
     },
 };
+use rustix::fd::BorrowedFd;
 use sea_orm::{
     ActiveModelTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
     DatabaseConnection, EntityTrait, IntoActiveModel, Set, Statement,
@@ -660,6 +662,68 @@ impl StorageHooks for RecordingHooks {
         self.events.lock().unwrap().push(event.clone());
         Ok(())
     }
+}
+
+/// 在容量读取测试中返回确定结果或注入系统调用失败。
+struct FixedCapacityReader {
+    capacity: StorageCapacity,
+    fail: bool,
+}
+
+impl StorageCapacityReader for FixedCapacityReader {
+    /// 在测试采样时返回预设容量，失败分支不暴露任何真实路径。
+    fn read(&self, _root: BorrowedFd<'_>) -> std::io::Result<StorageCapacity> {
+        if self.fail {
+            Err(std::io::Error::other("capacity unavailable"))
+        } else {
+            Ok(self.capacity)
+        }
+    }
+}
+
+#[tokio::test]
+/// 验证容量采样使用已打开目录、允许失败并且不产生存储写事件或文件。
+async fn storage_capacity_is_injectable_and_read_only() {
+    let root = TempRoot::new();
+    let hooks = Arc::new(RecordingHooks::default());
+    let expected = StorageCapacity {
+        total_bytes: 40 * 1024 * 1024 * 1024,
+        available_bytes: 10 * 1024 * 1024 * 1024,
+    };
+    let storage = LocalMediaStorage::initialize_with_hooks_and_capacity_reader(
+        root.as_ref(),
+        hooks.clone(),
+        Arc::new(FixedCapacityReader {
+            capacity: expected,
+            fail: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let event_count = hooks.events.lock().unwrap().len();
+    let file_count = count_files(root.as_ref());
+
+    assert_eq!(storage.capacity().unwrap(), expected);
+    assert_eq!(hooks.events.lock().unwrap().len(), event_count);
+    assert_eq!(count_files(root.as_ref()), file_count);
+
+    let failed = LocalMediaStorage::initialize_with_hooks_and_capacity_reader(
+        root.as_ref(),
+        hooks.clone(),
+        Arc::new(FixedCapacityReader {
+            capacity: expected,
+            fail: true,
+        }),
+    )
+    .await
+    .unwrap();
+    let event_count = hooks.events.lock().unwrap().len();
+    assert_eq!(
+        failed.capacity().unwrap_err().kind(),
+        std::io::ErrorKind::Other
+    );
+    assert_eq!(hooks.events.lock().unwrap().len(), event_count);
+    assert_eq!(count_files(root.as_ref()), file_count);
 }
 
 /// 列出恢复和提升测试中注入的对抗性文件替换动作。
