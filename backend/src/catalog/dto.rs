@@ -14,9 +14,22 @@ pub struct CatalogRequest {
     /// 去除首尾空白后的子串搜索。大小写折叠遵循数据库排序规则下 PostgreSQL 的 `lower`；
     /// LIKE 元字符会被转义，因此所有用户输入都按普通文本匹配。
     pub q: Option<String>,
+    pub genres: Option<String>,
+    pub year: Option<i32>,
     pub privacy: Option<String>,
+    pub sort: Option<String>,
     pub page: Option<u64>,
     pub size: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+// 表示公开目录的稳定排序方式，供候选窗口与最终输出共享。
+pub enum CatalogSort {
+    #[default]
+    Recent,
+    YearDesc,
+    YearAsc,
+    NameAsc,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,7 +56,10 @@ impl CatalogKind {
 pub struct CatalogFilter {
     pub kind: CatalogKind,
     pub search_pattern: Option<String>,
+    pub genre_ids: Vec<Uuid>,
+    pub year: Option<i32>,
     pub private_only: bool,
+    pub sort: CatalogSort,
     pub page: u64,
     pub size: u64,
     pub offset: u64,
@@ -79,11 +95,38 @@ impl TryFrom<CatalogRequest> for CatalogFilter {
             .map(|query| query.trim().to_owned())
             .filter(|query| !query.is_empty())
             .map(|query| format!("%{}%", escape_like(&query)));
+        let mut genre_ids = match value.genres {
+            None => Vec::new(),
+            Some(genres) if genres.is_empty() => return Err(()),
+            Some(genres) => genres
+                .split(',')
+                .map(Uuid::parse_str)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| ())?,
+        };
+        genre_ids.sort_unstable_by_key(Uuid::to_string);
+        genre_ids.dedup();
+        if genre_ids.len() > 20 {
+            return Err(());
+        }
+        if value.year.is_some_and(|year| !(1..=9999).contains(&year)) {
+            return Err(());
+        }
+        let sort = match value.sort.as_deref().unwrap_or("recent") {
+            "recent" => CatalogSort::Recent,
+            "year_desc" => CatalogSort::YearDesc,
+            "year_asc" => CatalogSort::YearAsc,
+            "name_asc" => CatalogSort::NameAsc,
+            _ => return Err(()),
+        };
         let private_only = value.privacy.as_deref() == Some("private");
         Ok(Self {
             kind,
             search_pattern,
+            genre_ids,
+            year: value.year,
             private_only,
+            sort,
             page,
             size,
             offset,
@@ -133,6 +176,13 @@ pub struct CatalogPage {
     pub size: u64,
     pub total: u64,
     pub items: Vec<CatalogCard>,
+}
+
+#[derive(Debug, Serialize)]
+// 承载当前身份可见内容实际引用的题材和年份筛选项。
+pub struct CatalogFacets {
+    pub genres: Vec<PublicGenre>,
+    pub years: Vec<i32>,
 }
 
 #[derive(Debug, Serialize)]

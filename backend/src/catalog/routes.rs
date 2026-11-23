@@ -1,5 +1,5 @@
 use super::{
-    dto::{CatalogFilter, CatalogRequest, MovieDetail, SeriesDetail},
+    dto::{CatalogFacets, CatalogFilter, CatalogRequest, MovieDetail, SeriesDetail},
     query,
 };
 use crate::route_params::parse_uuid;
@@ -51,10 +51,21 @@ impl IntoResponse for CatalogError {
 pub fn router(db: DatabaseConnection) -> Router {
     Router::new()
         .route("/api/catalog", get(list))
+        .route("/api/catalog/facets", get(facets))
         .route("/api/catalog/movies/{id}", get(movie_detail))
         .route("/api/catalog/series/{id}", get(series_detail))
         .layer(map_response(private_cache))
         .with_state(CatalogState { db })
+}
+
+// 按访客权限返回可实际命中的题材和年份，供公开浏览筛选面板初始化。
+async fn facets(
+    State(state): State<CatalogState>,
+    headers: HeaderMap,
+) -> Result<Json<CatalogFacets>, CatalogError> {
+    // 先固定普通用户身份再查询 facets，避免匿名请求借筛选项推断私密内容。
+    let include_private = include_private(&state, &headers).await?;
+    Ok(Json(query::facets(&state.db, include_private).await?))
 }
 
 // 设置私有且不可存储的缓存策略，供目录响应中间件调用。

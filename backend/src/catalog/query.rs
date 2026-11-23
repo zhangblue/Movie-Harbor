@@ -1,6 +1,7 @@
 use super::dto::{
-    CatalogCard, CatalogFilter, CatalogKind, CatalogPage, MovieDetail, PublicEpisode, PublicGenre,
-    PublicSeason, SeriesDetail, media_url, public_genre, published_at_string,
+    CatalogCard, CatalogFacets, CatalogFilter, CatalogKind, CatalogPage, CatalogSort, MovieDetail,
+    PublicEpisode, PublicGenre, PublicSeason, SeriesDetail, media_url, public_genre,
+    published_at_string,
 };
 use crate::entities::{
     episode, genre, media_asset, movie, movie_genre, season, series, series_genre,
@@ -10,8 +11,8 @@ use sea_orm::{
     AccessMode, ConnectionTrait, DatabaseConnection, DbErr, FromQueryResult, IsolationLevel,
     TransactionTrait,
     sea_query::{
-        Alias, Asterisk, BinOper, CommonTableExpression, Expr, Func, JoinType, Order, Query,
-        SelectStatement, SimpleExpr, UnionType, WithClause,
+        Alias, Asterisk, BinOper, CommonTableExpression, Expr, Func, JoinType, NullOrdering, Order,
+        Query, SelectStatement, SimpleExpr, UnionType, WithClause,
     },
 };
 use std::collections::HashMap;
@@ -79,24 +80,120 @@ fn matching_source(source: SelectStatement, pattern: Option<&str>) -> SelectStat
     by_name
 }
 
-// 合并分类查询，分页时先为每类应用安全窗口，避免给后续媒体连接传入无界集合。
-fn catalog_sources(
+// 为单类发布集合应用年份和题材 OR 条件，供计数与分页复用同一筛选语义。
+fn filtered_source(
     kind: CatalogKind,
     allow_public: bool,
     allow_private: bool,
     pattern: Option<&str>,
-    window: Option<u64>,
+    year: Option<i32>,
+    genre_ids: &[Uuid],
 ) -> SelectStatement {
+    let mut source = published_source(kind, allow_public, allow_private);
+    if let Some(year) = year {
+        source.and_where(Expr::col(Alias::new("year")).eq(year));
+    }
+    if !genre_ids.is_empty() {
+        let mut matching_genre = Query::select();
+        matching_genre.expr(Expr::val(1));
+        match kind {
+            CatalogKind::Movie => {
+                matching_genre
+                    .from(movie_genre::Entity)
+                    .and_where(
+                        Expr::col((movie_genre::Entity, movie_genre::Column::MovieId))
+                            .equals((movie::Entity, movie::Column::Id)),
+                    )
+                    .and_where(
+                        Expr::col((movie_genre::Entity, movie_genre::Column::GenreId))
+                            .is_in(genre_ids.iter().copied()),
+                    );
+            }
+            CatalogKind::Series => {
+                matching_genre
+                    .from(series_genre::Entity)
+                    .and_where(
+                        Expr::col((series_genre::Entity, series_genre::Column::SeriesId))
+                            .equals((series::Entity, series::Column::Id)),
+                    )
+                    .and_where(
+                        Expr::col((series_genre::Entity, series_genre::Column::GenreId))
+                            .is_in(genre_ids.iter().copied()),
+                    );
+            }
+            CatalogKind::All => unreachable!("filtered_source requires one content type"),
+        }
+        source.and_where(Expr::exists(matching_genre.to_owned()));
+    }
+    // 最后拆分名称和简介搜索分支，使两侧都继承上面的结构化筛选条件。
+    matching_source(source, pattern)
+}
+
+// 将目录稳定排序附加到查询，供分支窗口、统一分页与最终媒体连接保持一致。
+fn apply_catalog_order(query: &mut SelectStatement, sort: CatalogSort, table: Option<Alias>) {
+    // 最终查询连接海报表后存在同名 ID，因此按调用阶段决定是否限定分页表别名。
+    let column = |name: &'static str| -> SimpleExpr {
+        match &table {
+            Some(table) => Expr::col((table.clone(), Alias::new(name))),
+            None => Expr::col(Alias::new(name)),
+        }
+        .into()
+    };
+    match sort {
+        CatalogSort::Recent => {
+            query.order_by_expr(column("published_at"), Order::Desc);
+        }
+        CatalogSort::YearDesc => {
+            query.order_by_expr_with_nulls(column("year"), Order::Desc, NullOrdering::Last);
+            query.order_by_expr(column("published_at"), Order::Desc);
+        }
+        CatalogSort::YearAsc => {
+            query.order_by_expr_with_nulls(column("year"), Order::Asc, NullOrdering::Last);
+            query.order_by_expr(column("published_at"), Order::Desc);
+        }
+        CatalogSort::NameAsc => {
+            query.order_by_expr(SimpleExpr::from(Func::lower(column("name"))), Order::Asc);
+            query.order_by_expr(column("name"), Order::Asc);
+        }
+    }
+    query
+        .order_by_expr(column("kind"), Order::Asc)
+        .order_by_expr(column("id"), Order::Asc);
+}
+
+// 汇总目录候选查询的可见性、筛选、排序与窗口选项，避免调用点遗漏任一约束。
+struct CatalogSourceOptions<'a> {
+    kind: CatalogKind,
+    allow_public: bool,
+    allow_private: bool,
+    pattern: Option<&'a str>,
+    year: Option<i32>,
+    genre_ids: &'a [Uuid],
+    sort: CatalogSort,
+    window: Option<u64>,
+}
+
+// 合并分类查询，分页时先为每类应用安全窗口，避免给后续媒体连接传入无界集合。
+fn catalog_sources(options: CatalogSourceOptions<'_>) -> SelectStatement {
+    let CatalogSourceOptions {
+        kind,
+        allow_public,
+        allow_private,
+        pattern,
+        year,
+        genre_ids,
+        sort,
+        window,
+    } = options;
     let source = |kind| {
-        let query = matching_source(published_source(kind, allow_public, allow_private), pattern);
+        let query = filtered_source(kind, allow_public, allow_private, pattern, year, genre_ids);
         let Some(window) = window else { return query };
-        Query::select()
+        let mut bounded = Query::select();
+        bounded
             .column(Asterisk)
-            .from_subquery(query, Alias::new("matches"))
-            .order_by(Alias::new("published_at"), Order::Desc)
-            .order_by(Alias::new("id"), Order::Asc)
-            .limit(window)
-            .to_owned()
+            .from_subquery(query, Alias::new("matches"));
+        apply_catalog_order(&mut bounded, sort, None);
+        bounded.limit(window).to_owned()
     };
     match kind {
         CatalogKind::All => {
@@ -127,23 +224,21 @@ pub fn catalog_items_query(filter: &CatalogFilter, include_private: bool) -> Sel
     let media = Alias::new("poster");
     let candidates_cte = CommonTableExpression::new()
         .table_name(candidates.clone())
-        .query(catalog_sources(
-            filter.kind,
-            !filter.private_only,
-            include_private,
-            filter.search_pattern.as_deref(),
-            Some(filter.window),
-        ))
+        .query(catalog_sources(CatalogSourceOptions {
+            kind: filter.kind,
+            allow_public: !filter.private_only,
+            allow_private: include_private,
+            pattern: filter.search_pattern.as_deref(),
+            year: filter.year,
+            genre_ids: &filter.genre_ids,
+            sort: filter.sort,
+            window: Some(filter.window),
+        }))
         .to_owned();
-    let page_query = Query::select()
-        .column(Asterisk)
-        .from(candidates)
-        .order_by(Alias::new("published_at"), Order::Desc)
-        .order_by(Alias::new("kind"), Order::Asc)
-        .order_by(Alias::new("id"), Order::Asc)
-        .offset(filter.offset)
-        .limit(filter.size)
-        .to_owned();
+    let mut page_query = Query::select();
+    page_query.column(Asterisk).from(candidates);
+    apply_catalog_order(&mut page_query, filter.sort, None);
+    page_query.offset(filter.offset).limit(filter.size);
     // 固化分页结果后才读取海报，以免 PostgreSQL 将媒体连接提前到分页之前。
     let page_cte = CommonTableExpression::new()
         .table_name(page.clone())
@@ -154,7 +249,8 @@ pub fn catalog_items_query(filter: &CatalogFilter, include_private: bool) -> Sel
         .cte(candidates_cte)
         .cte(page_cte)
         .to_owned();
-    Query::select()
+    let mut query = Query::select();
+    query
         .column((page.clone(), Asterisk))
         .expr_as(
             Expr::col((media.clone(), media_asset::Column::StorageKey)),
@@ -168,11 +264,9 @@ pub fn catalog_items_query(filter: &CatalogFilter, include_private: bool) -> Sel
             Expr::col((media, media_asset::Column::Id))
                 .equals((page.clone(), Alias::new("poster_asset_id"))),
         )
-        .order_by((page.clone(), Alias::new("published_at")), Order::Desc)
-        .order_by((page.clone(), Alias::new("kind")), Order::Asc)
-        .order_by((page, Alias::new("id")), Order::Asc)
-        .with_cte(clause)
-        .to_owned()
+        .with_cte(clause);
+    apply_catalog_order(&mut query, filter.sort, Some(page));
+    query.to_owned()
 }
 
 // 生成电影或剧集详情查询，复用发布规则并按需加入电影视频。
@@ -325,6 +419,19 @@ struct GenreRow {
     name: String,
 }
 
+#[derive(FromQueryResult)]
+// 承载筛选面板题材行，供可见发布内容的 facets 响应使用。
+struct FacetGenreRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(FromQueryResult)]
+// 承载筛选面板年份行，供去重并按降序输出年份。
+struct FacetYearRow {
+    year: i32,
+}
+
 // 承载名称及所属范围，供助手构建按可见性分组的名称列表。
 #[derive(FromQueryResult)]
 pub(crate) struct PublishedName {
@@ -339,7 +446,16 @@ pub(crate) async fn published_names(
     allow_public: bool,
     allow_private: bool,
 ) -> Result<Vec<PublishedName>, DbErr> {
-    let candidates = catalog_sources(kind, allow_public, allow_private, None, None);
+    let candidates = catalog_sources(CatalogSourceOptions {
+        kind,
+        allow_public,
+        allow_private,
+        pattern: None,
+        year: None,
+        genre_ids: &[],
+        sort: CatalogSort::Recent,
+        window: None,
+    });
     let query = Query::select()
         .columns([Alias::new("name"), Alias::new("is_private")])
         .from_subquery(candidates, Alias::new("published"))
@@ -367,19 +483,134 @@ pub async fn list(
     Ok(page)
 }
 
+// 在一致性快照中读取当前身份可见内容实际使用的题材和年份，供筛选面板调用。
+pub async fn facets(
+    db: &DatabaseConnection,
+    include_private: bool,
+) -> Result<CatalogFacets, DbErr> {
+    // 题材和年份必须来自同一个快照，否则并发发布会产生无法组合的筛选项。
+    let transaction = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let facets = facets_on(&transaction, include_private).await?;
+    transaction.commit().await?;
+    Ok(facets)
+}
+
+// 按当前身份可见性生成 facets，供只读事务内部复用。
+async fn facets_on<C: ConnectionTrait>(
+    db: &C,
+    include_private: bool,
+) -> Result<CatalogFacets, DbErr> {
+    let visible_genres = |kind| {
+        let visible = Alias::new("visible");
+        let mut query = Query::select();
+        match kind {
+            CatalogKind::Movie => {
+                query
+                    .expr_as(
+                        Expr::col((movie_genre::Entity, movie_genre::Column::GenreId)),
+                        Alias::new("genre_id"),
+                    )
+                    .from(movie_genre::Entity)
+                    .join_subquery(
+                        JoinType::InnerJoin,
+                        published_source(CatalogKind::Movie, true, include_private),
+                        visible.clone(),
+                        Expr::col((movie_genre::Entity, movie_genre::Column::MovieId))
+                            .equals((visible, Alias::new("id"))),
+                    );
+            }
+            CatalogKind::Series => {
+                query
+                    .expr_as(
+                        Expr::col((series_genre::Entity, series_genre::Column::GenreId)),
+                        Alias::new("genre_id"),
+                    )
+                    .from(series_genre::Entity)
+                    .join_subquery(
+                        JoinType::InnerJoin,
+                        published_source(CatalogKind::Series, true, include_private),
+                        visible.clone(),
+                        Expr::col((series_genre::Entity, series_genre::Column::SeriesId))
+                            .equals((visible, Alias::new("id"))),
+                    );
+            }
+            CatalogKind::All => unreachable!("visible_genres requires one content type"),
+        }
+        query.to_owned()
+    };
+    let mut used_genres = visible_genres(CatalogKind::Movie);
+    used_genres.union(UnionType::Distinct, visible_genres(CatalogKind::Series));
+    let used = Alias::new("used_genres");
+    let genres_query = Query::select()
+        .columns([
+            (genre::Entity, genre::Column::Id),
+            (genre::Entity, genre::Column::Name),
+        ])
+        .from(genre::Entity)
+        .join_subquery(
+            JoinType::InnerJoin,
+            used_genres,
+            used.clone(),
+            Expr::col((genre::Entity, genre::Column::Id)).equals((used, Alias::new("genre_id"))),
+        )
+        .order_by((genre::Entity, genre::Column::SortOrder), Order::Asc)
+        .order_by((genre::Entity, genre::Column::Id), Order::Asc)
+        .to_owned();
+    let genres = query_models::<FacetGenreRow>(db, &genres_query)
+        .await?
+        .into_iter()
+        .map(|row| public_genre(row.id, row.name))
+        .collect();
+
+    let visible = Alias::new("visible");
+    let years_query = Query::select()
+        .distinct()
+        .column((visible.clone(), Alias::new("year")))
+        .from_subquery(
+            catalog_sources(CatalogSourceOptions {
+                kind: CatalogKind::All,
+                allow_public: true,
+                allow_private: include_private,
+                pattern: None,
+                year: None,
+                genre_ids: &[],
+                sort: CatalogSort::Recent,
+                window: None,
+            }),
+            visible.clone(),
+        )
+        .and_where(Expr::col((visible.clone(), Alias::new("year"))).is_not_null())
+        .order_by((visible, Alias::new("year")), Order::Desc)
+        .to_owned();
+    let years = query_models::<FacetYearRow>(db, &years_query)
+        .await?
+        .into_iter()
+        .map(|row| row.year)
+        .collect();
+    Ok(CatalogFacets { genres, years })
+}
+
 // 按筛选与可见性读取目录分页，供目录事务内查询调用。
 async fn list_on<C: ConnectionTrait>(
     db: &C,
     filter: CatalogFilter,
     include_private: bool,
 ) -> Result<CatalogPage, DbErr> {
-    let candidates = catalog_sources(
-        filter.kind,
-        !filter.private_only,
-        include_private,
-        filter.search_pattern.as_deref(),
-        None,
-    );
+    let candidates = catalog_sources(CatalogSourceOptions {
+        kind: filter.kind,
+        allow_public: !filter.private_only,
+        allow_private: include_private,
+        pattern: filter.search_pattern.as_deref(),
+        year: filter.year,
+        genre_ids: &filter.genre_ids,
+        sort: filter.sort,
+        window: None,
+    });
     let count = Query::select()
         .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("total"))
         .from_subquery(candidates, Alias::new("published"))

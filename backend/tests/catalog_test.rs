@@ -590,6 +590,10 @@ async fn catalog_validates_kind_page_and_bounded_size() {
         "/api/catalog?size=0",
         "/api/catalog?size=101",
         "/api/catalog?page=18446744073709551615&size=100",
+        "/api/catalog?genres=not-a-uuid",
+        "/api/catalog?year=0",
+        "/api/catalog?year=10000",
+        "/api/catalog?sort=unknown",
     ] {
         assert_eq!(
             get(&app, uri).await.status(),
@@ -603,6 +607,121 @@ async fn catalog_validates_kind_page_and_bounded_size() {
     let defaults = json_body(get(&app, "/api/catalog").await).await;
     assert_eq!(defaults["page"], 1);
     assert_eq!(defaults["size"], 20);
+}
+
+#[tokio::test]
+/// 验证目录组合筛选、题材 OR 去重、四种稳定排序及身份相关 facets。
+async fn catalog_filters_sorts_and_facets_follow_visible_published_content() {
+    let db = database("browse_filters").await;
+    sql(
+        &db,
+        r#"
+INSERT INTO genre (id, name, sort_order, enabled) VALUES
+('71000000-0000-0000-0000-000000000001', 'Drama', 20, true),
+('71000000-0000-0000-0000-000000000002', 'Sci-Fi', 10, false),
+('71000000-0000-0000-0000-000000000003', 'Private only', 30, true);
+INSERT INTO movie (id, name, synopsis, year, is_private, status, published_at) VALUES
+('71100000-0000-0000-0000-000000000001', 'Alpha', 'harbor signal', 2024, false, 'published', '2026-01-04T00:00:00Z'),
+('71100000-0000-0000-0000-000000000002', 'zeta', 'harbor signal', NULL, false, 'published', '2026-01-03T00:00:00Z'),
+('71100000-0000-0000-0000-000000000003', 'Private', 'harbor signal', 2025, true, 'published', '2026-01-05T00:00:00Z');
+INSERT INTO series (id, name, synopsis, year, is_private, status, published_at) VALUES
+('71200000-0000-0000-0000-000000000001', 'beta', 'harbor signal', 2023, false, 'published', '2026-01-02T00:00:00Z'),
+('71200000-0000-0000-0000-000000000002', 'Gamma', 'other', 2024, false, 'published', '2026-01-01T00:00:00Z');
+INSERT INTO movie_genre (movie_id, genre_id) VALUES
+('71100000-0000-0000-0000-000000000001', '71000000-0000-0000-0000-000000000001'),
+('71100000-0000-0000-0000-000000000001', '71000000-0000-0000-0000-000000000002'),
+('71100000-0000-0000-0000-000000000002', '71000000-0000-0000-0000-000000000001'),
+('71100000-0000-0000-0000-000000000003', '71000000-0000-0000-0000-000000000003');
+INSERT INTO series_genre (series_id, genre_id) VALUES
+('71200000-0000-0000-0000-000000000001', '71000000-0000-0000-0000-000000000002');
+INSERT INTO viewer_user (id, username, normalized_username, password_hash) VALUES
+('71300000-0000-0000-0000-000000000001', 'Browse Viewer', 'browse viewer', 'unused');
+"#,
+    )
+    .await;
+    let root = TempRoot::new();
+    let app = built_app(db.clone(), &root).await;
+    let viewer = viewer_user::Entity::find().one(&db).await.unwrap().unwrap();
+    let token = viewer_auth::session::create(&db, &viewer)
+        .await
+        .map_err(|error| error.0)
+        .unwrap();
+    let viewer_cookie = format!("mh_viewer_session={token}");
+
+    // 读取目录名称顺序，供各筛选和排序断言复用。
+    async fn names(app: &Router, uri: &str, cookie: Option<&str>) -> Vec<String> {
+        json_body(get_with_cookie(app, uri, cookie).await).await["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["name"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    assert_eq!(
+        names(
+            &app,
+            "/api/catalog?kind=movie&q=harbor&year=2024&genres=71000000-0000-0000-0000-000000000001",
+            None,
+        )
+        .await,
+        ["Alpha"]
+    );
+    assert_eq!(
+        names(
+            &app,
+            "/api/catalog?genres=71000000-0000-0000-0000-000000000001,71000000-0000-0000-0000-000000000002,71000000-0000-0000-0000-000000000001",
+            None,
+        )
+        .await,
+        ["Alpha", "zeta", "beta"]
+    );
+    for (sort, expected) in [
+        ("recent", vec!["Alpha", "zeta", "beta", "Gamma"]),
+        ("year_desc", vec!["Alpha", "Gamma", "beta", "zeta"]),
+        ("year_asc", vec!["beta", "Alpha", "Gamma", "zeta"]),
+        ("name_asc", vec!["Alpha", "beta", "Gamma", "zeta"]),
+    ] {
+        assert_eq!(
+            names(&app, &format!("/api/catalog?sort={sort}"), None).await,
+            expected,
+            "sort={sort}"
+        );
+    }
+
+    let anonymous_facets = json_body(get(&app, "/api/catalog/facets").await).await;
+    assert_eq!(anonymous_facets["years"], serde_json::json!([2024, 2023]));
+    assert_eq!(anonymous_facets["genres"][0]["name"], "Sci-Fi");
+    assert_eq!(anonymous_facets["genres"][1]["name"], "Drama");
+    assert_private_cache(&get(&app, "/api/catalog/facets").await);
+
+    let viewer_facets =
+        json_body(get_with_cookie(&app, "/api/catalog/facets", Some(&viewer_cookie)).await).await;
+    assert_eq!(
+        viewer_facets["years"],
+        serde_json::json!([2025, 2024, 2023])
+    );
+    assert_eq!(viewer_facets["genres"][2]["name"], "Private only");
+    assert_eq!(
+        names(
+            &app,
+            "/api/catalog?privacy=private&genres=71000000-0000-0000-0000-000000000003",
+            Some(&viewer_cookie),
+        )
+        .await,
+        ["Private"]
+    );
+
+    let too_many = (0..21)
+        .map(|index| format!("71000000-0000-0000-0000-{index:012}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert_eq!(
+        get(&app, &format!("/api/catalog?genres={too_many}"))
+            .await
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -1019,7 +1138,10 @@ INSERT INTO movie (id, name, poster_asset_id, status, published_at) VALUES
             CatalogFilter {
                 kind: CatalogKind::Movie,
                 search_pattern: None,
+                genre_ids: Vec::new(),
+                year: None,
                 private_only: false,
+                sort: Default::default(),
                 page: 1,
                 size: 20,
                 offset: 0,

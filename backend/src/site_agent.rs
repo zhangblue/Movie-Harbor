@@ -891,9 +891,12 @@ async fn catalog_content(
 ) -> Result<catalog::dto::CatalogPage, StatusCode> {
     let filter = catalog::dto::CatalogFilter::try_from(catalog::dto::CatalogRequest {
         q: name,
+        genres: None,
         kind: kind.map(|kind| kind.as_str().to_owned()),
+        year: None,
         page,
         privacy: private_only.then(|| "private".to_owned()),
+        sort: None,
         ..Default::default()
     })
     .map_err(|_| StatusCode::BAD_REQUEST)?;
