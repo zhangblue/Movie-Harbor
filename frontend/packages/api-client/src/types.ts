@@ -74,6 +74,41 @@ export interface ViewerLoginRequest { username: string; password: string }
 export interface ViewerLoginResponse { username: string }
 // 普通用户会话恢复返回的用户名和 CSRF 令牌。
 export interface ViewerSessionResponse { viewer_id: string; username: string; csrf_token: string }
+// 普通用户播放进度支持的内容目标，供单条写入和规范快照共享。
+export type ViewerProgressKind = "movie" | "episode";
+// 普通用户可移除电影、单集或整剧，供永久墓碑请求使用。
+export type ViewerProgressRemovalKind = ViewerProgressKind | "series";
+// 单条播放位置包含完成状态和原始客户端时间，供离线冲突合并。
+export interface ViewerProgressInput {
+  position_seconds: number; duration_seconds: number; completed: boolean; updated_at: string;
+}
+// 批量播放位置额外携带目标，供合并接口逐项处理。
+export interface ViewerProgressMergeInput extends ViewerProgressInput { kind: ViewerProgressKind; id: string }
+// 剧集游标记录最近选择的单集及原始客户端时间。
+export interface ViewerSeriesCursorInput { series_id: string; episode_id: string; updated_at: string }
+// 删除操作保留最初客户端时间，供离线重试保持冲突顺序。
+export interface ViewerProgressRemovalRequest { removed_at: string }
+// 批量删除额外携带目标范围和标识。
+export interface ViewerProgressRemovalInput extends ViewerProgressRemovalRequest { kind: ViewerProgressRemovalKind; id: string }
+// 一次进度合并包含播放位置、剧集游标和删除墓碑。
+export interface ViewerProgressMergeRequest {
+  progress: ViewerProgressMergeInput[]; cursors: ViewerSeriesCursorInput[]; removals: ViewerProgressRemovalInput[];
+}
+// 服务端规范播放位置可包含单集所属剧集，供继续观看聚合。
+export interface ViewerProgressRecord extends ViewerProgressInput {
+  kind: ViewerProgressKind; id: string; series_id?: string;
+}
+// 服务端规范剧集游标供跨设备进入播放器时定位。
+export interface ViewerSeriesCursorRecord extends ViewerSeriesCursorInput {}
+// 每项合并结果说明是否接受、忽略或因旧目标被拒绝。
+export interface ViewerProgressMergeResult {
+  operation: "progress" | "cursor" | "removal"; id: string;
+  status: "accepted" | "ignored" | "rejected"; reason?: "not_found";
+}
+// 进度接口返回当前有效的规范快照和本次逐项结果。
+export interface ViewerProgressSnapshot {
+  progress: ViewerProgressRecord[]; cursors: ViewerSeriesCursorRecord[]; results: ViewerProgressMergeResult[];
+}
 // 管理用户列表中单个普通用户的版本和会话摘要。
 export interface ViewerUserSummary {
   id: string; username: string; version: number; created_at: string;
