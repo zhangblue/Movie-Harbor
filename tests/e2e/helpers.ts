@@ -162,10 +162,15 @@ export async function createPublishableMovie(api: AdminApi, name: string) {
   return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: movie.version });
 }
 
-// 创建无海报的已发布电影，供占位和分页测试使用。
-export async function createPublishableMovieWithoutPoster(api: AdminApi, name: string) {
+// 创建可指定年份与题材的无海报已发布电影，供占位、分页和组合浏览测试使用。
+export async function createPublishableMovieWithoutPoster(api: AdminApi, name: string, options: {
+  year?: number | null;
+  genreIds?: string[];
+} = {}) {
   const movie = await createMovieDraftWithMedia(api, name, {
     synopsis: `${name} pagination fixture`, durationSeconds: 1, includePoster: false,
+    year: options.year,
+    genreIds: options.genreIds,
   });
   return api.write<Movie>("post", `/api/admin/movies/${movie.id}/publish`, { version: movie.version });
 }

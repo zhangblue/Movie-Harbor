@@ -67,7 +67,7 @@ export async function listCatalog(query: CatalogQuery = {}): Promise<CatalogPage
     query: {
       kind: query.kind,
       q: query.q,
-      genres: query.genres?.join(","),
+      genres: query.genres?.length ? query.genres.join(",") : undefined,
       year: query.year,
       privacy: query.privacy,
       sort: query.sort,

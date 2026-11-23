@@ -47,6 +47,21 @@ it("forwards the complete typed catalog filters and fetches facets independently
   expect(facets).toEqual({ genres: [{ id: "genre-a", name: "剧情" }], years: [2026] });
 });
 
+// 验证：空题材集合不编码为空参数，避免触发后端严格 UUID 列表校验。
+it("omits an empty catalog genre collection", async () => {
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+    urls.push(String(input));
+    return new Response('{"page":1,"size":20,"total":0,"items":[]}', {
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  await listCatalog({ genres: [], page: 1, size: 20 });
+
+  expect(urls).toEqual(["/api/catalog?page=1&size=20"]);
+});
+
 // 验证：公开目录访问范围查询仅允许指定字面值。
 it("keeps the public catalog privacy query as one explicit literal", () => {
   expectTypeOf<CatalogQuery["privacy"]>().toEqualTypeOf<"private" | undefined>();

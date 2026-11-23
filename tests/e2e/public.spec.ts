@@ -1,12 +1,15 @@
 import { expect, test } from "@playwright/test";
-import { AdminApi, ViewerApi, baseURL, createPublishableMovie, createPublishableSeries } from "./helpers";
+import {
+  AdminApi, ViewerApi, baseURL, createPublishableMovie, createPublishableMovieWithoutPoster,
+  createPublishableSeries, type Genre,
+} from "./helpers";
 
 // 验证已发布内容可搜索并显示公开详情。
 test("published content is searchable and has public details", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
   const name = `Public Movie ${Date.now()}`;
   const movie = await createPublishableMovie(api, name);
-  await page.goto(`/?q=${encodeURIComponent(name)}`);
+  await page.goto(`/browse?q=${encodeURIComponent(name)}`);
   await expect(page.getByRole("heading", { name })).toBeVisible();
   await page.getByRole("link", { name }).click();
   await expect(page).toHaveURL(new RegExp(`/movies/${movie.id}$`));
@@ -46,7 +49,7 @@ test("private-only catalog filters movies and series and clears on logout", asyn
     const publicMovie = await createPublishableMovie(api, `${prefix} Public Movie`);
     const privateMovie = await api.setPrivacy("movies", await createPublishableMovie(api, `${prefix} Private Movie`), true);
     const privateSeries = await api.setPrivacy("series", await createPublishableSeries(api, `${prefix} Private Series`), true);
-    await page.goto(`/?q=${encodeURIComponent(prefix)}`);
+    await page.goto(`/browse?q=${encodeURIComponent(prefix)}`);
     const privateOnly = page.getByRole("checkbox", { name: "只看私密", exact: true });
     await expect(privateOnly).toHaveCount(0);
     await expect(page.getByRole("heading", { name: publicMovie.name, exact: true })).toBeVisible();
@@ -68,11 +71,11 @@ test("private-only catalog filters movies and series and clears on logout", asyn
     await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();
 
-    // 显式使用第一页以匹配三条内容的测试数据，验证保存的私密筛选地址可恢复且退出时会清除。
-    await page.goto(`/?q=${encodeURIComponent(prefix)}&privacy=private&page=1`);
+    // 显式输入第一页地址，验证恢复私密筛选后会规范化默认页，且退出时继续清除身份专属条件。
+    await page.goto(`/browse?q=${encodeURIComponent(prefix)}&privacy=private&page=1`);
     await expect(privateOnly).toBeChecked();
     await expect(page.getByRole("heading", { name: privateSeries.name, exact: true })).toBeVisible();
-    await expect(page).toHaveURL((url) => url.searchParams.get("page") === "1");
+    await expect(page).toHaveURL((url) => !url.searchParams.has("page"));
     await page.getByRole("button", { name: "退出登录", exact: true }).click();
     await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
     await expect(privateOnly).toHaveCount(0);
@@ -83,6 +86,71 @@ test("private-only catalog filters movies and series and clears on logout", asyn
   } finally { await api.dispose(); }
 });
 
+// 验证超过二十条的公开浏览在匿名与登录阶段保持 facets 可见性、组合筛选、稳定排序和历史恢复。
+test("browse combines visible facets, stable sorting, pagination and shared URL restoration", async ({ page, playwright }) => {
+  test.setTimeout(240_000);
+  const api = await AdminApi.login(playwright);
+  const stamp = Date.now();
+  const prefix = `Browse Matrix ${stamp}`;
+  const user = await api.createUser(`browse-matrix-${stamp}`);
+  const publicGenre = await api.write<Genre>("post", "/api/admin/genres", { name: `Public Facet ${stamp}` });
+  const privateGenre = await api.write<Genre>("post", "/api/admin/genres", { name: `Private Facet ${stamp}` });
+  try {
+    const publicMovies = [];
+    for (let index = 1; index <= 21; index += 1) {
+      publicMovies.push(await createPublishableMovieWithoutPoster(
+        api,
+        `${prefix} ${String(index).padStart(2, "0")}`,
+        { year: index % 2 === 0 ? 2024 : 2025, genreIds: [publicGenre.id] },
+      ));
+    }
+    const privateMovie = await api.setPrivacy("movies", await createPublishableMovieWithoutPoster(
+      api, `${prefix} Private`, { year: 2033, genreIds: [privateGenre.id] },
+    ), true);
+
+    const anonymousFacets = await (await page.request.get("/api/catalog/facets")).json() as { genres: Genre[]; years: number[] };
+    expect(anonymousFacets.genres).toEqual(expect.arrayContaining([expect.objectContaining({ id: publicGenre.id })]));
+    expect(anonymousFacets.genres).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: privateGenre.id })]));
+    expect(anonymousFacets.years).not.toContain(2033);
+
+    await page.goto(`/browse?q=${encodeURIComponent(prefix)}&sort=name_asc`);
+    const cards = page.getByRole("list", { name: "影片目录" }).getByRole("listitem");
+    await expect(cards).toHaveCount(20);
+    await expect(cards.first().getByRole("heading")).toHaveText(publicMovies[0]!.name);
+    await page.getByRole("button", { name: "第 2 页" }).click();
+    await expect(page).toHaveURL((url) => url.searchParams.get("page") === "2" && url.searchParams.get("sort") === "name_asc");
+    await expect(cards).toHaveCount(1);
+    await expect(cards.first().getByRole("heading")).toHaveText(publicMovies[20]!.name);
+
+    await page.getByRole("checkbox", { name: publicGenre.name }).check();
+    await page.getByLabel("年份", { exact: true }).selectOption("2024");
+    await expect(page).toHaveURL((url) => url.searchParams.get("genres") === publicGenre.id
+      && url.searchParams.get("year") === "2024" && !url.searchParams.has("page"));
+    const sharedUrl = page.url();
+    await expect(cards).toHaveCount(10);
+    await cards.first().getByRole("link").click();
+    await page.goBack();
+    await expect(page).toHaveURL(sharedUrl);
+    await expect(page.getByRole("checkbox", { name: publicGenre.name })).toBeChecked();
+    await expect(page.getByLabel("年份", { exact: true })).toHaveValue("2024");
+
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    const login = page.getByRole("dialog");
+    await login.getByLabel("用户名").fill(user.username);
+    await login.getByLabel("密码", { exact: true }).fill("viewer-initial-password");
+    await login.getByRole("button", { name: "登录", exact: true }).click();
+    await expect(page.getByRole("checkbox", { name: privateGenre.name })).toBeVisible();
+    await page.getByRole("button", { name: "清除全部" }).click();
+    await page.getByRole("searchbox", { name: "浏览关键词" }).fill(prefix);
+    await page.getByRole("checkbox", { name: privateGenre.name }).check();
+    await page.getByRole("checkbox", { name: "只看私密" }).check();
+    await expect(page.getByRole("heading", { name: privateMovie.name, exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: publicMovies[0]!.name, exact: true })).toHaveCount(0);
+  } finally {
+    await api.dispose();
+  }
+});
+
 // 验证公开站登录、本人改密、私密内容刷新及会话撤销。
 test("public login and self password change refresh private content and revoke both sessions", async ({ page, playwright }) => {
   const api = await AdminApi.login(playwright);
@@ -90,7 +158,7 @@ test("public login and self password change refresh private content and revoke b
   const other = await ViewerApi.login(playwright, user.username);
   try {
     const movie = await api.setPrivacy("movies", await createPublishableMovie(api, `Private UI ${Date.now()}`), true);
-    await page.goto(`/?q=${encodeURIComponent(movie.name)}`);
+    await page.goto(`/browse?q=${encodeURIComponent(movie.name)}`);
     await expect(page.getByRole("heading", { name: movie.name })).toHaveCount(0);
     await page.getByRole("button", { name: "登录", exact: true }).click();
     const login = page.getByRole("dialog");
