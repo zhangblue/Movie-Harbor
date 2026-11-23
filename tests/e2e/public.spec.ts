@@ -221,6 +221,15 @@ test("signed-in home resumes a public movie and a private episode", async ({ pag
     await expect(page).toHaveURL(new RegExp(`/series/${series.id}/play/${episode.id}\\?resume=1$`));
     await expect(page.getByTestId("native-video")).toBeVisible();
     await page.goto("/");
+    // 返回首页时本地缓存和服务端规范快照都必须仍保留未完成电影，避免异步单集同步误删其他目标。
+    await expect.poll(() => page.evaluate(({ viewerId, movieId }) => {
+      const raw = localStorage.getItem(`movie-harbor:playback:v1:viewer:${viewerId}`);
+      return raw ? Boolean(JSON.parse(raw).progress?.[`movie:${movieId}`]) : false;
+    }, { viewerId: user.id, movieId: movie.id })).toBe(true);
+    await expect.poll(async () => {
+      const snapshot = await (await page.request.get("/api/viewer/progress")).json() as { progress: Array<{ id: string }> };
+      return snapshot.progress.some((item) => item.id === movie.id);
+    }).toBe(true);
     await section.getByRole("link", { name: new RegExp(movie.name) }).click();
     await expect(page).toHaveURL(new RegExp(`/movies/${movie.id}/play\\?resume=1$`));
     await expect(page.getByTestId("native-video")).toBeVisible();
