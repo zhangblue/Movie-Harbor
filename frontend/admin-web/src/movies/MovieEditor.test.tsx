@@ -277,6 +277,20 @@ it("preserves old media and pending selection after a synchronous replacement fa
   expect(requests.filter((r) => r.url.includes("/media/")).map((r) => r.url)).toEqual(["/api/admin/media/movies/movie-1/poster?version=4", "/api/admin/media/movies/movie-1/poster?version=5"]);
 });
 
+// 验证替换结果未知时提示重新读取版本及媒体，页面只提交用户触发的一次上传。
+it("requires checking the saved movie before retrying an uncertain video replacement", async () => {
+  const requests = fixture(movie(), (request) => request.url.includes("/video?")
+    ? json({ error: "media replacement result unknown", code: "media_replace_outcome_unknown" }, 500)
+    : undefined);
+  const user = userEvent.setup();
+  editor();
+  await screen.findByLabelText("名称");
+  await user.upload(screen.getByLabelText("视频文件"), new File(["video"], "feature.mp4", { type: "video/mp4" }));
+  await user.click(screen.getByRole("button", { name: "保存草稿" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体替换结果未知，请重新读取内容版本和已保存的媒体后再决定是否重试。");
+  expect(requests.filter((request) => request.url.includes("/video?"))).toHaveLength(1);
+});
+
 // 验证媒体内容不匹配时显示本地化提示。
 it("shows a localized upload message for a media content mismatch", async () => {
   fixture(movie(), (r) => r.url.includes("/media/")

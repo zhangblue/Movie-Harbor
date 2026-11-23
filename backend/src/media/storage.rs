@@ -71,6 +71,8 @@ pub enum StorageEvent {
     BeforeUnlink(String),
     Unlinked(String),
     BeforeDirectorySync(String),
+    /// 替换事务已执行提交，在调用方取得确认前报告传输结果。
+    ReplacementCommitAcknowledgement,
     DatabaseCommitted(String),
     RecoveryCycleCompleted,
 }
@@ -302,6 +304,16 @@ impl StoredFile {
             cleanup
                 .finish_rollback()
                 .map_err(|_| MediaError::ReplacementFailed)?;
+        }
+        Ok(())
+    }
+
+    /// 在替换事务返回时核对提交确认，可在该边界模拟服务器已提交但确认丢失。
+    pub(crate) fn replacement_commit_acknowledged(&self) -> Result<(), MediaError> {
+        if let Some(cleanup) = &self.cleanup {
+            cleanup
+                .hooks
+                .on_event(&StorageEvent::ReplacementCommitAcknowledgement)?;
         }
         Ok(())
     }
@@ -1304,8 +1316,8 @@ impl LocalMediaStorage {
         }
     }
 
-    /// 二版凭证恢复时在锁内复验原标记，再按数据库结果清理或恢复已隔离的视频。
-    pub(crate) async fn recover_prepared_video(
+    /// 在同一锁内核对上传凭证与数据库登记，再按凭证版本恢复文件。
+    pub(crate) async fn recover_pending_upload(
         &self,
         db: &sea_orm::DatabaseConnection,
         name: &str,
@@ -1325,49 +1337,36 @@ impl LocalMediaStorage {
             .one(db)
             .await?
             .is_some();
-        let (kind, shard, _) = parse_storage_key(&marker.storage_key)?;
-        let directory = open_directory(&self.root_fd, OsStr::new(kind))?;
-        let leaf = open_directory(&directory, OsStr::new(shard))?;
-        video_rollback::resolve(
-            &self.incoming_fd,
-            &self.quarantine_fd,
-            &leaf,
-            marker,
-            registered,
-            &self.hooks,
-        )?;
-        remove_if_present(&self.incoming_fd, name)?;
-        sync_fd(&self.incoming_fd)?;
-        Ok(())
-    }
-
-    /// 上传恢复确认没有数据库登记后重读标记，仅对仍匹配的标记执行按身份清理。
-    pub(crate) async fn remove_pending_owned(
-        &self,
-        marker: &PendingMarker,
-    ) -> Result<bool, MediaError> {
-        // 调用方已确认没有数据库登记；拿锁后重读标记，避免使用等待期间已被替换或移除的恢复依据。
-        let _mutation_guard = self.mutations.lock().await;
-        let (_, _, file) = parse_storage_key(&marker.storage_key)?;
-        let marker_name = format!(
-            "{}.pending",
-            file.rsplit_once('.')
-                .map(|(stem, _)| stem)
-                .ok_or(MediaError::InvalidStorageKey)?
-        );
-        if self.read_pending_marker(&marker_name).ok().as_ref() != Some(marker) {
-            return Ok(false);
+        if marker.version == 2 {
+            let (kind, shard, _) = parse_storage_key(&marker.storage_key)?;
+            let directory = open_directory(&self.root_fd, OsStr::new(kind))?;
+            let leaf = open_directory(&directory, OsStr::new(shard))?;
+            video_rollback::resolve(
+                &self.incoming_fd,
+                &self.quarantine_fd,
+                &leaf,
+                marker,
+                registered,
+                &self.hooks,
+            )?;
+        } else if !registered
+            && let Err(error) = self.remove_registered_if_owned(
+                &marker.storage_key,
+                DeletionIdentity {
+                    device: Some(marker.device),
+                    inode: Some(marker.inode),
+                    byte_size: marker.byte_size,
+                    checksum_sha256: &marker.checksum_sha256,
+                },
+            )
+        {
+            // 一版凭证可能与正式位置的碰撞文件不同，保留待核对并继续处理其他条目。
+            eprintln!("retaining unproven media recovery marker: {error}");
+            return Ok(());
         }
-        self.remove_registered_if_owned(
-            &marker.storage_key,
-            DeletionIdentity {
-                device: Some(marker.device),
-                inode: Some(marker.inode),
-                byte_size: marker.byte_size,
-                checksum_sha256: &marker.checksum_sha256,
-            },
-        )?;
-        Ok(true)
+        remove_if_present(&self.incoming_fd, name)?;
+        self.sync_directory(&self.incoming_fd, ".incoming".into())?;
+        Ok(())
     }
 
     /// 上传恢复需要清理正式位置时解析受控目录，并将归属检查与隔离删除交给底层辅助函数。
@@ -1450,7 +1449,11 @@ impl LocalMediaStorage {
         {
             return Err(MediaError::InvalidStorageKey);
         }
-        let (_, _, file_name) = parse_storage_key(&marker.storage_key)?;
+        // 路径分量解析会折叠重复斜线与点分量，数据库却逐字节匹配键；两者必须完全相同。
+        let (kind, shard, file_name) = parse_storage_key(&marker.storage_key)?;
+        if marker.storage_key != format!("{kind}/{shard}/{file_name}") {
+            return Err(MediaError::InvalidStorageKey);
+        }
         let resource = file_name
             .rsplit_once('.')
             .map(|(stem, _)| stem)

@@ -26,6 +26,8 @@ export function classifyEditorWriteError(cause: Error): EditorWriteError {
   switch (apiErrorCode(cause)) {
     case "media_delete_failed":
       return { kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" };
+    case "media_replace_outcome_unknown":
+      return { kind: "message", message: "媒体替换结果未知，请重新读取内容版本和已保存的媒体后再决定是否重试。" };
     case "media_replace_failed":
       return { kind: "message", message: "替换失败，原媒体文件已保留，请检查媒体目录权限后重试。" };
     case "storage_space_low":

@@ -195,9 +195,7 @@ where
     Ok(asset)
 }
 
-// 仅处理修改时间距今已达到年龄门槛的上传残留：临时文件可直接清理，已登记资产只清除恢复标记。
-// 未登记的正式文件须通过标记验证所有权后才能清理；无效或无法证明归属的标记保留。
-/// 在启动恢复时检查过期上传残留，只清理可确认归属的文件与标记。
+/// 启动时按数据库最终状态处理上传凭证；仅裸临时分片受年龄保护。
 pub async fn recover_stale_uploads(
     db: &DatabaseConnection,
     storage: &LocalMediaStorage,
@@ -208,11 +206,11 @@ pub async fn recover_stale_uploads(
         .unwrap_or_default()
         .as_secs();
     for entry in storage.incoming_entries()? {
-        let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
-        if now.saturating_sub(modified) < stale_age.as_secs() {
-            continue;
-        }
         if entry.name.ends_with(".part") {
+            let modified = u64::try_from(entry.modified_unix_seconds).unwrap_or(0);
+            if now.saturating_sub(modified) < stale_age.as_secs() {
+                continue;
+            }
             storage.remove_incoming(&entry.name).await?;
             continue;
         }
@@ -224,29 +222,10 @@ pub async fn recover_stale_uploads(
                     continue;
                 }
             };
-            if marker.version == 2 {
-                // 二版标记同时描述预留和已隔离阶段，成功恢复后由存储层同步移除凭证。
-                storage
-                    .recover_prepared_video(db, &entry.name, &marker)
-                    .await?;
-                continue;
-            }
-            let registered = media_asset::Entity::find()
-                .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
-                .one(db)
-                .await?
-                .is_some();
-            if !registered {
-                match storage.remove_pending_owned(&marker).await {
-                    Ok(true) => {}
-                    Ok(false) => continue,
-                    Err(error) => {
-                        eprintln!("retaining unproven media recovery marker: {error}");
-                        continue;
-                    }
-                }
-            }
-            storage.remove_incoming(&entry.name).await?;
+            // 在同一变更锁内重读凭证和数据库，使等待恢复期间完成的登记也可见。
+            storage
+                .recover_pending_upload(db, &entry.name, &marker)
+                .await?;
         }
     }
     storage.notify_recovery_cycle_completed()?;
@@ -357,15 +336,9 @@ pub(crate) async fn commit_attachment(
             return Err(error);
         }
     };
-    if tx.commit().await.is_err() {
-        pending.stored.database_failure_is_known();
-        let restore_result = staged
-            .take()
-            .map(|staged| staged.restore(&pending.storage))
-            .transpose();
-        pending.stored.return_mutation_guard(removal.into_guard())?;
-        restore_result.map_err(|_| MediaError::ReplacementFailed)?;
-        return Err(MediaError::ReplacementFailed);
+    if tx.commit().await.is_err() || pending.stored.replacement_commit_acknowledged().is_err() {
+        // COMMIT 可能已生效；旧文件留在删除清单，新文件保留 pending，启动按实际引用裁定。
+        return Err(MediaError::ReplacementOutcomeUnknown);
     }
     // 数据库提交后，注册新资产或清理旧隔离副本的失败均映射为 ReplacementFinalizationFailed，与提交前的 ReplacementFailed 区分。
     pending

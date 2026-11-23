@@ -32,6 +32,8 @@ test("classifyEditorWriteError preserves stable media and validation outcomes", 
     .toEqual({ kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" });
   expect(classifyEditorWriteError(new ApiError(500, "", "", { code: "media_replace_failed" })))
     .toEqual({ kind: "message", message: "替换失败，原媒体文件已保留，请检查媒体目录权限后重试。" });
+  expect(classifyEditorWriteError(new ApiError(500, "", "", { code: "media_replace_outcome_unknown" })))
+    .toEqual({ kind: "message", message: "媒体替换结果未知，请重新读取内容版本和已保存的媒体后再决定是否重试。" });
   expect(classifyEditorWriteError(new ApiError(415, "", "", { code: "media_content_mismatch" })))
     .toEqual({ kind: "message", message: "上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。" });
   expect(classifyEditorWriteError(new ApiError(422, "", "", { fields: ["name", 7] })))

@@ -2,7 +2,8 @@
 use super::MediaError;
 use axum::{
     body::{Body, BodyDataStream, Bytes},
-    extract::Request,
+    extract::{FromRequest, Multipart, Request},
+    http::{HeaderValue, header::CONTENT_TYPE},
 };
 use futures_util::{StreamExt, stream};
 use std::{
@@ -28,7 +29,7 @@ const IDLE_EXPIRED: u8 = 3;
 pub(super) struct Progress(Arc<AtomicU8>);
 
 impl Progress {
-    /// multipart 返回首字段后允许读取声明大小范围内的文件内容。
+    /// 解析器产出首字段后释放前缀检查，下游继续使用同一份文件字段。
     pub(super) fn field_ready(&self) {
         self.0.store(READING_FILE, Ordering::Relaxed);
     }
@@ -48,6 +49,8 @@ struct Reader {
     source: BodyDataStream,
     pending: Bytes,
     header_left: u64,
+    prefix: Vec<u8>,
+    content_type: Option<HeaderValue>,
     total_left: u64,
     progress: Progress,
 }
@@ -55,11 +58,14 @@ struct Reader {
 /// 在解析 multipart 前包装原始正文；构造时不读取任何 HTTP 帧。
 pub(super) fn guard(request: Request, declared: u64, metadata_limit: u64) -> (Request, Progress) {
     let progress = Progress::default();
+    let content_type = request.headers().get(CONTENT_TYPE).cloned();
     let request = request.map(|body| {
         let reader = Reader {
             source: body.into_data_stream(),
             pending: Bytes::new(),
             header_left: metadata_limit,
+            prefix: Vec::new(),
+            content_type,
             total_left: declared.saturating_add(metadata_limit),
             progress: progress.clone(),
         };
@@ -71,6 +77,22 @@ pub(super) fn guard(request: Request, declared: u64, metadata_limit: u64) -> (Re
 impl Reader {
     /// 限量向解析器交付当前帧，使它在继续预取前有机会产出字段或文件数据。
     async fn read(mut self) -> io::Result<Option<(Bytes, Self)>> {
+        if self.header_left == 0 && self.progress.0.load(Ordering::Relaxed) == READING_HEADERS {
+            // 主解析器可能在解释头部前继续预取。用相同解析器和明确 EOF 检查有限前缀：
+            // 能取得首字段等价于完整的前导、边界和字段头均在额度内，后面的字节属于文件。
+            let mut probe = Request::new(Body::from(std::mem::take(&mut self.prefix)));
+            if let Some(content_type) = self.content_type.take() {
+                probe.headers_mut().insert(CONTENT_TYPE, content_type);
+            }
+            let mut parser = Multipart::from_request(probe, &())
+                .await
+                .map_err(io::Error::other)?;
+            if !matches!(parser.next_field().await, Ok(Some(_))) {
+                self.progress.0.store(OVER_BUDGET, Ordering::Relaxed);
+                return Err(io::Error::other("video multipart header limit exceeded"));
+            }
+            self.progress.field_ready();
+        }
         tokio::task::yield_now().await;
         if self.pending.is_empty() {
             let next = tokio::time::timeout(IDLE, async {
@@ -105,6 +127,8 @@ impl Reader {
             return Err(io::Error::other("video multipart metadata limit exceeded"));
         }
         if header {
+            self.prefix
+                .extend_from_slice(&self.pending[..count as usize]);
             self.header_left -= count;
         }
         self.total_left -= count;
@@ -205,6 +229,22 @@ mod tests {
             b"1234567890"
         );
     }
+    /// 短正文前的前导或字段元数据超过独立额度时，返回大小错误。
+    #[tokio::test]
+    async fn oversized_preamble_and_field_headers_exhaust_only_metadata_budget() {
+        let head = "--X\r\nContent-Disposition: form-data; name=\"file\"\r\n";
+        let padding = "a".repeat(192);
+        for frame in [
+            format!("{padding}\r\n{head}\r\nx\r\n--X--\r\n"),
+            format!("{head}X-Label: {padding}\r\n\r\nx\r\n--X--\r\n"),
+        ] {
+            assert!(matches!(
+                parse(vec![(0, Bytes::from(frame))], 4096, 128).await,
+                Err(super::MediaError::TooLarge)
+            ));
+        }
+    }
+
     /// 文件后合法的第二个字段也受元数据预算约束，超出时给出大小错误。
     #[tokio::test]
     async fn video_trailing_metadata_uses_only_remaining_allowance() {
@@ -218,5 +258,22 @@ mod tests {
             parse(vec![(0, first), (0, second)], 1, 64).await,
             Err(super::MediaError::TooLarge)
         ));
+    }
+    /// 一次立即交付大帧时，短字段头只占少数字节，其余视频内容不消耗头部额度。
+    #[tokio::test]
+    async fn video_large_ready_first_frame_with_short_headers_is_accepted() {
+        let payload = vec![b'x'; 192 * 1024];
+        let mut body = b"--X\r\nContent-Disposition: form-data; name=\"file\"\r\n\r\n".to_vec();
+        body.extend_from_slice(&payload);
+        body.extend_from_slice(b"\r\n--X--\r\n");
+        let req = Request::builder()
+            .header("content-type", "multipart/form-data; boundary=X")
+            .body(Body::from(body))
+            .unwrap();
+        let (req, progress) = super::guard(req, payload.len() as u64, 64 * 1024);
+        let mut multipart = Multipart::from_request(req, &()).await.unwrap();
+        let field = multipart.next_field().await.unwrap().unwrap();
+        progress.field_ready();
+        assert_eq!(field.bytes().await.unwrap(), payload);
     }
 }

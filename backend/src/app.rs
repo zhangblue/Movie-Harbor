@@ -48,9 +48,9 @@ pub async fn build(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
     )?;
-    // 监听前恢复中断的媒体操作；恢复失败则终止启动，避免暴露不一致状态。
-    crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
+    // 先按删除清单恢复仍被引用的正式文件，再让上传凭证核验其身份；两者均完成后才监听。
     crate::media::removal::recover(&db, &storage).await?;
+    crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
     crate::media::staged_poster::cleanup_expired(
         &db,
         &storage,

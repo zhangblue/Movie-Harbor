@@ -2790,8 +2790,8 @@ async fn replacement_registration_failure_reports_committed_state() {
 
 // Catches a database commit failure leaving the old file staged or the new file registered.
 #[tokio::test]
-/// 验证替换提交失败恢复旧文件并删除新文件。
-async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact() {
+/// 提交响应错误但事务实际回滚时，启动按数据库状态恢复旧文件并清理新文件。
+async fn startup_restores_rolled_back_replacement_after_commit_error() {
     let db = database().await;
     let root = TempRoot::new();
     let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
@@ -2840,8 +2840,13 @@ async fn replacement_commit_failure_restores_old_file_and_removes_new_artifact()
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(
         response,
-        json!({"error":"media replacement failed","code":"media_replace_failed"})
+        json!({"error":"media replacement result unknown","code":"media_replace_outcome_unknown"})
     );
+    // COMMIT 错误后保留两侧依据，真正的启动恢复通过数据库最终状态选择旧文件。
+    assert!(!only_file(root.as_ref(), &old.storage_key).await);
+    let _app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
     let unchanged = movie::Entity::find_by_id(movie.id)
         .one(&db)
         .await
@@ -4697,16 +4702,8 @@ async fn capacity_recovery_handles_prepared_and_isolated_video_slots() {
         )
         .await
         .unwrap();
-        let formal = root.as_ref().join(&asset.storage_key);
-        let marker = write_pending_marker(root.as_ref(), asset.id, &asset.storage_key, &formal);
-        let mut proof: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
-        proof["version"] = 2.into();
-        std::fs::write(&marker, proof.to_string()).unwrap();
-        let hold = root
-            .as_ref()
-            .join(".quarantine")
-            .join(format!("{}.hold", asset.id.simple()));
-        std::fs::hard_link(&marker, &hold).unwrap();
+        let (formal, marker, hold) =
+            prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
         if isolated {
             std::fs::rename(&formal, &hold).unwrap();
         }
@@ -4716,13 +4713,237 @@ async fn capacity_recovery_handles_prepared_and_isolated_video_slots() {
                 .await
                 .unwrap();
         }
-        movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
-            .await
-            .unwrap();
+        movie_harbor_api::media::upload::recover_stale_uploads(
+            &db,
+            &storage,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
         assert!(!hold.exists() && !marker.exists());
         assert_eq!(formal.exists(), registered);
         if registered {
             assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
         }
     }
+}
+
+/// 写入与正式视频身份匹配的二版凭证，并在隔离目录预留同 inode 的位置。
+fn prepare_video_proof(root: &Path, id: Uuid, key: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let formal = root.join(key);
+    let marker = write_pending_marker(root, id, key, &formal);
+    let mut proof: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    proof["version"] = 2.into();
+    std::fs::write(&marker, proof.to_string()).unwrap();
+    let hold = root
+        .join(".quarantine")
+        .join(format!("{}.hold", id.simple()));
+    std::fs::hard_link(&marker, &hold).unwrap();
+    (formal, marker, hold)
+}
+
+/// 为启动测试提交电影视频，使数据库引用和正式文件来自一次真实替换事务。
+async fn attach_recovery_fixture(
+    db: &DatabaseConnection,
+    storage: &LocalMediaStorage,
+    id: Uuid,
+    version: i64,
+) -> Result<media_asset::Model, MediaError> {
+    replace_attachment(
+        db,
+        storage,
+        AttachmentTarget::MovieVideo { id, version },
+        "v.mp4",
+        "video/mp4",
+        &policy(4096),
+        Chunks::bytes(valid_mp4()).0,
+    )
+    .await
+}
+
+/// 未知格式的凭证不能作为清理依据，文件及两侧凭证必须保留。
+#[tokio::test]
+async fn recovery_retains_noncanonical_video_proof() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let movie = draft_movie(&db, None).await;
+    let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+        .await
+        .unwrap();
+    let (formal, marker, hold) = prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+    let mut proof: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    proof["storage_key"] = asset.storage_key.replacen('/', "//", 1).into();
+    std::fs::write(&marker, proof.to_string()).unwrap();
+    make_stale(&marker);
+    movie_harbor_api::media::upload::recover_stale_uploads(
+        &db,
+        &storage,
+        Duration::from_secs(3600),
+    )
+    .await
+    .unwrap();
+    assert!(marker.exists() && hold.exists());
+    assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
+}
+
+/// 旧操作暂存了已登记视频时，启动应先恢复正式位置，再处理同一文件的新凭证。
+#[tokio::test]
+async fn startup_restores_staged_video_before_resolving_its_proof() {
+    use movie_harbor_api::media::removal::{self, OwnedMedia};
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let movie = draft_movie(&db, None).await;
+    let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+        .await
+        .unwrap();
+    let (formal, marker, hold) = prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+    make_stale(&marker);
+    let staged = removal::stage(
+        &storage,
+        "replace-media",
+        &[OwnedMedia {
+            asset_id: asset.id,
+            storage_key: asset.storage_key,
+        }],
+    )
+    .await
+    .unwrap();
+    drop(staged);
+    assert!(!formal.exists());
+    let _app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
+    assert!(!marker.exists() && !hold.exists());
+    assert_eq!(count_files(root.as_ref()), 1);
+}
+
+/// 只在隔离文件已恢复至正式位置后，注入选定目录的持久化失败。
+struct FailRestoredDirectory {
+    hold: PathBuf,
+    directory: String,
+}
+
+impl StorageHooks for FailRestoredDirectory {
+    /// 正式名已经恢复时使选定目录同步失败，后续重试仍能观察到相同故障。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if !self.hold.exists()
+            && matches!(event, StorageEvent::BeforeDirectorySync(label) if *label == self.directory)
+        {
+            return Err(std::io::Error::other("directory sync failed"));
+        }
+        Ok(())
+    }
+}
+
+/// 还原后的任一目录同步失败，重启重试仍要同步两侧并保留依据直至成功。
+#[tokio::test]
+async fn restored_video_requires_both_directory_syncs_on_retry() {
+    let db = database().await;
+    for fail_leaf in [true, false] {
+        let root = TempRoot::new();
+        let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+        let movie = draft_movie(&db, None).await;
+        let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+            .await
+            .unwrap();
+        let (formal, marker, hold) =
+            prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+        make_stale(&marker);
+        std::fs::rename(&formal, &hold).unwrap();
+        let directory = if fail_leaf {
+            asset.storage_key.rsplit_once('/').unwrap().0
+        } else {
+            ".quarantine"
+        };
+        let faulty = LocalMediaStorage::initialize_with_hooks(
+            root.as_ref(),
+            Arc::new(FailRestoredDirectory {
+                hold: hold.clone(),
+                directory: directory.into(),
+            }),
+        )
+        .await
+        .unwrap();
+        for _ in 0..2 {
+            assert!(
+                movie_harbor_api::media::upload::recover_stale_uploads(
+                    &db,
+                    &faulty,
+                    Duration::from_secs(3600)
+                )
+                .await
+                .is_err()
+            );
+            assert!(formal.exists() && marker.exists() && !hold.exists());
+        }
+        movie_harbor_api::media::upload::recover_stale_uploads(
+            &db,
+            &storage,
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
+    }
+}
+
+/// 在真实提交已生效后模拟连接丢失确认。
+struct LostCommitAcknowledgement;
+impl StorageHooks for LostCommitAcknowledgement {
+    /// 仅让事务确认失败，后续使用独立启动实例按数据库引用恢复。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::ReplacementCommitAcknowledgement) {
+            return Err(std::io::Error::other("commit acknowledgement lost"));
+        }
+        Ok(())
+    }
+}
+
+/// 提交已生效但响应未知时，恢复保留新视频并收拢旧操作清单。
+#[tokio::test]
+async fn startup_preserves_committed_video_after_lost_acknowledgement() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let movie = draft_movie(&db, None).await;
+    let old = attach_recovery_fixture(&db, &storage, movie.id, 1)
+        .await
+        .unwrap();
+    let faulty = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(LostCommitAcknowledgement),
+    )
+    .await
+    .unwrap();
+    let error = attach_recovery_fixture(&db, &faulty, movie.id, 2)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "media replacement result unknown");
+    assert_eq!(count_files(&root.as_ref().join(".incoming")), 1);
+    assert_eq!(count_files(&root.as_ref().join(".quarantine")), 1);
+    assert!(count_files(&root.as_ref().join(".operations")) >= 2);
+    let _app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let updated = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(updated.version, 3);
+    assert_ne!(updated.video_asset_id, Some(old.id));
+    let asset = media_asset::Entity::find_by_id(updated.video_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        std::fs::read(root.as_ref().join(asset.storage_key)).unwrap(),
+        valid_mp4()
+    );
+    assert_eq!(count_files(root.as_ref()), 1);
 }

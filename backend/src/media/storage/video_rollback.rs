@@ -87,6 +87,22 @@ fn owns(marker: &PendingMarker, file: &mut std::fs::File) -> Result<bool, MediaE
     )
 }
 
+/// 从隔离目录恢复正式名后同步源和目标目录；重试即使只剩正式名也要完成两侧同步。
+fn sync_restored_directories(
+    leaf: &OwnedFd,
+    quarantine: &OwnedFd,
+    key: &str,
+    hooks: &Arc<dyn StorageHooks>,
+) -> Result<(), MediaError> {
+    let (directory, _) = key.rsplit_once('/').ok_or(MediaError::InvalidStorageKey)?;
+    for (fd, label) in [(leaf, directory), (quarantine, ".quarantine")] {
+        hooks.on_event(&StorageEvent::BeforeDirectorySync(label.to_owned()))?;
+        sync_fd(fd)?;
+        hooks.on_event(&StorageEvent::DirectorySynced(label.to_owned()))?;
+    }
+    Ok(())
+}
+
 /// 在已知回滚或数据库恢复阶段处理准备和隔离两种状态，拒绝对未知文件执行删除。
 pub(super) fn resolve(
     incoming: &OwnedFd,
@@ -113,7 +129,7 @@ pub(super) fn resolve(
             }
             Some(mut formal) if registered => {
                 if owns(marker, &mut formal)? {
-                    Ok(())
+                    sync_restored_directories(leaf, quarantine, &marker.storage_key, hooks)
                 } else {
                     Err(MediaError::InvalidStorageKey)
                 }
@@ -174,11 +190,10 @@ pub(super) fn resolve(
             RenameFlags::NOREPLACE,
         )
         .map_err(io::Error::from)?;
-        sync_fd(leaf)?;
-    } else {
-        remove_if_present(quarantine, &target)?;
-        hooks.on_event(&StorageEvent::Unlinked(marker.storage_key.clone()))?;
+        return sync_restored_directories(leaf, quarantine, &marker.storage_key, hooks);
     }
+    remove_if_present(quarantine, &target)?;
+    hooks.on_event(&StorageEvent::Unlinked(marker.storage_key.clone()))?;
     sync_fd(quarantine)?;
     Ok(())
 }

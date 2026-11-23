@@ -86,6 +86,8 @@ pub enum MediaError {
     VersionConflict,
     StillReferenced,
     ReplacementFailed,
+    /// COMMIT 结果未知时通过稳定响应提示客户端重新读取已保存的槽位。
+    ReplacementOutcomeUnknown,
     ReplacementFinalizationFailed,
     Io(io::Error),
     Database(sea_orm::DbErr),
@@ -113,6 +115,7 @@ impl fmt::Display for MediaError {
             Self::VersionConflict => "content version conflict",
             Self::StillReferenced => "media asset is still referenced",
             Self::ReplacementFailed => "media replacement failed",
+            Self::ReplacementOutcomeUnknown => "media replacement result unknown",
             Self::ReplacementFinalizationFailed => "media replacement finalization failed",
             Self::Io(_) => "media filesystem operation failed",
             Self::Database(_) => "media database operation failed",
@@ -166,6 +169,7 @@ impl IntoResponse for MediaError {
             Self::ReadOnly | Self::VersionConflict | Self::StillReferenced => StatusCode::CONFLICT,
             Self::InvalidStorageKey
             | Self::ReplacementFailed
+            | Self::ReplacementOutcomeUnknown
             | Self::ReplacementFinalizationFailed
             | Self::Io(_)
             | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -175,6 +179,7 @@ impl IntoResponse for MediaError {
         let code = match self {
             Self::ContentMismatch => "media_content_mismatch",
             Self::ReplacementFailed => "media_replace_failed",
+            Self::ReplacementOutcomeUnknown => "media_replace_outcome_unknown",
             Self::ReplacementFinalizationFailed => "media_replace_finalization_failed",
             Self::StorageCapacityUnavailable => "storage_capacity_unavailable",
             Self::StorageSpaceLow {
