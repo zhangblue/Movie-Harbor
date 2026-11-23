@@ -2,11 +2,15 @@
 export type ContentKind = "movie" | "series";
 // 目录筛选可选全部、电影或剧集，供公开及管理列表查询。
 export type CatalogKind = "all" | ContentKind;
+// 公开目录支持的稳定排序枚举，供 URL 状态和 API 查询共享。
+export type CatalogSort = "recent" | "year_desc" | "year_asc" | "name_asc";
 // 草稿、已发布或已归档的生命周期状态，供管理端筛选和操作。
 export type ContentStatus = "draft" | "published" | "archived";
 
 // 公开内容的题材标识和名称，不包含管理状态。
 export interface PublicGenre { id: string; name: string }
+// 当前身份可见的已发布内容实际使用的题材和年份筛选项。
+export interface CatalogFacets { genres: PublicGenre[]; years: number[] }
 // 公开目录单张卡片所需的访问范围、元数据、海报和题材。
 export interface CatalogCard {
   is_private: boolean;

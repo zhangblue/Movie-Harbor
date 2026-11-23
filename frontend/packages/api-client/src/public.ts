@@ -1,16 +1,19 @@
 import { apiPath, apiRequest, clearCsrfToken, requiredResponse, setCsrfToken } from "./http";
 import type {
-  CatalogKind, CatalogPage, ChangePasswordRequest, MovieDetail, SeriesDetail,
+  CatalogFacets, CatalogKind, CatalogPage, CatalogSort, ChangePasswordRequest, MovieDetail, SeriesDetail,
   ViewerLoginRequest, ViewerLoginResponse, ViewerProgressInput, ViewerProgressKind,
   ViewerProgressMergeRequest, ViewerProgressRemovalKind, ViewerProgressRemovalRequest,
   ViewerProgressSnapshot, ViewerSessionResponse,
 } from "./types";
 
-// 公开目录查询支持的内容类别、搜索、私密筛选和分页参数。
+// 公开目录查询支持的内容类别、搜索、题材、年份、访问范围、排序和分页参数。
 export interface CatalogQuery {
   kind?: CatalogKind;
   q?: string;
+  genres?: readonly string[];
+  year?: number;
   privacy?: "private";
+  sort?: CatalogSort;
   page?: number;
   size?: number;
 }
@@ -61,8 +64,21 @@ export async function removeViewerProgress(kind: ViewerProgressRemovalKind, id: 
 // 按筛选条件和页码请求公开目录，供目录页加载。
 export async function listCatalog(query: CatalogQuery = {}): Promise<CatalogPage> {
   return requiredResponse(await apiRequest<CatalogPage>("/api/catalog", {
-    query: { kind: query.kind, q: query.q, privacy: query.privacy, page: query.page, size: query.size },
+    query: {
+      kind: query.kind,
+      q: query.q,
+      genres: query.genres?.join(","),
+      year: query.year,
+      privacy: query.privacy,
+      sort: query.sort,
+      page: query.page,
+      size: query.size,
+    },
   }));
+}
+// 读取当前普通用户身份可见的目录筛选项，供浏览页独立加载和重试。
+export async function listCatalogFacets(): Promise<CatalogFacets> {
+  return requiredResponse(await apiRequest<CatalogFacets>("/api/catalog/facets"));
 }
 // 请求公开电影详情，供详情页和播放器加载。
 export async function getMovieDetail(id: string): Promise<MovieDetail> {
