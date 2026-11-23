@@ -63,6 +63,7 @@ pub async fn build(
         .merge(crate::catalog::routes::router(db))
         .merge(crate::auth::routes::router(state.clone()))
         .merge(crate::viewer_auth::routes::router(state.clone()))
+        .merge(crate::viewer_progress::routes::router(state.clone()))
         .merge(crate::media::routes::authorization_router(state.clone()))
         .merge(crate::admin_content::routes::router(state.clone()))
         // 助手复用现有认证状态，路由初始化失败时终止应用启动。

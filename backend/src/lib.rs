@@ -16,3 +16,4 @@ pub mod route_params;
 pub mod series;
 pub mod site_agent;
 pub mod viewer_auth;
+pub mod viewer_progress;
