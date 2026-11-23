@@ -233,4 +233,12 @@ export const getSystemOverviewOutput = z.strictObject({
   volumes: z.tuple([overviewVolume]),
   backup: z.strictObject({ status: z.literal('unverifiable') }),
   warnings: z.array(overviewWarning),
+}).refine(({ volumes: [volume], warnings }) => {
+  // 后端只在卷 0 容量采样失败时提供该告警，校验两者是否一致。
+  const unavailable = volume.status === 'unavailable';
+  const hasCapacityWarning = warnings.some(warning => warning.code === 'storage_capacity_unavailable');
+  return unavailable === hasCapacityWarning;
+}, {
+  message: '媒体卷容量状态与不可用告警不一致',
+  path: ['warnings'],
 });

@@ -688,6 +688,17 @@ const healthyOverview = {
   warnings: [],
 };
 
+// 提供后端采样失败时返回的完整快照，供成功和不一致响应测试复用。
+const unavailableOverview = {
+  ...healthyOverview,
+  status: 'attention',
+  volumes: [{
+    ...healthyOverview.volumes[0], status: 'unavailable', total_bytes: null, available_bytes: null,
+    writable_bytes: null, accepts_uploads: false,
+  }],
+  warnings: [{ code: 'storage_capacity_unavailable', scope: 'volume:0', message: '无法读取媒体卷容量' }],
+};
+
 // 验证健康、低空间与未知容量均完整保留服务端快照，每次调用恰好一次 GET。
 test('system overview returns the unchanged healthy, low space, or unavailable snapshot', async () => {
   const volume = healthyOverview.volumes[0];
@@ -697,20 +708,33 @@ test('system overview returns the unchanged healthy, low space, or unavailable s
     volumes: [{ ...volume, status: 'space_low', available_bytes: 10737418240, writable_bytes: 0, accepts_uploads: false }],
     warnings: [{ code: 'storage_space_low', scope: 'volume:0', message: '媒体卷空间不足' }],
   };
-  const unavailable = {
-    ...healthyOverview,
-    status: 'attention',
-    volumes: [{
-      ...volume, status: 'unavailable', total_bytes: null, available_bytes: null, writable_bytes: null,
-      accepts_uploads: false,
-    }],
-    warnings: [{ code: 'storage_capacity_unavailable', scope: 'volume:0', message: '无法读取媒体卷容量' }],
-  };
-  for (const [overview, args] of [[healthyOverview, undefined], [low, {}], [unavailable, {}]] as const) {
+  for (const [overview, args] of [[healthyOverview, undefined], [low, {}], [unavailableOverview, {}]] as const) {
     const { result, calls } = await callAdminQuery('get_system_overview', args, overview);
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, overview);
     assert.deepEqual(calls, [['GET', '/api/admin/system/overview']]);
+  }
+});
+
+// 验证未知容量与其专属告警必须对应，矛盾响应不得进入工具结果。
+test('system overview rejects a missing or mismatched capacity unavailable warning', async t => {
+  for (const [name, overview] of [
+    ['unavailable capacity without warnings', { ...unavailableOverview, warnings: [] }],
+    ['unavailable capacity with a different warning', {
+      ...unavailableOverview, warnings: [{ code: 'storage_space_low', scope: 'volume:0', message: '媒体卷空间不足' }],
+    }],
+    ['known capacity with the unavailable warning', {
+      ...healthyOverview, status: 'attention', warnings: unavailableOverview.warnings,
+    }],
+  ] as const) {
+    // 独立运行各分支，确保每种矛盾都被拒绝且只读取一次概览。
+    await t.test(name, async () => {
+      const { result, calls } = await callAdminQuery('get_system_overview', {}, overview);
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent, undefined);
+      assert.match(JSON.stringify(result.content), /服务端返回的数据格式无效/);
+      assert.deepEqual(calls, [['GET', '/api/admin/system/overview']]);
+    });
   }
 });
 
