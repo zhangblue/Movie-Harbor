@@ -566,3 +566,65 @@ it("ignores an obsolete page request's delayed 401 after a newer query succeeds"
   expect(screen.getByText("新查询结果")).toBeInTheDocument();
   expect(screen.queryByRole("heading", { name: "管理员登录" })).not.toBeInTheDocument();
 });
+
+// 验证逐项选择、表头三态、当前页全选以及翻页清空选择。
+it("selects only the current page with an accessible tri-state header", async () => {
+  server((request) => {
+    if (request.url === "/api/admin/contents?kind=all&page=1") return json(adminContentPage(numberedItems(1, 20), 21, 1));
+    if (request.url === "/api/admin/contents?kind=all&page=2") return json(adminContentPage(numberedItems(21, 1), 21, 2));
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("内容 1");
+  const all = screen.getByRole("checkbox", { name: "选择当前页全部内容" });
+  expect(all).not.toBeChecked();
+  await user.click(screen.getByRole("checkbox", { name: "选择内容 1" }));
+  expect(all).toHaveProperty("indeterminate", true);
+  expect(screen.getByText("已选择 1 项")).toBeInTheDocument();
+  await user.click(all);
+  expect(all).toBeChecked();
+  expect(screen.getByText("已选择 20 项")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "第 2 页" }));
+  await screen.findByText("内容 21");
+  expect(screen.getByText("已选择 0 项")).toBeInTheDocument();
+});
+
+// 验证批量归档携带显示版本，409 保留选择并标记冲突行。
+it("preserves selected rows and marks them after a bulk validation conflict", async () => {
+  const requests = server((request) => request.url === "/api/admin/contents/bulk-actions"
+    ? json({ error: "bulk_validation_failed", problems: [{ scope: "target", kind: "movie", id: "movie-1", reason: "version_conflict" }] }, 409)
+    : undefined);
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("checkbox", { name: "选择潮汐尽头" }));
+  await user.click(screen.getByRole("button", { name: "批量归档" }));
+  const dialog = await screen.findByRole("dialog", { name: "批量归档内容" });
+  await user.click(within(dialog).getByRole("button", { name: "确认归档" }));
+  expect(await within(dialog).findByRole("alert")).toHaveTextContent("内容版本已变化");
+  expect(screen.getByRole("checkbox", { name: "选择潮汐尽头" })).toBeChecked();
+  expect(screen.getByRole("row", { name: /潮汐尽头/ })).toHaveAttribute("data-bulk-error", "true");
+  expect(requests.find((request) => request.url.endsWith("bulk-actions"))?.body).toEqual({
+    action: "archive", targets: [{ kind: "movie", id: "movie-1", version: 3 }],
+  });
+});
+
+// 验证批量写入成功后刷新失败只显示已提交告警，且不会重放写请求。
+it("reports a committed bulk action when the following list refresh fails", async () => {
+  let committed = false;
+  const requests = server((request) => {
+    if (request.url === "/api/admin/contents/bulk-actions") { committed = true; return json({ results: [] }); }
+    if (committed && request.url.startsWith("/api/admin/contents?")) return json({ error: "unavailable" }, 503);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByText("潮汐尽头");
+  await user.click(screen.getByRole("checkbox", { name: "选择潮汐尽头" }));
+  await user.click(screen.getByRole("button", { name: "批量设置访问范围" }));
+  const dialog = await screen.findByRole("dialog", { name: "批量设置访问范围" });
+  await user.click(within(dialog).getByLabelText("私密"));
+  await user.click(within(dialog).getByRole("button", { name: "确认设置" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("操作已完成，列表刷新失败");
+  expect(screen.getByRole("region", { name: "内容列表" })).toHaveAttribute("data-stale", "true");
+  expect(requests.filter((request) => request.url.endsWith("bulk-actions"))).toHaveLength(1);
+});

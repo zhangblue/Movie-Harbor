@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
-import { ApiError, normalizeError, type CaughtValue, downloadAdminContentExport, listAdminContent, setMoviePrivacy, setSeriesPrivacy, transitionMovie, transitionSeries, type AdminContentPage } from "@movie-harbor/api-client";
+import { ApiError, bulkActionProblems, bulkUpdateAdminContent, normalizeError, type CaughtValue, downloadAdminContentExport, listAdminContent, listGenres, setMoviePrivacy, setSeriesPrivacy, transitionMovie, transitionSeries, type AdminBulkActionRequest, type AdminBulkProblem, type AdminContentPage, type GenreResponse } from "@movie-harbor/api-client";
 import { Button } from "@movie-harbor/ui";
 import { useMounted } from "../app/useMounted";
 import { recoverForbiddenWrite } from "../auth/recoverForbiddenWrite";
@@ -7,6 +7,8 @@ import { availableActions, type ContentAction, type ContentRow } from "./ActionB
 import { ContentFilters, initialFilters, type Filters } from "./ContentFilters";
 import { ContentPagination } from "./ContentPagination";
 import { ContentTable } from "./ContentTable";
+import { BulkActionBar } from "./BulkActionBar";
+import { BulkActionDialog, type BulkDialogAction } from "./BulkActionDialog";
 
 // 保存内容筛选、页码和刷新版本，在列表与详情间导航时使用。
 export type ContentListState = { filters: Filters; page: number; revision: number };
@@ -26,13 +28,23 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   const [exportError, setExportError] = useState("");
   const [exporting, setExporting] = useState(false);
   const [conflict, setConflict] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<BulkDialogAction | null>(null);
+  const [bulkProblems, setBulkProblems] = useState<AdminBulkProblem[]>([]);
+  const [bulkError, setBulkError] = useState("");
+  const [genres, setGenres] = useState<GenreResponse[]>([]);
+  const [stale, setStale] = useState(false);
   const mounted = useMounted();
   const operation = useRef(false);
   const exportOperation = useRef(false);
+  const committedRefresh = useRef(false);
 
   // 筛选、页码或刷新版本变化时加载列表；清理旧请求，防止迟到响应覆盖新结果。
   useEffect(() => {
     let ignore = false;
+    // 页码、筛选、刷新和普通操作都会改变列表身份，因此旧页选择不能继续保留。
+    setSelected(new Set());
+    setBulkProblems([]);
     setLoading(true);
     setError("");
     void listAdminContent({
@@ -51,12 +63,19 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
       }
       setData(result);
       setConflict(false);
+      setStale(false);
+      committedRefresh.current = false;
     }).catch((cause: CaughtValue) => {
       // 认证失效交给根组件退出后台；其他失败保留列表上下文并展示重试入口。
       const error = normalizeError(cause);
       if (ignore) return;
       if (error instanceof ApiError && error.status === 401) onExpired();
-      else setError("内容列表加载失败，请重新加载。");
+      else if (committedRefresh.current) {
+        // 写请求已经成功时只报告后续读取失败，禁止提供会自动重放批量写入的路径。
+        setStale(true);
+        setError("操作已完成，列表刷新失败；当前列表已过期，请重新加载。");
+        committedRefresh.current = false;
+      } else setError("内容列表加载失败，请重新加载。");
     }).finally(() => { if (!ignore) setLoading(false); });
     return () => { ignore = true; };
   }, [state.filters, state.page, state.revision, setState, onExpired]);
@@ -64,6 +83,9 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
   // 按内容类型执行状态或可见性操作，列表操作触发时调用。
   async function act(row: ContentRow, action: ContentAction) {
     if (operation.current || loading || conflict || !availableActions(row).includes(action)) return;
+    // 单条操作开始前清空批量选择，避免刷新或详情返回后误用旧版本目标。
+    setSelected(new Set());
+    setBulkProblems([]);
     if (action === "edit" || action === "view" || action === "delete") { onOpen(row, action); return; }
     operation.current = true;
     setMutating(true);
@@ -87,6 +109,79 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
         setConflict(true);
         setError("内容已发生变化，请刷新后重试。");
       } else setError(error instanceof ApiError ? `操作失败：${error.message}` : "操作失败，请检查网络后重试。");
+    } finally {
+      operation.current = false;
+      if (mounted.current) setMutating(false);
+    }
+  }
+
+  // 切换单行选择，选择键包含内容形态以避免电影与剧集标识空间意外重叠。
+  function selectRow(row: ContentRow, checked: boolean) {
+    const key = `${row.kind}:${row.id}`;
+    setSelected((current) => {
+      const next = new Set(current);
+      if (checked) next.add(key); else next.delete(key);
+      return next;
+    });
+    setBulkProblems([]);
+  }
+
+  // 选择或取消当前页全部行，绝不跨页保存隐藏目标。
+  function selectAll(checked: boolean) {
+    setSelected(checked ? new Set((data?.items ?? []).map((row) => `${row.kind}:${row.id}`)) : new Set());
+    setBulkProblems([]);
+  }
+
+  // 打开批量确认框；题材动作先读取最新管理题材，避免提交已停用的添加选项。
+  async function openBulk(action: BulkDialogAction) {
+    if (selected.size === 0 || operation.current) return;
+    setBulkProblems([]);
+    setBulkError("");
+    if (action !== "genres") { setBulkAction(action); return; }
+    setMutating(true);
+    try {
+      const values = await listGenres();
+      if (!mounted.current) return;
+      setGenres(values);
+      setBulkAction(action);
+    } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
+      if (!mounted.current) return;
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      else setError("题材列表加载失败，请重试。");
+    } finally {
+      if (mounted.current) setMutating(false);
+    }
+  }
+
+  // 提交唯一批量写请求，成功后只刷新列表；冲突保留选择和对话框供管理员处理。
+  async function submitBulk(request: AdminBulkActionRequest) {
+    if (operation.current) return;
+    operation.current = true;
+    setMutating(true);
+    setBulkError("");
+    setBulkProblems([]);
+    try {
+      await bulkUpdateAdminContent(request);
+      if (!mounted.current) return;
+      setSelected(new Set());
+      setBulkAction(null);
+      committedRefresh.current = true;
+      setState((value) => ({ ...value, revision: value.revision + 1 }));
+    } catch (cause) {
+      const error = normalizeError(cause as CaughtValue);
+      if (!mounted.current) return;
+      if (error instanceof ApiError && error.status === 401) onExpired();
+      else if (error instanceof ApiError && error.status === 403) {
+        // 恢复令牌但不重放批量写入，避免响应丢失时重复执行整批命令。
+        const recovery = await recoverForbiddenWrite();
+        if (!mounted.current) return;
+        if (recovery.expired) onExpired(); else setBulkError(recovery.message);
+      } else {
+        const problems = bulkActionProblems(error);
+        if (problems) setBulkProblems(problems);
+        else setBulkError(error instanceof ApiError ? `批量操作失败：${error.message}` : "批量操作失败，请检查网络后重试。");
+      }
     } finally {
       operation.current = false;
       if (mounted.current) setMutating(false);
@@ -134,11 +229,17 @@ export function ContentPage({ state, setState, onExpired, onOpen }: {
     {loading && <p role="status">正在加载内容…</p>}
     {data && <>
       {rows.length === 0 && !error && !loading && <p role="status" className="empty-state">没有匹配的内容，请调整查询条件。</p>}
-      <ContentTable rows={rows} startIndex={(data.page - 1) * data.size} disabled={loading || mutating || conflict} onAction={(row, action) => { void act(row, action); }} />
+      <BulkActionBar count={selected.size} disabled={loading || mutating || conflict} onAction={(action) => { void openBulk(action); }} />
+      <ContentTable rows={rows} startIndex={(data.page - 1) * data.size} disabled={loading || mutating || conflict} selected={selected} stale={stale}
+        problemKeys={new Set(bulkProblems.filter((problem) => problem.scope === "target").map((problem) => `${problem.kind}:${problem.id}`))}
+        onSelect={selectRow} onSelectAll={selectAll} onAction={(row, action) => { void act(row, action); }} />
     </>}
     <div className="content-pagination-slot">
       {data && <ContentPagination page={data.page} size={data.size} total={data.total} disabled={loading || mutating}
         onPage={(page) => setState((value) => ({ ...value, page }))} />}
     </div>
+    {bulkAction && <BulkActionDialog action={bulkAction} rows={rows.filter((row) => selected.has(`${row.kind}:${row.id}`))} genres={genres}
+      pending={mutating} problems={bulkProblems} error={bulkError} onClose={() => { setBulkAction(null); setBulkProblems([]); setBulkError(""); }}
+      onSubmit={(request) => { void submitBulk(request); }} />}
   </section>;
 }
