@@ -348,20 +348,23 @@ pub(crate) async fn commit_attachment(
             // 父、季、集行锁持续到提交；只有此时才创建 v2 证据并提升文件。
             match part.promote(&pending.storage) {
                 Ok(stored) => (stored, Some(slot)),
-                Err(error) => {
-                    // 提升失败时尚无数据库写入，释放本次事务后才报告已清理的错误。
-                    tx.rollback().await?;
-                    return Err(error);
+                Err(failure) => {
+                    // 还未 INSERT。先确认咨询锁与父子行锁已释放，再在本地锁内扫描并清理视频。
+                    // 回滚确认丢失或请求取消时由启动恢复处理凭证，此处不能把不明状态报告为 507。
+                    tx.rollback()
+                        .await
+                        .map_err(|_| MediaError::ReplacementFailed)?;
+                    return Err(failure.rollback());
                 }
             }
         }
         AttachmentFile::Stored(stored) => (stored, None),
     };
-    // 把本地锁交给旧文件清理流程后才允许首次数据库写入，已核验的单集行锁持续到事务结束。
+    // 先保护正式文件再交接本地锁，交接异常或后续等待被取消时仅留证据，不在事务内扫描文件。
+    stored.begin_database_write();
     let guard = stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
-    stored.begin_database_write();
     let result =
         replace_before_commit(&tx, &pending.metadata, &stored, &removal, &mut staged, slot).await;
     let committed = match result {

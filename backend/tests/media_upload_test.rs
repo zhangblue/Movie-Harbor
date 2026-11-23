@@ -4716,6 +4716,229 @@ async fn capacity_post_promotion_full_uses_prepared_rollback_slot() {
     );
 }
 
+/// 在单集正式改名后的指定目录同步注入错误，并在两次回滚摘要核对之间建立屏障。
+struct PausePromotionRollback {
+    sync_directory: &'static str,
+    sync_error: rustix::io::Errno,
+    deny_cleanup: bool,
+    armed: AtomicBool,
+    renamed: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl StorageHooks for PausePromotionRollback {
+    /// 仅对已改名的替换注入一次同步失败，第一次隔离原件前让另一连接实际尝试加锁。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if !self.armed.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        match event {
+            StorageEvent::Promoted(_) => self.renamed.store(true, Ordering::SeqCst),
+            StorageEvent::BeforeDirectorySync(path)
+                if path.starts_with(self.sync_directory)
+                    && self.renamed.swap(false, Ordering::SeqCst) =>
+            {
+                return Err(self.sync_error.into());
+            }
+            StorageEvent::BeforeUnlink(_) => {
+                if let Some(resume) = self.resume.lock().unwrap().take() {
+                    self.entered.notify_one();
+                    // 同步文件钩子等待时让出 Tokio 工作线程，以便另一连接的 I/O 继续推进。
+                    tokio::task::block_in_place(|| resume.recv_timeout(Duration::from_secs(10)))
+                        .map_err(std::io::Error::other)?;
+                    // 只拒绝一次；若错误路径在析构中偷偷重试，预期保留的凭证会消失。
+                    if self.deny_cleanup {
+                        return Err(std::io::Error::other("injected cleanup failure"));
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+
+/// 单集提升出错时，两次摘要扫描间数据库咨询锁和父行锁均可用，进程内媒体锁仍挡住其他上传。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_episode_promotion_releases_database_locks_before_video_rollback() {
+    use rustix::io::Errno;
+    use sea_orm::TransactionTrait;
+    for (sync_directory, sync_error, deny_cleanup) in [
+        ("video/", Errno::NOSPC, false),
+        (".incoming", Errno::IO, false),
+        (".incoming", Errno::NOSPC, true),
+    ] {
+        let db = database().await;
+        let root = TempRoot::new();
+        let (release, receive) = std::sync::mpsc::channel();
+        let hooks = Arc::new(PausePromotionRollback {
+            sync_directory,
+            sync_error,
+            deny_cleanup,
+            armed: AtomicBool::new(false),
+            renamed: AtomicBool::new(false),
+            entered: tokio::sync::Notify::new(),
+            resume: Mutex::new(Some(receive)),
+        });
+        let capacity = Arc::new(UploadCapacityProbe {
+            available: 20 << 30,
+            promoted: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+        });
+        let storage = LocalMediaStorage::initialize_with_hooks_and_capacity_reader(
+            root.as_ref(),
+            hooks.clone(),
+            capacity.clone(),
+        )
+        .await
+        .unwrap();
+        let app = media_test_router(&db, &config(root.as_ref()), storage.clone()).await;
+        let (cookie, csrf) = credentials(&app).await;
+        let (parent, season, episode) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        db.execute_unprepared(&format!(
+            "INSERT INTO series(id,name) VALUES ('{parent}','父剧');
+             INSERT INTO season(id,series_id,number) VALUES ('{season}','{parent}',1);
+             INSERT INTO episode(id,season_id,number,name) VALUES ('{episode}','{season}',1,'单集')"
+        ))
+        .await
+        .unwrap();
+        let request = |version| {
+            multipart_request(
+                format!(
+                    "/api/admin/media/episodes/{episode}/video?version={version}&series_version={version}"
+                ),
+                Some(&cookie),
+                Some(&csrf),
+                "https://harbor.test",
+            )
+        };
+        assert_eq!(
+            app.clone().oneshot(request(1)).await.unwrap().status(),
+            StatusCode::OK
+        );
+        let before = episode::Entity::find_by_id(episode)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let original = media_asset::Entity::find_by_id(before.video_asset_id.unwrap())
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        // 即使事务已回滚，序列仍能证明是否有过新资产 INSERT 尝试。
+        db.execute_unprepared("CREATE SEQUENCE attempted_insert;
+            CREATE FUNCTION note_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+              BEGIN PERFORM nextval('attempted_insert'); RETURN NEW; END $$;
+            CREATE TRIGGER note_insert BEFORE INSERT ON media_asset FOR EACH ROW EXECUTE FUNCTION note_insert()"
+        ).await.unwrap();
+        let witness = db.begin().await.unwrap();
+        hooks.armed.store(true, Ordering::SeqCst);
+        let upload = tokio::spawn(app.oneshot(request(2)));
+        tokio::time::timeout(Duration::from_secs(5), hooks.entered.notified())
+            .await
+            .expect("未进入已提升视频的回滚");
+        // 在真实事务中取同一个咨询锁并实际锁住父行。NOWAIT 避免红灯时测试和文件屏障互相等待。
+        let advisory = witness.query_one(Statement::from_string(DatabaseBackend::Postgres,
+            "SELECT pg_try_advisory_xact_lock(1296584018, 'media_asset'::regclass::int) AS acquired"))
+            .await.unwrap().unwrap().try_get::<bool>("", "acquired").unwrap();
+        let parent_locked = witness
+            .query_one(Statement::from_sql_and_values(
+                DatabaseBackend::Postgres,
+                "SELECT id FROM series WHERE id=$1 FOR UPDATE NOWAIT",
+                [parent.into()],
+            ))
+            .await;
+        witness.rollback().await.unwrap();
+        let p = policy(4096);
+        let mut second = std::pin::pin!(storage.store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            "next.mp4",
+            "video/mp4",
+            &p,
+            Chunks::bytes(valid_mp4()).0
+        ));
+        let waiting_locally = futures_util::poll!(second.as_mut()).is_pending();
+        let reads_during_cleanup = capacity.reads.load(Ordering::SeqCst);
+        release.send(()).unwrap();
+        let response = upload.await.unwrap().unwrap();
+        hooks.armed.store(false, Ordering::SeqCst);
+        // 屏障结束后同一个真实上传能完成；放弃独立文件后只检查本次单集替换的遗留项。
+        drop(second.await.unwrap());
+        assert!(
+            advisory && matches!(parent_locked, Ok(Some(_))),
+            "文件回滚扫描仍占用数据库锁，咨询锁可取得={advisory}，父行结果={parent_locked:?}"
+        );
+        assert!(waiting_locally);
+        assert_eq!(
+            reads_during_cleanup, 2,
+            "回滚期间另一次上传已越过本地锁采样容量"
+        );
+        assert_eq!(capacity.reads.load(Ordering::SeqCst), 3);
+        let status = response.status();
+        let body: Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        if deny_cleanup {
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body["code"], "media_replace_failed");
+            assert_eq!(count_files(&root.as_ref().join(".incoming")), 1);
+            assert_eq!(count_files(&root.as_ref().join(".quarantine")), 1);
+            assert_eq!(count_files(&root.as_ref().join("video")), 2);
+            movie_harbor_api::media::prepare_for_serving(&db, &storage)
+                .await
+                .unwrap();
+        } else if sync_error == Errno::NOSPC {
+            assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
+            assert_eq!(body["code"], "storage_space_low");
+        } else {
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(body, json!({"error":"media filesystem operation failed"}));
+        }
+        let attempted = db
+            .query_one(Statement::from_string(
+                DatabaseBackend::Postgres,
+                "SELECT is_called FROM attempted_insert",
+            ))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!attempted.try_get::<bool>("", "is_called").unwrap());
+        assert_eq!(
+            episode::Entity::find_by_id(episode)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            series::Entity::find_by_id(parent)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            2
+        );
+        assert_eq!(
+            media_asset::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&original)
+        );
+        assert_eq!(
+            std::fs::read(root.as_ref().join(original.storage_key)).unwrap(),
+            valid_mp4()
+        );
+        assert_eq!(count_files(root.as_ref()), 1);
+    }
+}
+
 /// 重启时根据持久凭证、预备/隔离状态和真实数据库结果恢复视频。
 #[tokio::test]
 async fn capacity_recovery_handles_prepared_and_isolated_video_slots() {

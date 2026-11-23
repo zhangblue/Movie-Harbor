@@ -170,7 +170,11 @@ impl UploadSession<'_> {
     ) -> Result<StoredFile, MediaError> {
         let spec = self.spec(resource_id, kind, original_name, declared_mime, policy)?;
         let storage = self.storage;
-        self.stage(spec, source, true).await?.promote(storage)
+        // 此入口尚未开启登记事务，提升失败即可在仍持本地锁时同步回滚文件。
+        self.stage(spec, source, true)
+            .await?
+            .promote(storage)
+            .map_err(|failure| failure.rollback())
     }
 
     /// 单集视频先只写入和验证 .part，保留文件描述符及本地锁交给最终版本检查。
@@ -250,7 +254,8 @@ impl UploadSession<'_> {
             Ok((directories, marker))
         }
         .await;
-        let (directories, marker) = cleanup.capacity_result(self.capacity, result)?;
+        let (directories, marker) =
+            result.map_err(|error| cleanup.rollback_error(self.capacity, error))?;
         Ok(ValidatedUpload {
             marker,
             directories,
@@ -278,17 +283,47 @@ impl ValidatedUpload {
         self.cleanup.finish_rollback()
     }
 
-    /// 业务允许写入后才发布恢复凭证并执行正式提升，失败时沿用既有 ENOSPC 回滚语义。
-    pub(crate) fn promote(mut self, storage: &LocalMediaStorage) -> Result<StoredFile, MediaError> {
-        let result = storage.promote_part(&mut self);
-        self.cleanup.capacity_result(self.capacity, result)?;
+    /// 版本已核对后提升文件；出错时把原错误、证据和本地锁交还调用方，由它选择安全回滚时机。
+    pub(crate) fn promote(
+        mut self,
+        storage: &LocalMediaStorage,
+    ) -> Result<StoredFile, Box<PromotionFailure>> {
+        let result = storage
+            .promote_part(&mut self)
+            .and_then(|()| i64::try_from(self.marker.byte_size).map_err(|_| MediaError::TooLarge));
+        let byte_size = match result {
+            Ok(size) => size,
+            Err(error) => {
+                // 数据库回滚确认前可能取消请求，禁止析构扫描大文件；未结清的凭证供启动恢复。
+                self.cleanup.destructive = false;
+                return Err(Box::new(PromotionFailure {
+                    error,
+                    cleanup: self.cleanup,
+                    capacity: self.capacity,
+                }));
+            }
+        };
         Ok(StoredFile {
             storage_key: self.marker.storage_key,
             mime_type: self.mime_type,
-            byte_size: i64::try_from(self.marker.byte_size).map_err(|_| MediaError::TooLarge)?,
+            byte_size,
             checksum_sha256: self.marker.checksum_sha256,
             cleanup: Some(self.cleanup),
         })
+    }
+}
+
+/// 提升失败后独占本次临时或正式文件和 v2 凭证，持续持有本地锁直到显式清理或留待恢复。
+pub(crate) struct PromotionFailure {
+    error: MediaError,
+    cleanup: PendingCleanup,
+    capacity: Option<UploadCapacityRequirement>,
+}
+
+impl PromotionFailure {
+    /// 调用方结束数据库事务后核验并清理文件，再按原错误决定是否能返回可重试的 507。
+    pub(crate) fn rollback(mut self) -> MediaError {
+        self.cleanup.rollback_error(self.capacity, self.error)
     }
 }
 
@@ -519,28 +554,31 @@ impl PendingCleanup {
         self.part.take()
     }
 
-    /// 空间写满时先在本地锁内完成本次分片或正式文件回滚，再返回可重试的容量错误。
-    fn capacity_result<T>(
+    /// 在本地锁内显式清理本次分片或正式文件；失败保留证据，成功后才映射原始 ENOSPC。
+    fn rollback_error(
         &mut self,
         capacity: Option<UploadCapacityRequirement>,
-        result: Result<T, MediaError>,
-    ) -> Result<T, MediaError> {
-        match (capacity, result) {
-            (Some(requirement), Err(MediaError::Io(error)))
-                if error.kind() == io::ErrorKind::StorageFull =>
+        error: MediaError,
+    ) -> MediaError {
+        // 中途失败后交给启动恢复；析构不再重读同一份大视频或重试部分完成的回滚。
+        self.destructive = false;
+        if self.finish_rollback().is_err() {
+            return MediaError::ReplacementFailed;
+        }
+        match (capacity, error) {
+            (Some(requirement), MediaError::Io(cause))
+                if cause.kind() == io::ErrorKind::StorageFull =>
             {
-                self.finish_rollback()
-                    .map_err(|_| MediaError::ReplacementFailed)?;
-                Err(MediaError::StorageSpaceLow {
+                MediaError::StorageSpaceLow {
                     // ENOSPC 可来自外部占用或配额，错误本身未提供可用字节数。
                     available_bytes: None,
                     required_bytes: requirement
                         .declared_bytes
                         .checked_add(requirement.reserve_bytes),
                     reserve_bytes: requirement.reserve_bytes,
-                })
+                }
             }
-            (_, result) => result,
+            (_, error) => error,
         }
     }
 
