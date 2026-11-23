@@ -37,6 +37,34 @@ export interface AdminContentPage {
   total: number;
   items: AdminContentListItem[];
 }
+// 批量内容操作中的单个乐观锁目标，供管理页提交当前页选择。
+export interface AdminBulkTarget { kind: ContentKind; id: string; version: number }
+// 管理内容支持的三种原子批量请求，判别字段决定其余必需参数。
+export type AdminBulkActionRequest =
+  | { action: "set_privacy"; is_private: boolean; targets: AdminBulkTarget[] }
+  | { action: "update_genres"; mode: "add" | "remove"; genre_ids: string[]; targets: AdminBulkTarget[] }
+  | { action: "archive"; targets: AdminBulkTarget[] };
+// 批量目标问题的稳定原因，供界面标记对应内容行。
+export type AdminBulkTargetProblemReason = "not_found" | "version_conflict" | "invalid_state";
+// 批量题材问题的稳定原因，供确认框标记不存在或停用题材。
+export type AdminBulkGenreProblemReason = "not_found" | "inactive";
+// 批量事务失败时返回的目标或题材问题，不包含名称和当前版本。
+export type AdminBulkProblem =
+  | { scope: "target"; kind: ContentKind; id: string; reason: AdminBulkTargetProblemReason }
+  | { scope: "genre"; genre_id: string; reason: AdminBulkGenreProblemReason };
+// 批量成功条目中的最终题材摘要。
+export interface AdminBulkGenreSummary { id: string; name: string }
+// 单个批量目标提交后的最终版本、状态、访问范围和题材。
+export interface AdminBulkActionResult {
+  kind: ContentKind;
+  id: string;
+  version: number;
+  status: ContentStatus;
+  is_private: boolean;
+  genres: AdminBulkGenreSummary[];
+}
+// 原子批量请求全部成功后的结果集合。
+export interface AdminBulkActionResponse { results: AdminBulkActionResult[] }
 // 系统概览总状态只表示当前是否存在需要管理员关注的稳定告警。
 export type AdminSystemStatus = "healthy" | "attention";
 // 媒体卷状态由后端结合容量采样和保留空间规则确定，前端不得重新推断。

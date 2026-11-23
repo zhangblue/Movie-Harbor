@@ -1,7 +1,7 @@
 import { ApiError, apiDownload, apiPath, apiRequest, apiUpload, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload, type ApiUploadProgress } from "./http";
 import { isJsonObject } from "./dataTypes";
 import type {
-  AdminContentListQuery, AdminContentPage, AdminSystemOverview, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
+  AdminBulkActionRequest, AdminBulkActionResponse, AdminBulkProblem, AdminContentListQuery, AdminContentPage, AdminSystemOverview, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
   ChangeViewerUserPasswordRequest, CreateMovieRequest, CreateSeriesRequest, CreateViewerUserRequest,
@@ -69,6 +69,40 @@ export async function listGenres(): Promise<GenreResponse[]> {
 export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
   const params = { kind: query.kind, status: query.status, privacy: query.privacy, name: query.name, page: query.page };
   return requiredResponse(await apiRequest<AdminContentPage>("/api/admin/contents", { query: params }));
+}
+// 提交一次原子批量内容动作，成功时返回所有目标的新版本和最终摘要。
+export async function bulkUpdateAdminContent(input: AdminBulkActionRequest): Promise<AdminBulkActionResponse> {
+  return requiredResponse(await apiRequest<AdminBulkActionResponse, AdminBulkActionRequest>(
+    "/api/admin/contents/bulk-actions",
+    { method: "POST", json: input },
+  ));
+}
+
+// 判断未知值是否为后端定义的内容类别，供 409 详情安全解析。
+function isBulkContentKind(value: unknown): value is "movie" | "series" {
+  return value === "movie" || value === "series";
+}
+
+// 判断未知对象是否为结构完整的目标或题材问题，避免界面信任任意错误详情。
+function isBulkProblem(value: unknown): value is AdminBulkProblem {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const object = value as Record<string, unknown>;
+  if (object.scope === "target") {
+    return isBulkContentKind(object.kind)
+      && typeof object.id === "string"
+      && ["not_found", "version_conflict", "invalid_state"].includes(String(object.reason));
+  }
+  return object.scope === "genre"
+    && typeof object.genre_id === "string"
+    && ["not_found", "inactive"].includes(String(object.reason));
+}
+
+// 从显式 409 bulk_validation_failed 错误中解析类型安全问题列表，其他错误返回未定义。
+export function bulkActionProblems(error: unknown): AdminBulkProblem[] | undefined {
+  if (!(error instanceof ApiError) || error.status !== 409 || !isJsonObject(error.details)) return undefined;
+  const { details } = error;
+  if (details.error !== "bulk_validation_failed" || !Array.isArray(details.problems)) return undefined;
+  return details.problems.every(isBulkProblem) ? details.problems : undefined;
 }
 // 系统设置页面加载或手动刷新时读取一次只读系统概览快照。
 export async function getAdminSystemOverview(): Promise<AdminSystemOverview> {

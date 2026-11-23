@@ -1,12 +1,12 @@
 import { afterEach, expect, expectTypeOf, it, vi } from "vitest";
 
-import { apiErrorCode, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession, listAdminContent, uploadMedia } from "./admin";
+import { apiErrorCode, bulkActionProblems, bulkUpdateAdminContent, changePassword, createGenre, deleteMovie, getEpisodeDeleteImpact, getMovieDeleteImpact, getSeasonDeleteImpact, getSession, listAdminContent, uploadMedia } from "./admin";
 import { ApiError, apiRequest, clearCsrfToken, setCsrfToken } from "./http";
 import * as client from "./index";
 import type {
   AdminContentListItem, CatalogCard, CreateMovieRequest, CreateSeriesRequest,
   MovieDetail, MovieResponse, PrivacyRequest, SeriesDetail, SeriesResponse,
-  ViewerSessionResponse, ViewerUserPage, ViewerUserSummary, JsonValue,
+  AdminBulkActionRequest, AdminBulkProblem, ViewerSessionResponse, ViewerUserPage, ViewerUserSummary, JsonValue,
 } from "./index";
 
 // 管理客户端用例结束后清除认证令牌与全局网络替身，隔离后续请求。
@@ -203,6 +203,46 @@ it("does not forward unknown runtime query fields", async () => {
   await listAdminContent(query);
 
   expect(urls).toEqual(["/api/admin/contents?kind=series&status=archived&name=%E9%95%BF+%E5%A4%9C&page=2"]);
+});
+
+// 验证：三种批量动作以判别联合原样提交，并返回统一结果摘要。
+it("sends all discriminated admin bulk action bodies unchanged", async () => {
+  const requests = recordRequests([
+    jsonResponse({ results: [] }),
+    jsonResponse({ results: [] }),
+    jsonResponse({ results: [] }),
+  ]);
+  const target = { kind: "movie", id: "movie-1", version: 7 } as const;
+  const actions: AdminBulkActionRequest[] = [
+    { action: "set_privacy", is_private: true, targets: [target] },
+    { action: "update_genres", mode: "remove", genre_ids: ["genre-1"], targets: [target] },
+    { action: "archive", targets: [target] },
+  ];
+  for (const action of actions) await bulkUpdateAdminContent(action);
+  expect(requests.map(({ url, method, json }) => ({ url, method, json }))).toEqual(actions.map((json) => ({
+    url: "/api/admin/contents/bulk-actions", method: "POST", json,
+  })));
+});
+
+// 验证：仅将结构完整的 409 批量详情解析为类型安全问题列表。
+it("parses only explicit bulk validation problem details", () => {
+  const problems: AdminBulkProblem[] = [
+    { scope: "target", kind: "series", id: "series-1", reason: "version_conflict" },
+    { scope: "genre", genre_id: "genre-1", reason: "inactive" },
+  ];
+  expect(bulkActionProblems(new ApiError(409, "Conflict", "failed", {
+    error: "bulk_validation_failed", problems,
+  }))).toEqual(problems);
+  for (const details of [
+    { error: "other", problems },
+    { error: "bulk_validation_failed", problems: [{ scope: "target", kind: "episode", id: "x", reason: "not_found" }] },
+    { error: "bulk_validation_failed", problems: [{ scope: "genre", genre_id: 1, reason: "inactive" }] },
+  ]) {
+    expect(bulkActionProblems(new ApiError(409, "Conflict", "failed", details))).toBeUndefined();
+  }
+  expect(bulkActionProblems(new ApiError(400, "Bad Request", "failed", {
+    error: "bulk_validation_failed", problems,
+  }))).toBeUndefined();
 });
 
 // 验证：未提供进度回调时使用普通请求上传海报。
