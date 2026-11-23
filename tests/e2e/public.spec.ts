@@ -232,3 +232,34 @@ test("signed-in home resumes a public movie and a private episode", async ({ pag
     await api.dispose();
   }
 });
+
+// 验证两个独立普通用户会话共享规范进度，且旧设备不能越过另一设备的删除墓碑。
+test("viewer progress synchronizes across devices and removal blocks stale replay", async ({ playwright }) => {
+  const admin = await AdminApi.login(playwright);
+  const user = await admin.createUser(`progress-sync-${Date.now()}`);
+  const movie = await createPublishableMovie(admin, `Progress Sync ${Date.now()}`);
+  const deviceA = await ViewerApi.login(playwright, user.username);
+  const deviceB = await ViewerApi.login(playwright, user.username);
+  const headersA = { "X-CSRF-Token": deviceA.csrf, Origin: baseURL };
+  const headersB = { "X-CSRF-Token": deviceB.csrf, Origin: baseURL };
+  try {
+    const playedAt = new Date(Date.now() - 2_000).toISOString();
+    const write = await deviceA.request.post("/api/viewer/progress/merge", { headers: headersA, data: {
+      progress: [{ kind: "movie", id: movie.id, position_seconds: 0.2, duration_seconds: 120, completed: false, updated_at: playedAt }], cursors: [], removals: [],
+    } });
+    expect(write.status(), await write.text()).toBe(200);
+    await expect((await deviceB.request.get("/api/viewer/progress")).json()).resolves.toEqual(expect.objectContaining({
+      progress: [expect.objectContaining({ id: movie.id, position_seconds: 0.2 })],
+    }));
+
+    const removedAt = new Date().toISOString();
+    const removed = await deviceB.request.delete(`/api/viewer/progress/movie/${movie.id}`, { headers: headersB, data: { removed_at: removedAt } });
+    expect(removed.status(), await removed.text()).toBe(200);
+    await deviceA.request.post("/api/viewer/progress/merge", { headers: headersA, data: {
+      progress: [{ kind: "movie", id: movie.id, position_seconds: 0.4, duration_seconds: 120, completed: false, updated_at: playedAt }], cursors: [], removals: [],
+    } });
+    await expect((await deviceA.request.get("/api/viewer/progress")).json()).resolves.toEqual(expect.objectContaining({ progress: [] }));
+  } finally {
+    await deviceA.dispose(); await deviceB.dispose(); await admin.dispose();
+  }
+});

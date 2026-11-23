@@ -128,6 +128,15 @@ export interface ContinueWatchingEntry { kind: "movie" | "series"; id: string; e
 // 按更新时间生成未完成续播候选，每部剧集只保留最近一集。
 export function listContinueWatching(viewerId: string, storage?: Storage): ContinueWatchingEntry[] {
   const records = Object.entries(readState(storage, viewerId).progress).sort(([, a], [, b]) => b.updatedAt - a.updatedAt), seen = new Set<string>(), result: ContinueWatchingEntry[] = [];
-  for (const [key, progress] of records) { if (progress.completed || progress.position <= 0 || progress.duration - progress.position < 30) continue; if (key.startsWith("movie:")) result.push({ kind: "movie", id: key.slice(6), progress }); else if (key.startsWith("episode:") && progress.seriesId && !seen.has(progress.seriesId)) { seen.add(progress.seriesId); result.push({ kind: "series", id: progress.seriesId, episodeId: key.slice(8), progress }); } }
+  for (const [key, progress] of records) {
+    if (progress.position <= 0) continue;
+    if (key.startsWith("movie:")) {
+      if (!progress.completed && progress.duration - progress.position >= 30) result.push({ kind: "movie", id: key.slice(6), progress });
+    } else if (key.startsWith("episode:") && progress.seriesId && !seen.has(progress.seriesId)) {
+      if (!progress.completed && progress.duration - progress.position < 30) continue;
+      seen.add(progress.seriesId);
+      result.push({ kind: "series", id: progress.seriesId, episodeId: key.slice(8), progress });
+    }
+  }
   return result;
 }

@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
-import { saveProgress } from "../player/progressStore";
+import { completeProgress, getProgress, saveProgress } from "../player/progressStore";
 import { catalog, deferred, json, movie, series } from "../test/fixtures";
 
 // 在每个测试中安装独立的浏览器存储替身。
@@ -34,6 +34,7 @@ it.each([true, false])("shows the account's available items only when signed in 
       case "/api/catalog": return Promise.resolve(catalog([]));
       case "/api/catalog/movies/movie-1": return Promise.resolve(json(movie));
       case "/api/catalog/series/series-1": return Promise.resolve(json({ ...series, is_private: true }));
+      case "/api/viewer/progress/merge": return Promise.resolve(json({ progress: [], cursors: [], results: [] }));
       default: return Promise.resolve(json({}, 404));
     }
   });
@@ -48,6 +49,31 @@ it.each([true, false])("shows the account's available items only when signed in 
   expect(within(section).getByRole("link", { name: /群星之间/ }).getAttribute("href")).toBe("/series/series-1/play/ep-2?resume=1");
   expect(within(section).getByRole("link", { name: /第 1 季 · 第 3 集/ })).toBeTruthy();
   expect(within(section).getAllByRole("link")).toHaveLength(2);
+  fireEvent.click(within(section).getByRole("button", { name: "移除远方来信" }));
+  expect((await screen.findByRole("region", { name: "继续观看" })).textContent).not.toContain("远方来信");
+  expect(getProgress("movie:movie-1", undefined, "viewer")).toBeNull();
+});
+
+// 验证：已完成单集续播卡片指向下一集，最后一集完成后不再展示整剧。
+it("advances completed episodes and hides a series after its final episode", async () => {
+  window.history.replaceState(null, "", "/");
+  completeProgress("episode:ep-2", 200, 200, undefined, "viewer", "series-1");
+  vi.stubGlobal("fetch", (input: string) => {
+    const path = new URL(input, "http://localhost").pathname;
+    if (path === "/api/viewer/session") return Promise.resolve(json({ viewer_id: "viewer", username: "Summer", csrf_token: "csrf" }));
+    if (path === "/api/viewer/progress/merge") return Promise.resolve(json({ progress: [], cursors: [], results: [] }));
+    if (path === "/api/catalog/series/series-1") return Promise.resolve(json(series));
+    return Promise.resolve(catalog([]));
+  });
+  const view = render(<App />);
+  const section = await screen.findByRole("region", { name: "继续观看" });
+  expect(within(section).getByRole("link", { name: /群星之间/ }).getAttribute("href")).toBe("/series/series-1/play/ep-3?resume=1");
+
+  view.unmount();
+  completeProgress("episode:ep-3", 200, 200, undefined, "viewer", "series-1");
+  render(<App />);
+  await screen.findByText("没有找到匹配内容");
+  expect(screen.queryByRole("region", { name: "继续观看" })).toBeNull();
 });
 
 // 验证退出后才返回的私密详情不会让首页重新显示旧账号的记录。

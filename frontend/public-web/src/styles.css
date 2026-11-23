@@ -30,6 +30,10 @@ a:focus-visible, button:focus-visible { outline: 3px solid #96aeeb; outline-offs
 .search-box input::placeholder { color: #9da7b9; }
 .continue-watching { margin-bottom: 36px; }
 .continue-watching h2 { margin: 0; font-size: 1.45rem; }
+.continue-watching li { position: relative; }
+.continue-watching__remove { width: 100%; margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 10px; color: var(--muted); background: transparent; cursor: pointer; }
+.continue-watching__remove:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.continue-watching__remove:disabled { opacity: .55; cursor: wait; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 22px; }
 .eyebrow { margin: 0 0 7px; color: #9da7b9; font-size: .73rem; font-weight: 800; letter-spacing: .16em; }
 h1 { margin: 0; font-size: clamp(1.55rem, 3vw, 2rem); letter-spacing: -.035em; overflow-wrap: anywhere; }
