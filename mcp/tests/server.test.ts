@@ -36,7 +36,7 @@ test('server registers the complete atomic tool schemas and exposes its workflow
       'search_movies','search_series','get_series_structure','list_genres','create_genre','stage_poster',
       'create_movie','create_series','create_season','create_episode','update_movie_metadata','update_series_metadata','update_episode_metadata',
       'update_content_synopsis',
-      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle',
+      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle','set_content_poster',
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
     assert.ok(listed.tools.every(tool=>tool.outputSchema));
@@ -53,6 +53,17 @@ test('server registers the complete atomic tool schemas and exposes its workflow
       for (const field of fields) assert.ok(Object.hasOwn(tool.inputSchema.properties ?? {}, field), `${name} must expose ${field}`);
       if (name === 'create_movie') assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, 'duration_seconds'), false);
     }
+    const poster = listed.tools.find(tool => tool.name === 'set_content_poster');
+    assert.ok(poster);
+    assert.deepEqual(Object.keys(poster.inputSchema.properties ?? {}).sort(),
+      ['confirmed', 'content_id', 'content_type', 'path', 'version']);
+    assert.deepEqual(poster.inputSchema.required?.slice().sort(),
+      ['confirmed', 'content_id', 'content_type', 'path', 'version']);
+    assert.equal(poster.inputSchema.additionalProperties, false);
+    assert.deepEqual(poster.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false });
+    assert.match(poster.description ?? '', /补传.*替换.*删除.*transition_content_lifecycle/);
+    assert.match(instructions, /补传.*替换.*海报.*transition_content_lifecycle/);
+    assert.doesNotMatch(JSON.stringify(poster.outputSchema), /"remove"|"deleted"/);
     const lifecycle = listed.tools.find(tool => tool.name === 'transition_content_lifecycle');
     assert.ok(lifecycle);
     assert.equal(lifecycle.inputSchema.type, 'object');

@@ -116,7 +116,7 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
         ("GET", "/api/admin/movies/not-a-uuid"),
         (
             "POST",
-            "/api/admin/media/movies/00000000-0000-4000-8000-000000000001/poster",
+            "/api/admin/media/episodes/00000000-0000-4000-8000-000000000001/poster",
         ),
         (
             "PATCH",
@@ -146,6 +146,25 @@ fn route_allowed_for_visibility() {
             &format!("/api/admin/{content}/not-a-uuid/privacy"),
         ));
         assert!(!mcp::route_allowed(&Method::PUT, &format!("{path}/extra"),));
+    }
+}
+
+#[test]
+/// 验证海报白名单只接纳电影、整剧和合法 UUID 的精确 POST 路径。
+fn route_allowed_for_content_poster() {
+    for content in ["movies", "series"] {
+        let path = format!("/api/admin/media/{content}/{ID}/poster");
+        assert!(mcp::route_allowed(&Method::POST, &path), "{path}");
+        for method in [Method::GET, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(!mcp::route_allowed(&method, &path), "{method} {path}");
+        }
+        for path in [
+            format!("/api/admin/media/{content}/not-a-uuid/poster"),
+            format!("{path}/"),
+            format!("{path}/extra"),
+        ] {
+            assert!(!mcp::route_allowed(&Method::POST, &path), "{path}");
+        }
     }
 }
 
@@ -281,8 +300,8 @@ async fn bearer_denies_every_unlisted_management_operation() {
         ),
         ("DELETE", format!("/api/admin/movies/{ID}")),
         ("GET", format!("/api/admin/movies/{ID}/delete-impact")),
-        ("POST", format!("/api/admin/media/movies/{ID}/poster")),
-        ("POST", format!("/api/admin/media/series/{ID}/poster")),
+        ("POST", "/api/admin/media/movies/not-a-uuid/poster".into()),
+        ("POST", "/api/admin/media/series/not-a-uuid/poster".into()),
         ("PATCH", format!("/api/admin/series/{ID}/seasons/{ID}")),
         ("GET", "/api/viewer/session".into()),
     ] {
@@ -323,6 +342,26 @@ async fn bearer_can_reach_visibility_and_lifecycle_routes() {
                 .status(),
             StatusCode::UNPROCESSABLE_ENTITY,
             "{method} {path}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+/// 验证合法 Bearer 能到达两个海报上传端点的 Multipart 校验。
+async fn bearer_can_reach_content_poster_upload_routes() {
+    let (_db, app, root) = setup(true).await;
+    let bearer = format!("Bearer {KEY}");
+    let headers = [("host", "harbor.test"), ("authorization", bearer.as_str())];
+    for content in ["movies", "series"] {
+        let path = format!("/api/admin/media/{content}/{ID}/poster?version=1");
+        // 请求体缺少 Multipart 边界，通过鉴权后应由媒体路由返回 400。
+        assert_eq!(
+            send(&app, "POST", &path, json!({}), &headers)
+                .await
+                .status(),
+            StatusCode::BAD_REQUEST,
+            "{path}"
         );
     }
     std::fs::remove_dir_all(root).unwrap();

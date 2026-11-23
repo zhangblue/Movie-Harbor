@@ -57,7 +57,8 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
                 episode,
                 "publish" | "archive" | "draft",
             ] => uuid(series) && uuid(season) && uuid(episode),
-            ["media", "movies" | "episodes", id, "video"] => uuid(id),
+            ["media", "movies" | "series", id, "poster"]
+            | ["media", "movies" | "episodes", id, "video"] => uuid(id),
             _ => false,
         },
         // 访问范围只在电影和整剧级别修改，其他 PUT 路径继续拒绝。

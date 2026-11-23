@@ -8,6 +8,7 @@ import { registerContentMaintenanceTools } from './tools/content-maintenance.js'
 import { registerGenreTools } from './tools/genres.js';
 import { registerLocalMediaTools, type LocalMediaDependencies } from './tools/local-media.js';
 import { registerMovieTools } from './tools/movies.js';
+import { registerPosterTools } from './tools/posters.js';
 import { registerSeriesTools } from './tools/series.js';
 import { registerSynopsisTools } from './tools/synopsis.js';
 import { registerUploadTools } from './tools/uploads.js';
@@ -31,6 +32,7 @@ const instructions = [
   '目标已有视频时必须明确展示替换；电视剧先发布单集，父剧集需要再次单独确认发布。',
   '修改访问范围或转换生命周期前，须向用户说明目标、当前版本与影响并取得明确确认；已发布内容归档或转草稿前须说明下线影响。',
   '发布、归档和转草稿统一调用 transition_content_lifecycle。',
+  '补传或替换海报前须查询槽位，向用户说明是补传还是替换，并单独确认目标、版本和文件。非草稿先显式调用 transition_content_lifecycle 转草稿，再按新版本确认并调用 set_content_poster；该工具不允许删除海报。',
 ].join('\n');
 
 // 创建服务器时注册各组工具与操作说明。
@@ -46,6 +48,8 @@ export function buildServer(services: Services): McpServer {
   registerUploadTools(server,services);
   // 入库完成后只提示下一步，实际发布或修改范围由用户独立确认后执行。
   registerContentMaintenanceTools(server,services.client);
+  // 已有内容的海报走直接上传入口，按版本保护草稿槽位；创建内容继续使用暂存令牌。
+  registerPosterTools(server, { client: services.client, allowedRoots: services.config.allowedRoots });
   return server;
 }
 

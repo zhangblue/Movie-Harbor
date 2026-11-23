@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { test, type TestContext } from 'node:test';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { buildServer } from '../src/server.js';
+import type { CheckedFile } from '../src/services/path-policy.js';
 import { setContentVisibility, transitionContentLifecycle } from '../src/tools/content-maintenance.js';
 import { MovieHarborClientError, type HttpMethod, type MovieHarborClient } from '../src/services/movie-harbor-client.js';
 
@@ -308,4 +314,167 @@ test('visibility and lifecycle reject unconfirmed or malformed input before an A
     await assert.rejects(transitionContentLifecycle({ target_status: 'published', ...invalid }, remote.client));
   }
   assert.deepEqual(remote.calls, []);
+});
+
+
+// 准备可完整解码的 1×1 PNG、管理 API 上传响应和既有海报槽位。
+const posterPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNg+A8AAQIBAEK+vGgAAAAASUVORK5CYII=', 'base64');
+const posterId = '66666666-6666-4666-8666-666666666666';
+const posterResponse = { id: posterId, mime_type: 'image/png', byte_size: 68, version: 4, original_name: 'poster.png' };
+const oldPoster = { ...media, mime_type: 'image/jpeg', byte_size: 120, local_path: '/private/media/poster.jpg' };
+
+// 测试调用前创建隔离目录和真实海报，并清理每个场景的临时文件。
+async function posterFixture(t: TestContext) {
+  const root = await mkdtemp(join(tmpdir(), 'mh-content-poster-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const allowedRoot = join(root, 'allowed');
+  await mkdir(allowedRoot);
+  const path = join(allowedRoot, 'poster.png');
+  await writeFile(path, posterPng);
+  return { root, allowedRoot, path, input: { ...movieInput, path } };
+}
+
+// 通过内存协议发送真实工具请求，仅替代外部管理 API，并记录工具发出的读取和文件上传。
+async function callContentPoster(allowedRoot: string, input: Record<string, unknown>, detail?: unknown, upload?: unknown) {
+  const config = {
+    baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
+    allowedRoots: [allowedRoot], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000,
+  };
+  const calls: unknown[][] = [];
+  const clientApi: MovieHarborClient = {
+    // 记录真实工具请求，提供后端详情并检测额外的远程写入。
+    async json<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
+      calls.push([method, path]);
+      assert.equal(body, undefined);
+      return detail as T;
+    },
+    // 记录上传文件和 MIME，读取真实本地文件后才提供外部写入结果。
+    async upload<T>(path: string, file: CheckedFile, mimeType: string): Promise<T> {
+      calls.push(['upload', path, file.requestedPath, mimeType, (await readFile(file.realPath)).length]);
+      if (upload instanceof Error) throw upload;
+      return upload as T;
+    },
+  };
+  const server = buildServer({ config, credentialDirectory: config.credentialDirectory, client: clientApi });
+  const client = new Client({ name: 'movie-harbor-poster-test', version: '1.0.0' });
+  const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverEnd);
+  await client.connect(clientEnd);
+  try {
+    return { result: await client.callTool({ name: 'set_content_poster', arguments: input }), calls };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+// 验证空电影槽位和已有整剧槽位分别补传和替换，上传使用对应版本且输出不泄露路径。
+test('content poster adds to an empty movie slot and replaces an occupied series slot', async t => {
+  const f = await posterFixture(t);
+  for (const scenario of [
+    { input: f.input, detail: movies.draft, detailPath: moviePath, typePath: 'movies', action: 'added' },
+    { input: { ...seriesInput, path: f.path }, detail: { ...series, poster: oldPoster }, detailPath: seriesPath,
+      typePath: 'series', action: 'replaced' },
+  ] as const) {
+    const newVersion = scenario.input.version + 1;
+    const { result, calls } = await callContentPoster(f.allowedRoot, scenario.input, scenario.detail,
+      { ...posterResponse, version: newVersion, local_path: '/private/media/new.png' });
+    assert.equal(result.isError, undefined, JSON.stringify(result.content));
+    assert.deepEqual(result.structuredContent, {
+      content_type: scenario.input.content_type, content_id: scenario.input.content_id, version: newVersion,
+      media_id: posterId, format: 'png', byte_size: 68, action: scenario.action, next_actions: ['transition_content_lifecycle'],
+    });
+    assert.deepEqual(calls, [
+      ['GET', scenario.detailPath],
+      ['upload', '/api/admin/media/' + scenario.typePath + '/' + scenario.input.content_id
+        + '/poster?version=' + scenario.input.version, f.path, 'image/png', 68],
+    ]);
+    assert.doesNotMatch(JSON.stringify(result), /mh-content-poster-|\/private\/media|local_path/);
+    assert.match(JSON.stringify(result.content), /发布.*单独确认/);
+  }
+});
+
+// 验证严格 schema 拒绝单集、相对路径、空值、删除参数和非字面量确认。
+test('content poster schema rejects invalid kinds, deletion, paths and confirmation', async t => {
+  const f = await posterFixture(t);
+  for (const patch of [
+    { content_type: 'episode' }, { content_type: 'season' }, { content_id: 'invalid' }, { version: 0 },
+    { path: 'poster.png' }, { path: '' }, { path: null }, { confirmed: false }, { confirmed: 'true' },
+    { action: 'remove' }, { confirmed: undefined },
+  ]) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, { ...f.input, ...patch });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), /validation|invalid|必须使用|Unrecognized/i);
+    assert.deepEqual(calls, []);
+  }
+});
+
+// 验证路径策略与海报头尾预检先于远端读取，文件系统错误不会泄露路径。
+test('content poster preflights the allowed local image before any API request', async t => {
+  const f = await posterFixture(t);
+  const outside = join(f.root, 'outside.png');
+  const invalid = join(f.allowedRoot, 'invalid.png');
+  await writeFile(outside, posterPng);
+  await writeFile(invalid, 'wrong signature');
+  for (const [path, message] of [
+    [outside, /允许目录/], [invalid, /图片内容与扩展名/], [join(f.allowedRoot, 'missing.png'), /不可读取/],
+  ] as const) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, { ...f.input, path });
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), message);
+    assert.doesNotMatch(JSON.stringify(result), /mh-content-poster-/);
+    assert.deepEqual(calls, []);
+  }
+});
+
+// 验证过期版本、非草稿和详情 ID 错配均不会触发上传或生命周期写入。
+test('content poster checks detail identity, draft state and version before upload', async t => {
+  const f = await posterFixture(t);
+  for (const [detail, expected] of [
+    [{ ...movies.draft, status: 'published' }, /transition_content_lifecycle/],
+    [{ ...movies.draft, status: 'archived' }, /transition_content_lifecycle/],
+    [{ ...movies.draft, version: 4 }, 'version_conflict'],
+    [{ ...movies.draft, id: otherId }, 'invalid_response'],
+    [{ ...movies.draft, poster: undefined }, 'invalid_response'],
+  ] as const) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, f.input, detail);
+    assert.equal(result.isError, true);
+    if (typeof expected === 'string') assert.equal(result.structuredContent?.code, expected);
+    else assert.match(JSON.stringify(result.content), expected);
+    assert.deepEqual(calls, [['GET', moviePath]]);
+  }
+});
+
+// 验证返回格式、大小、资产 ID 和版本必须对应本次替换，异常响应不会发起进一步写入。
+test('content poster rejects mismatched upload responses as invalid_response', async t => {
+  const f = await posterFixture(t);
+  for (const patch of [
+    { mime_type: 'image/webp' }, { byte_size: 67 }, { id: 'invalid' }, { id: oldPoster.id },
+    { version: 3 }, { version: 5 },
+  ]) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, f.input, { ...movies.draft, poster: oldPoster },
+      { ...posterResponse, ...patch });
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent?.code, 'invalid_response');
+    assert.deepEqual(calls, [
+      ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+    ]);
+  }
+});
+
+// 验证上传断线与超时只提示重新查询海报及版本，无重试和发布动作。
+test('content poster requires a reread when the upload result is unknown', async t => {
+  const f = await posterFixture(t);
+  for (const code of ['network_error', 'timeout'] as const) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, f.input, movies.draft,
+      new MovieHarborClientError(code));
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, {
+      code: 'write_result_unknown', content_type: 'movie', content_id: movieId, next_actions: ['search_movies'],
+    });
+    assert.match(JSON.stringify(result.content), /请重新查询.*海报.*版本/);
+    assert.deepEqual(calls, [
+      ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+    ]);
+  }
 });
