@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
+import { mapHttpError } from '../src/services/error-mapper.js';
 import type { CheckedFile } from '../src/services/path-policy.js';
+import { UploadFileChangedAfterSendError } from '../src/services/upload-stream.js';
 import { setContentVisibility, transitionContentLifecycle } from '../src/tools/content-maintenance.js';
 import { MovieHarborClientError, type HttpMethod, type MovieHarborClient } from '../src/services/movie-harbor-client.js';
 
@@ -335,18 +337,27 @@ async function posterFixture(t: TestContext) {
 }
 
 // 通过内存协议发送真实工具请求，仅替代外部管理 API，并记录工具发出的读取和文件上传。
-async function callContentPoster(allowedRoot: string, input: Record<string, unknown>, detail?: unknown, upload?: unknown) {
+async function callContentPoster(
+  allowedRoot: string,
+  input: Record<string, unknown>,
+  detail?: unknown,
+  upload?: unknown,
+  readback?: unknown,
+) {
   const config = {
     baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
     allowedRoots: [allowedRoot], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000,
   };
   const calls: unknown[][] = [];
+  const snapshots = [detail, readback];
   const clientApi: MovieHarborClient = {
-    // 记录真实工具请求，提供后端详情并检测额外的远程写入。
+    // 记录真实工具请求，依次返回上传前快照和回查快照，并检测额外的远程写入。
     async json<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
       calls.push([method, path]);
       assert.equal(body, undefined);
-      return detail as T;
+      const snapshot = snapshots.shift();
+      if (snapshot instanceof Error) throw snapshot;
+      return snapshot as T;
     },
     // 记录上传文件和 MIME，读取真实本地文件后才提供外部写入结果。
     async upload<T>(path: string, file: CheckedFile, mimeType: string): Promise<T> {
@@ -453,28 +464,113 @@ test('content poster rejects mismatched upload responses as invalid_response', a
     { version: 3 }, { version: 5 },
   ]) {
     const { result, calls } = await callContentPoster(f.allowedRoot, f.input, { ...movies.draft, poster: oldPoster },
-      { ...posterResponse, ...patch });
+      { ...posterResponse, ...patch }, { ...movies.draft, poster: oldPoster });
     assert.equal(result.isError, true);
     assert.equal(result.structuredContent?.code, 'invalid_response');
+    assert.equal(result.structuredContent?.commit_status, 'unknown');
     assert.deepEqual(calls, [
-      ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+      ['GET', moviePath],
+      ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+      ['GET', moviePath],
     ]);
   }
 });
 
-// 验证上传断线与超时只提示重新查询海报及版本，无重试和发布动作。
-test('content poster requires a reread when the upload result is unknown', async t => {
+// 验证后端报告事务提交后收尾失败时，按 UUID 回查补传与替换的实际槽位及版本。
+test('content poster confirms a committed add or replacement after a finalization error', async t => {
   const f = await posterFixture(t);
-  for (const code of ['network_error', 'timeout'] as const) {
-    const { result, calls } = await callContentPoster(f.allowedRoot, f.input, movies.draft,
-      new MovieHarborClientError(code));
+  for (const scenario of [
+    { input: f.input, detail: movies.draft, detailPath: moviePath, collection: 'movies', previousId: null },
+    { input: { ...seriesInput, path: f.path }, detail: { ...series, poster: oldPoster }, detailPath: seriesPath,
+      collection: 'series', previousId: oldPoster.id },
+  ] as const) {
+    const latest = { ...scenario.detail, version: scenario.input.version + 1, poster: {
+      ...posterResponse, local_path: '/private/media/new.png',
+    } };
+    const { result, calls } = await callContentPoster(f.allowedRoot, scenario.input, scenario.detail, mapHttpError(500, {
+      code: 'media_replace_finalization_failed', error: 'Bearer mhmcp_secret /private/media/raw',
+    }, 'mhmcp_secret'), latest);
     assert.equal(result.isError, true);
     assert.deepEqual(result.structuredContent, {
-      code: 'write_result_unknown', content_type: 'movie', content_id: movieId, next_actions: ['search_movies'],
+      code: 'media_replace_finalization_failed', content_type: scenario.input.content_type,
+      content_id: scenario.input.content_id, previous_poster_id: scenario.previousId, current_poster_id: posterId,
+      previous_version: scenario.input.version, current_version: latest.version, commit_status: 'committed',
     });
-    assert.match(JSON.stringify(result.content), /请重新查询.*海报.*版本/);
+    assert.match(JSON.stringify(result.content), /已提交.*收尾/);
+    assert.doesNotMatch(JSON.stringify(result), /请.*重试|mhmcp_|Bearer|\/private\/media|mh-content-poster-/);
     assert.deepEqual(calls, [
-      ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+      ['GET', scenario.detailPath],
+      ['upload', '/api/admin/media/' + scenario.collection + '/' + scenario.input.content_id
+        + '/poster?version=' + scenario.input.version, f.path, 'image/png', 68],
+      ['GET', scenario.detailPath],
     ]);
   }
+});
+
+// 验证断线、超时和未识别的服务端错误均按原 UUID 回查；并发或读回失败时保留不确定状态。
+test('content poster rereads ambiguous upload outcomes by UUID without uploading again', async t => {
+  const f = await posterFixture(t);
+  for (const scenario of [
+    { detail: movies.draft, error: new MovieHarborClientError('network_error'),
+      readback: { ...movies.draft, version: 4, poster: posterResponse },
+      observedId: posterId, observedVersion: 4 },
+    { detail: { ...movies.draft, poster: oldPoster }, error: new MovieHarborClientError('timeout'),
+      readback: { ...movies.draft, poster: oldPoster },
+      observedId: oldPoster.id, observedVersion: 3 },
+    { detail: { ...movies.draft, poster: oldPoster }, error: new MovieHarborClientError('server_error'),
+      readback: new Error('Bearer mhmcp_secret /private/media/raw'),
+      observedId: null, observedVersion: null },
+    { detail: movies.draft, error: new MovieHarborClientError('network_error'),
+      readback: { ...movies.draft, id: otherId, version: 7, poster: posterResponse },
+      observedId: null, observedVersion: null },
+    { detail: { ...movies.draft, poster: oldPoster }, error: new UploadFileChangedAfterSendError(),
+      readback: { ...movies.draft, version: 4, poster: posterResponse }, observedId: posterId, observedVersion: 4 },
+  ] as const) {
+    const { result, calls } = await callContentPoster(f.allowedRoot, f.input, scenario.detail,
+      scenario.error, scenario.readback);
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, {
+      code: 'write_result_unknown', content_type: 'movie', content_id: movieId,
+      previous_poster_id: scenario.detail.poster?.id ?? null, current_poster_id: scenario.observedId,
+      previous_version: 3, current_version: scenario.observedVersion, commit_status: 'unknown',
+    });
+    assert.match(JSON.stringify(result.content), /无法确认.*提交/);
+    assert.doesNotMatch(JSON.stringify(result), /请.*重试|mhmcp_|Bearer|\/private\/media|mh-content-poster-/);
+    assert.deepEqual(calls, [
+      ['GET', moviePath],
+      ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+      ['GET', moviePath],
+    ]);
+  }
+});
+
+// 验证收尾错误后的回查失败继续保留原机器码和不确定状态，谨慎呈现当前快照。
+test('content poster preserves a finalization error when rereading its target fails', async t => {
+  const f = await posterFixture(t);
+  const { result, calls } = await callContentPoster(f.allowedRoot, f.input, movies.draft,
+    new MovieHarborClientError('media_replace_finalization_failed', 500), new MovieHarborClientError('timeout'));
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, {
+    code: 'media_replace_finalization_failed', content_type: 'movie', content_id: movieId,
+    previous_poster_id: null, current_poster_id: null, previous_version: 3,
+    current_version: null, commit_status: 'unknown',
+  });
+  assert.match(JSON.stringify(result.content), /回查未取得.*无法确认.*提交/);
+  assert.deepEqual(calls, [
+    ['GET', moviePath],
+    ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+    ['GET', moviePath],
+  ]);
+});
+
+// 验证明确发生在发送前的文件变化不启动远端核对。
+test('content poster keeps pre-send file changes distinct from ambiguous uploads', async t => {
+  const f = await posterFixture(t);
+  const { result, calls } = await callContentPoster(f.allowedRoot, f.input, movies.draft,
+    new MovieHarborClientError('file_changed'));
+  assert.equal(result.isError, true);
+  assert.deepEqual(result.structuredContent, { code: 'file_changed' });
+  assert.deepEqual(calls, [
+    ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
+  ]);
 });

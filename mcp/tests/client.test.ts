@@ -121,6 +121,31 @@ test('client maps HTTP errors to safe Chinese messages and bounded string fields
   }
 });
 
+// 验证上传收尾错误保留可信机器码，且不转发后端错误正文或路径。
+test('client preserves the media upload finalization error code', async t => {
+  const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
+  let status = 500;
+  const { config, directory } = await fixture(t, async (req, res) => {
+    for await (const _ of req) {}
+    res.writeHead(status, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      code: 'media_replace_finalization_failed', error: 'Bearer ' + key + ' /private/media/hidden',
+    }));
+  });
+  const path = join(directory, 'poster.png');
+  await writeFile(path, 'fixture image bytes');
+  const file = await inspectAllowedFile(path, config.allowedRoots);
+  const client = createMovieHarborClient(config);
+  const endpoint = '/api/admin/media/movies/id/poster?version=3';
+  await assert.rejects(client.upload(endpoint, file, 'image/png'), error => {
+    assert.equal((error as { code: string }).code, 'media_replace_finalization_failed');
+    assert.doesNotMatch(JSON.stringify(error) + String(error), /重试|mhmcp_|Bearer|\/private\/media/);
+    return true;
+  });
+  status = 409;
+  await assert.rejects(client.upload(endpoint, file, 'image/png'), { code: 'version_conflict' });
+});
+
 // Catches reflecting local paths or terminal control sequences through backend field names.
 // 验证只接受安全的远端字段名，数组中有无效值时丢弃整个数组。
 test('client accepts only safe remote field names and drops the entire invalid array', async t => {
@@ -230,14 +255,15 @@ test('client multipart rejects files changed before or during upload', async t =
   const stale = await inspectAllowedFile(path, config.allowedRoots);
   await writeFile(path, 'changed');
   const client = createMovieHarborClient(config);
-  await assert.rejects(client.upload('/api/admin/media/movies/id/video', stale, 'video/mp4'), { code: 'file_changed' });
+  await assert.rejects(client.upload('/api/admin/media/movies/id/video', stale, 'video/mp4'),
+    { code: 'file_changed', name: 'MovieHarborClientError' });
   await writeFile(path, Buffer.alloc(256 * 1024, 0x61));
   const current = await inspectAllowedFile(path, config.allowedRoots);
   let changed = false;
   await assert.rejects(client.upload('/api/admin/media/movies/id/video', current, 'video/mp4', () => {
     // 首次收到上传进度时用等长内容改写源文件，注入传输期间变化，使上传后身份复检必须拒绝。
     if (!changed) { changed = true; writeFileSync(path, Buffer.alloc(256 * 1024, 0x62)); }
-  }), { code: 'file_changed' });
+  }), { code: 'file_changed', name: 'UploadFileChangedAfterSendError' });
 });
 
 // Catches treating uploads as a total deadline instead of measuring inactivity.

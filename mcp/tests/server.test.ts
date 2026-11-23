@@ -60,8 +60,8 @@ test('server registers the complete atomic tool schemas and exposes its workflow
     assert.deepEqual(poster.inputSchema.required?.slice().sort(),
       ['confirmed', 'content_id', 'content_type', 'path', 'version']);
     assert.equal(poster.inputSchema.additionalProperties, false);
-    assert.deepEqual(poster.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false });
-    assert.match(poster.description ?? '', /补传.*替换.*删除.*transition_content_lifecycle/);
+    assert.deepEqual(poster.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false });
+    assert.match(poster.description ?? '', /补传.*替换.*永久移除旧海报.*删除.*transition_content_lifecycle/);
     assert.match(instructions, /补传.*替换.*海报.*transition_content_lifecycle/);
     assert.doesNotMatch(JSON.stringify(poster.outputSchema), /"remove"|"deleted"/);
     const lifecycle = listed.tools.find(tool => tool.name === 'transition_content_lifecycle');

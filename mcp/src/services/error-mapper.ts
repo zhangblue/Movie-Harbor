@@ -8,6 +8,7 @@ const messages = {
   validation_error: '请求内容未通过校验',
   rate_limited: '请求过于频繁，请稍后重试',
   server_error: '服务端处理失败，请稍后重试',
+  media_replace_finalization_failed: '服务端已提交媒体写入，但收尾失败，请查询最新媒体和版本',
   http_error: '服务端拒绝了请求',
   network_error: '连接中断或请求已取消',
   timeout: '请求超时，请检查服务连接',
@@ -36,6 +37,11 @@ export function mapHttpError(status: number, payload: unknown, apiKey: string): 
     401: 'auth_required', 403: 'forbidden', 404: 'not_found', 409: 'version_conflict',
     413: 'payload_too_large', 415: 'unsupported_media', 422: 'validation_error', 429: 'rate_limited',
   };
+  if (status === 500 && payload && typeof payload === 'object'
+    && (payload as { code?: unknown }).code === 'media_replace_finalization_failed') {
+    // 只接收既有上传接口的固定收尾错误码，响应正文和字段不随该错误转发。
+    return new MovieHarborClientError('media_replace_finalization_failed', status);
+  }
   const value = payload && typeof payload === 'object' ? (payload as { fields?: unknown }).fields : undefined;
   const fields = Array.isArray(value) && value.length <= 32 && value.every(field =>
     typeof field === 'string' && /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(field) && !field.includes(apiKey)
