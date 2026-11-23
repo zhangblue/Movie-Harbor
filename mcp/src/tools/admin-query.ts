@@ -1,5 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/server';
-import { listMissingVideosInput, listMissingVideosOutput } from '../schemas/admin-maintenance.js';
+import {
+  getSystemOverviewInput, getSystemOverviewOutput, listMissingVideosInput, listMissingVideosOutput,
+} from '../schemas/admin-maintenance.js';
 import { parseApi, readOnlyAnnotations, toolResult } from '../schemas/common.js';
 import { MovieHarborClientError, type MovieHarborClient } from '../services/movie-harbor-client.js';
 
@@ -30,6 +32,14 @@ export async function listMissingVideos(input: unknown, client: MovieHarborClien
   );
 }
 
+// 读取一次既有系统概览，供 MCP 查看后端采样的状态、计数、容量和告警。
+export async function getSystemOverview(input: unknown, client: MovieHarborClient): Promise<ToolResult> {
+  getSystemOverviewInput.parse(input === undefined ? {} : input);
+  // 请求成功后校验原样返回的数据，异常结构统一映射为安全的无效响应。
+  const response = await client.json('GET', '/api/admin/system/overview');
+  return toolResult(getSystemOverviewOutput, response, '已读取系统概览。');
+}
+
 // 在 MCP 服务器启动时注册管理端只读查询工具。
 export function registerAdminQueryTools(server: McpServer, client: MovieHarborClient): void {
   server.registerTool('list_missing_videos', {
@@ -38,4 +48,11 @@ export function registerAdminQueryTools(server: McpServer, client: MovieHarborCl
     outputSchema: listMissingVideosOutput,
     annotations: readOnlyAnnotations,
   }, input => listMissingVideos(input, client));
+  // 概览工具只读取管理页面的同一份快照，并向调用者公开完整结果契约。
+  server.registerTool('get_system_overview', {
+    description: '只读获取系统概览，包括应用版本、内容和用户计数、媒体卷容量、备份状态与告警。无需参数。',
+    inputSchema: getSystemOverviewInput,
+    outputSchema: getSystemOverviewOutput,
+    annotations: readOnlyAnnotations,
+  }, input => getSystemOverview(input, client));
 }

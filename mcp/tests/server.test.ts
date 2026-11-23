@@ -37,6 +37,7 @@ test('server registers the complete atomic tool schemas and exposes its workflow
       'create_movie','create_series','create_season','create_episode','update_movie_metadata','update_series_metadata','update_episode_metadata',
       'update_content_synopsis',
       'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle','set_content_poster','list_missing_videos',
+      'get_system_overview',
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
     assert.ok(listed.tools.every(tool=>tool.outputSchema));
@@ -71,6 +72,16 @@ test('server registers the complete atomic tool schemas and exposes its workflow
     assert.equal(missingVideos.inputSchema.additionalProperties, false);
     assert.deepEqual(missingVideos.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true });
     assert.match(missingVideos.description ?? '', /电影.*单集/);
+    const overview = listed.tools.find(tool => tool.name === 'get_system_overview');
+    assert.ok(overview);
+    assert.equal(overview.inputSchema.type, 'object');
+    assert.deepEqual(Object.keys(overview.inputSchema.properties ?? {}), []);
+    assert.deepEqual(overview.inputSchema.required ?? [], []);
+    assert.equal(overview.inputSchema.additionalProperties, false);
+    assert.deepEqual(overview.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true });
+    assert.match(overview.description ?? '', /系统概览/);
+    assert.deepEqual(Object.keys(overview.outputSchema?.properties ?? {}).sort(),
+      ['application_version', 'backup', 'counts', 'sampled_at', 'status', 'volumes', 'warnings']);
     const lifecycle = listed.tools.find(tool => tool.name === 'transition_content_lifecycle');
     assert.ok(lifecycle);
     assert.equal(lifecycle.inputSchema.type, 'object');

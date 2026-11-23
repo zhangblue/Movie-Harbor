@@ -152,3 +152,85 @@ export const listMissingVideosOutput = z.discriminatedUnion('content_type', [
     items: z.array(missingEpisodeItem).max(missingVideoPageSize),
   }),
 ]);
+
+// 系统概览查询没有业务参数，使用固定错误避免回显未知字段名。
+export const getSystemOverviewInput = z.strictObject({}, { error: '系统概览无需参数' });
+
+// 概览整数保持精确，超出 JavaScript 安全范围时拒绝响应，避免精度损失。
+const overviewCount = z.int().nonnegative();
+
+// 校验电影、剧集和单集按生命周期拆分的数据库数量。
+const overviewLifecycleCounts = z.strictObject({
+  draft: overviewCount,
+  published: overviewCount,
+  archived: overviewCount,
+});
+
+// 校验海报与视频各自的数量和数据库记录字节数。
+const overviewAssetCounts = z.strictObject({ count: overviewCount, bytes: overviewCount });
+
+// 卷 0 的数据库统计和保留空间在容量采样失败后仍由后端返回。
+const overviewVolumeFields = {
+  number: z.literal(0),
+  reserve_bytes: overviewCount,
+  asset_count: overviewCount,
+  recorded_asset_bytes: overviewCount,
+};
+
+// 按后端给出的卷状态校验容量字段，保留已知值或显式 null。
+const overviewVolume = z.discriminatedUnion('status', [
+  z.strictObject({
+    ...overviewVolumeFields,
+    status: z.enum(['healthy', 'space_low']),
+    total_bytes: overviewCount,
+    available_bytes: overviewCount,
+    writable_bytes: overviewCount,
+    accepts_uploads: z.boolean(),
+  }),
+  z.strictObject({
+    ...overviewVolumeFields,
+    status: z.literal('unavailable'),
+    total_bytes: z.null(),
+    available_bytes: z.null(),
+    writable_bytes: z.null(),
+    accepts_uploads: z.literal(false),
+  }),
+]);
+
+// 只接收后端稳定的告警码、卷范围和说明，阻止路径或底层错误借告警字段传出。
+const overviewWarning = z.discriminatedUnion('code', [
+  z.strictObject({
+    code: z.literal('storage_space_low'),
+    scope: z.literal('volume:0'),
+    message: z.literal('媒体卷空间不足'),
+  }),
+  z.strictObject({
+    code: z.literal('storage_capacity_unavailable'),
+    scope: z.literal('volume:0'),
+    message: z.literal('无法读取媒体卷容量'),
+  }),
+]);
+
+// 校验后端构建版本字符串，允许 Cargo 版本号的预发布与构建标识。
+const overviewApplicationVersion = z.string().regex(
+  /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/,
+);
+
+// 校验系统概览的完整 DTO，并供 MCP 发布同一成功结果结构。
+export const getSystemOverviewOutput = z.strictObject({
+  sampled_at: z.iso.datetime({ offset: true }),
+  application_version: overviewApplicationVersion,
+  status: z.enum(['healthy', 'attention']),
+  counts: z.strictObject({
+    movies: overviewLifecycleCounts,
+    series: overviewLifecycleCounts,
+    episodes: overviewLifecycleCounts,
+    viewer_users: overviewCount,
+    active_viewer_users: overviewCount,
+    posters: overviewAssetCounts,
+    videos: overviewAssetCounts,
+  }),
+  volumes: z.tuple([overviewVolume]),
+  backup: z.strictObject({ status: z.literal('unverifiable') }),
+  warnings: z.array(overviewWarning),
+});

@@ -25,6 +25,9 @@ use support::TestDatabase;
 use tower::ServiceExt;
 use uuid::Uuid;
 
+// 为系统概览集成测试配置独立的 MCP 凭据。
+const MCP_KEY: &str = "system-overview-test-key";
+
 /// 为系统概览测试持有权限受控的临时媒体目录。
 struct TempRoot(PathBuf);
 
@@ -80,7 +83,7 @@ fn config(root: &Path) -> Config {
         allow_insecure_lan_http: false,
         trust_proxy_headers: false,
         trusted_proxy_secret: None,
-        mcp_api_key_digest: None,
+        mcp_api_key_digest: Some(auth::csrf::digest(MCP_KEY)),
         max_upload_bytes: 4096,
         allowed_video_mime_types: vec!["video/mp4".into()],
         admin_name: Some("Admin".into()),
@@ -88,7 +91,7 @@ fn config(root: &Path) -> Config {
     }
 }
 
-/// 组装共享认证状态，使被测路由使用真实管理员会话中间件。
+/// 组装共享认证状态，使被测路由使用真实的会话和 MCP 认证。
 fn auth_state(db: sea_orm::DatabaseConnection, config: &Config) -> AuthState {
     AuthState {
         db,
@@ -96,7 +99,7 @@ fn auth_state(db: sea_orm::DatabaseConnection, config: &Config) -> AuthState {
         origin_policy: auth::csrf::OriginPolicy::new(config.validated_origin().unwrap(), false),
         trust_proxy_headers: false,
         trusted_proxy_secret_digest: None,
-        mcp_api_key_digest: None,
+        mcp_api_key_digest: config.mcp_api_key_digest.clone(),
         limits: Default::default(),
         password_work: Arc::new(tokio::sync::Semaphore::new(2)),
     }
@@ -196,6 +199,65 @@ INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, p
 ('70000000-0000-0000-0000-000000000001', 'poster/aa/70000000-0000-0000-0000-000000000001.webp', 'p.webp', 'image/webp', 100, 'poster'),
 ('70000000-0000-0000-0000-000000000002', 'video/aa/70000000-0000-0000-0000-000000000002.mp4', 'v.mp4', 'video/mp4', 900, 'video');
 "#).await.unwrap();
+}
+
+#[tokio::test]
+/// 验证仅携带有效 MCP Bearer 的 GET 请求复用正式概览响应和私有缓存策略。
+async fn mcp_bearer_reads_the_existing_system_overview() {
+    let db = TestDatabase::migrated("admin_system_mcp").await;
+    seed(&db).await;
+    let root = TempRoot::new();
+    let reserve = 10 * 1024 * 1024 * 1024;
+    let app = test_app(
+        &db,
+        &root,
+        CapacityReader {
+            capacity: StorageCapacity {
+                total_bytes: reserve * 4,
+                available_bytes: reserve * 2,
+            },
+            fail: false,
+        },
+    )
+    .await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/system/overview")
+                .header("host", "harbor.test")
+                .header("authorization", format!("Bearer {MCP_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "private, no-store");
+    let value = body(response).await;
+    assert_eq!(value["application_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(value["status"], "healthy");
+    assert_eq!(
+        value["counts"]["movies"],
+        json!({"draft":1,"published":1,"archived":1})
+    );
+    assert_eq!(
+        value["volumes"],
+        json!([{"number":0,"status":"healthy","total_bytes":reserve*4,"available_bytes":reserve*2,
+            "reserve_bytes":reserve,"writable_bytes":reserve,"accepts_uploads":true,
+            "asset_count":2,"recorded_asset_bytes":1000}])
+    );
+    assert_eq!(value["backup"], json!({"status":"unverifiable"}));
+    assert_eq!(value["warnings"], json!([]));
+    let encoded = value.to_string();
+    for sensitive in [
+        MCP_KEY,
+        root.as_ref().to_str().unwrap(),
+        "local_path",
+        "storage_key",
+        "database_url",
+    ] {
+        assert!(!encoded.contains(sensitive));
+    }
 }
 
 #[tokio::test]

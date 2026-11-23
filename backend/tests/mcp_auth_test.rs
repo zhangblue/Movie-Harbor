@@ -133,6 +133,33 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
 }
 
 #[test]
+/// 验证系统概览只放行精确 GET，拒绝其他方法和相邻的系统路径。
+fn route_allowed_for_system_overview() {
+    let path = "/api/admin/system/overview";
+    assert!(mcp::route_allowed(&Method::GET, path));
+    for method in [
+        Method::HEAD,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ] {
+        assert!(!mcp::route_allowed(&method, path), "{method} {path}");
+    }
+    for neighbor in [
+        "/api/admin/system",
+        "/api/admin/system/settings",
+        "/api/admin/system/backup",
+        "/api/admin/system/overview/",
+        "/api/admin/system/overview/extra",
+        "/api/admin/system/%6fverview",
+    ] {
+        assert!(!mcp::route_allowed(&Method::GET, neighbor), "{neighbor}");
+    }
+}
+
+#[test]
 /// 验证 MCP 白名单只接纳合法电影和整剧的访问范围修改。
 fn route_allowed_for_visibility() {
     for content in ["movies", "series"] {
@@ -294,6 +321,7 @@ async fn bearer_denies_every_unlisted_management_operation() {
         ("POST", "/api/admin/logout".into()),
         ("GET", "/api/admin/users".into()),
         ("HEAD", "/api/admin/genres".into()),
+        ("HEAD", "/api/admin/system/overview".into()),
         (
             "DELETE",
             format!("/api/admin/series/{ID}/seasons/{ID}/episodes/{ID}"),

@@ -41,7 +41,7 @@ export function buildServer(services: Services): McpServer {
   const server=new McpServer({name:'movie-harbor',version:'0.1.0'},{instructions});
   registerLocalMediaTools(server,services);
   registerCatalogTools(server,services.client);
-  // 查找缺视频槽位走单次管理分页接口，避免展开全库或触发维护写入。
+  // 缺视频查询和系统概览各使用一个管理端只读接口，直接返回后端结果。
   registerAdminQueryTools(server, services.client);
   registerGenreTools(server,services.client);
   registerMovieTools(server,{client:services.client,allowedRoots:services.config.allowedRoots});

@@ -583,8 +583,8 @@ const missingEpisode = {
   episode_number: 4, episode_status: 'archived', episode_version: 3, is_private: true,
 };
 
-// 通过内存 MCP 连接执行工具，仅替代远程管理接口以验证实际请求数量和路径。
-async function callMissingVideos(input: Record<string, unknown>, response?: unknown) {
+// 通过内存 MCP 连接执行只读管理工具，仅替代远程接口以验证实际请求数量和路径。
+async function callAdminQuery(name: string, input?: Record<string, unknown>, response?: unknown) {
   const config = {
     baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
     allowedRoots: [], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000,
@@ -596,11 +596,16 @@ async function callMissingVideos(input: Record<string, unknown>, response?: unkn
   await server.connect(serverEnd);
   await client.connect(clientEnd);
   try {
-    return { result: await client.callTool({ name: 'list_missing_videos', arguments: input }), calls: remote.calls };
+    return { result: await client.callTool({ name, arguments: input }), calls: remote.calls };
   } finally {
     await client.close();
     await server.close();
   }
+}
+
+// 调用缺视频工具，供分页验证沿用相同的内存查询边界。
+function callMissingVideos(input: Record<string, unknown>, response?: unknown) {
+  return callAdminQuery('list_missing_videos', input, response);
 }
 
 // 验证电影和单集分别只发出一次分页查询，完整保留后端分支和层级字段。
@@ -659,5 +664,113 @@ test('missing videos rejects malformed or mismatched pages without leaking backe
     assert.match(JSON.stringify(result.content), /服务端返回的数据格式无效/);
     assert.doesNotMatch(JSON.stringify(result), /\/srv\/media|storage_key|local_path/);
     assert.deepEqual(calls, [['GET', '/api/admin/contents/missing-videos?content_type=series']]);
+  }
+});
+
+// 提供后端卷 0 的完整快照，包含非零计数和 RFC 3339 时区偏移。
+const healthyOverview = {
+  sampled_at: '2026-11-23T10:00:00.123456+00:00',
+  application_version: '1.0.0',
+  status: 'healthy',
+  counts: {
+    movies: { draft: 3, published: 20, archived: 1 },
+    series: { draft: 2, published: 8, archived: 0 },
+    episodes: { draft: 5, published: 120, archived: 2 },
+    viewer_users: 4, active_viewer_users: 2,
+    posters: { count: 31, bytes: 84000000 }, videos: { count: 148, bytes: 920000000000 },
+  },
+  volumes: [{
+    number: 0, status: 'healthy', total_bytes: 2000000000000, available_bytes: 1080000000000,
+    reserve_bytes: 10737418240, writable_bytes: 1069262581760, accepts_uploads: true,
+    asset_count: 179, recorded_asset_bytes: 920084000000,
+  }],
+  backup: { status: 'unverifiable' },
+  warnings: [],
+};
+
+// 验证健康、低空间与未知容量均完整保留服务端快照，每次调用恰好一次 GET。
+test('system overview returns the unchanged healthy, low space, or unavailable snapshot', async () => {
+  const volume = healthyOverview.volumes[0];
+  const low = {
+    ...healthyOverview,
+    status: 'attention',
+    volumes: [{ ...volume, status: 'space_low', available_bytes: 10737418240, writable_bytes: 0, accepts_uploads: false }],
+    warnings: [{ code: 'storage_space_low', scope: 'volume:0', message: '媒体卷空间不足' }],
+  };
+  const unavailable = {
+    ...healthyOverview,
+    status: 'attention',
+    volumes: [{
+      ...volume, status: 'unavailable', total_bytes: null, available_bytes: null, writable_bytes: null,
+      accepts_uploads: false,
+    }],
+    warnings: [{ code: 'storage_capacity_unavailable', scope: 'volume:0', message: '无法读取媒体卷容量' }],
+  };
+  for (const [overview, args] of [[healthyOverview, undefined], [low, {}], [unavailable, {}]] as const) {
+    const { result, calls } = await callAdminQuery('get_system_overview', args, overview);
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent, overview);
+    assert.deepEqual(calls, [['GET', '/api/admin/system/overview']]);
+  }
+});
+
+// 验证额外参数不会发出请求，校验错误也不会回显参数键中的敏感内容。
+test('system overview rejects unexpected input before making a request', async () => {
+  const { result, calls } = await callAdminQuery(
+    'get_system_overview', { refresh: true, 'Bearer mhmcp_secret /srv/media/private': true }, healthyOverview,
+  );
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /系统概览无需参数/);
+  assert.doesNotMatch(JSON.stringify(result.content), /mhmcp_secret|\/srv\/media|Bearer/i);
+  assert.deepEqual(calls, []);
+});
+
+// 验证缺字段、异常枚举、非法容量及嵌套敏感字段统一返回安全校验错误。
+test('system overview rejects malformed snapshots without disclosing backend data', async () => {
+  const volume = healthyOverview.volumes[0];
+  const warning = { code: 'storage_space_low', scope: 'volume:0', message: '媒体卷空间不足' };
+  for (const malformed of [
+    { ...healthyOverview, sampled_at: 'yesterday' },
+    { ...healthyOverview, application_version: '/srv/media/version' },
+    { ...healthyOverview, status: 'ok' },
+    { ...healthyOverview, counts: { ...healthyOverview.counts, active_viewer_users: undefined } },
+    { ...healthyOverview, counts: { ...healthyOverview.counts, movies: { draft: -1, published: 2.5, archived: 0 } } },
+    { ...healthyOverview, volumes: [] },
+    { ...healthyOverview, volumes: [{ ...volume, number: 1 }] },
+    { ...healthyOverview, volumes: [{ ...volume, total_bytes: Number.MAX_SAFE_INTEGER + 1 }] },
+    { ...healthyOverview, volumes: [{ ...volume, available_bytes: null }] },
+    { ...healthyOverview, volumes: [{ ...volume, status: 'unavailable' }] },
+    { ...healthyOverview, volumes: [{ ...volume, status: 'unavailable', total_bytes: null, available_bytes: null,
+      writable_bytes: null, accepts_uploads: true }] },
+    { ...healthyOverview, volumes: [{ ...volume, accepts_uploads: 'true' }] },
+    { ...healthyOverview, volumes: [{ ...volume, local_path: '/srv/media/private' }] },
+    { ...healthyOverview, backup: { status: 'verified' } },
+    { ...healthyOverview, backup: { status: 'unverifiable', environment: 'DATABASE_URL' } },
+    { ...healthyOverview, warnings: [{ ...warning, code: 'unknown_issue' }] },
+    { ...healthyOverview, warnings: [{ ...warning, scope: '/srv/media/private' }] },
+    { ...healthyOverview, warnings: [{ ...warning, message: 'Bearer mhmcp_secret' }] },
+    { ...healthyOverview, warnings: [{ ...warning, storage_key: '/srv/media/private' }] },
+    { ...healthyOverview, authorization: 'Bearer mhmcp_secret' },
+  ]) {
+    const { result, calls } = await callAdminQuery('get_system_overview', {}, malformed);
+    const encoded = JSON.stringify(result);
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent, undefined);
+    assert.match(encoded, /服务端返回的数据格式无效/);
+    assert.doesNotMatch(encoded, /\/srv\/media|storage_key|local_path|DATABASE_URL|Bearer|mhmcp_secret/i);
+    assert.deepEqual(calls, [['GET', '/api/admin/system/overview']]);
+  }
+});
+
+// 验证认证和数据库故障只展示现有安全错误，不返回原始下游响应。
+test('system overview propagates sanitized HTTP errors without retrying', async () => {
+  for (const [status, message] of [[401, /认证失败/], [500, /服务端处理失败/]] as const) {
+    const remoteError = mapHttpError(status, { error: 'Bearer mhmcp_secret /srv/media/private' }, 'mhmcp_secret');
+    const { result, calls } = await callAdminQuery('get_system_overview', {}, remoteError);
+    assert.equal(result.isError, true);
+    assert.equal(result.structuredContent, undefined);
+    assert.match(JSON.stringify(result.content), message);
+    assert.doesNotMatch(JSON.stringify(result), /mhmcp_secret|\/srv\/media|Bearer/i);
+    assert.deepEqual(calls, [['GET', '/api/admin/system/overview']]);
   }
 });
