@@ -157,16 +157,22 @@ async fn apply_action(
 ) -> Result<BulkActionResult, BulkActionError> {
     match locked.content {
         LockedContent::Movie(mut value) => {
-            apply_model_fields(
-                request,
-                &mut value.is_private,
-                &mut value.status,
-                &mut value.published_at,
-                &mut value.archived_at,
-            );
-            let updated = movies::repository::persist(tx, &value, locked.target.version)
-                .await
-                .map_err(|_| BulkActionError::Database)?;
+            let updated = if let BulkActionRequest::SetPrivacy { is_private, .. } = request {
+                // 隐私字段独立于普通内容持久化，必须调用专用条件更新才能真正写入该字段。
+                movies::repository::set_privacy(tx, value.id, locked.target.version, *is_private)
+                    .await
+                    .map_err(|_| BulkActionError::Database)?
+            } else {
+                apply_model_fields(
+                    request,
+                    &mut value.status,
+                    &mut value.published_at,
+                    &mut value.archived_at,
+                );
+                movies::repository::persist(tx, &value, locked.target.version)
+                    .await
+                    .map_err(|_| BulkActionError::Database)?
+            };
             update_movie_genres(tx, request, updated.id).await?;
             let genres = movies::repository::genres(tx, updated.id)
                 .await
@@ -174,17 +180,27 @@ async fn apply_action(
             Ok(result_from_movie(updated, genres))
         }
         LockedContent::Series(mut value) => {
-            apply_model_fields(
-                request,
-                &mut value.is_private,
-                &mut value.status,
-                &mut value.published_at,
-                &mut value.archived_at,
-            );
-            let updated =
+            let updated = if let BulkActionRequest::SetPrivacy { is_private, .. } = request {
+                // 剧集普通持久化同样不含隐私字段，专用更新在当前外层事务中只递增一次版本。
+                series_domain::repository::set_privacy(
+                    tx,
+                    value.id,
+                    locked.target.version,
+                    *is_private,
+                )
+                .await
+                .map_err(|_| BulkActionError::Database)?
+            } else {
+                apply_model_fields(
+                    request,
+                    &mut value.status,
+                    &mut value.published_at,
+                    &mut value.archived_at,
+                );
                 series_domain::repository::persist_series(tx, &value, locked.target.version)
                     .await
-                    .map_err(|_| BulkActionError::Database)?;
+                    .map_err(|_| BulkActionError::Database)?
+            };
             update_series_genres(tx, request, updated.id).await?;
             let genres = series_domain::repository::genres(tx, updated.id)
                 .await
@@ -197,15 +213,12 @@ async fn apply_action(
 /// 将访问范围或归档动作写入模型字段，题材动作保留字段但仍由持久化递增版本。
 fn apply_model_fields(
     request: &BulkActionRequest,
-    is_private: &mut bool,
     status: &mut String,
     published_at: &mut Option<chrono::DateTime<chrono::FixedOffset>>,
     archived_at: &mut Option<chrono::DateTime<chrono::FixedOffset>>,
 ) {
     match request {
-        BulkActionRequest::SetPrivacy {
-            is_private: next, ..
-        } => *is_private = *next,
+        BulkActionRequest::SetPrivacy { .. } => {}
         BulkActionRequest::Archive { .. } => apply_target_state(
             status,
             published_at,

@@ -272,11 +272,10 @@ async fn bulk_service_updates_mixed_targets_once_and_rejects_replay() {
     let response = execute_bulk_action(&db, request.clone()).await.unwrap();
     assert_eq!(response.results.len(), 2);
     assert!(response.results.iter().all(|result| result.version == 2));
+    assert!(response.results.iter().all(|result| result.is_private));
     assert_eq!(
-        movie_state(&db, "10000000-0000-0000-0000-000000000001")
-            .await
-            .0,
-        2
+        movie_state(&db, "10000000-0000-0000-0000-000000000001").await,
+        (2, true, "published".into())
     );
 
     let error = execute_bulk_action(&db, request).await.unwrap_err();
