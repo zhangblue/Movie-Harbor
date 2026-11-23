@@ -23,7 +23,7 @@ async function fixture(t: TestContext, handler: (req: IncomingMessage, res: Serv
   if (!address || typeof address === 'string') throw new Error('listen failed');
   const config: McpConfig = { baseUrl: new URL(`http://127.0.0.1:${address.port}`), apiKey: key, credentialDirectory: directory,
     allowedRoots: [directory], generatedRoot: directory, requestTimeoutMs: 300 };
-  return { directory, config };
+  return { directory, config, server };
 }
 
 // Catches falling back to browser authentication or sending JSON with the wrong byte length.
@@ -224,7 +224,7 @@ test('client handles timeout, remote interruption, and abort without exposing tr
 
 // Catches using the requested path without revalidation or reporting bytes before write callbacks.
 // 验证分段上传已检查文件时长度准确，进度只计文件字节。
-test('client multipart uploads a checked file with exact length and file-only progress', async t => {
+test('client multipart declares checked media byte size separately from body length and file-only progress', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
   let body: Buffer | undefined; let headers: IncomingMessage['headers'] | undefined;
   const { config, directory } = await fixture(t, async (req, res) => {
@@ -238,7 +238,9 @@ test('client multipart uploads a checked file with exact length and file-only pr
   assert.deepEqual(await createMovieHarborClient(config).upload('/api/admin/media/movies/id/video?version=2', file, 'video/mp4', (sent, total) => {
     assert.equal(total, payload.length); progress.push(sent);
   }), { id: 'video-1' });
+  assert.equal(headers!['x-media-byte-size'], String(payload.length));
   assert.equal(headers!['content-length'], String(body!.length));
+  assert.ok(body!.length > payload.length);
   assert.equal(headers!.authorization, `Bearer ${key}`);
   assert.ok(body!.includes(payload));
   assert.match(body!.toString('utf8', 0, 200), /name="file"; filename="影片.mp4"/);
@@ -250,13 +252,16 @@ test('client multipart uploads a checked file with exact length and file-only pr
 // 验证分段上传拒绝上传前或上传期间发生变化的文件。
 test('client multipart rejects files changed before or during upload', async t => {
   const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
-  const { config, directory } = await fixture(t, async (req, res) => { for await (const _ of req) {} res.end('{}'); });
+  const { config, directory, server } = await fixture(t, async (req, res) => { for await (const _ of req) {} res.end('{}'); });
+  let connections = 0;
+  server.on('connection', () => { connections++; });
   const path = join(directory, 'video.mp4'); await writeFile(path, Buffer.alloc(256 * 1024, 0x61));
   const stale = await inspectAllowedFile(path, config.allowedRoots);
   await writeFile(path, 'changed');
   const client = createMovieHarborClient(config);
   await assert.rejects(client.upload('/api/admin/media/movies/id/video', stale, 'video/mp4'),
     { code: 'file_changed', name: 'MovieHarborClientError' });
+  assert.equal(connections, 0, '上传前文件身份变化时不能先向服务端建立连接');
   await writeFile(path, Buffer.alloc(256 * 1024, 0x61));
   const current = await inspectAllowedFile(path, config.allowedRoots);
   let changed = false;
@@ -347,5 +352,38 @@ test('client multipart accepts an independent generated root but refuses its par
     await writeFile(path, 'outside');
     const checked = await inspectAllowedFile(path, [directory]);
     await assert.rejects(client.upload('/api/admin/media/movies/id/video', checked, 'video/mp4'), { code: 'file_changed' });
+  }
+});
+
+// 按媒体槽位发送声明头，海报和暂存入口即使收到标记为视频的文件也沿用原协议。
+test('media byte size follows the video slot and is omitted for posters', async t => {
+  const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
+  const declared: unknown[] = [];
+  const { config, directory } = await fixture(t, async (req, res) => {
+    for await (const _ of req) {}
+    declared.push(req.headers['x-media-byte-size']);
+    res.end('{}');
+  });
+  const path = join(directory, 'picked.png');
+  await writeFile(path, 'image');
+  const file = await inspectAllowedFile(path, config.allowedRoots);
+  const client = createMovieHarborClient(config);
+  await client.upload('/api/admin/media/episodes/id/video?version=1', file, 'image/png');
+  await client.upload('/api/admin/media/movies/id/poster?version=1', file, 'video/mp4');
+  await client.upload('/api/admin/media/posters/stage', file, 'image/png');
+  assert.deepEqual(declared, ['5', undefined, undefined]);
+});
+
+// 服务端仅在约定 HTTP 状态下提供可信容量、声明或提交不明错误码，其余正文均不应转发。
+test('client preserves bounded video capacity and declaration errors only for their matching status', async () => {
+  const { mapHttpError } = await import('../src/services/error-mapper.js');
+  for (const [status, code] of [[503, 'storage_capacity_unavailable'], [507, 'storage_space_low'],
+    [400, 'declared_size_invalid'], [400, 'declared_size_mismatch'], [500, 'media_replace_outcome_unknown']] as const) {
+    const payload = { code, error: 'Bearer ' + key + ' /srv/media/private', fields: ['metadata'] };
+    const mapped = mapHttpError(status, payload, key);
+    assert.equal(mapped.code, code);
+    assert.deepEqual(mapped.fields, []);
+    assert.doesNotMatch(mapped.message + JSON.stringify(mapped), /Bearer|mhmcp_|private/);
+    assert.notEqual(mapHttpError(409, payload, key).code, code);
   }
 });

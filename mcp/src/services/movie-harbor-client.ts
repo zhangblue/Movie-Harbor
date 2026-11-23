@@ -3,7 +3,7 @@ import { request as httpsRequest } from 'node:https';
 import { isAbsolute, relative, sep } from 'node:path';
 import type { McpConfig } from '../config.js';
 import { MovieHarborClientError, mapHttpError } from './error-mapper.js';
-import type { CheckedFile } from './path-policy.js';
+import { revalidateAllowedFile, type CheckedFile } from './path-policy.js';
 import { createUploadStream } from './upload-stream.js';
 export { MovieHarborClientError } from './error-mapper.js';
 
@@ -159,8 +159,13 @@ export function createMovieHarborClient(config: McpConfig, dependencies: ClientD
       const url = controlledUrl(baseUrl, path);
       const generatedRelative = relative(generatedRoot, file.realPath);
       const inGeneratedRoot = !isAbsolute(generatedRelative) && generatedRelative.split(sep)[0] !== '..';
-      // 输出目录与用户输入目录分别限制，流式读取并复验身份，避免扩展任意文件访问权限。
-      return request<T>('POST', url, undefined, createUploadStream(file, inGeneratedRoot ? [generatedRoot] : roots, mimeType), onProgress);
+      const allowedRoots = inGeneratedRoot ? [generatedRoot] : roots;
+      // 容量采样及目标详情可能已耗时。建立连接前复验原身份，生成大小声明后仍由流核对固定句柄。
+      try { await revalidateAllowedFile(file, allowedRoots); }
+      catch { throw new MovieHarborClientError('file_changed'); }
+      const videoSlot = /^\/api\/admin\/media\/(movies|episodes)\/[^/]+\/video$/.test(url.pathname);
+      const stream = createUploadStream(file, allowedRoots, mimeType, videoSlot);
+      return request<T>('POST', url, undefined, stream, onProgress);
     },
   };
 }

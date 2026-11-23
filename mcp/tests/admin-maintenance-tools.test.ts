@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { healthyOverview, unavailableOverview } from './overview-fixture.js';
 import { buildServer } from '../src/server.js';
 import { mapHttpError } from '../src/services/error-mapper.js';
 import type { CheckedFile } from '../src/services/path-policy.js';
@@ -520,6 +521,8 @@ test('content poster rereads ambiguous upload outcomes by UUID without uploading
     { detail: { ...movies.draft, poster: oldPoster }, error: new MovieHarborClientError('server_error'),
       readback: new Error('Bearer mhmcp_secret /private/media/raw'),
       observedId: null, observedVersion: null },
+    { detail: movies.draft, error: mapHttpError(500, { code: 'media_replace_outcome_unknown' }, 'mhmcp_secret'),
+      readback: movies.draft, observedId: null, observedVersion: 3 },
     { detail: movies.draft, error: new MovieHarborClientError('network_error'),
       readback: { ...movies.draft, id: otherId, version: 7, poster: posterResponse },
       observedId: null, observedVersion: null },
@@ -666,38 +669,6 @@ test('missing videos rejects malformed or mismatched pages without leaking backe
     assert.deepEqual(calls, [['GET', '/api/admin/contents/missing-videos?content_type=series']]);
   }
 });
-
-// 提供后端卷 0 的完整快照，包含非零计数和 RFC 3339 时区偏移。
-const healthyOverview = {
-  sampled_at: '2026-11-23T10:00:00.123456+00:00',
-  application_version: '1.0.0',
-  status: 'healthy',
-  counts: {
-    movies: { draft: 3, published: 20, archived: 1 },
-    series: { draft: 2, published: 8, archived: 0 },
-    episodes: { draft: 5, published: 120, archived: 2 },
-    viewer_users: 4, active_viewer_users: 2,
-    posters: { count: 31, bytes: 84000000 }, videos: { count: 148, bytes: 920000000000 },
-  },
-  volumes: [{
-    number: 0, status: 'healthy', total_bytes: 2000000000000, available_bytes: 1080000000000,
-    reserve_bytes: 10737418240, writable_bytes: 1069262581760, accepts_uploads: true,
-    asset_count: 179, recorded_asset_bytes: 920084000000,
-  }],
-  backup: { status: 'unverifiable' },
-  warnings: [],
-};
-
-// 提供后端采样失败时返回的完整快照，供成功和不一致响应测试复用。
-const unavailableOverview = {
-  ...healthyOverview,
-  status: 'attention',
-  volumes: [{
-    ...healthyOverview.volumes[0], status: 'unavailable', total_bytes: null, available_bytes: null,
-    writable_bytes: null, accepts_uploads: false,
-  }],
-  warnings: [{ code: 'storage_capacity_unavailable', scope: 'volume:0', message: '无法读取媒体卷容量' }],
-};
 
 // 验证健康、低空间与未知容量均完整保留服务端快照，每次调用恰好一次 GET。
 test('system overview returns the unchanged healthy, low space, or unavailable snapshot', async () => {

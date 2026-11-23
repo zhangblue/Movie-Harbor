@@ -8,6 +8,11 @@ const messages = {
   validation_error: '请求内容未通过校验',
   rate_limited: '请求过于频繁，请稍后重试',
   server_error: '服务端处理失败，请稍后重试',
+  storage_capacity_unavailable: '无法读取媒体卷容量，暂时不能上传视频',
+  storage_space_low: '媒体卷未接受本次上传，请核对可用空间和预留空间',
+  declared_size_invalid: '视频声明大小无效，请重新检查文件',
+  declared_size_mismatch: '视频实际字节数与声明大小不符，请重新检查文件',
+  media_replace_outcome_unknown: '服务端无法确认媒体写入结果，请重新查询目标视频和版本',
   media_replace_finalization_failed: '服务端已提交媒体写入，但收尾失败，请查询最新媒体和版本',
   http_error: '服务端拒绝了请求',
   network_error: '连接中断或请求已取消',
@@ -37,10 +42,13 @@ export function mapHttpError(status: number, payload: unknown, apiKey: string): 
     401: 'auth_required', 403: 'forbidden', 404: 'not_found', 409: 'version_conflict',
     413: 'payload_too_large', 415: 'unsupported_media', 422: 'validation_error', 429: 'rate_limited',
   };
-  if (status === 500 && payload && typeof payload === 'object'
-    && (payload as { code?: unknown }).code === 'media_replace_finalization_failed') {
-    // 只接收既有上传接口的固定收尾错误码，响应正文和字段不随该错误转发。
-    return new MovieHarborClientError('media_replace_finalization_failed', status);
+  // 仅承认后端明确约定的状态码组合，固定文本和字段隔离服务端路径与诊断。
+  const mediaCode = payload && typeof payload === 'object' && 'code' in payload ? payload.code : undefined;
+  if ((status === 503 && mediaCode === 'storage_capacity_unavailable')
+    || (status === 507 && mediaCode === 'storage_space_low')
+    || (status === 400 && (mediaCode === 'declared_size_invalid' || mediaCode === 'declared_size_mismatch'))
+    || (status === 500 && (mediaCode === 'media_replace_outcome_unknown' || mediaCode === 'media_replace_finalization_failed'))) {
+    return new MovieHarborClientError(mediaCode, status);
   }
   const value = payload && typeof payload === 'object' ? (payload as { fields?: unknown }).fields : undefined;
   const fields = Array.isArray(value) && value.length <= 32 && value.every(field =>

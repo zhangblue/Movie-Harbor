@@ -80,7 +80,7 @@ function posterWriteOutcomeCode(error: unknown): PosterWriteOutcome['code'] | un
   if (!(error instanceof MovieHarborClientError)) return undefined;
   if (error.code === 'invalid_response' || error.code === 'media_replace_finalization_failed') return error.code;
   if (error instanceof UploadFileChangedAfterSendError
-    || ['network_error', 'timeout', 'response_too_large', 'server_error'].includes(error.code)) {
+    || ['network_error', 'timeout', 'response_too_large', 'server_error', 'media_replace_outcome_unknown'].includes(error.code)) {
     return 'write_result_unknown';
   }
 }

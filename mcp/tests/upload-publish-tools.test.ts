@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { healthyOverview, unavailableOverview } from './overview-fixture.js';
+import { mapHttpError, MovieHarborClientError } from '../src/services/error-mapper.js';
 import { inspectAllowedFile } from '../src/services/path-policy.js';
 import { prepareGeneratedRoot, recordGeneratedFile } from '../src/services/generated-files.js';
 
@@ -38,12 +40,16 @@ async function fixture(t: TestContext) {
 }
 
 // 为上传及替换测试准备可控 API 响应。
-function fakeClient(responses: unknown[]) {
+function fakeClient(responses: unknown[], overview: unknown = healthyOverview) {
   const calls: any[] = [];
   return { calls, client: {
     // 测试请求时记录参数并返回预设的 API 响应。
     async json(method: string, path: string, body?: unknown) {
       calls.push({ kind: 'json', method, path, body });
+      if (path === '/api/admin/system/overview') {
+        if (overview instanceof Error) throw overview;
+        return overview;
+      }
       assert.ok(responses.length, `unexpected JSON call ${method} ${path}`);
       const value = responses.shift(); if (value instanceof Error) throw value; return value;
     },
@@ -65,6 +71,7 @@ async function registeredTools(client: any, dependencies: any) {
   return { registrations, /* 测试调用时运行处理器并核对输出 schema 与敏感信息。 */ async call(name: string, input: unknown) {
     const tool = registrations.get(name); assert.ok(tool, name);
     const result = await tool.handler(input);
+    if (result.isError) throw Object.assign(new Error(result.content[0].text), result.structuredContent);
     assert.equal(tool.schema.outputSchema.safeParse(result.structuredContent).success, true, `${name} output`);
     assert.doesNotMatch(JSON.stringify(result), /SECRET|local_path|mhmcp_/);
     return result.structuredContent;
@@ -106,7 +113,7 @@ test('ordinary movie upload refuses an occupied slot and never uploads or publis
   const f = await fixture(t); const c = fakeClient([{ ...movie, video: media }]);
   const tools = await registeredTools(c.client, f);
   await assert.rejects(tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:true }), /已有视频.*replace_movie_video/);
-  assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path]), [['json','GET',`/api/admin/movies/${movieId}`]]);
+  assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path]), [['json','GET','/api/admin/system/overview'], ['json','GET',`/api/admin/movies/${movieId}`]]);
 });
 
 // 验证电影上传检查兼容媒体、仅流式上传一次、过滤输出且不自动发布。
@@ -116,6 +123,7 @@ test('movie upload validates compatible media, streams once, filters output and 
   assert.deepEqual(out, { id:movieId,version:4,media_id:mediaId,mime_type:'video/mp4',byte_size:6,
     generated_file_deleted:false,retained_generated_path:null,next_actions:['transition_content_lifecycle'] });
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path,call.mimeType]), [
+    ['json','GET','/api/admin/system/overview',undefined],
     ['json','GET',`/api/admin/movies/${movieId}`,undefined],
     ['upload',undefined,`/api/admin/media/movies/${movieId}/video?version=3`,'video/mp4'],
   ]);
@@ -170,12 +178,13 @@ test('episode upload validates hierarchy and returns episode and parent versions
   assert.deepEqual(await tools.call('upload_episode_video',input), {id:episodeId,version:5,series_version:9,media_id:mediaId,
     mime_type:'video/mp4',byte_size:6,generated_file_deleted:false,retained_generated_path:null,next_actions:['transition_content_lifecycle']});
   assert.deepEqual(c.calls.map(call => call.path), [
+    '/api/admin/system/overview',
     `/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}`,
     `/api/admin/media/episodes/${episodeId}/video?version=4`,
   ]);
   const wrong = fakeClient([{series_version:8,episode:{...episode,id:movieId}}]);
   await assert.rejects((await registeredTools(wrong.client,f)).call('upload_episode_video',input), /数据格式无效/);
-  assert.equal(wrong.calls.length,1);
+  assert.equal(wrong.calls.length,2);
 });
 
 // 验证电影上传响应语义不可能时，在清理生成文件前拒绝响应。
@@ -189,7 +198,7 @@ test('upload rejects semantically impossible movie responses before cleanup', as
     const ordinary = fakeClient([movie,response]);
     await assert.rejects((await registeredTools(ordinary.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:f.path,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(f.path).then(()=>true),true);
-    assert.equal(ordinary.calls.length,2);
+    assert.equal(ordinary.calls.length,3);
 
     await prepareGeneratedRoot(f.config);
     const source = await inspectAllowedFile(f.path,f.config.allowedRoots);
@@ -199,7 +208,7 @@ test('upload rejects semantically impossible movie responses before cleanup', as
     const generatedClient = fakeClient([movie,{...response,byte_size:response.byte_size===999?999:4}]);
     await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(generated).then(()=>true),true,'invalid response must retain generated file');
-    assert.equal(generatedClient.calls.length,2);
+    assert.equal(generatedClient.calls.length,3);
   }
 });
 
@@ -212,7 +221,7 @@ test('episode upload rejects target or parent version jumps before cleanup', asy
   ].entries()){
     const c=fakeClient([episodeEnvelope,response]);
     await assert.rejects((await registeredTools(c.client,f)).call('upload_episode_video',input),/数据格式无效/);
-    assert.equal(c.calls.length,2);
+    assert.equal(c.calls.length,3);
 
     await prepareGeneratedRoot(f.config);
     const source=await inspectAllowedFile(f.path,f.config.allowedRoots);
@@ -222,7 +231,7 @@ test('episode upload rejects target or parent version jumps before cleanup', asy
     const generatedClient=fakeClient([episodeEnvelope,{...response,byte_size:4}]);
     await assert.rejects((await registeredTools(generatedClient.client,f)).call('upload_episode_video',{...input,path:generated,confirmed:true}),/数据格式无效/);
     assert.equal(await stat(generated).then(()=>true),true,'invalid episode response must retain generated file');
-    assert.equal(generatedClient.calls.length,2);
+    assert.equal(generatedClient.calls.length,3);
   }
 });
 
@@ -243,4 +252,111 @@ test('successful generated upload deletes only registered conversion output and 
   const failure = fakeClient([movie,new Error('remote failed')]);
   await assert.rejects((await registeredTools(failure.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated2,confirmed:true}), error => /保留|retry/.test(String(error)));
   assert.equal(await stat(generated2).then(() => true),true);
+});
+
+// 逐一调用四个注册入口，检查容量边界、中止阶段和错误输出中的可公开数字。
+test('video capacity checks volume zero before the target and allows the exact reserve boundary', async t => {
+  const f = await fixture(t);
+  const volume = { ...healthyOverview.volumes[0], available_bytes: 46, reserve_bytes: 40, writable_bytes: 6 };
+  const boundary = { ...healthyOverview, volumes: [volume] };
+  const movieArgs = { movie_id: movieId, version: 3, confirmed: true, path: f.path };
+  const episodeArgs = { series_id: seriesId, season_id: seasonId, episode_id: episodeId,
+    version: 4, confirmed: true, path: f.path };
+  const episodeResponse = { ...uploadResponse, version: 5, series_version: 9 };
+  for (const [name, args, target, response] of [
+    ['upload_movie_video', movieArgs, movie, uploadResponse],
+    ['replace_movie_video', movieArgs, { ...movie, video: media }, uploadResponse],
+    ['upload_episode_video', episodeArgs, episodeEnvelope, episodeResponse],
+    ['replace_episode_video', episodeArgs, { ...episodeEnvelope, episode: { ...episode, video: media } }, episodeResponse],
+  ] as const) {
+    await t.test(name, async () => {
+      const success = fakeClient([target, response], boundary);
+      const registered = await registeredTools(success.client, f);
+      const out = await registered.call(name, args);
+      assert.equal(out.byte_size, 6);
+      assert.deepEqual(success.calls.map(call => [call.kind, call.method]), [
+        ['json', 'GET'], ['json', 'GET'], ['upload', undefined],
+      ]);
+      assert.equal(success.calls[0].path, '/api/admin/system/overview');
+      for (const [snapshot, code, available, reserve, shortfall] of [
+        [{ ...boundary, volumes: [{ ...volume, available_bytes: 45 }] }, 'storage_space_low', 45, 40, 1],
+        [{ ...boundary, volumes: [{ ...volume, accepts_uploads: false }] }, 'storage_space_low', 46, 40, 0],
+        [unavailableOverview, 'storage_capacity_unavailable', null, 10737418240, null],
+        [new MovieHarborClientError('timeout'), 'storage_capacity_unavailable', null, null, null],
+        [{ ...boundary, volumes: [], error: '/srv/media/private' }, 'storage_capacity_unavailable', null, null, null],
+        [{ ...boundary, volumes: [{ ...volume, available_bytes: Number.MAX_SAFE_INTEGER,
+          reserve_bytes: Number.MAX_SAFE_INTEGER }] }, 'storage_space_low', Number.MAX_SAFE_INTEGER, Number.MAX_SAFE_INTEGER, 6],
+      ] as const) {
+        const rejected = fakeClient([], snapshot);
+        const tools = await registeredTools(rejected.client, f);
+        const result = await tools.registrations.get(name).handler(args);
+        assert.equal(result.isError, true);
+        assert.deepEqual(result.structuredContent, {
+          code, file_bytes: 6, available_bytes: available, reserve_bytes: reserve, shortfall_bytes: shortfall,
+        });
+        assert.match(result.content[0].text, /容量|空间/);
+        assert.doesNotMatch(JSON.stringify(result), /Bearer|Authorization|mhmcp_|mh-upload-tools-|\/srv\/media/);
+        assert.deepEqual(rejected.calls.map(call => [call.method, call.path]), [['GET', '/api/admin/system/overview']]);
+      }
+    });
+  }
+});
+
+// 服务端可能在快照之后拒绝容量或无法确认写入；两类文件都须保留，工具不得再次发起上传。
+test('server capacity rejection or uncertain write retains source and generated files without resending', async t => {
+  const f = await fixture(t);
+  await prepareGeneratedRoot(f.config);
+  const generated = join(f.config.generatedRoot, 'retry.mp4');
+  await writeFile(generated, 'retry!');
+  await recordGeneratedFile(generated, await inspectAllowedFile(f.path, f.config.allowedRoots), f.config, f.credentials);
+  for (const [status, code] of [[507, 'storage_space_low'], [500, 'media_replace_outcome_unknown']] as const) {
+    for (const path of [f.path, generated]) {
+      const error = mapHttpError(status, { code, error: 'Bearer mhmcp_secret /srv/media/private' }, f.config.apiKey);
+      const remote = fakeClient([movie, error]);
+      const tools = await registeredTools(remote.client, f);
+      const result = await tools.registrations.get('upload_movie_video').handler({
+        movie_id: movieId, version: 3, confirmed: true, path,
+      });
+      assert.equal(result.isError, true);
+      assert.equal(result.structuredContent.code, code);
+      if (code === 'media_replace_outcome_unknown') assert.match(result.content[0].text, /查询|读取/);
+      if (path === generated) assert.match(result.content[0].text, /生成文件已保留/);
+      assert.doesNotMatch(JSON.stringify(result), /Bearer|Authorization|mhmcp_|mh-upload-tools-|\/srv\/media/);
+      assert.equal((await stat(path)).size, 6);
+      assert.equal(remote.calls.filter(call => call.kind === 'upload').length, 1);
+    }
+  }
+});
+
+// 详情已核对后的网络错误和无效成功响应都须引导人工核对；已发送的文件不可自动重传。
+test('uncertain video upload result requires rereading media and version', async t => {
+  const f = await fixture(t);
+  for (const [response, code] of [
+    [new MovieHarborClientError('timeout'), 'write_result_unknown'],
+    [{ ...uploadResponse, version: 99 }, 'invalid_response'],
+  ] as const) {
+    const remote = fakeClient([movie, response]);
+    const tools = await registeredTools(remote.client, f);
+    const result = await tools.registrations.get('upload_movie_video').handler({
+      movie_id: movieId, version: 3, confirmed: true, path: f.path,
+    });
+    assert.equal(result.structuredContent.code, code);
+    assert.match(result.content[0].text, /重新查询.*版本/);
+    assert.equal(remote.calls.filter(call => call.kind === 'upload').length, 1);
+  }
+});
+
+// 本地路径丢失时不得将文件系统原始错误交给工具调用方，也不应查询容量。
+test('local video identity failure avoids disclosing paths or requesting capacity', async t => {
+  const f = await fixture(t);
+  const remote = fakeClient([]);
+  const tools = await registeredTools(remote.client, f);
+  await rm(f.path);
+  await assert.rejects(tools.call('upload_movie_video', {
+    movie_id: movieId, version: 3, confirmed: true, path: f.path,
+  }), error => {
+    assert.doesNotMatch(String(error), /mh-upload-tools-/);
+    return true;
+  });
+  assert.equal(remote.calls.length, 0);
 });

@@ -23,13 +23,15 @@ function sameIdentity(file: CheckedFile, info: BigIntStats): boolean {
 }
 
 // 上传前后核验文件身份并从固定句柄流式写入请求。
-export function createUploadStream(file: CheckedFile, roots: string[], mimeType: string) {
+export function createUploadStream(file: CheckedFile, roots: string[], mimeType: string, videoSlot = false) {
   let multipart: ReturnType<typeof createMultipartFileBody>;
   try {
     multipart = createMultipartFileBody({ localPath: file.realPath, fileName: basename(file.realPath),
       byteSize: file.identity.size, mimeType });
   } catch { throw new MovieHarborClientError('file_changed'); }
-  return { headers: multipart.headers, /* 实际上传时核验文件并向请求写入 multipart 数据。 */ async writeTo(request: Writable, options: Omit<MultipartWriteOptions, 'createStream'> = {}) {
+  // 视频槽位仅声明已检查的文件字节，multipart 的内容长度仍包含表单边界。
+  const headers = videoSlot ? { ...multipart.headers, 'X-Media-Byte-Size': String(file.identity.size) } : multipart.headers;
+  return { headers, /* 实际上传时核验文件并向请求写入 multipart 数据。 */ async writeTo(request: Writable, options: Omit<MultipartWriteOptions, 'createStream'> = {}) {
     let handle: FileHandle | undefined;
     try {
       // 打开前复验路径并禁止符号链接替换，后续始终从同一文件句柄读取。
