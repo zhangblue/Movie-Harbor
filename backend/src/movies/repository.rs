@@ -53,6 +53,15 @@ pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<movie::Mo
         .ok_or(MovieError::NotFound)
 }
 
+/// 在批量事务中按标识取得可选电影并加排他锁，使不存在目标可与其他问题一并返回。
+pub async fn find_locked_optional(
+    tx: &DatabaseTransaction,
+    id: Uuid,
+) -> Result<Option<movie::Model>, sea_orm::DbErr> {
+    // 批量服务按统一 kind+id 顺序逐条调用，避免混合内容请求因客户端顺序不同产生死锁。
+    movie::Entity::find_by_id(id).lock_exclusive().one(tx).await
+}
+
 /// 在写事务中按预期版本保存内容并递增版本，冲突时拒绝覆盖。
 pub async fn persist(
     tx: &DatabaseTransaction,

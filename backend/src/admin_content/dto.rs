@@ -68,10 +68,15 @@ enum BulkActionWire {
     },
 }
 
+#[derive(Clone, Copy, Debug)]
+/// 表示批量请求结构或集合约束无效，供路由统一映射为 400 而不泄漏解析细节。
+pub struct BulkRequestParseError;
+
 impl BulkActionRequest {
     // 从任意 JSON 值解析并完成批量数量、正版本及唯一性校验，供路由返回统一 400。
-    pub fn from_value(value: Value) -> Result<Self, ()> {
-        let wire: BulkActionWire = serde_json::from_value(value).map_err(|_| ())?;
+    pub fn from_value(value: Value) -> Result<Self, BulkRequestParseError> {
+        let wire: BulkActionWire =
+            serde_json::from_value(value).map_err(|_| BulkRequestParseError)?;
         let request = match wire {
             BulkActionWire::SetPrivacy {
                 is_private,
@@ -109,28 +114,28 @@ impl BulkActionRequest {
 }
 
 // 校验一至二十个正版本且 kind+id 唯一的目标，供所有动作解析时调用。
-fn validate_targets(targets: &[BulkTarget]) -> Result<(), ()> {
+fn validate_targets(targets: &[BulkTarget]) -> Result<(), BulkRequestParseError> {
     if targets.is_empty() || targets.len() > MAX_BULK_TARGETS {
-        return Err(());
+        return Err(BulkRequestParseError);
     }
     let mut unique = HashSet::with_capacity(targets.len());
     if targets
         .iter()
         .any(|target| target.version <= 0 || !unique.insert((target.kind, target.id)))
     {
-        return Err(());
+        return Err(BulkRequestParseError);
     }
     Ok(())
 }
 
 // 校验一至二十个唯一题材标识，供题材动作进入事务前调用。
-fn validate_genres(genre_ids: &[Uuid]) -> Result<(), ()> {
+fn validate_genres(genre_ids: &[Uuid]) -> Result<(), BulkRequestParseError> {
     if genre_ids.is_empty() || genre_ids.len() > MAX_BULK_GENRES {
-        return Err(());
+        return Err(BulkRequestParseError);
     }
     let unique = genre_ids.iter().copied().collect::<HashSet<_>>();
     if unique.len() != genre_ids.len() {
-        return Err(());
+        return Err(BulkRequestParseError);
     }
     Ok(())
 }

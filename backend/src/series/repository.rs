@@ -53,6 +53,18 @@ pub async fn find_locked(tx: &DatabaseTransaction, id: Uuid) -> Result<series::M
         .ok_or(SeriesError::NotFound)
 }
 
+/// 在批量事务中按标识取得可选剧集并加排他锁，使不存在目标可与其他问题一并返回。
+pub async fn find_locked_optional(
+    tx: &DatabaseTransaction,
+    id: Uuid,
+) -> Result<Option<series::Model>, sea_orm::DbErr> {
+    // 批量服务按统一 kind+id 顺序逐条调用，锁定次序不受请求中电影和剧集排列影响。
+    series::Entity::find_by_id(id)
+        .lock_exclusive()
+        .one(tx)
+        .await
+}
+
 /// 在剧集写事务中按预期版本保存记录并递增版本，冲突时拒绝覆盖。
 pub async fn persist_series(
     tx: &DatabaseTransaction,
