@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { existsSync } from "node:fs";
-import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublishableMovie, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Movie, type ViewerUser } from "./helpers";
+import { AdminApi, ViewerApi, adminName, baseURL, changedPassword, createPublishableMovie, createPublishableSeries, initialPassword, poster, saveState, snapshotMediaFiles, uploadedSince, video, type Genre, type Movie, type Series, type ViewerUser } from "./helpers";
 
 // 验证匿名请求不能读取系统事实，管理员页面只展示卷、版本、统计和备份边界。
 test("system overview is administrator-only and exposes no operational write actions", async ({ page, request }) => {
@@ -83,6 +83,82 @@ test("user management preserves Unicode usernames and resets or deletes every vi
     await expect(page.getByRole("row", { name: new RegExp(movie.name) })).toHaveCount(0);
     expect((await first.request.get(movie.video!.url, { headers: { Range: "bytes=0-1" } })).status()).toBe(404);
   } finally { await first.dispose(); await second.dispose(); await api.dispose(); }
+});
+
+// 验证当前页混合选择只发送原子批量请求，冲突零写入，并覆盖题材和归档最终效果。
+test("admin content bulk actions are atomic across movies and series", async ({ page, playwright, request }) => {
+  const api = await AdminApi.login(playwright);
+  const marker = `Bulk ${Date.now()}`;
+  const genre = await api.write<Genre>("post", "/api/admin/genres", { name: `${marker} Genre` });
+  let movie = await createPublishableMovie(api, `${marker} Movie`);
+  let series = await createPublishableSeries(api, `${marker} Series`);
+  try {
+    await page.goto("/admin/");
+    await page.getByLabel("管理员名称").fill(adminName);
+    await page.getByLabel("密码").fill(initialPassword);
+    await page.getByRole("button", { name: "登录" }).click();
+    await page.getByLabel("名称", { exact: true }).fill(marker);
+    await page.getByRole("button", { name: "查询", exact: true }).click();
+
+    const movieRow = page.getByRole("row", { name: new RegExp(movie.name) });
+    const seriesRow = page.getByRole("row", { name: new RegExp(series.name) });
+    await movieRow.getByRole("checkbox", { name: `选择${movie.name}` }).check();
+    await seriesRow.getByRole("checkbox", { name: `选择${series.name}` }).check();
+    await expect(page.getByText("已选择 2 项")).toBeVisible();
+    await expect(page.getByRole("button", { name: /批量.*(删除|媒体)/ })).toHaveCount(0);
+
+    // 混合电影和剧集的一次访问范围请求应全部成功，并在刷新后清空当前页选择。
+    await page.getByRole("button", { name: "批量设置访问范围" }).click();
+    const privacyDialog = page.getByRole("dialog", { name: "批量设置访问范围" });
+    await privacyDialog.getByLabel("私密").check();
+    await privacyDialog.getByRole("button", { name: "确认设置" }).click();
+    await expect(page.getByText("已选择 0 项")).toBeVisible();
+    movie = await api.get<Movie>(`/api/admin/movies/${movie.id}`);
+    series = await api.get<Series>(`/api/admin/series/${series.id}`);
+    expect(movie.is_private).toBe(true);
+    expect(series.is_private).toBe(true);
+
+    // 在页面保留旧版本后外部递增电影版本，整批归档必须返回冲突且剧集也保持已发布。
+    await movieRow.getByRole("checkbox", { name: `选择${movie.name}` }).check();
+    await seriesRow.getByRole("checkbox", { name: `选择${series.name}` }).check();
+    movie = await api.setPrivacy("movies", movie, false);
+    await page.getByRole("button", { name: "批量归档" }).click();
+    const conflictDialog = page.getByRole("dialog", { name: "批量归档内容" });
+    await conflictDialog.getByRole("button", { name: "确认归档" }).click();
+    await expect(conflictDialog.getByRole("alert")).toContainText("内容版本已变化");
+    expect((await api.get<Movie>(`/api/admin/movies/${movie.id}`)).status).toBe("published");
+    expect((await api.get<Series>(`/api/admin/series/${series.id}`)).status).toBe("published");
+    await conflictDialog.getByRole("button", { name: "取消" }).click();
+    // 等待查询响应完成后再选择新行，避免列表 Effect 按约定清空刚勾选的旧 DOM。
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes("/api/admin/contents?") && response.request().method() === "GET"),
+      page.getByRole("button", { name: "查询", exact: true }).click(),
+    ]);
+
+    // 题材批量添加后使用刷新得到的新版本归档，两种内容均从公开目录消失。
+    await movieRow.getByRole("checkbox", { name: `选择${movie.name}` }).check();
+    await seriesRow.getByRole("checkbox", { name: `选择${series.name}` }).check();
+    await page.getByRole("button", { name: "批量调整题材" }).click();
+    const genreDialog = page.getByRole("dialog", { name: "批量调整题材" });
+    await genreDialog.getByLabel(genre.name).check();
+    await genreDialog.getByRole("button", { name: "确认调整题材" }).click();
+    await expect(page.getByText("已选择 0 项")).toBeVisible();
+    const movieWithGenres = await api.get<Movie & { genres: Genre[] }>(`/api/admin/movies/${movie.id}`);
+    const seriesWithGenres = await api.get<Series & { genres: Genre[] }>(`/api/admin/series/${series.id}`);
+    expect(movieWithGenres.genres.map((item) => item.id)).toContain(genre.id);
+    expect(seriesWithGenres.genres.map((item) => item.id)).toContain(genre.id);
+
+    await movieRow.getByRole("checkbox", { name: `选择${movie.name}` }).check();
+    await seriesRow.getByRole("checkbox", { name: `选择${series.name}` }).check();
+    await page.getByRole("button", { name: "批量归档" }).click();
+    await page.getByRole("dialog", { name: "批量归档内容" }).getByRole("button", { name: "确认归档" }).click();
+    await expect(movieRow).toContainText("已归档");
+    await expect(seriesRow).toContainText("已归档");
+    expect((await request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(404);
+    expect((await request.get(`/api/catalog/series/${series.id}`)).status()).toBe(404);
+  } finally {
+    await api.dispose();
+  }
 });
 
 // 验证空部署初始化管理员及电影完整生命周期。
