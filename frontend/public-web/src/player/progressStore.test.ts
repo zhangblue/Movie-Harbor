@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PROGRESS_STORAGE_KEY,
+  completeProgress,
   clearProgress,
   getProgress,
   getRecentEpisode,
+  markProgressRemoved,
+  readProgressSnapshot,
   saveProgress,
   setRecentEpisode,
 } from "./progressStore";
@@ -40,16 +43,18 @@ describe("playback progress storage", () => {
     expect(getProgress("movie:same-id")).toMatchObject({ position: 61, duration: 600 });
     expect(getProgress("episode:same-id")).toMatchObject({ position: 122, duration: 900 });
     expect([...Array(localStorage.length)].map((_, index) => localStorage.key(index))).toEqual([PROGRESS_STORAGE_KEY]);
-    expect(JSON.parse(localStorage.getItem(PROGRESS_STORAGE_KEY)!)).toMatchObject({ version: 1 });
+    expect(JSON.parse(localStorage.getItem(PROGRESS_STORAGE_KEY)!)).toMatchObject({ version: 2 });
   });
 
-  // 验证：清除已完成内容时不影响其他内容进度。
-  it("clears a completed item without disturbing another content key", () => {
+  // 验证：接近结尾仍保存位置，只有真实结束事件才保留已看完标记。
+  it("keeps near-end progress and marks completion without disturbing another content key", () => {
     saveProgress("movie:one", 60, 600);
     saveProgress("movie:two", 80, 600);
     saveProgress("movie:one", 575, 600);
 
-    expect(getProgress("movie:one")).toBeNull();
+    expect(getProgress("movie:one")?.position).toBe(575);
+    completeProgress("movie:one", 600, 600);
+    expect(getProgress("movie:one")).toMatchObject({ position: 600, duration: 600, completed: true });
     expect(getProgress("movie:two")?.position).toBe(80);
   });
 
@@ -62,7 +67,7 @@ describe("playback progress storage", () => {
   // 验证：损坏或不兼容的本地数据按空状态处理。
   it.each([
     "not json",
-    JSON.stringify({ version: 2, progress: {}, recentEpisodes: {} }),
+    JSON.stringify({ version: 3, progress: {}, cursors: {}, removals: {} }),
     JSON.stringify({ version: 1, progress: { "movie:one": { position: "bad", duration: 90 } }, recentEpisodes: {} }),
   ])("treats corrupt or incompatible local data as empty", (stored) => {
     localStorage.setItem(PROGRESS_STORAGE_KEY, stored);
@@ -105,6 +110,37 @@ describe("playback progress storage", () => {
     setRecentEpisode("series:one", null);
     expect(getRecentEpisode("series:one")).toBeNull();
     expect(getRecentEpisode("series:two")).toBe("ep-2");
+  });
+
+  // 验证：版本 1 进度迁移为未完成，独立最近单集以最低优先级游标保留。
+  it("migrates version one progress and standalone recent episodes into version two", () => {
+    localStorage.setItem(PROGRESS_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      progress: { "movie:m": { position: 12, duration: 100, updatedAt: 500 } },
+      recentEpisodes: { "series:s": "ep-legacy" },
+    }));
+
+    expect(getProgress("movie:m")).toMatchObject({ position: 12, completed: false });
+    expect(getRecentEpisode("series:s")).toBe("ep-legacy");
+    expect(readProgressSnapshot().cursors["series:s"]).toEqual({ episodeId: "ep-legacy", updatedAt: 0 });
+  });
+
+  // 验证：电影、单集和整剧墓碑只隐藏对应范围，并保留其他记录。
+  it("applies movie episode and series removal scopes independently", () => {
+    saveProgress("movie:m", 10, 100, undefined, "viewer");
+    saveProgress("episode:e1", 20, 100, undefined, "viewer", "s");
+    saveProgress("episode:e2", 30, 100, undefined, "viewer", "s");
+    setRecentEpisode("series:s", "e2", undefined, "viewer");
+    markProgressRemoved("movie", "m", undefined, "viewer");
+    markProgressRemoved("episode", "e1", undefined, "viewer");
+    expect(getProgress("movie:m", undefined, "viewer")).toBeNull();
+    expect(getProgress("episode:e1", undefined, "viewer")).toBeNull();
+    expect(getProgress("episode:e2", undefined, "viewer")?.position).toBe(30);
+
+    markProgressRemoved("series", "s", undefined, "viewer");
+    expect(getProgress("episode:e2", undefined, "viewer")).toBeNull();
+    expect(getRecentEpisode("series:s", undefined, "viewer")).toBeNull();
+    expect(Object.keys(readProgressSnapshot("viewer").removals).sort()).toEqual(["episode:e1", "movie:m", "series:s"]);
   });
 });
 
