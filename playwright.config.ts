@@ -18,7 +18,7 @@ export default defineConfig({
     { name: "import", testMatch: /import\.spec\.ts/, dependencies: ["export"] },
     { name: "playback", testMatch: /playback\.spec\.ts/, dependencies: ["import"] },
     { name: "pagination", testMatch: /pagination\.spec\.ts/, dependencies: ["playback"] },
-    { name: "admin", testMatch: /admin\.spec\.ts/, dependencies: ["pagination", "mcp"] },
+    { name: "admin", testMatch: /admin(?:-media-capacity)?\.spec\.ts/, dependencies: ["pagination", "mcp"] },
     { name: "persistence", testMatch: /persistence\.spec\.ts/ },
   ],
 });

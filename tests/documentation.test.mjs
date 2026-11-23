@@ -38,6 +38,23 @@ test("MCP guide explains every registered tool and README only links to the guid
   for (const match of documented) assert.ok(match[2].trim().length > 0);
 });
 
+// 防止维护流程继续推荐旧工具，或省略独立确认和视频容量的服务端复核。
+test("MCP guide documents maintenance confirmations and video capacity", () => {
+  const guide = readFileSync(path.join(projectRoot, "docs/guides/codex-mcp.md"), "utf8");
+  assert.doesNotMatch(guide, /\bpublish_(?:movie|episode|series)\b/);
+  for (const tool of [
+    "set_content_visibility", "transition_content_lifecycle", "set_content_poster",
+    "list_missing_videos", "get_system_overview", "upload_movie_video",
+    "replace_movie_video", "upload_episode_video", "replace_episode_video",
+  ]) {
+    assert.ok(guide.includes(`| \`${tool}\` |`), `${tool} must appear in the tool reference`);
+  }
+  assert.match(guide, /转草稿[^。\n]*不会自动[^。\n]*海报[^。\n]*重新发布/);
+  assert.match(guide, /新文件大小 \+ 10 GiB 预留/);
+  assert.match(guide, /X-Media-Byte-Size/);
+  assert.match(guide, /服务端[^。\n]*锁[^。\n]*复核/);
+});
+
 // 验证README 导航与指南链接均可解析。
 test("README guide navigation and guide links resolve", () => {
   const guides = [

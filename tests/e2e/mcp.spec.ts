@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
-import { AdminApi, ViewerApi, baseURL } from "./helpers";
+import { AdminApi, ViewerApi, baseURL, type Movie } from "./helpers";
 
 // 描述 MCP 结构化结果允许的 JSON 原始值，供结果类型使用。
 type JsonPrimitive = string | number | boolean | null;
@@ -113,6 +113,21 @@ test.afterAll(async () => {
   assertSafeResult(observedResults, false);
 });
 
+// 通过真实 STDIO 注册表和后端采样确认维护工具已经上线。
+test("MCP exposes the system overview and retires the old publishing tools", async () => {
+  const names = (await client.listTools()).tools.map(tool => tool.name);
+  for (const retired of ["publish_movie", "publish_episode", "publish_series"]) {
+    expect(names).not.toContain(retired);
+  }
+  const overview = await call("get_system_overview", {});
+  expect(overview).toMatchObject({
+    sampled_at: expect.any(String),
+    counts: { videos: { count: expect.any(Number) } },
+    volumes: [{ number: 0, reserve_bytes: 10 * 1024 ** 3 }],
+    backup: { status: "unverifiable" },
+  });
+});
+
 // 验证 MCP 创建、上传并分别发布私密电影和剧集。
 test("MCP creates, uploads and independently publishes private movie and series", async ({ request, playwright }) => {
   const prefix = `MCP E2E ${Date.now()}`;
@@ -137,16 +152,19 @@ test("MCP creates, uploads and independently publishes private movie and series"
     genre_ids: [genreId], staged_poster_token: stagedMoviePoster.staged_poster_token,
   });
   expect(movie).toMatchObject({ status: "draft", next_actions: ["upload_movie_video"] });
+  // 在填充槽位前精确定位新建电影，防止误把剧集或已有视频的内容列入上传计划。
+  const missingMovies = await call("list_missing_videos", { content_type: "movie" });
+  expect(missingMovies.items).toContainEqual(expect.objectContaining({ movie_id: movie.id, version: movie.version }));
   const movieUpload = await call("upload_movie_video", {
     movie_id: movie.id, version: movie.version, path: compatibleVideoPath, confirmed: true,
   });
-  expect(movieUpload).toMatchObject({ generated_file_deleted: false, next_actions: ["publish_movie"] });
+  expect(movieUpload).toMatchObject({ generated_file_deleted: false, next_actions: ["transition_content_lifecycle"] });
   const movieBeforePublish = await (await request.get(`/api/catalog/movies/${movie.id}`)).status();
   expect(movieBeforePublish).toBe(404);
-  const publishedMovie = await call("publish_movie", {
-    movie_id: movie.id, version: movieUpload.version, confirmed: true,
+  const publishedMovie = await call("transition_content_lifecycle", {
+    content_type: "movie", content_id: movie.id, target_status: "published", version: movieUpload.version, confirmed: true,
   });
-  expect(publishedMovie).toMatchObject({ id: movie.id, status: "published", next_actions: [] });
+  expect(publishedMovie).toMatchObject({ content_id: movie.id, status: "published", next_actions: [] });
 
   const seriesName = `${prefix} Series`;
   expect(await call("validate_poster", { path: posterPath })).toMatchObject({ format: "png", mime_type: "image/png" });
@@ -164,6 +182,12 @@ test("MCP creates, uploads and independently publishes private movie and series"
     series_id: series.id, season_id: season.season_id, version: season.series_version,
     number: 1, name: "Pilot", duration_seconds: duration, confirmed: true,
   });
+  // 单集清单须给出完整归属，使调用方能准确填写后续上传所需的三个标识。
+  const missingEpisodes = await call("list_missing_videos", { content_type: "series", page: 1 });
+  expect(missingEpisodes.items).toContainEqual(expect.objectContaining({
+    series_id: series.id, season_id: season.season_id, episode_id: episode.id,
+    episode_name: "Pilot", episode_version: episode.version,
+  }));
   const episodeUpload = await call("upload_episode_video", {
     series_id: series.id, season_id: season.season_id, episode_id: episode.id,
     version: episode.version, path: compatibleVideoPath, confirmed: true,
@@ -184,15 +208,15 @@ test("MCP creates, uploads and independently publishes private movie and series"
     const updatedSeries = await admin.get<any>(`/api/admin/series/${series.id}`);
     expect(updatedSeries.seasons[0].episodes[0].duration_seconds).toBe(120);
 
-    const publishedEpisode = await call("publish_episode", {
-      series_id: series.id, season_id: season.season_id, episode_id: episode.id,
+    const publishedEpisode = await call("transition_content_lifecycle", {
+      content_type: "episode", series_id: series.id, season_id: season.season_id, content_id: episode.id, target_status: "published",
       version: updatedEpisode.version, confirmed: true,
     });
-    expect(publishedEpisode).toMatchObject({ status: "published", next_actions: ["publish_series"] });
+    expect(publishedEpisode).toMatchObject({ status: "published", next_actions: ["transition_content_lifecycle"] });
     const parentStillDraft = await admin.get<any>(`/api/admin/series/${series.id}`);
     expect(parentStillDraft.status).toBe("draft");
-    const publishedSeries = await call("publish_series", {
-      series_id: series.id, version: publishedEpisode.series_version, confirmed: true,
+    const publishedSeries = await call("transition_content_lifecycle", {
+      content_type: "series", content_id: series.id, target_status: "published", version: publishedEpisode.series_version, confirmed: true,
     });
     expect(publishedSeries).toMatchObject({ status: "published", next_actions: [] });
 
@@ -213,6 +237,36 @@ test("MCP creates, uploads and independently publishes private movie and series"
       expect((await viewer.request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(200);
       expect((await viewer.request.get(`/api/catalog/series/${series.id}`)).status()).toBe(200);
     } finally { await viewer.dispose(); }
+
+    // 确认两种范围写入后从匿名公开站回读，以检查真实权限与缓存行为。
+    const publicMovie = await call("set_content_visibility", {
+      content_type: "movie", content_id: movie.id, version: publishedMovie.version, visibility: "public", confirmed: true,
+    });
+    const publicSeries = await call("set_content_visibility", {
+      content_type: "series", content_id: series.id, version: publishedSeries.version, visibility: "public", confirmed: true,
+    });
+    expect(publicMovie.visibility).toBe("public");
+    expect(publicSeries.visibility).toBe("public");
+    expect((await request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(200);
+    expect((await request.get(`/api/catalog/series/${series.id}`)).status()).toBe(200);
+
+    // 下线和换海报分别执行，确认每个阶段的状态、版本和媒体槽位。
+    const draft = await call("transition_content_lifecycle", {
+      content_type: "movie", content_id: movie.id, version: publicMovie.version, target_status: "draft", confirmed: true,
+    });
+    expect(draft).toMatchObject({ status: "draft", transitioned_through: ["archived", "draft"] });
+    const draftDetail = await admin.get<Movie>(`/api/admin/movies/${movie.id}`);
+    expect(draftDetail.poster).toEqual(movieDetail.poster);
+    expect((await request.get(`/api/catalog/movies/${movie.id}`)).status()).toBe(404);
+    const replacement = await call("set_content_poster", {
+      content_type: "movie", content_id: movie.id, version: draft.version, path: posterPath, confirmed: true,
+    });
+    expect(replacement).toMatchObject({ action: "replaced", content_id: movie.id });
+    const replacedDetail = await admin.get<Movie>(`/api/admin/movies/${movie.id}`);
+    expect(replacedDetail).toMatchObject({
+      version: replacement.version, status: "draft", poster: { id: replacement.media_id }, video: movieDetail.video,
+    });
+    expect(replacedDetail.poster?.url).not.toBe(draftDetail.poster?.url);
   } finally { await admin.dispose(); }
 });
 
