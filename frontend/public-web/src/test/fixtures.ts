@@ -1,4 +1,4 @@
-import type { CatalogCard, CatalogPage, JsonValue, MovieDetail, SeriesDetail } from "@movie-harbor/api-client";
+import type { CatalogCard, CatalogFacets, CatalogPage, JsonValue, MovieDetail, SeriesDetail } from "@movie-harbor/api-client";
 import { vi } from "vitest";
 
 export const movieCard: CatalogCard = {
@@ -35,7 +35,7 @@ export const series: SeriesDetail = {
   ],
 };
 // 公开站测试响应允许使用的 JSON、目录或详情数据。
-type PublicFixturePayload = JsonValue | CatalogPage | MovieDetail | SeriesDetail;
+type PublicFixturePayload = JsonValue | CatalogFacets | CatalogPage | MovieDetail | SeriesDetail;
 
 // 公开站测试中构造 JSON 响应。
 export function json(value: PublicFixturePayload, status = 200) {
@@ -50,7 +50,10 @@ export function catalog(items: CatalogCard[], total = items.length, page = 1) {
 export function serve(handler: (url: URL) => Response | Promise<Response>) {
   vi.stubGlobal("fetch", (input: string) => {
     const url = new URL(input, "http://localhost");
-    return url.pathname === "/api/viewer/session" ? json({ error: "未登录" }, 401) : handler(url);
+    if (url.pathname === "/api/viewer/session") return json({ error: "未登录" }, 401);
+    // 未关注 facets 的旧页面用例默认返回合法空筛选项，避免把分页夹具误作 facets。
+    if (url.pathname === "/api/catalog/facets") return json({ genres: [], years: [] });
+    return handler(url);
   });
 }
 // 异步测试中创建可由测试控制完成时机的 Promise。

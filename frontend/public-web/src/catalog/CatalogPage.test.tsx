@@ -29,9 +29,9 @@ it("renders the mixed public catalog with accessible cards, metadata and the fiv
   expect(within(card).getByLabelText("题材")).toHaveTextContent("剧情冒险悬疑+1");
   expect(screen.getByRole("link", { name: "查看群星之间详情" })).toHaveTextContent("剧集 · 2025");
   expect(screen.getByRole("list", { name: "影片目录" })).toHaveClass("catalog-grid", "catalog-grid--five");
-  expect(screen.getByRole("searchbox", { name: "搜索电影或剧集" }).closest("label")).toHaveClass("search-box");
+  expect(screen.getByRole("searchbox", { name: "浏览关键词" }).closest("label")).toHaveClass("browse-field");
   expect(screen.getByRole("button", { name: "全部" })).toHaveAttribute("aria-pressed", "true");
-  expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  expect(screen.getByRole("combobox", { name: "排序" })).toHaveValue("recent");
 });
 
 // 验证：通过 API 切换电影和剧集并将选择保存在 URL。
@@ -55,7 +55,7 @@ it("searches the API including synopsis matches and renders an empty result", as
   serve((url) => catalog(url.searchParams.get("q") === "山海" ? [movieCard]
     : url.searchParams.get("q") ? [] : [movieCard, seriesCard]));
   render(<App />);
-  const search = screen.getByRole("searchbox", { name: "搜索电影或剧集" });
+  const search = screen.getByRole("searchbox", { name: "浏览关键词" });
   fireEvent.change(search, { target: { value: "山海" } });
   await screen.findByRole("link", { name: "查看远方来信详情" });
   expect(new URLSearchParams(location.search).get("q")).toBe("山海");
@@ -97,7 +97,7 @@ it("ignores a stale request after changing the content kind", async () => {
   serve((url) => url.searchParams.get("kind") === "all" ? old.promise : catalog([seriesCard]));
   const user = userEvent.setup();
   render(<App />);
-  expect(screen.getByRole("status")).toHaveTextContent("正在加载");
+  expect(screen.getAllByRole("status").some((element) => element.textContent === "正在加载…")).toBe(true);
   await user.click(screen.getByRole("button", { name: "剧集" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
   await act(async () => { old.resolve(catalog([movieCard])); });
@@ -126,10 +126,10 @@ it("makes catalog pages after the first accessible and resets page when filterin
   const user = userEvent.setup();
   render(<App />);
   await screen.findByRole("link", { name: "查看远方来信详情" });
-  expect(screen.getByRole("heading", { name: "全部影片" })).not.toHaveFocus();
+  expect(screen.getByRole("heading", { name: "浏览影片" })).not.toHaveFocus();
   await user.click(screen.getByRole("button", { name: "下一页" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
-  expect(screen.getByRole("heading", { name: "全部影片" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "浏览影片" })).toHaveFocus();
   expect(new URLSearchParams(location.search).get("page")).toBe("2");
   await user.click(screen.getByRole("button", { name: "电影" }));
   await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
@@ -163,7 +163,7 @@ it("offers a compact numeric window and navigates directly to page 6", async () 
   const initialNavigation = screen.getByRole("navigation", { name: "目录分页" });
   await user.click(within(initialNavigation).getByRole("button", { name: "第 6 页" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
-  expect(screen.getByRole("heading", { name: "全部影片" })).toHaveFocus();
+  expect(screen.getByRole("heading", { name: "浏览影片" })).toHaveFocus();
   expect(location.pathname + location.search).toBe("/browse?page=6");
   expect(requests.at(-1)?.searchParams.get("page")).toBe("6");
   expect(requests.at(-1)?.searchParams.get("size")).toBe("20");
@@ -232,9 +232,10 @@ it("reserves the full desktop pagination height while the catalog is loading", a
 
   await act(async () => response.resolve(json({ items: [movieCard], total: 221, page: 1, size: 20 })));
   await screen.findByRole("link", { name: "查看远方来信详情" });
-  const navigation = within(slot!).getByRole("navigation", { name: "目录分页" });
+  const loadedSlot = document.querySelector<HTMLElement>(".pagination-slot");
+  const navigation = within(loadedSlot!).getByRole("navigation", { name: "目录分页" });
   expect(getComputedStyle(navigation).marginTop).toBe("0px");
-  expect(getComputedStyle(slot!).minHeight).toBe(loadingStyle.minHeight);
+  expect(getComputedStyle(loadedSlot!).minHeight).toBe(loadingStyle.minHeight);
 });
 
 // 验证：窄屏下保留换行分页区域高度。
@@ -308,7 +309,8 @@ it("ignores a stale page response after browser navigation selects another page"
   await screen.findByRole("link", { name: "查看远方来信详情" });
 
   await user.click(screen.getByRole("button", { name: "第 2 页" }));
-  expect(screen.getByRole("status")).toHaveTextContent("正在加载");
+  expect(screen.getByRole("region", { name: "浏览影片" })).toHaveAttribute("aria-busy", "true");
+  expect(screen.getByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
   act(() => {
     window.history.pushState(null, "", "/browse");
     window.dispatchEvent(new PopStateEvent("popstate"));

@@ -72,6 +72,7 @@ function server(initial = false) {
       return new Response(null, { status: 204 });
     }
     if (url.pathname === "/api/viewer/progress/merge") return json({ progress: [], cursors: [], results: [] });
+    if (url.pathname === "/api/catalog/facets") return json({ genres: [], years: [] });
     if (url.pathname === "/api/catalog") {
       const privateOnly = url.searchParams.get("privacy") === "private";
       const authenticatedItems = privateOnly ? [{ ...seriesCard, is_private: true }] : [movieCard, { ...seriesCard, is_private: true }];
@@ -295,7 +296,7 @@ it("removes private data after a revoked session on focus and ignores an old aut
   await screen.findByText("Summer"); await screen.findByText("私密");
   const old = deferred<Response>(); state.catalogResponse = old.promise;
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "星" } });
-  await waitFor(() => expect(state.requests.at(-1)?.url.pathname).toBe("/api/catalog"));
+  await waitFor(() => expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("q")).toBe("星"));
   state.catalogResponse = undefined; state.authenticated = false;
   act(() => window.dispatchEvent(new Event("focus")));
   await screen.findByRole("button", { name: "登录" });
@@ -481,12 +482,13 @@ it("filters the authenticated catalog to private content and restores it from th
   const state = server(true); const user = userEvent.setup(); render(<App />);
   const filter = await screen.findByRole("checkbox", { name: "只看私密" });
   await screen.findByRole("link", { name: "查看远方来信详情" });
+  await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
   state.catalogResponse = deferred<Response>().promise;
   act(() => {
     window.history.pushState(null, "", "/browse?kind=series&q=%E6%98%9F&page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
-  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
+  await waitFor(() => expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("page")).toBe("2"));
   state.catalogResponse = undefined;
   await user.click(filter);
   await screen.findByRole("link", { name: "查看群星之间详情" });
@@ -510,12 +512,13 @@ it.each(["logout", "password", "expired"] as const)("clears private filtering an
   window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private");
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
+  await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
   state.catalogResponse = deferred<Response>().promise;
   act(() => {
     window.history.pushState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private&page=2");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
-  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("page")).toBe("2"));
+  await waitFor(() => expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("page")).toBe("2"));
   if (operation === "logout") await user.click(screen.getByRole("button", { name: "退出登录" }));
   else if (operation === "password") {
     await user.click(screen.getByRole("button", { name: "修改密码" }));
@@ -538,7 +541,7 @@ it("ignores a delayed ordinary catalog after switching to the private filter", a
   await screen.findByText("Summer"); await screen.findByText("私密");
   const old = deferred<Response>(); state.catalogResponse = old.promise;
   fireEvent.change(screen.getByRole("searchbox"), { target: { value: "星" } });
-  await waitFor(() => expect(state.requests.at(-1)?.url.searchParams.get("q")).toBe("星"));
+  await waitFor(() => expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("q")).toBe("星"));
   state.catalogResponse = undefined;
   await user.click(screen.getByRole("checkbox", { name: "只看私密" }));
   await screen.findByRole("link", { name: "查看群星之间详情" });
@@ -553,13 +556,15 @@ it("keeps a private filter deep link loading until session discovery finishes", 
   const state = server(true); const session = deferred<Response>(); state.sessionResponse = session.promise;
   state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
   render(<App />);
-  await waitFor(() => expect(state.requests.some(({ url }) => url.pathname === "/api/catalog")).toBe(true));
+  await act(async () => {});
+  expect(state.requests.some(({ url }) => url.pathname === "/api/catalog")).toBe(false);
   await act(async () => {});
   expect(screen.queryByText("没有找到匹配内容")).not.toBeInTheDocument();
   expect(screen.queryByText("没有找到私密内容")).not.toBeInTheDocument();
   state.sessionResponse = undefined;
   state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
   await act(async () => session.resolve(json({ viewer_id: "viewer-1", username: "Summer", csrf_token: "viewer-csrf" })));
+  await waitFor(() => expect(state.requests.some(({ url }) => url.pathname === "/api/catalog")).toBe(true));
   expect(await screen.findByText("没有找到私密内容")).toBeInTheDocument();
 });
 
