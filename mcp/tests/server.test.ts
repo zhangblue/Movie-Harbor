@@ -9,7 +9,7 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { buildServer } from '../src/server.js';
 
 // 在内存连接中验证服务器身份、工作流说明、工具输入输出结构和完整注册。
-test('server exposes identity, workflow instructions, complete atomic tool schemas and structured output in memory', async () => {
+test('server registers the complete atomic tool schemas and exposes its workflow instructions in memory', async () => {
   const config = { baseUrl:new URL('http://localhost/'),apiKey:'mhmcp_secret',credentialDirectory:'/tmp/credentials',allowedRoots:[],generatedRoot:'/tmp/generated',requestTimeoutMs:1000 };
   const clientApi = { /* 内存服务器测试时返回固定的电影列表并拒绝其他请求。 */ async json(method:string,path:string) {
     if(method === 'GET' && path === '/api/admin/movies') return [];
@@ -24,7 +24,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
     const instructions = client.getInstructions() ?? '';
     for (const phrase of [
       '联网', '来源', '年份', '简介', '题材', '单集名称', '海报',
-      '四舍五入', '最少 1 分钟', '默认公开', '完整入库计划', '确认失效', '转换', '上传', '发布', '禁止自动发布',
+      '四舍五入', '最少 1 分钟', '默认公开', '完整入库计划', '确认失效', '转换', '上传', '发布', '禁止自动发布', '单独确认发布', '下线',
     ]) assert.match(instructions, new RegExp(phrase));
     assert.doesNotMatch(instructions, /固定.*私密草稿/);
     const listed = await client.listTools();
@@ -34,7 +34,7 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
       'search_movies','search_series','get_series_structure','list_genres','create_genre','stage_poster',
       'create_movie','create_series','create_season','create_episode','update_movie_metadata','update_series_metadata','update_episode_metadata',
       'update_content_synopsis',
-      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','publish_movie','publish_episode','publish_series',
+      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle',
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
     assert.ok(listed.tools.every(tool=>tool.outputSchema));
@@ -44,16 +44,62 @@ test('server exposes identity, workflow instructions, complete atomic tool schem
       ['create_episode', ['name', 'duration_seconds', 'confirmed']],
       ['update_content_synopsis', ['content_type', 'content_id', 'version', 'synopsis']],
       ['upload_movie_video', ['confirmed']],
+      ['set_content_visibility', ['content_type', 'content_id', 'version', 'visibility', 'confirmed']],
     ] as const) {
       const tool = listed.tools.find(tool => tool.name === name);
       assert.ok(tool, `${name} must be listed`);
       for (const field of fields) assert.ok(Object.hasOwn(tool.inputSchema.properties ?? {}, field), `${name} must expose ${field}`);
       if (name === 'create_movie') assert.equal(Object.hasOwn(tool.inputSchema.properties ?? {}, 'duration_seconds'), false);
     }
+    const lifecycle = listed.tools.find(tool => tool.name === 'transition_content_lifecycle');
+    assert.ok(lifecycle);
+    assert.equal(lifecycle.inputSchema.type, 'object');
+    assert.equal(lifecycle.outputSchema?.type, 'object');
+    const inputSchema = JSON.stringify(lifecycle.inputSchema);
+    for (const phrase of ['content_type', 'content_id', 'series_id', 'season_id', 'target_status', 'confirmed']) {
+      assert.match(inputSchema, new RegExp(phrase));
+    }
     const result = await client.callTool({name:'search_movies',arguments:{name:'Unknown'}});
     assert.equal(result.isError,undefined);
     assert.deepEqual(result.structuredContent,{query:'Unknown',normalized_name:'unknown',matches:[],exact_match_count:0,requires_selection:false,next_actions:['create_movie']});
   } finally { await client.close(); await server.close(); }
+});
+
+// 验证 MCP 协议调用向客户端交付部分完成的机器码和中文说明。
+test('server exposes the partial transition error code to MCP clients', async () => {
+  const config = { baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
+    allowedRoots: [], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000 };
+  const id = '11111111-1111-4111-8111-111111111111';
+  const movie = { id, name: '电影', year: 2000, status: 'published', version: 3, is_private: false,
+    duration_seconds: 120, poster: null, video: null };
+  const path = '/api/admin/movies/' + id;
+  const clientApi = {
+    // 使用本地替身模拟归档成功后的第二步中断。
+    async json(method: string, url: string) {
+      if (method === 'GET' && url === path) return movie;
+      if (method === 'POST' && url === path + '/archive') return { ...movie, status: 'archived', version: 4 };
+      throw new Error('远端详细错误不得泄露');
+    },
+    // 生命周期工具不应请求文件上传。
+    async upload() { throw new Error('非预期请求'); },
+  };
+  const server = buildServer({ config, credentialDirectory: '/tmp/credentials', client: clientApi } as any);
+  const client = new Client({ name: 'movie-harbor-test', version: '1.0.0' });
+  const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverEnd);
+  await client.connect(clientEnd);
+  try {
+    const result = await client.callTool({ name: 'transition_content_lifecycle', arguments: {
+      content_type: 'movie', content_id: id, version: 3, target_status: 'draft', confirmed: true,
+    } });
+    assert.equal(result.isError, true);
+    assert.deepEqual(result.structuredContent, { code: 'partial_transition', last_confirmed_status: 'archived' });
+    assert.match(JSON.stringify(result.content), /已确认归档.*请重新读取/);
+    assert.doesNotMatch(JSON.stringify(result), /远端详细错误/);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });
 
 // 验证标准输入输出入口只在标准输出写协议 JSON，启动诊断不会混入协议。

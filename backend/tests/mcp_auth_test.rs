@@ -2,7 +2,7 @@ use axum::{
     Router,
     body::Body,
     extract::ConnectInfo,
-    http::{Request, StatusCode},
+    http::{Method, Request, StatusCode},
     response::Response,
 };
 use http_body_util::BodyExt;
@@ -132,6 +132,45 @@ fn mcp_route_policy_is_an_exact_method_and_path_allowlist() {
     }
 }
 
+#[test]
+/// 验证 MCP 白名单只接纳合法电影和整剧的访问范围修改。
+fn route_allowed_for_visibility() {
+    for content in ["movies", "series"] {
+        let path = format!("/api/admin/{content}/{ID}/privacy");
+        assert!(mcp::route_allowed(&Method::PUT, &path));
+        for method in [Method::POST, Method::DELETE] {
+            assert!(!mcp::route_allowed(&method, &path), "{method} {path}");
+        }
+        assert!(!mcp::route_allowed(
+            &Method::PUT,
+            &format!("/api/admin/{content}/not-a-uuid/privacy"),
+        ));
+        assert!(!mcp::route_allowed(&Method::PUT, &format!("{path}/extra"),));
+    }
+}
+
+#[test]
+/// 验证单集状态转换的请求必须匹配动作和全部层级标识。
+fn route_allowed_for_episode_lifecycle() {
+    let episode = format!("/api/admin/series/{ID}/seasons/{ID}/episodes/{ID}");
+    assert!(!mcp::route_allowed(
+        &Method::PUT,
+        &format!("{episode}/privacy"),
+    ));
+    for action in ["publish", "archive", "draft"] {
+        let path = format!("{episode}/{action}");
+        assert!(mcp::route_allowed(&Method::POST, &path));
+        assert!(!mcp::route_allowed(&Method::DELETE, &path));
+        assert!(!mcp::route_allowed(&Method::POST, &format!("{path}/extra"),));
+        for (series, season, episode) in [("bad", ID, ID), (ID, "bad", ID), (ID, ID, "bad")] {
+            assert!(!mcp::route_allowed(
+                &Method::POST,
+                &format!("/api/admin/series/{series}/seasons/{season}/episodes/{episode}/{action}"),
+            ));
+        }
+    }
+}
+
 /// 在测试准备阶段创建隔离数据库、应用和场景所需凭据。
 async fn setup(enabled: bool) -> (support::TestDatabase, Router, std::path::PathBuf) {
     let db = support::TestDatabase::migrated("mcp_auth_test").await;
@@ -236,7 +275,10 @@ async fn bearer_denies_every_unlisted_management_operation() {
         ("POST", "/api/admin/logout".into()),
         ("GET", "/api/admin/users".into()),
         ("HEAD", "/api/admin/genres".into()),
-        ("PUT", format!("/api/admin/movies/{ID}/privacy")),
+        (
+            "DELETE",
+            format!("/api/admin/series/{ID}/seasons/{ID}/episodes/{ID}"),
+        ),
         ("DELETE", format!("/api/admin/movies/{ID}")),
         ("GET", format!("/api/admin/movies/{ID}/delete-impact")),
         ("POST", format!("/api/admin/media/movies/{ID}/poster")),
@@ -257,24 +299,30 @@ async fn bearer_denies_every_unlisted_management_operation() {
 
 // Catches allowing the route matcher but rejecting the Bearer principal before existing lifecycle handlers run.
 #[tokio::test]
-/// 验证 Bearer 凭据可进入电影和剧集的归档、转草稿接口，供统一简介工具复用。
-async fn bearer_can_reach_movie_and_series_archive_and_draft_routes() {
+/// 验证 Bearer 凭据可进入维护工具复用的访问范围和生命周期接口。
+async fn bearer_can_reach_visibility_and_lifecycle_routes() {
     let (_db, app, root) = setup(true).await;
     let bearer = format!("Bearer {KEY}");
     let headers = [("host", "harbor.test"), ("authorization", bearer.as_str())];
-    for path in [
-        format!("/api/admin/movies/{ID}/archive"),
-        format!("/api/admin/movies/{ID}/draft"),
-        format!("/api/admin/series/{ID}/archive"),
-        format!("/api/admin/series/{ID}/draft"),
+    let episode = format!("/api/admin/series/{ID}/seasons/{ID}/episodes/{ID}");
+    for (method, path) in [
+        ("PUT", format!("/api/admin/movies/{ID}/privacy")),
+        ("PUT", format!("/api/admin/series/{ID}/privacy")),
+        ("POST", format!("/api/admin/movies/{ID}/archive")),
+        ("POST", format!("/api/admin/movies/{ID}/draft")),
+        ("POST", format!("/api/admin/series/{ID}/archive")),
+        ("POST", format!("/api/admin/series/{ID}/draft")),
+        ("POST", format!("{episode}/publish")),
+        ("POST", format!("{episode}/archive")),
+        ("POST", format!("{episode}/draft")),
     ] {
         // 缺少版本时应在通过授权后由请求提取返回 422；若白名单遗漏则会提前返回 401。
         assert_eq!(
-            send(&app, "POST", &path, json!({}), &headers)
+            send(&app, method, &path, json!({}), &headers)
                 .await
                 .status(),
             StatusCode::UNPROCESSABLE_ENTITY,
-            "POST {path}"
+            "{method} {path}"
         );
     }
     std::fs::remove_dir_all(root).unwrap();

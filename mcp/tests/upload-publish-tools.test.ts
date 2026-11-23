@@ -37,7 +37,7 @@ async function fixture(t: TestContext) {
   return { directory, allowed, credentials, credentialDirectory:credentials, path, config, probeMedia };
 }
 
-// 为上传与发布测试准备可控 API 响应。
+// 为上传及替换测试准备可控 API 响应。
 function fakeClient(responses: unknown[]) {
   const calls: any[] = [];
   return { calls, client: {
@@ -59,11 +59,9 @@ function fakeClient(responses: unknown[]) {
 // 测试工具调用时收集注册信息并提供调用入口。
 async function registeredTools(client: any, dependencies: any) {
   const uploads = await import('../src/tools/uploads.js');
-  const publishing = await import('../src/tools/publishing.js');
   const registrations = new Map<string, any>();
   const server = { /* 测试注册时收集工具 schema 与处理器。 */ registerTool(name: string, schema: any, handler: any) { registrations.set(name, { schema, handler }); } };
   uploads.registerUploadTools(server as any, { ...dependencies, client });
-  publishing.registerPublishingTools(server as any, client);
   return { registrations, /* 测试调用时运行处理器并核对输出 schema 与敏感信息。 */ async call(name: string, input: unknown) {
     const tool = registrations.get(name); assert.ok(tool, name);
     const result = await tool.handler(input);
@@ -73,16 +71,15 @@ async function registeredTools(client: any, dependencies: any) {
   } };
 }
 
-// 验证上传、替换及发布工具分别注册，并具有严格的写操作标注。
-test('upload, replace and publish tools register independently with strict write annotations', async t => {
+// 验证上传及替换工具分别注册，并具有严格的写操作标注。
+test('upload and replace tools register independently with strict write annotations', async t => {
   const f = await fixture(t); const c = fakeClient([]); const tools = await registeredTools(c.client, f);
-  assert.deepEqual([...tools.registrations.keys()], ['upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','publish_movie','publish_episode','publish_series']);
+  assert.deepEqual([...tools.registrations.keys()], ['upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video']);
   for (const { schema } of tools.registrations.values()) {
     assert.ok(schema.inputSchema); assert.ok(schema.outputSchema);
     assert.deepEqual(schema.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false });
   }
   await assert.rejects(tools.call('replace_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:false }));
-  await assert.rejects(tools.call('publish_movie', { movie_id:movieId,version:3,confirmed:false }), /需要独立发布确认/);
   assert.equal(c.calls.length, 0);
 });
 
@@ -117,7 +114,7 @@ test('movie upload validates compatible media, streams once, filters output and 
   const f = await fixture(t); const c = fakeClient([movie, uploadResponse]); const tools = await registeredTools(c.client, f);
   const out = await tools.call('upload_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:true });
   assert.deepEqual(out, { id:movieId,version:4,media_id:mediaId,mime_type:'video/mp4',byte_size:6,
-    generated_file_deleted:false,retained_generated_path:null,next_actions:['publish_movie'] });
+    generated_file_deleted:false,retained_generated_path:null,next_actions:['transition_content_lifecycle'] });
   assert.deepEqual(c.calls.map(call => [call.kind,call.method,call.path,call.mimeType]), [
     ['json','GET',`/api/admin/movies/${movieId}`,undefined],
     ['upload',undefined,`/api/admin/media/movies/${movieId}/video?version=3`,'video/mp4'],
@@ -171,7 +168,7 @@ test('episode upload validates hierarchy and returns episode and parent versions
   const c = fakeClient([episodeEnvelope,response]); const tools = await registeredTools(c.client, f);
   const input = {series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,path:f.path,confirmed:true};
   assert.deepEqual(await tools.call('upload_episode_video',input), {id:episodeId,version:5,series_version:9,media_id:mediaId,
-    mime_type:'video/mp4',byte_size:6,generated_file_deleted:false,retained_generated_path:null,next_actions:['publish_episode']});
+    mime_type:'video/mp4',byte_size:6,generated_file_deleted:false,retained_generated_path:null,next_actions:['transition_content_lifecycle']});
   assert.deepEqual(c.calls.map(call => call.path), [
     `/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}`,
     `/api/admin/media/episodes/${episodeId}/video?version=4`,
@@ -246,72 +243,4 @@ test('successful generated upload deletes only registered conversion output and 
   const failure = fakeClient([movie,new Error('remote failed')]);
   await assert.rejects((await registeredTools(failure.client,f)).call('upload_movie_video',{movie_id:movieId,version:3,path:generated2,confirmed:true}), error => /保留|retry/.test(String(error)));
   assert.equal(await stat(generated2).then(() => true),true);
-});
-
-// 验证发布拒绝归档目标、已发布时保持幂等，并检查内容归属。
-test('publishing rejects archived targets, is idempotent when published and validates ownership', async t => {
-  const f = await fixture(t);
-  for (const target of [{...movie,status:'archived'},{...movie,status:'published'}]) {
-    const c = fakeClient([target]); const tools = await registeredTools(c.client,f);
-    if (target.status === 'archived') await assert.rejects(tools.call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),/归档/);
-    else assert.deepEqual(await tools.call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),{id:movieId,version:3,status:'published',next_actions:[]});
-    assert.equal(c.calls.length,1); assert.equal(c.calls[0].method,'GET');
-  }
-  const wrong = fakeClient([{...movie,id:seriesId}]);
-  await assert.rejects((await registeredTools(wrong.client,f)).call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),/数据格式无效/);
-  assert.equal(wrong.calls.length,1);
-});
-
-// 验证电影、单集和父剧集只能通过各自独立确认的调用发布。
-test('movie, episode and parent series publish only through separate confirmed calls', async t => {
-  const f = await fixture(t);
-  const publishedMovie = {...movie,status:'published',version:4};
-  const publishedEpisode = {...episode,status:'published',version:5};
-  const publishedSeries = {...series,status:'published',version:10};
-  const c = fakeClient([movie,publishedMovie,series,episodeEnvelope,{series_version:9,episode:publishedEpisode},{...series,version:9},publishedSeries]);
-  const tools = await registeredTools(c.client,f);
-  assert.deepEqual(await tools.call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),{id:movieId,version:4,status:'published',next_actions:[]});
-  assert.deepEqual(await tools.call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),
-    {id:episodeId,version:5,status:'published',series_version:9,next_actions:['publish_series']});
-  assert.deepEqual(await tools.call('publish_series',{series_id:seriesId,version:9,confirmed:true}),{id:seriesId,version:10,status:'published',next_actions:[]});
-  assert.deepEqual(c.calls.filter(call => call.method === 'POST').map(call => [call.path,call.body]),[
-    [`/api/admin/movies/${movieId}/publish`,{version:3}],
-    [`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}/publish`,{version:4}],
-    [`/api/admin/series/${seriesId}/publish`,{version:9}],
-  ]);
-});
-
-// 验证发布结果出现不可能的版本变化时停止后续调用。
-test('publishing rejects impossible version transitions without later calls', async t => {
-  const f=await fixture(t);
-  for(const response of [{...movie,status:'published',version:3},{...movie,status:'published',version:5}]){
-    const c=fakeClient([movie,response]);
-    await assert.rejects((await registeredTools(c.client,f)).call('publish_movie',{movie_id:movieId,version:3,confirmed:true}),/数据格式无效/);
-    assert.equal(c.calls.length,2);
-  }
-  for(const response of [{...series,status:'published',version:8},{...series,status:'published',version:10}]){
-    const c=fakeClient([series,response]);
-    await assert.rejects((await registeredTools(c.client,f)).call('publish_series',{series_id:seriesId,version:8,confirmed:true}),/数据格式无效/);
-    assert.equal(c.calls.length,2);
-  }
-  const mismatchedDetail=fakeClient([series,{...episodeEnvelope,series_version:7}]);
-  await assert.rejects((await registeredTools(mismatchedDetail.client,f)).call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/数据格式无效/);
-  assert.equal(mismatchedDetail.calls.length,2,'detail mismatch must stop before publish POST');
-  for(const response of [
-    {series_version:9,episode:{...episode,status:'published',version:4}},
-    {series_version:9,episode:{...episode,status:'published',version:6}},
-    {series_version:8,episode:{...episode,status:'published',version:5}},
-    {series_version:10,episode:{...episode,status:'published',version:5}},
-  ]){
-    const c=fakeClient([series,episodeEnvelope,response]);
-    await assert.rejects((await registeredTools(c.client,f)).call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/数据格式无效/);
-    assert.equal(c.calls.length,3);
-  }
-});
-
-// 验证父剧集已归档时，单集发布在状态转换前停止。
-test('episode publishing stops before transition when its parent is archived', async t => {
-  const f = await fixture(t); const c = fakeClient([{...series,status:'archived'}]); const tools = await registeredTools(c.client,f);
-  await assert.rejects(tools.call('publish_episode',{series_id:seriesId,season_id:seasonId,episode_id:episodeId,version:4,confirmed:true}),/父剧集.*归档/);
-  assert.equal(c.calls.length,1); assert.equal(c.calls[0].method,'GET');
 });

@@ -55,7 +55,7 @@ export async function updateEpisodeMetadata(input: unknown, client: MovieHarborC
     || (response.series_id !== undefined && response.series_id !== series_id)
     || (episode.series_id !== undefined && episode.series_id !== series_id)) throw new MovieHarborClientError('invalid_response');
   return toolResult(episodeOutput, { id: episode.id, version: episode.version, status: episode.status, series_version: response.series_version,
-    next_actions: episode.video ? ['replace_episode_video', 'publish_episode'] : ['upload_episode_video'] }, '已更新单集元数据。');
+    next_actions: episode.video ? ['replace_episode_video', 'transition_content_lifecycle'] : ['upload_episode_video'] }, '已更新单集元数据。');
 }
 // 构建服务器时注册剧集、季和单集工具。
 export function registerSeriesTools(server: McpServer, client: MovieHarborClient) {

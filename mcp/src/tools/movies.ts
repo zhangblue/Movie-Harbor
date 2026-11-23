@@ -46,7 +46,7 @@ export async function updateMovieMetadata(input: unknown, client: MovieHarborCli
     throw new MovieHarborClientError('invalid_response');
   }
   return toolResult(contentResult, { id: movie.id, version: movie.version, status: movie.status,
-    next_actions: movie.video ? ['replace_movie_video', 'publish_movie'] : ['upload_movie_video'] }, '已更新电影元数据。');
+    next_actions: movie.video ? ['replace_movie_video', 'transition_content_lifecycle'] : ['upload_movie_video'] }, '已更新电影元数据。');
 }
 // 构建服务器时注册海报和电影工具。
 export function registerMovieTools(server: McpServer, dependencies: MovieToolDependencies) {

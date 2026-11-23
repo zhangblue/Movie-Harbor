@@ -71,7 +71,7 @@ test('one synopsis tool supports draft movies and archived series', async () => 
   assert.equal(movieTool.schema.annotations.destructiveHint, true);
   assert.deepEqual(await movieTool.call({
     content_type: 'movie', content_id: movieId, version: 3, synopsis: '新的电影简介',
-  }), { id: movieId, version: 4, status: 'draft', next_actions: ['publish_movie'] });
+  }), { id: movieId, version: 4, status: 'draft', next_actions: ['transition_content_lifecycle'] });
   assert.deepEqual(draftMovie.calls, [
     { method: 'GET', path: `/api/admin/movies/${movieId}`, body: undefined },
     { method: 'PATCH', path: `/api/admin/movies/${movieId}`, body: { version: 3, synopsis: '新的电影简介' } },
@@ -97,7 +97,7 @@ test('published content is archived, reverted to draft, then updated and left as
   const tool = await synopsisTool(f.client);
   assert.deepEqual(await tool.call({
     content_type: 'movie', content_id: movieId, version: 4, synopsis: '',
-  }), { id: movieId, version: 7, status: 'draft', next_actions: ['publish_movie'] });
+  }), { id: movieId, version: 7, status: 'draft', next_actions: ['transition_content_lifecycle'] });
   assert.deepEqual(f.calls, [
     { method: 'GET', path: `/api/admin/movies/${movieId}`, body: undefined },
     { method: 'POST', path: `/api/admin/movies/${movieId}/archive`, body: { version: 4 } },
@@ -132,7 +132,7 @@ test('lost archive response is reconciled before continuing to draft and synopsi
   const tool = await synopsisTool(f.client);
   assert.deepEqual(await tool.call({
     content_type: 'movie', content_id: movieId, version: 4, synopsis: '恢复后的简介',
-  }), { id: movieId, version: 7, status: 'draft', next_actions: ['publish_movie'] });
+  }), { id: movieId, version: 7, status: 'draft', next_actions: ['transition_content_lifecycle'] });
   assert.deepEqual(f.calls, [
     { method: 'GET', path: `/api/admin/movies/${movieId}`, body: undefined },
     { method: 'POST', path: `/api/admin/movies/${movieId}/archive`, body: { version: 4 } },

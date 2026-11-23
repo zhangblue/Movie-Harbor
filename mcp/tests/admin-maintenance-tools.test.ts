@@ -1,0 +1,311 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { setContentVisibility, transitionContentLifecycle } from '../src/tools/content-maintenance.js';
+import { MovieHarborClientError, type HttpMethod, type MovieHarborClient } from '../src/services/movie-harbor-client.js';
+
+const movieId = '11111111-1111-4111-8111-111111111111';
+const seriesId = '22222222-2222-4222-8222-222222222222';
+const seasonId = '33333333-3333-4333-8333-333333333333';
+const episodeId = '44444444-4444-4444-8444-444444444444';
+const otherId = '55555555-5555-4555-8555-555555555555';
+const moviePath = '/api/admin/movies/' + movieId;
+const seriesPath = '/api/admin/series/' + seriesId;
+const episodePath = seriesPath + '/seasons/' + seasonId + '/episodes/' + episodeId;
+
+// 准备真实管理接口的响应形状，包含工具不得对外转发的媒体路径。
+const media = { id: otherId, local_path: '/private/media/video.mp4' };
+const movies = {
+  draft: { id: movieId, name: '电影', year: 2000, status: 'draft', version: 3,
+    is_private: false, duration_seconds: 120, poster: null, video: media },
+  published: { id: movieId, name: '电影', year: 2000, status: 'published', version: 4,
+    is_private: false, duration_seconds: 120, poster: null, video: media },
+};
+const episode = { id: episodeId, season_id: seasonId, number: 1, name: '单集', status: 'draft',
+  version: 4, duration_seconds: 120, video: media };
+const series = { id: seriesId, name: '剧集', year: 2000, status: 'draft', version: 8,
+  is_private: true, poster: null, seasons: [{ id: seasonId, number: 1, episodes: [episode] }] };
+const episodeEnvelope = { series_version: 8, episode };
+const movieInput = { content_type: 'movie', content_id: movieId, version: 3, confirmed: true };
+const seriesInput = { content_type: 'series', content_id: seriesId, version: 8, confirmed: true };
+const episodeInput = { content_type: 'episode', content_id: episodeId, series_id: seriesId,
+  season_id: seasonId, version: 4, confirmed: true };
+
+// 记录工具对外部管理 API 的方法、路径和正文，并按场景返回预设 API 响应。
+function mockApi(...responses: unknown[]) {
+  const calls: unknown[][] = [];
+  const client: MovieHarborClient = {
+    // 模拟管理接口依次完成读取和写入，也能注入确定性的网络或并发错误。
+    async json<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
+      calls.push(body === undefined ? [method, path] : [method, path, body]);
+      assert.ok(responses.length, '发生了额外管理 API 请求');
+      const result = responses.shift();
+      if (result instanceof Error) throw result;
+      return result as T;
+    },
+    // 此工具组只使用 JSON；走到文件上传即说明路径选错。
+    async upload(): Promise<never> { throw new Error('发生了非预期的上传'); },
+  };
+  return { client, calls };
+}
+
+// 验证公开和私密方向均映射至对应资源的 PUT 隐私路径，不转发工具字段。
+test('visibility maps movie and series changes to the correct privacy PUT with a checked result', async () => {
+  const movie = mockApi(movies.draft, { ...movies.draft, is_private: true, version: 4 });
+  const movieResult = await setContentVisibility({ ...movieInput, visibility: 'private' }, movie.client);
+  assert.deepEqual(movieResult.structuredContent, {
+    content_type: 'movie', content_id: movieId, visibility: 'private', version: 4, next_actions: ['search_movies'],
+  });
+  assert.deepEqual(movie.calls, [
+    ['GET', moviePath],
+    ['PUT', moviePath + '/privacy', { version: 3, is_private: true }],
+  ]);
+  const archivedSeries = { ...series, status: 'archived' };
+  const show = mockApi(archivedSeries, { ...archivedSeries, is_private: false, version: 9 });
+  const seriesResult = await setContentVisibility({ ...seriesInput, visibility: 'public' }, show.client);
+  assert.deepEqual(seriesResult.structuredContent, {
+    content_type: 'series', content_id: seriesId, visibility: 'public', version: 9, next_actions: ['get_series_structure'],
+  });
+  assert.deepEqual(show.calls, [
+    ['GET', seriesPath],
+    ['PUT', seriesPath + '/privacy', { version: 8, is_private: false }],
+  ]);
+  assert.doesNotMatch(JSON.stringify([movieResult, seriesResult]), /local_path|\/private\/media/);
+});
+
+// 验证大写 UUID 与后端回传的标准小写 UUID 代表同一个内容。
+test('visibility and lifecycle accept uppercase UUIDs and return the canonical ID', async () => {
+  const id = 'abcdef11-1111-4111-8111-111111111111';
+  const path = '/api/admin/movies/' + id;
+  const upperInput = { ...movieInput, content_id: id.toUpperCase() };
+  const current = { ...movies.draft, id };
+  const privacy = mockApi(current);
+  const visibility = await setContentVisibility({ ...upperInput, visibility: 'public' }, privacy.client);
+  assert.equal(visibility.structuredContent?.content_id, id);
+  assert.deepEqual(privacy.calls, [['GET', path]]);
+  const lifecycle = mockApi(current, { ...movies.published, id });
+  const changed = await transitionContentLifecycle({ ...upperInput, target_status: 'published' }, lifecycle.client);
+  assert.equal(changed.structuredContent?.content_id, id);
+  assert.deepEqual(lifecycle.calls, [['GET', path], ['POST', path + '/publish', { version: 3 }]]);
+});
+
+// 验证同范围保持原版本，陈旧版本即使范围相同也须等待调用者重新读取。
+test('visibility skips a redundant write and rejects stale versions before writing', async () => {
+  const unchanged = mockApi(movies.draft);
+  const result = await setContentVisibility({ ...movieInput, visibility: 'public' }, unchanged.client);
+  assert.equal(result.structuredContent?.version, 3);
+  assert.deepEqual(unchanged.calls, [['GET', moviePath]]);
+  const stale = mockApi(movies.published);
+  await assert.rejects(setContentVisibility({ ...movieInput, visibility: 'public' }, stale.client),
+    { code: 'version_conflict' });
+  assert.deepEqual(stale.calls, [['GET', moviePath]]);
+});
+
+// 验证写入前拒绝详情 ID 错配，写入后拒绝目标 ID、范围与版本错配。
+test('visibility rejects a mismatched ID, scope, or updated version without retrying', async () => {
+  const input = { ...movieInput, visibility: 'private' };
+  const wrongDetail = mockApi({ ...movies.draft, id: otherId });
+  await assert.rejects(setContentVisibility(input, wrongDetail.client), { code: 'invalid_response' });
+  assert.deepEqual(wrongDetail.calls, [['GET', moviePath]]);
+  const updated = { ...movies.draft, is_private: true, version: 4 };
+  for (const malformed of [{ ...updated, id: otherId }, { ...updated, is_private: false },
+    { ...updated, version: 3 }, { ...updated, version: 5 }]) {
+    const remote = mockApi(movies.draft, malformed);
+    await assert.rejects(setContentVisibility(input, remote.client), { code: 'invalid_response' });
+    assert.deepEqual(remote.calls, [['GET', moviePath], ['PUT', moviePath + '/privacy', { version: 3, is_private: true }]]);
+  }
+});
+
+// 验证版本冲突从后端传回，工具不会在读取与写入之间发生并发时覆盖新版本。
+test('visibility propagates a concurrent version conflict without a retry', async () => {
+  const remote = mockApi(movies.draft, new MovieHarborClientError('version_conflict', 409));
+  await assert.rejects(setContentVisibility({ ...movieInput, visibility: 'private' }, remote.client),
+    { code: 'version_conflict', status: 409 });
+  assert.deepEqual(remote.calls, [['GET', moviePath], ['PUT', moviePath + '/privacy', { version: 3, is_private: true }]]);
+});
+
+// 验证单集发布和父剧发布独立，电影、整剧及单集使用各自的详情与写入路径。
+test('lifecycle publishes movie, episode and parent series through separate confirmed calls', async () => {
+  const publishedEpisode = { ...episode, status: 'published', version: 5 };
+  const remote = mockApi(movies.draft, movies.published, series, episodeEnvelope,
+    { series_version: 9, episode: publishedEpisode }, { ...series, version: 9 },
+    { ...series, status: 'published', version: 10 });
+  const movie = await transitionContentLifecycle({ ...movieInput, target_status: 'published' }, remote.client);
+  assert.deepEqual(movie.structuredContent, {
+    content_type: 'movie', content_id: movieId, previous_status: 'draft', transitioned_through: ['published'],
+    status: 'published', version: 4, next_actions: [],
+  });
+  const child = await transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, remote.client);
+  assert.deepEqual(child.structuredContent, {
+    content_type: 'episode', content_id: episodeId, previous_status: 'draft', transitioned_through: ['published'],
+    status: 'published', version: 5, series_version: 9, next_actions: ['transition_content_lifecycle'],
+  });
+  assert.match(JSON.stringify(child.content), /父剧集仍需单独确认发布/);
+  const parent = await transitionContentLifecycle({ ...seriesInput, version: 9, target_status: 'published' }, remote.client);
+  assert.deepEqual(parent.structuredContent, {
+    content_type: 'series', content_id: seriesId, previous_status: 'draft', transitioned_through: ['published'],
+    status: 'published', version: 10, next_actions: [],
+  });
+  assert.deepEqual(remote.calls, [
+    ['GET', moviePath], ['POST', moviePath + '/publish', { version: 3 }],
+    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+    ['GET', seriesPath], ['POST', seriesPath + '/publish', { version: 9 }],
+  ]);
+});
+
+// 验证已达目标状态时不写入、不伪造状态路径，版本过期仍需重新读取。
+test('lifecycle skips a same-state write after validating the current version', async () => {
+  const remote = mockApi(movies.published);
+  const result = await transitionContentLifecycle({ ...movieInput, version: 4, target_status: 'published' }, remote.client);
+  assert.deepEqual(result.structuredContent, {
+    content_type: 'movie', content_id: movieId, previous_status: 'published', transitioned_through: [],
+    status: 'published', version: 4, next_actions: [],
+  });
+  assert.deepEqual(remote.calls, [['GET', moviePath]]);
+  const stale = mockApi(movies.published);
+  await assert.rejects(transitionContentLifecycle({ ...movieInput, target_status: 'published' }, stale.client),
+    { code: 'version_conflict' });
+  assert.deepEqual(stale.calls, [['GET', moviePath]]);
+});
+
+// 验证草稿不能直接归档，归档后可重新发布或恢复草稿。
+test('lifecycle follows the status matrix before selecting any POST', async () => {
+  const denied = mockApi(movies.draft);
+  await assert.rejects(transitionContentLifecycle({ ...movieInput, target_status: 'archived' }, denied.client), /草稿.*归档/);
+  assert.deepEqual(denied.calls, [['GET', moviePath]]);
+  for (const [from, target, action] of [
+    ['published', 'archived', 'archive'], ['archived', 'published', 'publish'], ['archived', 'draft', 'draft'],
+  ] as const) {
+    const remote = mockApi({ ...movies.draft, status: from }, { ...movies.draft, status: target, version: 4 });
+    const result = await transitionContentLifecycle({ ...movieInput, target_status: target }, remote.client);
+    assert.deepEqual(result.structuredContent?.transitioned_through, [target]);
+    assert.deepEqual(remote.calls, [['GET', moviePath], ['POST', moviePath + '/' + action, { version: 3 }]]);
+  }
+});
+
+// 验证单集可按自身状态重新发布，即使父剧处于归档状态，且不会自动发布父剧。
+test('lifecycle lets the backend decide episode publication under an archived parent', async () => {
+  const archived = { ...episode, status: 'archived' };
+  const remote = mockApi({ ...series, status: 'archived' }, { ...episodeEnvelope, episode: archived },
+    { series_version: 9, episode: { ...archived, status: 'published', version: 5 } });
+  const result = await transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, remote.client);
+  assert.equal(result.structuredContent?.status, 'published');
+  assert.deepEqual(result.structuredContent?.next_actions, []);
+  assert.deepEqual(remote.calls, [
+    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+  ]);
+});
+
+// 验证两步转换使用实际归档响应中的新版本，并按顺序返回经过的状态。
+test('lifecycle published to draft uses the archived response version', async () => {
+  const remote = mockApi(movies.published, { ...movies.published, status: 'archived', version: 5 },
+    { ...movies.published, status: 'draft', version: 6 });
+  const result = await transitionContentLifecycle({ ...movieInput, version: 4, target_status: 'draft' }, remote.client);
+  assert.deepEqual(result.structuredContent, {
+    content_type: 'movie', content_id: movieId, previous_status: 'published', transitioned_through: ['archived', 'draft'],
+    status: 'draft', version: 6, next_actions: [],
+  });
+  assert.deepEqual(remote.calls, [
+    ['GET', moviePath], ['POST', moviePath + '/archive', { version: 4 }], ['POST', moviePath + '/draft', { version: 5 }],
+  ]);
+});
+
+// 验证单集两步转换沿完整层级执行，并逐步验证单集及父剧版本增长。
+test('lifecycle episode published to draft returns the final parent version', async () => {
+  const published = { ...episode, status: 'published' };
+  const remote = mockApi(series, { series_version: 8, episode: published },
+    { series_version: 9, episode: { ...episode, status: 'archived', version: 5 } },
+    { series_version: 10, episode: { ...episode, status: 'draft', version: 6 } });
+  const result = await transitionContentLifecycle({ ...episodeInput, target_status: 'draft' }, remote.client);
+  assert.deepEqual(result.structuredContent?.transitioned_through, ['archived', 'draft']);
+  assert.equal(result.structuredContent?.series_version, 10);
+  assert.deepEqual(remote.calls, [
+    ['GET', seriesPath], ['GET', episodePath],
+    ['POST', episodePath + '/archive', { version: 4 }], ['POST', episodePath + '/draft', { version: 5 }],
+  ]);
+});
+
+// 验证第二步失败时保留已确认的归档事实，不发布补偿，也不透传远端错误。
+test('partial transition reports archive success and requires a reread without compensation', async () => {
+  const archived = { ...movies.published, status: 'archived', version: 5 };
+  const remote = mockApi(movies.published, archived, new Error('raw /private/media/secret'));
+  await assert.rejects(transitionContentLifecycle({ ...movieInput, version: 4, target_status: 'draft' }, remote.client),
+    { code: 'partial_transition', message: '生命周期转换部分完成：已确认归档，转草稿结果未确认，请重新读取内容状态。' });
+  assert.deepEqual(remote.calls, [
+    ['GET', moviePath], ['POST', moviePath + '/archive', { version: 4 }], ['POST', moviePath + '/draft', { version: 5 }],
+  ]);
+});
+
+// 验证单集详情及父级响应的任一层级标识或父版本不一致时停止写入。
+test('lifecycle rejects an episode detail from a different hierarchy before POST', async () => {
+  for (const detail of [
+    { ...episodeEnvelope, series_id: otherId },
+    { ...episodeEnvelope, episode: { ...episode, series_id: otherId } },
+    { ...episodeEnvelope, episode: { ...episode, season_id: otherId } },
+    { ...episodeEnvelope, episode: { ...episode, id: otherId } },
+    { ...episodeEnvelope, series_version: 7 },
+  ]) {
+    const remote = mockApi(series, detail);
+    await assert.rejects(transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, remote.client),
+      { code: 'invalid_response' });
+    assert.deepEqual(remote.calls, [['GET', seriesPath], ['GET', episodePath]]);
+  }
+  const wrongParent = mockApi({ ...series, id: otherId });
+  await assert.rejects(transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, wrongParent.client),
+    { code: 'invalid_response' });
+  assert.deepEqual(wrongParent.calls, [['GET', seriesPath]]);
+  const unrelatedParent = mockApi({ ...series, seasons: [] }, episodeEnvelope);
+  await assert.rejects(transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, unrelatedParent.client),
+    { code: 'invalid_response' });
+  assert.deepEqual(unrelatedParent.calls, [['GET', seriesPath], ['GET', episodePath]]);
+});
+
+// 验证生命周期写响应不接受错误状态、标识或未按一次递增的单集与父级版本。
+test('lifecycle rejects impossible state, ownership or version changes in POST responses', async () => {
+  for (const [input, current, path, published] of [
+    [movieInput, movies.draft, moviePath, movies.published],
+    [seriesInput, series, seriesPath, { ...series, status: 'published', version: 9 }],
+  ] as const) {
+    for (const response of [{ ...published, id: otherId }, { ...published, status: 'draft' },
+      { ...published, version: input.version }, { ...published, version: input.version + 2 }]) {
+      const remote = mockApi(current, response);
+      await assert.rejects(transitionContentLifecycle({ ...input, target_status: 'published' }, remote.client),
+        { code: 'invalid_response' });
+      assert.deepEqual(remote.calls, [['GET', path], ['POST', path + '/publish', { version: input.version }]]);
+    }
+  }
+  const publishedEpisode = { ...episode, status: 'published', version: 5 };
+  for (const response of [
+    { series_version: 9, episode: { ...publishedEpisode, version: 4 } },
+    { series_version: 9, episode: { ...publishedEpisode, version: 6 } },
+    { series_version: 8, episode: publishedEpisode },
+    { series_version: 10, episode: publishedEpisode },
+    { series_version: 9, episode: { ...publishedEpisode, id: otherId } },
+    { series_version: 9, episode: { ...publishedEpisode, season_id: otherId } },
+    { series_version: 9, series_id: otherId, episode: publishedEpisode },
+  ]) {
+    const remote = mockApi(series, episodeEnvelope, response);
+    await assert.rejects(transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, remote.client),
+      { code: 'invalid_response' });
+    assert.deepEqual(remote.calls, [
+      ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+    ]);
+  }
+});
+
+// 验证确认必须是字面量 true，范围必须显式提交且单集层级参数严格分流。
+test('visibility and lifecycle reject unconfirmed or malformed input before an API request', async () => {
+  const remote = mockApi();
+  for (const confirmed of [false, 'true', undefined]) {
+    await assert.rejects(setContentVisibility({ ...movieInput, visibility: 'private', confirmed }, remote.client));
+    await assert.rejects(transitionContentLifecycle({ ...movieInput, target_status: 'published', confirmed }, remote.client));
+  }
+  for (const invalid of [movieInput, { ...episodeInput, visibility: 'private' },
+    { ...movieInput, visibility: 'private', extra: true }]) {
+    await assert.rejects(setContentVisibility(invalid, remote.client));
+  }
+  for (const invalid of [{ ...movieInput, series_id: seriesId }, { ...episodeInput, season_id: undefined },
+    { ...episodeInput, target_status: 'removed' }]) {
+    await assert.rejects(transitionContentLifecycle({ target_status: 'published', ...invalid }, remote.client));
+  }
+  assert.deepEqual(remote.calls, []);
+});

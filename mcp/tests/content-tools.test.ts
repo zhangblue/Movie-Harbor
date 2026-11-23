@@ -397,11 +397,11 @@ test('movie series episode updates route only explicit patches, preserve version
   const a = await t.call('update_movie_metadata',{movie_id:movieId,version:2,name:' New '});
   assert.deepEqual(a.next_actions,['upload_movie_video']);
   const b = await t.call('update_movie_metadata',{movie_id:movieId,version:3,synopsis:''});
-  assert.deepEqual(b.next_actions,['replace_movie_video','publish_movie']);
+  assert.deepEqual(b.next_actions,['replace_movie_video','transition_content_lifecycle']);
   assert.deepEqual((await t.call('update_series_metadata',{series_id:seriesId,version:2,year:1979})).next_actions,['get_series_structure']);
   const ids = {series_id:seriesId,season_id:seasonId,episode_id:episodeId};
   assert.deepEqual(await t.call('update_episode_metadata',{...ids,version:1,name:'Pilot'}),{id:episodeId,version:1,status:'draft',series_version:4,next_actions:['upload_episode_video']});
-  assert.deepEqual((await t.call('update_episode_metadata',{...ids,version:1,number:2})).next_actions,['replace_episode_video','publish_episode']);
+  assert.deepEqual((await t.call('update_episode_metadata',{...ids,version:1,number:2})).next_actions,['replace_episode_video','transition_content_lifecycle']);
   assert.deepEqual(f.calls[0],{method:'PATCH',path:`/api/admin/movies/${movieId}`,body:{version:2,name:'New'}});
   assert.deepEqual(f.calls[3],{method:'PATCH',path:`/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}`,body:{version:1,name:'Pilot'}});
 });

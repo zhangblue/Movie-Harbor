@@ -55,9 +55,14 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
                 season,
                 "episodes",
                 episode,
-                "publish",
+                "publish" | "archive" | "draft",
             ] => uuid(series) && uuid(season) && uuid(episode),
             ["media", "movies" | "episodes", id, "video"] => uuid(id),
+            _ => false,
+        },
+        // 访问范围只在电影和整剧级别修改，其他 PUT 路径继续拒绝。
+        Method::PUT => match segments.as_slice() {
+            ["movies" | "series", id, "privacy"] => uuid(id),
             _ => false,
         },
         Method::PATCH => match segments.as_slice() {

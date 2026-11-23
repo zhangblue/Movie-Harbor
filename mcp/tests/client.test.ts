@@ -50,6 +50,33 @@ test('client sends Bearer only and exact JSON bytes to the configured API', asyn
   assert.equal(requests[1]!.body.toString(), '{"name":"影片"}');
 });
 
+// 验证 PUT 只向受控同源管理路径发送带 Bearer 的完整 JSON，其他方法和越界地址均在请求前拒绝。
+test('client sends PUT JSON only to the configured administrative API', async t => {
+  const { createMovieHarborClient } = await import('../src/services/movie-harbor-client.js');
+  const requests: unknown[] = [];
+  const { config } = await fixture(t, async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push({
+      method: req.method, url: req.url, body: Buffer.concat(chunks).toString(),
+      authorization: req.headers.authorization, contentType: req.headers['content-type'],
+    });
+    res.end('{"ok":true}');
+  });
+  const client = createMovieHarborClient(config);
+  const path = '/api/admin/movies/00000000-0000-4000-8000-000000000001/privacy';
+  for (const invalidPath of [`${config.baseUrl.origin}${path}`, '//example.com/api/admin/movies', '/api/admin/../public/movies']) {
+    await assert.rejects(client.json('PUT', invalidPath, {}), { code: 'invalid_path' });
+  }
+  // 模拟 JavaScript 调用方绕过静态类型，确认运行时仍拒绝未授权的方法。
+  await assert.rejects(Reflect.apply(client.json, client, ['DELETE', path]), { code: 'invalid_path' });
+  assert.deepEqual(await client.json('PUT', path, { version: 3, is_private: true }), { ok: true });
+  assert.deepEqual(requests, [{
+    method: 'PUT', url: path, body: '{"version":3,"is_private":true}',
+    authorization: `Bearer ${key}`, contentType: 'application/json',
+  }]);
+});
+
 // Catches absolute/cross-origin paths and URL normalization escaping the administrative API.
 // 验证客户端在发送网络请求前拒绝非受控路径。
 test('client rejects uncontrolled paths before any network request', async t => {

@@ -112,7 +112,7 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
     });
   return toolResult(movieUploadOutput, { id: parsed.movie_id, version: result.response.version, media_id: result.response.id,
     mime_type: result.response.mime_type, byte_size: result.response.byte_size, generated_file_deleted: result.generated_file_deleted,
-    retained_generated_path: result.retained_generated_path, next_actions: ['publish_movie'] },
+    retained_generated_path: result.retained_generated_path, next_actions: ['transition_content_lifecycle'] },
   replace ? '电影视频已明确替换；发布仍需单独确认。' : '电影视频已上传；发布仍需单独确认。');
 }
 
@@ -143,7 +143,7 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   return toolResult(episodeUploadOutput, { id: parsed.episode_id, version: result.response.version,
     series_version: result.response.series_version, media_id: result.response.id, mime_type: result.response.mime_type,
     byte_size: result.response.byte_size, generated_file_deleted: result.generated_file_deleted,
-    retained_generated_path: result.retained_generated_path, next_actions: ['publish_episode'] },
+    retained_generated_path: result.retained_generated_path, next_actions: ['transition_content_lifecycle'] },
   replace ? '单集视频已明确替换；发布仍需单独确认。' : '单集视频已上传；发布仍需单独确认。');
 }
 

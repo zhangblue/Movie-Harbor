@@ -8,7 +8,7 @@ import { createUploadStream } from './upload-stream.js';
 export { MovieHarborClientError } from './error-mapper.js';
 
 // 限定客户端允许发送的管理 API 方法。
-export type HttpMethod = 'GET' | 'POST' | 'PATCH';
+export type HttpMethod = 'GET' | 'POST' | 'PATCH' | 'PUT';
 // 描述上传时报告文件字节进度的回调。
 export type Progress = (sentBytes: number, totalBytes: number) => void;
 // 定义工具访问管理 API 和上传文件的接口。
@@ -148,7 +148,7 @@ export function createMovieHarborClient(config: McpConfig, dependencies: ClientD
     async json<T>(method: HttpMethod, path: string, body?: unknown): Promise<T> {
       // 发出认证请求前限制地址；路径越界时不发送任何网络请求。
       const url = controlledUrl(baseUrl, path);
-      if (!['GET', 'POST', 'PATCH'].includes(method)) throw new MovieHarborClientError('invalid_path');
+      if (!['GET', 'POST', 'PATCH', 'PUT'].includes(method)) throw new MovieHarborClientError('invalid_path');
       let encoded: Buffer | undefined;
       try { if (body !== undefined) encoded = Buffer.from(JSON.stringify(body)); }
       catch { throw new MovieHarborClientError('invalid_response'); }

@@ -111,7 +111,7 @@ export async function updateContentSynopsis(input: unknown, client: MovieHarborC
 
   const hasVideo = parsed.content_type === 'movie' && 'video' in updated && updated.video !== null;
   const nextActions = parsed.content_type === 'movie'
-    ? (hasVideo ? ['publish_movie'] : ['upload_movie_video'])
+    ? (hasVideo ? ['transition_content_lifecycle'] : ['upload_movie_video'])
     : ['get_series_structure'];
   return toolResult(contentResult, {
     id: updated.id,

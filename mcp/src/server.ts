@@ -4,10 +4,10 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { loadConfig, type McpConfig } from './config.js';
 import { createMovieHarborClient, type MovieHarborClient } from './services/movie-harbor-client.js';
 import { registerCatalogTools } from './tools/catalog.js';
+import { registerContentMaintenanceTools } from './tools/content-maintenance.js';
 import { registerGenreTools } from './tools/genres.js';
 import { registerLocalMediaTools, type LocalMediaDependencies } from './tools/local-media.js';
 import { registerMovieTools } from './tools/movies.js';
-import { registerPublishingTools } from './tools/publishing.js';
 import { registerSeriesTools } from './tools/series.js';
 import { registerSynopsisTools } from './tools/synopsis.js';
 import { registerUploadTools } from './tools/uploads.js';
@@ -25,10 +25,12 @@ const instructions = [
   '用户未提供名称、年份、简介、题材或单集名称时，Codex 必须联网查询可靠来源；冲突时让用户选择，不得虚构。',
   '创建和上传前必须展示完整入库计划、联网字段来源、文件路径、电影和单集整数分钟、访问范围、转换与替换动作。',
   '单集创建和更新仍接收整数秒，写入时自动按分钟四舍五入，最少 1 分钟；通用视频探测和转换保留秒数。',
-  '访问范围未指定时默认公开；公开草稿在发布前仍不可访问。',
+  '创建内容时访问范围未指定则默认公开；公开草稿在发布前仍不可访问。',
   '只有用户明确确认完整入库计划后，才可向入库写工具传 confirmed=true。计划、文件、版本或转换结果变化会使确认失效。',
   '转换确认、入库确认、发布确认相互独立。上传完成后禁止自动发布。',
   '目标已有视频时必须明确展示替换；电视剧先发布单集，父剧集需要再次单独确认发布。',
+  '修改访问范围或转换生命周期前，须向用户说明目标、当前版本与影响并取得明确确认；已发布内容归档或转草稿前须说明下线影响。',
+  '发布、归档和转草稿统一调用 transition_content_lifecycle。',
 ].join('\n');
 
 // 创建服务器时注册各组工具与操作说明。
@@ -42,7 +44,8 @@ export function buildServer(services: Services): McpServer {
   // 电影和剧集共用一个简介修改工具，必要时自动转换生命周期并保留草稿。
   registerSynopsisTools(server,services.client);
   registerUploadTools(server,services);
-  registerPublishingTools(server,services.client);
+  // 入库完成后只提示下一步，实际发布或修改范围由用户独立确认后执行。
+  registerContentMaintenanceTools(server,services.client);
   return server;
 }
 
