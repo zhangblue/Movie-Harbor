@@ -244,8 +244,8 @@ pub async fn create_mcp(
         .staged_poster_token
         .filter(|token| !token.trim().is_empty())
         .ok_or(SeriesError::Validation(vec!["poster"]))?;
-    // 与电影创建保持一致：先锁暂存海报，再锁题材，内容/独占归属/关系与 token 删除同事务提交。
-    let tx = db.begin().await?;
+    // 与电影创建保持一致：先取得媒体事务锁，再依次锁暂存海报和题材，内容/独占归属/关系与 token 删除同事务提交。
+    let tx = crate::media::transaction::begin(db).await?;
     let poster =
         staged_poster::lock_for_consumption(&tx, &token, principal_hash, Utc::now().fixed_offset())
             .await
@@ -462,7 +462,7 @@ pub async fn delete_season(
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let tx = db.begin().await?;
+    let tx = crate::media::transaction::begin(db).await?;
     let model = repository::find_locked(&tx, series_id).await?;
     require_version(model.version, expected_version)?;
     repository::season_locked(&tx, series_id, season_id).await?;
@@ -723,7 +723,7 @@ pub async fn delete_episode(
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let tx = db.begin().await?;
+    let tx = crate::media::transaction::begin(db).await?;
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let episode = repository::episode_locked(&tx, season_id, episode_id).await?;
@@ -760,7 +760,7 @@ pub async fn delete_series(
     let removal = removal::acquire(storage)
         .await
         .map_err(|_| SeriesError::MediaDelete)?;
-    let tx = db.begin().await?;
+    let tx = crate::media::transaction::begin(db).await?;
     let model = repository::find_locked(&tx, id).await?;
     require_version(model.version, expected_version)?;
     if model.status == "published" {

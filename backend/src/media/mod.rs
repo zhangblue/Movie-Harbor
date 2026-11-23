@@ -4,6 +4,7 @@ pub mod removal;
 pub mod routes;
 pub mod staged_poster;
 pub mod storage;
+pub(crate) mod transaction;
 pub mod upload;
 pub mod validation;
 mod video_body;

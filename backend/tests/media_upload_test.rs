@@ -4947,3 +4947,201 @@ async fn startup_preserves_committed_video_after_lost_acknowledgement() {
     );
     assert_eq!(count_files(root.as_ref()), 1);
 }
+
+/// 旧删除清单与二版凭证并存时，两次独立启动都必须等还原两侧目录同步成功再清清单。
+#[tokio::test]
+async fn restart_retries_both_directories_before_retiring_removal_manifest() {
+    use movie_harbor_api::media::removal::{self, OwnedMedia};
+    for fail_shard in [true, false] {
+        let db = database().await;
+        let root = TempRoot::new();
+        let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+        let movie = draft_movie(&db, None).await;
+        let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+            .await
+            .unwrap();
+        let (formal, marker, hold) =
+            prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+        drop(
+            removal::stage(
+                &storage,
+                "replace-media",
+                &[OwnedMedia {
+                    asset_id: asset.id,
+                    storage_key: asset.storage_key.clone(),
+                }],
+            )
+            .await
+            .unwrap(),
+        );
+        let operation = std::fs::read_dir(root.as_ref().join(".operations"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let staged = operation.join("00000000.data");
+        let directory = if fail_shard {
+            asset.storage_key.rsplit_once('/').unwrap().0.to_owned()
+        } else {
+            operation
+                .strip_prefix(root.as_ref())
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .into()
+        };
+        for _ in 0..2 {
+            let restarted = LocalMediaStorage::initialize_with_hooks(
+                root.as_ref(),
+                Arc::new(FailRestoredDirectory {
+                    hold: staged.clone(),
+                    directory: directory.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(removal::recover(&db, &restarted).await.is_err());
+            assert!(formal.is_file() && !staged.exists() && marker.exists() && hold.exists());
+            assert!(operation.join("manifest.json").is_file());
+        }
+        let _app = app::build(db.clone(), &config(root.as_ref()))
+            .await
+            .unwrap();
+        assert_eq!(count_files(root.as_ref()), 1);
+        assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
+    }
+}
+
+/// 模拟前一个 API 已退出，PostgreSQL 仍持有修改资产登记或槽位的旧事务。
+#[tokio::test]
+async fn restart_waits_for_unresolved_media_transaction_before_file_decision() {
+    use movie_harbor_api::media::{
+        removal::{self, OwnedMedia},
+        upload::recover_stale_uploads,
+    };
+    use sea_orm::TransactionTrait;
+    for deletion in [false, true] {
+        for commit in [true, false] {
+            let db = database().await;
+            let root = TempRoot::new();
+            let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+            let movie = draft_movie(&db, None).await;
+            let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+                .await
+                .unwrap();
+            let formal = root.as_ref().join(&asset.storage_key);
+            if deletion {
+                drop(
+                    removal::stage(
+                        &storage,
+                        "delete-movie",
+                        &[OwnedMedia {
+                            asset_id: asset.id,
+                            storage_key: asset.storage_key.clone(),
+                        }],
+                    )
+                    .await
+                    .unwrap(),
+                );
+            } else {
+                movie::Entity::delete_by_id(movie.id)
+                    .exec(&db)
+                    .await
+                    .unwrap();
+                media_asset::Entity::delete_by_id(asset.id)
+                    .exec(&db)
+                    .await
+                    .unwrap();
+                prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+            }
+            let old = db.begin().await.unwrap();
+            // 使用与媒体事务约定相同的项目命名空间和表 OID，保持旧连接直至确认有恢复者等待。
+            old.execute_unprepared(
+                "SELECT pg_advisory_xact_lock(1296584018, 'media_asset'::regclass::int)",
+            )
+            .await
+            .unwrap();
+            if deletion {
+                movie::Entity::delete_by_id(movie.id)
+                    .exec(&old)
+                    .await
+                    .unwrap();
+                media_asset::Entity::delete_by_id(asset.id)
+                    .exec(&old)
+                    .await
+                    .unwrap();
+            } else {
+                asset
+                    .clone()
+                    .into_active_model()
+                    .insert(&old)
+                    .await
+                    .unwrap();
+            }
+            let reopened = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+            let recovery_db = db.clone();
+            let recovery = tokio::spawn(async move {
+                if deletion {
+                    removal::recover(&recovery_db, &reopened).await
+                } else {
+                    recover_stale_uploads(&recovery_db, &reopened, Duration::from_secs(3600)).await
+                }
+            });
+            // 查看实际的 PostgreSQL 阻塞锁；在旧事务内观测，避免通过时间差推断正确性。
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    assert!(!recovery.is_finished(), "旧事务未决时恢复提前完成");
+                    let waiting = old.query_one(Statement::from_string(DatabaseBackend::Postgres,
+                        "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted AND classid=1296584018 AND objid='media_asset'::regclass::oid AND objsubid=2) AS waiting"
+                    )).await.unwrap().unwrap().try_get::<bool>("", "waiting").unwrap();
+                    if waiting { break }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            if commit {
+                old.commit().await.unwrap()
+            } else {
+                old.rollback().await.unwrap()
+            }
+            recovery.await.unwrap().unwrap();
+            let registered = commit != deletion;
+            assert_eq!(formal.exists(), registered);
+            assert_eq!(count_files(root.as_ref()), usize::from(registered));
+        }
+    }
+}
+
+/// 由 PostgreSQL 写触发器确认登记、替换和删除在实际写连接上均已取得约定的事务锁。
+#[tokio::test]
+async fn media_writes_hold_recovery_lock_on_their_database_transaction() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    db.execute_unprepared("CREATE FUNCTION require_media_transaction_lock() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_locks WHERE locktype='advisory' AND granted AND pid=pg_backend_pid()
+            AND classid=1296584018 AND objid='media_asset'::regclass::oid AND objsubid=2)
+        THEN RAISE EXCEPTION 'missing media transaction lock'; END IF;
+        IF TG_OP='DELETE' THEN RETURN OLD; ELSE RETURN NEW; END IF; END $$;
+        CREATE TRIGGER require_media_transaction_lock BEFORE INSERT OR DELETE ON media_asset
+        FOR EACH ROW EXECUTE FUNCTION require_media_transaction_lock()").await.unwrap();
+    let poster = store_new_asset(
+        &db,
+        &storage,
+        MediaKind::Poster,
+        "poster.png",
+        "image/png",
+        &policy(4096),
+        Chunks::new([PNG]).0,
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, Some(poster.id)).await;
+    attach_recovery_fixture(&db, &storage, movie.id, 1)
+        .await
+        .unwrap();
+    movie_harbor_api::movies::service::delete(&db, &storage, movie.id, 2)
+        .await
+        .unwrap();
+    assert_eq!(count_files(root.as_ref()), 0);
+}

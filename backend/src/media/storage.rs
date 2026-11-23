@@ -1291,29 +1291,28 @@ impl LocalMediaStorage {
             )
             .map_err(|_| MediaError::InvalidStorageKey)?;
             let stat = rustix::fs::fstat(existing).map_err(io::Error::from)?;
-            return if rustix::fs::FileType::from_raw_mode(stat.st_mode)
-                == rustix::fs::FileType::RegularFile
+            if rustix::fs::FileType::from_raw_mode(stat.st_mode)
+                != rustix::fs::FileType::RegularFile
             {
-                Ok(())
-            } else {
-                Err(MediaError::InvalidStorageKey)
-            };
-        }
-        match renameat_with(
-            &operation.directory,
-            staged_name,
-            &shard_fd,
-            file,
-            RenameFlags::NOREPLACE,
-        ) {
-            Ok(()) => {
-                sync_fd(&operation.directory)?;
-                sync_fd(&shard_fd)?;
-                Ok(())
+                return Err(MediaError::InvalidStorageKey);
             }
-            Err(rustix::io::Errno::NOENT) => Err(MediaError::InvalidStorageKey),
-            Err(_) => Err(MediaError::InvalidStorageKey),
+        } else {
+            renameat_with(
+                &operation.directory,
+                staged_name,
+                &shard_fd,
+                file,
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(|_| MediaError::InvalidStorageKey)?;
         }
+        // 正式名可能来自上次未同步成功的 rename；每次恢复都必须确认两侧持久化后才可清清单。
+        self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
+        self.sync_directory(
+            &operation.directory,
+            format!(".operations/{}", operation.name),
+        )?;
+        Ok(())
     }
 
     /// 在同一锁内核对上传凭证与数据库登记，再按凭证版本恢复文件。
@@ -1332,9 +1331,10 @@ impl LocalMediaStorage {
         // 等待锁期间数据库可能确认登记；必须在同一锁内读取当前结果再决定是否删除。
         use crate::entities::media_asset;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let tx = super::transaction::begin(db).await?;
         let registered = media_asset::Entity::find()
             .filter(media_asset::Column::StorageKey.eq(&marker.storage_key))
-            .one(db)
+            .one(&tx)
             .await?
             .is_some();
         if marker.version == 2 {
@@ -1366,6 +1366,7 @@ impl LocalMediaStorage {
         }
         remove_if_present(&self.incoming_fd, name)?;
         self.sync_directory(&self.incoming_fd, ".incoming".into())?;
+        tx.commit().await?;
         Ok(())
     }
 

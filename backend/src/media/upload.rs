@@ -6,7 +6,7 @@ use super::{
 use crate::entities::{episode, media_asset, movie, season, series};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, DatabaseConnection, DatabaseTransaction, EntityTrait,
-    QueryFilter, QuerySelect, Set, TransactionTrait, sea_query::Expr,
+    QueryFilter, QuerySelect, Set, sea_query::Expr,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -164,7 +164,7 @@ where
         original_name,
         mut stored,
     } = pending;
-    let tx = db.begin().await?;
+    let tx = super::transaction::begin(db).await?;
     // 数据库写入开始前启用取消保护：中途取消或结果未知时保留正式文件和恢复标记。
     stored.begin_database_write();
     // 资产与调用方引用必须全部登记成功；保留整体错误，供下方判断回滚是否已确认并处理文件。
@@ -296,7 +296,7 @@ pub(crate) async fn commit_attachment(
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
-    let tx = match db.begin().await {
+    let tx = match super::transaction::begin(db).await {
         Ok(tx) => tx,
         Err(error) => {
             pending.stored.return_mutation_guard(removal.into_guard())?;

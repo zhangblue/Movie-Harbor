@@ -176,6 +176,7 @@ pub async fn recover(
 ) -> Result<(), MediaError> {
     // 启动恢复只检查持久清单明确登记的中断操作，不扫描或清理普通孤儿文件。
     let _session = acquire(storage).await?;
+    let tx = super::transaction::begin(db).await?;
     for persisted in storage.persisted_removal_operations()? {
         let manifest: Manifest = serde_json::from_slice(&persisted.manifest)
             .map_err(|_| MediaError::InvalidStorageKey)?;
@@ -194,7 +195,7 @@ pub async fn recover(
         }
         for entry in &manifest.entries {
             // 数据库仍引用该资产则恢复原位置；引用已切换或删除后才完成隔离副本的物理清理。
-            if is_referenced(db, entry.asset_id, &entry.storage_key).await? {
+            if is_referenced(&tx, entry.asset_id, &entry.storage_key).await? {
                 storage.restore_persisted_removal(
                     &persisted.operation,
                     &entry.storage_key,
@@ -206,12 +207,13 @@ pub async fn recover(
         }
         storage.close_removal_operation(&persisted.operation)?;
     }
+    tx.commit().await?;
     Ok(())
 }
 
 /// 在删除恢复时核对资产及存储键是否仍被内容或暂存海报引用。
 async fn is_referenced(
-    db: &DatabaseConnection,
+    db: &DatabaseTransaction,
     asset_id: Uuid,
     storage_key: &str,
 ) -> Result<bool, MediaError> {

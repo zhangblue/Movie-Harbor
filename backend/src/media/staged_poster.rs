@@ -5,7 +5,6 @@ use chrono::{DateTime, FixedOffset};
 use rand_core::{OsRng, RngCore};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set,
-    TransactionTrait,
 };
 use sea_orm::{ConnectionTrait, DatabaseConnection};
 use serde::Serialize;
@@ -185,7 +184,9 @@ pub async fn cleanup_expired(
     if limit == 0 {
         return Ok(0);
     }
-    let tx = db.begin().await?;
+    // 与上传、内容删除及恢复保持同一顺序，取得文件锁后才开启数据库事务并锁定令牌行。
+    let removal = super::removal::acquire(storage).await?;
+    let tx = super::transaction::begin(db).await?;
     let rows = mcp_staged_poster::Entity::find()
         .filter(mcp_staged_poster::Column::ExpiresAt.lte(now))
         .order_by_asc(mcp_staged_poster::Column::ExpiresAt)
@@ -201,7 +202,7 @@ pub async fn cleanup_expired(
     let ids: Vec<_> = rows.iter().map(|row| row.asset_id).collect();
     let owned = super::removal::load_owned_media(&tx, &ids).await?;
     // 在删除数据库记录前隔离文件；后续写入失败时由事务收尾恢复文件。
-    let staged = super::removal::stage(storage, "expired-mcp-staged-posters", &owned).await?;
+    let staged = removal.stage("expired-mcp-staged-posters", &owned)?;
     // 令牌与资产记录共同删除，捕获任一步错误供统一收尾回滚数据库并恢复已隔离文件。
     let result: Result<(), MediaError> = async {
         mcp_staged_poster::Entity::delete_many()
