@@ -257,7 +257,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
     let pending = prepare_attachment(
-        storage,
+        storage.begin_upload(None).await?,
         target,
         original_name,
         declared_mime,
@@ -270,7 +270,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
 
 /// 在槽位切换前验证版本并流式保存新文件，保留旧引用。
 pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
-    storage: &LocalMediaStorage,
+    session: super::storage::UploadSession<'_>,
     target: AttachmentTarget,
     original_name: &str,
     declared_mime: &str,
@@ -284,7 +284,8 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     let id = Uuid::new_v4();
     let kind = target.kind();
     // 替换也先按流式上传策略完整写入新文件；旧引用在后续事务成功前保持不变。
-    let stored = storage
+    let storage = session.storage.clone();
+    let stored = session
         .store(id, kind, original_name, declared_mime, policy, source)
         .await?;
     Ok(PendingAttachment {
@@ -293,7 +294,7 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
         kind,
         original_name: original_name.to_owned(),
         stored,
-        storage: storage.clone(),
+        storage,
         expected_version,
     })
 }

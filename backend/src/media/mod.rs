@@ -18,6 +18,16 @@ pub use storage::{
     ChunkSource, LocalMediaStorage, StorageCapacity, StorageCapacityReader, StorageEvent,
     StorageHooks, StoredFile,
 };
+/// 系统概览和视频上传共用的媒体卷安全保留字节数。
+pub const MEDIA_CAPACITY_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+/// 视频上传取得变更锁后用于容量复核与流式计数的声明。
+#[derive(Clone, Copy, Debug)]
+pub struct UploadCapacityRequirement {
+    pub declared_bytes: u64,
+    pub reserve_bytes: u64,
+}
+
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
 pub use validation::{MediaKind, UploadPolicy};
 
@@ -49,6 +59,14 @@ pub enum MediaError {
     UnsupportedType,
     ContentMismatch,
     TooLarge,
+    StorageCapacityUnavailable,
+    StorageSpaceLow {
+        available_bytes: Option<u64>,
+        required_bytes: Option<u64>,
+        reserve_bytes: u64,
+    },
+    DeclaredSizeInvalid,
+    DeclaredSizeMismatch,
     Empty,
     TargetNotFound,
     ReadOnly,
@@ -71,6 +89,10 @@ impl fmt::Display for MediaError {
             Self::UnsupportedType => "unsupported media type",
             Self::ContentMismatch => "media content does not match its declared type",
             Self::TooLarge => "upload exceeds configured byte limit",
+            Self::StorageCapacityUnavailable => "media storage capacity unavailable",
+            Self::StorageSpaceLow { .. } => "insufficient media storage space",
+            Self::DeclaredSizeInvalid => "invalid declared video size",
+            Self::DeclaredSizeMismatch => "video size differs from declared size",
             Self::Empty => "upload is empty",
             Self::TargetNotFound => "media attachment target not found",
             Self::ReadOnly => "only draft content can replace media",
@@ -115,40 +137,15 @@ impl From<sea_orm::DbErr> for MediaError {
 impl IntoResponse for MediaError {
     /// 在路由返回错误时转换为对应的 HTTP 响应。
     fn into_response(self) -> Response {
-        if matches!(self, Self::ContentMismatch) {
-            return (
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                Json(serde_json::json!({
-                    "error": "media content does not match its declared type",
-                    "code": "media_content_mismatch"
-                })),
-            )
-                .into_response();
-        }
-        if matches!(self, Self::ReplacementFailed) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "media replacement failed",
-                    "code": "media_replace_failed"
-                })),
-            )
-                .into_response();
-        }
-        if matches!(self, Self::ReplacementFinalizationFailed) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "media replacement finalization failed",
-                    "code": "media_replace_finalization_failed"
-                })),
-            )
-                .into_response();
-        }
         let status = match self {
-            Self::InvalidFileName | Self::InvalidVersion | Self::Empty | Self::Multipart(_) => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::DeclaredSizeInvalid
+            | Self::DeclaredSizeMismatch
+            | Self::InvalidFileName
+            | Self::InvalidVersion
+            | Self::Empty
+            | Self::Multipart(_) => StatusCode::BAD_REQUEST,
+            Self::StorageCapacityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::StorageSpaceLow { .. } => StatusCode::INSUFFICIENT_STORAGE,
             Self::UnsupportedType | Self::ContentMismatch => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TargetNotFound => StatusCode::NOT_FOUND,
@@ -159,6 +156,28 @@ impl IntoResponse for MediaError {
             | Self::Io(_)
             | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
-        (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
+        // 只公开固定消息和机器码；采样或文件系统错误中的服务器路径不得进入响应。
+        let mut body = serde_json::json!({"error": self.to_string()});
+        let code = match self {
+            Self::ContentMismatch => "media_content_mismatch",
+            Self::ReplacementFailed => "media_replace_failed",
+            Self::ReplacementFinalizationFailed => "media_replace_finalization_failed",
+            Self::StorageCapacityUnavailable => "storage_capacity_unavailable",
+            Self::StorageSpaceLow {
+                available_bytes,
+                required_bytes,
+                reserve_bytes,
+            } => {
+                body["available_bytes"] = available_bytes.into();
+                body["required_bytes"] = required_bytes.into();
+                body["reserve_bytes"] = reserve_bytes.into();
+                "storage_space_low"
+            }
+            Self::DeclaredSizeInvalid => "declared_size_invalid",
+            Self::DeclaredSizeMismatch => "declared_size_mismatch",
+            _ => return (status, Json(body)).into_response(),
+        };
+        body["code"] = code.into();
+        (status, Json(body)).into_response()
     }
 }

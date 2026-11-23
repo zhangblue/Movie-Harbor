@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     auth::{self, AuthState},
-    media::LocalMediaStorage,
+    media::{LocalMediaStorage, MEDIA_CAPACITY_RESERVE_BYTES},
 };
 use axum::{
     Json, Router,
@@ -16,9 +16,6 @@ use axum::{
 };
 use chrono::Utc;
 use sea_orm::{AccessMode, DbErr, IsolationLevel, TransactionTrait};
-
-/// 首期单媒体卷为上传保留的固定安全空间。
-pub const MEDIA_CAPACITY_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 #[derive(Clone)]
 /// 保存系统概览查询需要的数据库与已验证媒体存储句柄。

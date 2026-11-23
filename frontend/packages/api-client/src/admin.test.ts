@@ -22,6 +22,7 @@ class FakeUploadXMLHttpRequest extends EventTarget {
   status = 0;
   statusText = "";
   responseText = "";
+  readonly headers = new Headers();
   private responseHeaders = new Headers();
 
   // 记录模拟请求的目标，供测试断言请求路径。
@@ -30,7 +31,7 @@ class FakeUploadXMLHttpRequest extends EventTarget {
   }
 
   // 模拟设置请求头，供上传测试使用。
-  setRequestHeader(): void {}
+  setRequestHeader(name: string, value: string): void { this.headers.append(name, value); }
   // 模拟发送请求，等待测试触发响应。
   send(): void {}
 
@@ -246,9 +247,9 @@ it("parses only explicit bulk validation problem details", () => {
   }))).toBeUndefined();
 });
 
-// 验证：未提供进度回调时使用普通请求上传海报。
-it("keeps poster uploads on fetch when no progress callback is supplied", async () => {
-  const fetchMock = vi.fn(async (_url: RequestInfo | URL) => new Response('{"id":"media-1","url":"/media/poster.jpg"}', {
+// 验证普通请求仅为视频声明文件大小，海报继续按原协议上传。
+it("declares only video file bytes on fetch when no progress callback is supplied", async () => {
+  const fetchMock = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => new Response('{"id":"media-1","url":"/media/poster.jpg"}', {
     headers: { "content-type": "application/json" },
   }));
   vi.stubGlobal("fetch", fetchMock);
@@ -260,6 +261,9 @@ it("keeps poster uploads on fetch when no progress callback is supplied", async 
   );
 
   expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/admin/media/movies/movie%2F1/poster?version=7");
+  expect(new Headers(fetchMock.mock.calls[0]?.[1]?.headers).has("x-media-byte-size")).toBe(false);
+  await uploadMedia({ kind: "episodes", id: "e1", slot: "video" }, new File(["视频"], "one.mp4"), 1);
+  expect(new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("x-media-byte-size")).toBe("6");
 });
 
 // 验证：上传视频时转发进度上传边界的事件。
@@ -278,6 +282,7 @@ it("uses the progress upload boundary for video uploads and forwards its events"
 
   await expect(request).resolves.toEqual({ id: "media-1", url: "/media/video.mp4" });
   expect(xhr.url).toBe("/api/admin/media/movies/movie%2F1/video?version=7");
+  expect(xhr.headers.get("x-media-byte-size")).toBe("5");
   expect(events).toEqual([
     { phase: "uploading", percent: 0 },
     { phase: "uploading", percent: 40 },

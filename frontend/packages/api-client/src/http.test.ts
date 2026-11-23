@@ -341,6 +341,7 @@ describe("apiUpload", () => {
     const request = apiUpload<{ ok: boolean }>("/api/admin/media/movies/movie-1/video", {
       method: "POST",
       query: { version: 4 },
+      headers: { "X-Media-Byte-Size": "40" },
       body: new FormData(),
       /* 上传事件到达时收集顺序，供当前测试核对百分比及处理阶段。 */ onProgress: (event) => events.push(event),
     });
@@ -361,6 +362,7 @@ describe("apiUpload", () => {
     expect(xhr.url).toBe("/api/admin/media/movies/movie-1/video?version=4");
     expect(xhr.headers.get("accept")).toBe("application/json");
     expect(xhr.headers.get("x-csrf-token")).toBe("session-csrf");
+    expect(xhr.headers.get("x-media-byte-size")).toBe("40");
     expect(xhr.headers.has("content-type")).toBe(false);
     expect(xhr.body).toBeInstanceOf(FormData);
   });

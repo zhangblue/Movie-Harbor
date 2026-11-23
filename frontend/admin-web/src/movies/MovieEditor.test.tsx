@@ -212,10 +212,13 @@ it("shows monotonic movie video progress through server processing and clears it
   expect(screen.queryByText(/待上传：feature.mp4/)).not.toBeInTheDocument();
 });
 
-// 验证上传失败清除进度但保留文件供重试。
+// 验证空间不足时清除进度、保留待传文件和原视频链接。
 it("clears failed movie video progress but preserves its pending retry file", async () => {
+  const oldVideo = { id: "old", url: "/media/old", local_path: "/media/old", original_name: "old.mp4", mime_type: "video/mp4", byte_size: 3 };
   const uploads = installUploadXhr({ manual: true });
-  fixture(movie(), (r) => r.url.includes("/video?") ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415) : undefined);
+  fixture(movie({ video: oldVideo }), (r) => r.url.includes("/video?")
+    ? json({ error: "upload failed", code: "storage_space_low" }, 507)
+    : undefined);
   const user = userEvent.setup();
   editor();
   await screen.findByLabelText("名称");
@@ -229,9 +232,10 @@ it("clears failed movie video progress but preserves its pending retry file", as
   act(() => current.finishUpload());
   await act(async () => { await current.respondFromFetch(); });
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("媒体卷空间不足，请释放空间后重试。");
   expect(screen.queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
   expect(screen.getByText(/待上传：broken.mp4/)).toBeInTheDocument();
+  expect(screen.getByRole("link", { name: "已保存视频：old.mp4" })).toHaveAttribute("href", "/media/old");
 });
 
 // 验证卸载后上传事件不再更新电影状态。

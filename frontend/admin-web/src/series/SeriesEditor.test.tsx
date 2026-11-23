@@ -215,11 +215,13 @@ it("isolates first-episode video progress through processing and preserves its s
   expect(within(secondEpisode).getByLabelText("单集名称")).toHaveValue("未保存回声");
 });
 
-// 验证单集上传失败时清除进度、保留文件并跳过发布。
+// 验证容量不可用时保留单集原视频和待传文件，并跳过发布。
 it("clears a failed episode upload progress, retains its file, and skips publication", async () => {
+  const oldVideo = { id: "old", url: "/media/old", local_path: "/media/old", original_name: "old.mp4", mime_type: "video/mp4", byte_size: 3 };
   const uploads = installUploadXhr({ manual: true });
-  const requests = fixture(detail(), (request) => request.url.includes("/media/episodes/")
-    ? json({ error: "media content does not match its declared type", code: "media_content_mismatch" }, 415)
+  const initial = detail({ seasons: [{ id: "s1", number: 1, episodes: [episode({ video: oldVideo })] }] });
+  const requests = fixture(initial, (request) => request.url.includes("/media/episodes/")
+    ? json({ error: "upload failed", code: "storage_capacity_unavailable" }, 503)
     : undefined);
   const user = userEvent.setup();
   editor();
@@ -236,10 +238,11 @@ it("clears a failed episode upload progress, retains its file, and skips publica
   act(() => current.finishUpload());
   await act(async () => { await current.respondFromFetch(); });
 
-  expect(await screen.findByRole("alert")).toHaveTextContent("上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。");
+  expect(await screen.findByRole("alert")).toHaveTextContent("暂时无法读取媒体卷容量，请稍后重试。");
   expect(within(firstEpisode).queryByRole("progressbar", { name: "视频上传进度" })).not.toBeInTheDocument();
   expect(within(firstEpisode).getByText(/待上传：broken.mp4/)).toBeInTheDocument();
   expect(requests.some((request) => request.url === `${episodePath}/publish`)).toBe(false);
+  expect(within(firstEpisode).getByRole("link", { name: "已保存视频：old.mp4" })).toHaveAttribute("href", "/media/old");
 });
 
 // 验证卸载后上传事件不再更新单集行状态。

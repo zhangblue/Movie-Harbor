@@ -1,5 +1,5 @@
 use super::{
-    MediaError,
+    MediaError, UploadCapacityRequirement,
     validation::{self, MediaKind, UploadPolicy},
 };
 use axum::body::Bytes;
@@ -138,6 +138,64 @@ pub struct LocalMediaStorage {
     mutations: Arc<AsyncMutex<()>>,
     hooks: Arc<dyn StorageHooks>,
     capacity_reader: Arc<dyn StorageCapacityReader>,
+}
+
+/// 容量检查后继续持有同一把媒体锁，直到上传提交或失败收尾。
+pub struct UploadSession<'a> {
+    pub(crate) storage: &'a LocalMediaStorage,
+    guard: OwnedMutexGuard<()>,
+    capacity: Option<UploadCapacityRequirement>,
+}
+
+impl UploadSession<'_> {
+    /// 持锁并核对 multipart 元数据后写入文件，清理守卫接管锁直到后续数据库登记完成。
+    pub async fn store<S: ChunkSource + Send>(
+        self,
+        resource_id: Uuid,
+        kind: MediaKind,
+        original_name: &str,
+        declared_mime: &str,
+        policy: &UploadPolicy,
+        mut source: S,
+    ) -> Result<StoredFile, MediaError> {
+        let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
+        let temp_name = format!("{}.part", Uuid::new_v4().simple());
+        let mut cleanup = PendingCleanup::new(
+            self.storage.incoming_fd.clone(),
+            self.storage.quarantine_fd.clone(),
+            temp_name.clone(),
+            self.storage.hooks.clone(),
+            self.guard,
+        );
+        let spec = StoreSpec {
+            resource_id,
+            kind,
+            declared_mime,
+            format,
+            max_bytes: policy.max_bytes(),
+            declared_bytes: self.capacity.map(|requirement| requirement.declared_bytes),
+        };
+        // 锁内采样后其他进程仍可能写满磁盘，将真实 ENOSPC 转成容量错误并清理本次文件。
+        let result = self
+            .storage
+            .write_and_promote(&temp_name, spec, &mut source, &mut cleanup)
+            .await;
+        match (self.capacity, result) {
+            (Some(requirement), Err(MediaError::Io(error)))
+                if error.kind() == io::ErrorKind::StorageFull =>
+            {
+                Err(MediaError::StorageSpaceLow {
+                    // ENOSPC 可来自外部占用或配额，错误本身未提供可用字节数。
+                    available_bytes: None,
+                    required_bytes: requirement
+                        .declared_bytes
+                        .checked_add(requirement.reserve_bytes),
+                    reserve_bytes: requirement.reserve_bytes,
+                })
+            }
+            (_, result) => result,
+        }
+    }
 }
 
 /// 删除预检后保存的正式文件位置与身份，供后续暂存和回滚使用。
@@ -386,6 +444,7 @@ struct StoreSpec<'a> {
     declared_mime: &'a str,
     format: validation::ExpectedFormat,
     max_bytes: u64,
+    declared_bytes: Option<u64>,
 }
 
 /// 正式提升前持久化的上传恢复标记，恢复时结合数据库登记和文件身份决定是否清理。
@@ -547,29 +606,50 @@ impl LocalMediaStorage {
         original_name: &str,
         declared_mime: &str,
         policy: &UploadPolicy,
-        mut source: S,
+        source: S,
     ) -> Result<StoredFile, MediaError> {
-        // 写文件前先拒绝非法名称、格式声明与策略组合，避免为已知无效请求创建临时数据。
-        let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
-        // 锁随清理责任移入 StoredFile，覆盖流式写入、正式落盘及调用方随后的数据库登记。
-        let mutation_guard = self.mutations.clone().lock_owned().await;
-        let temp_name = format!("{}.part", Uuid::new_v4().simple());
-        let mut cleanup = PendingCleanup::new(
-            self.incoming_fd.clone(),
-            self.quarantine_fd.clone(),
-            temp_name.clone(),
-            self.hooks.clone(),
-            mutation_guard,
-        );
-        let spec = StoreSpec {
-            resource_id,
-            kind,
-            declared_mime,
-            format,
-            max_bytes: policy.max_bytes(),
-        };
-        self.write_and_promote(&temp_name, spec, &mut source, &mut cleanup)
+        self.begin_upload(None)
+            .await?
+            .store(
+                resource_id,
+                kind,
+                original_name,
+                declared_mime,
+                policy,
+                source,
+            )
             .await
+    }
+
+    /// 解析视频正文前先取得全局锁并读取当前卷容量，失败时直接释放锁。
+    pub async fn begin_upload(
+        &self,
+        capacity: Option<UploadCapacityRequirement>,
+    ) -> Result<UploadSession<'_>, MediaError> {
+        let guard = self.mutations.clone().lock_owned().await;
+        if let Some(requirement) = capacity {
+            let available_bytes = self
+                .capacity()
+                .map_err(|_| MediaError::StorageCapacityUnavailable)?
+                .available_bytes;
+            let required_bytes = requirement
+                .declared_bytes
+                .checked_add(requirement.reserve_bytes);
+            if available_bytes <= requirement.reserve_bytes
+                || required_bytes.is_none_or(|needed| available_bytes < needed)
+            {
+                return Err(MediaError::StorageSpaceLow {
+                    available_bytes: Some(available_bytes),
+                    required_bytes,
+                    reserve_bytes: requirement.reserve_bytes,
+                });
+            }
+        }
+        Ok(UploadSession {
+            storage: self,
+            guard,
+            capacity,
+        })
     }
 
     /// 上传已校验元数据并持锁时写入受控临时文件，校验内容后持久化标记并提升到正式目录。
@@ -606,12 +686,24 @@ impl LocalMediaStorage {
             byte_size = byte_size
                 .checked_add(chunk.len() as u64)
                 .ok_or(MediaError::TooLarge)?;
+            if spec
+                .declared_bytes
+                .is_some_and(|declared| byte_size > declared)
+            {
+                return Err(MediaError::DeclaredSizeMismatch);
+            }
             if byte_size > spec.max_bytes {
                 return Err(MediaError::TooLarge);
             }
             digest.update(&chunk);
             file.write_all(&chunk).await?;
             file.flush().await?;
+        }
+        if spec
+            .declared_bytes
+            .is_some_and(|declared| byte_size != declared)
+        {
+            return Err(MediaError::DeclaredSizeMismatch);
         }
         // flush 完成缓冲写入，sync_all 才建立文件数据的持久化边界；之后仍须校验真实内容才能提升。
         file.sync_all().await?;

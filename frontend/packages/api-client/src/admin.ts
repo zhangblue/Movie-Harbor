@@ -259,9 +259,11 @@ export async function uploadMedia(
   const form = new FormData();
   form.append("file", file);
   const path = apiPath("admin", "media", target.kind, target.id, target.slot);
+  // 容量检查按文件字节数计算，表单边界和文件名不计入声明值。
+  const headers = target.slot === "video" ? { "X-Media-Byte-Size": String(file.size) } : undefined;
   // 只有需要进度反馈时使用 XHR；否则走普通请求，两条路径都将结果交给调用方。
   const response = onProgress
-    ? await apiUpload<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form, onProgress })
-    : await apiRequest<MediaAssetResponse>(path, { method: "POST", query: { version }, body: form });
+    ? await apiUpload<MediaAssetResponse>(path, { method: "POST", query: { version }, headers, body: form, onProgress })
+    : await apiRequest<MediaAssetResponse>(path, { method: "POST", query: { version }, headers, body: form });
   return requiredResponse(response);
 }

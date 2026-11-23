@@ -927,13 +927,16 @@ fn multipart_file_request(
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let mut builder = Request::builder()
         .method("POST")
-        .uri(path)
+        .uri(&path)
         .header("host", "harbor.test")
         .header("origin", origin)
         .header(
             "content-type",
             format!("multipart/form-data; boundary={boundary}"),
         );
+    if path.split('?').next().unwrap().ends_with("/video") {
+        builder = builder.header("x-media-byte-size", contents.len());
+    }
     if let Some(value) = cookie {
         builder = builder.header("cookie", value);
     }
@@ -3662,6 +3665,15 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
     let (cookie, csrf) = credentials(&app).await;
     let boundary = "bounded-boundary";
 
+    // 给协议用例附加有效大小，让元数据、请求上限和字段数量分别决定结果。
+    let protocol_request =
+        |path: String, cookie: &str, csrf: &str, boundary: &str, body: Vec<u8>| {
+            let mut request = raw_multipart_request(path, cookie, csrf, boundary, body);
+            request
+                .headers_mut()
+                .insert("x-media-byte-size", valid_mp4().len().into());
+            request
+        };
     let movie = draft_movie(&db, None).await;
     let mut oversized_preamble = vec![b'x'; 70 * 1024];
     oversized_preamble.extend_from_slice(
@@ -3671,8 +3683,8 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
     oversized_preamble.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let response = app
         .clone()
-        .oneshot(raw_multipart_request(
-            format!("/api/admin/media/movies/{}/video", movie.id),
+        .oneshot(protocol_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
             &cookie,
             &csrf,
             boundary,
@@ -3694,8 +3706,8 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
     oversized_filename.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let response = app
         .clone()
-        .oneshot(raw_multipart_request(
-            format!("/api/admin/media/movies/{}/video", movie.id),
+        .oneshot(protocol_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
             &cookie,
             &csrf,
             boundary,
@@ -3715,8 +3727,8 @@ async fn multipart_request_bounds_metadata_and_requires_exactly_one_file_field()
     );
     let response = app
         .clone()
-        .oneshot(raw_multipart_request(
-            format!("/api/admin/media/movies/{}/video", movie.id),
+        .oneshot(protocol_request(
+            format!("/api/admin/media/movies/{}/video?version=1", movie.id),
             &cookie,
             &csrf,
             boundary,
@@ -4036,4 +4048,348 @@ async fn registration_commit_unknown_retains_pending_file_until_database_state_r
             );
         }
     }
+}
+
+/// 为上传容量测试安装真实认证及媒体路由，并注入受控卷容量。
+async fn capacity_router(
+    db: &DatabaseConnection,
+    root: &TempRoot,
+    reader: Arc<dyn StorageCapacityReader>,
+    hooks: Arc<dyn StorageHooks>,
+) -> Router {
+    use movie_harbor_api::{auth, media};
+    let config = config(root.as_ref());
+    auth::initialize(db, &config).await.unwrap();
+    let auth = auth::AuthState {
+        db: db.clone(),
+        cookie_secure: true,
+        origin_policy: auth::csrf::OriginPolicy::new(config.validated_origin().unwrap(), false),
+        trust_proxy_headers: false,
+        trusted_proxy_secret_digest: None,
+        mcp_api_key_digest: None,
+        limits: Default::default(),
+        password_work: Arc::new(tokio::sync::Semaphore::new(2)),
+    };
+    let storage =
+        LocalMediaStorage::initialize_with_hooks_and_capacity_reader(root.as_ref(), hooks, reader)
+            .await
+            .unwrap();
+    auth::routes::router(auth.clone())
+        .merge(media::routes::router(auth, storage, policy(4096)).unwrap())
+}
+
+/// 在拒绝场景中记录首个正文帧的读取，验证错误码和安全响应。
+async fn capacity_rejection(
+    app: &Router,
+    request: Request<Body>,
+    code: &str,
+    status: StatusCode,
+    should_read: bool,
+) {
+    let consumed = Arc::new(AtomicBool::new(false));
+    let polled = consumed.clone();
+    let request = request.map(|body| {
+        Body::new(body.map_frame(move |frame| {
+            polled.store(true, Ordering::SeqCst);
+            frame
+        }))
+    });
+    let response = app.clone().oneshot(request).await.unwrap();
+    let actual_status = response.status();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["code"], code, "{body}");
+    assert_eq!(actual_status, status);
+    assert_eq!(consumed.load(Ordering::SeqCst), should_read);
+    assert!(!body.to_string().contains("/"));
+}
+
+/// 验证两个视频入口都在消费正文前拒绝无效声明及无法满足的容量。
+#[tokio::test]
+async fn capacity_routes_reject_before_polling_the_body() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let available = 10 * 1024 * 1024 * 1024 + 9;
+    for fail in [false, true] {
+        let app = capacity_router(
+            &db,
+            &root,
+            Arc::new(FixedCapacityReader {
+                capacity: StorageCapacity {
+                    total_bytes: available,
+                    available_bytes: available,
+                },
+                fail,
+            }),
+            Arc::new(RecordingHooks::default()),
+        )
+        .await;
+        let (cookie, csrf) = credentials(&app).await;
+        for kind in ["movies", "episodes"] {
+            let path = format!("/api/admin/media/{kind}/{}/video?version=1", Uuid::new_v4());
+            // 读取正文将给出媒体格式错误，计数器独立证明提前拒绝。
+            let make_request =
+                || raw_multipart_request(path.clone(), &cookie, &csrf, "bound", vec![1, 2, 3]);
+            for values in [
+                vec![],
+                vec!["1", "1"],
+                vec![""],
+                vec![" 1"],
+                vec!["+1"],
+                vec!["-1"],
+                vec!["01"],
+                vec!["18446744073709551616"],
+            ] {
+                let mut request = make_request();
+                for value in values {
+                    request
+                        .headers_mut()
+                        .append("x-media-byte-size", value.parse().unwrap());
+                }
+                capacity_rejection(
+                    &app,
+                    request,
+                    "declared_size_invalid",
+                    StatusCode::BAD_REQUEST,
+                    false,
+                )
+                .await;
+            }
+            for size in ["10", "18446744073709551615"] {
+                let mut request = make_request();
+                request
+                    .headers_mut()
+                    .insert("x-media-byte-size", size.parse().unwrap());
+                let (code, status) = if fail {
+                    (
+                        "storage_capacity_unavailable",
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                } else {
+                    ("storage_space_low", StatusCode::INSUFFICIENT_STORAGE)
+                };
+                capacity_rejection(&app, request, code, status, false).await;
+            }
+        }
+        assert_eq!(count_files(root.as_ref()), 0);
+    }
+}
+
+/// 用文件落盘事件改变下一次可用量，验证并发上传在同一锁内依次复核。
+struct UploadCapacityProbe {
+    available: u64,
+    promoted: AtomicBool,
+    reads: AtomicUsize,
+}
+
+impl StorageHooks for UploadCapacityProbe {
+    /// 首次正式提升后记录占用，确保第二次容量判断反映真实写入顺序。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::Promoted(_)) {
+            self.promoted.store(true, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
+
+impl StorageCapacityReader for UploadCapacityProbe {
+    /// 返回当前容量；旧快照会让第二个请求也通过门槛。
+    fn read(&self, _: BorrowedFd<'_>) -> std::io::Result<StorageCapacity> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        Ok(StorageCapacity {
+            total_bytes: self.available,
+            available_bytes: if self.promoted.load(Ordering::SeqCst) {
+                self.available - 1
+            } else {
+                self.available
+            },
+        })
+    }
+}
+
+/// 检查恰等门槛的上传能成功，并发的下一次在第一个文件落盘后重新采样。
+#[tokio::test]
+async fn capacity_serializes_uploads_and_allows_exact_fit() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let probe = Arc::new(UploadCapacityProbe {
+        available: 10 * 1024 * 1024 * 1024 + valid_mp4().len() as u64,
+        promoted: AtomicBool::new(false),
+        reads: AtomicUsize::new(0),
+    });
+    let app = capacity_router(&db, &root, probe.clone(), probe.clone()).await;
+    let (cookie, csrf) = credentials(&app).await;
+    let first = draft_movie(&db, None).await;
+    let second = draft_movie(&db, None).await;
+    let request = |id| {
+        multipart_request(
+            format!("/api/admin/media/movies/{id}/video?version=1"),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        )
+    };
+    let (a, b) = tokio::join!(
+        app.clone().oneshot(request(first.id)),
+        app.oneshot(request(second.id))
+    );
+    let mut statuses = [a.unwrap().status(), b.unwrap().status()];
+    statuses.sort();
+    assert_eq!(statuses, [StatusCode::OK, StatusCode::INSUFFICIENT_STORAGE]);
+    assert_eq!(probe.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(count_files(root.as_ref()), 1);
+}
+
+/// 检查声明过大、过小、空间不足和实际 ENOSPC 均不替换旧文件或推进版本。
+#[tokio::test]
+async fn capacity_failed_replacements_preserve_asset_and_version() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(FullDiskHook(AtomicBool::new(false)));
+    let app = capacity_router(
+        &db,
+        &root,
+        Arc::new(FixedCapacityReader {
+            capacity: StorageCapacity {
+                total_bytes: u64::MAX,
+                available_bytes: u64::MAX,
+            },
+            fail: false,
+        }),
+        hooks.clone(),
+    )
+    .await;
+    let (cookie, csrf) = credentials(&app).await;
+    let movie = draft_movie(&db, None).await;
+    let request = |version| {
+        multipart_request(
+            format!(
+                "/api/admin/media/movies/{}/video?version={version}",
+                movie.id
+            ),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        )
+    };
+    assert_eq!(
+        app.clone().oneshot(request(1)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let saved = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let asset = media_asset::Entity::find_by_id(saved.video_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let len = valid_mp4().len();
+    for size in [len - 1, len + 1] {
+        let mut request = request(2);
+        request
+            .headers_mut()
+            .insert("x-media-byte-size", size.into());
+        capacity_rejection(
+            &app,
+            request,
+            "declared_size_mismatch",
+            StatusCode::BAD_REQUEST,
+            true,
+        )
+        .await;
+    }
+    let mut overflow = request(2);
+    overflow
+        .headers_mut()
+        .insert("x-media-byte-size", u64::MAX.into());
+    capacity_rejection(
+        &app,
+        overflow,
+        "storage_space_low",
+        StatusCode::INSUFFICIENT_STORAGE,
+        false,
+    )
+    .await;
+    hooks.0.store(true, Ordering::SeqCst);
+    capacity_rejection(
+        &app,
+        request(2),
+        "storage_space_low",
+        StatusCode::INSUFFICIENT_STORAGE,
+        true,
+    )
+    .await;
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    assert_eq!(
+        media_asset::Entity::find().all(&db).await.unwrap(),
+        vec![asset.clone()]
+    );
+    assert_eq!(
+        std::fs::read(root.as_ref().join(asset.storage_key)).unwrap(),
+        valid_mp4()
+    );
+    assert_eq!(count_files(root.as_ref()), 1);
+}
+
+/// 模拟预检通过后卷被外部写满，仅在测试指定的上传中生效。
+struct FullDiskHook(AtomicBool);
+impl StorageHooks for FullDiskHook {
+    /// 文件同步阶段返回系统无空间错误，检查客户端得到稳定容量错误。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if self.0.load(Ordering::SeqCst) && matches!(event, StorageEvent::FileSynced(_)) {
+            return Err(std::io::Error::from(rustix::io::Errno::NOSPC));
+        }
+        Ok(())
+    }
+}
+
+/// 验证第一块超过声明时立刻停止拉取，失败后清空已写入的临时数据。
+#[tokio::test]
+async fn capacity_stream_aborts_on_first_excess_chunk() {
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize_with_hooks_and_capacity_reader(
+        root.as_ref(),
+        Arc::new(RecordingHooks::default()),
+        Arc::new(FixedCapacityReader {
+            capacity: StorageCapacity {
+                total_bytes: 100,
+                available_bytes: 100,
+            },
+            fail: false,
+        }),
+    )
+    .await
+    .unwrap();
+    let (source, polls) = Chunks::new([&b"a"[..], &b"bc"[..], &b"never"[..]]);
+    // 允许首块落盘，第二块使累计大小超过声明；第三块若被读取说明拒绝过晚。
+    let session = storage
+        .begin_upload(Some(movie_harbor_api::media::UploadCapacityRequirement {
+            declared_bytes: 2,
+            reserve_bytes: 1,
+        }))
+        .await
+        .unwrap();
+    let result = session
+        .store(
+            Uuid::new_v4(),
+            MediaKind::Video,
+            "movie.mp4",
+            "video/mp4",
+            &policy(4096),
+            source,
+        )
+        .await;
+    assert!(matches!(result, Err(MediaError::DeclaredSizeMismatch)));
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_eq!(count_files(root.as_ref()), 0);
 }

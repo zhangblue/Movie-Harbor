@@ -27,6 +27,7 @@ export type ApiUploadProgress =
 export interface ApiUploadInit {
   method: "POST";
   body: FormData;
+  headers?: HeadersInit;
   query?: Query;
   onProgress: (progress: ApiUploadProgress) => void;
 }
@@ -202,8 +203,11 @@ export function apiUpload<T>(path: string, init: ApiUploadInit): Promise<T | und
     xhr.addEventListener("abort", () => rejectNetwork(new DOMException("Request was aborted", "AbortError")));
 
     xhr.open(init.method, url, true);
-    xhr.setRequestHeader("Accept", "application/json");
-    if (csrfToken) xhr.setRequestHeader("X-CSRF-Token", csrfToken);
+    const headers = new Headers(init.headers);
+    if (!headers.has("Accept")) headers.set("Accept", "application/json");
+    if (csrfToken) headers.set("X-CSRF-Token", csrfToken);
+    // open 后统一设置声明和认证头，避免 XHR 合并重复头值导致服务端拒绝。
+    headers.forEach((value, name) => xhr.setRequestHeader(name, value));
     init.onProgress({ phase: "uploading", percent: 0 });
     xhr.send(init.body);
   });

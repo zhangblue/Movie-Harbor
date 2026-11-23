@@ -107,7 +107,10 @@ export class AdminApi {
   }
   // 通过 multipart 上传测试媒体并断言成功，供媒体生命周期测试使用。
   async upload<T>(path: string, file: { name: string; mimeType: string; buffer: Buffer }): Promise<T> {
-    const response = await this.request.post(path, { multipart: { file }, headers: this.headers() });
+    // 与管理客户端一样，只给视频槽位声明文件自身的字节数。
+    const headers = new URL(path, baseURL).pathname.endsWith("/video")
+      ? { ...this.headers(), "X-Media-Byte-Size": String(file.buffer.length) } : this.headers();
+    const response = await this.request.post(path, { multipart: { file }, headers });
     expect(response.status(), await response.text()).toBe(200);
     return response.json();
   }

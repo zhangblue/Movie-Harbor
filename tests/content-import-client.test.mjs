@@ -335,6 +335,7 @@ test("streams a file with exact multipart length and preserves query", async () 
       assert.equal(result.version, 3);
       const received = requests[2];
       assert.equal(received.url, "/api/admin/media/movies/id/video?version=2");
+      assert.equal(received.headers["x-media-byte-size"], String(payload.length));
       assert.equal(received.headers["content-length"], String(received.body.length));
       assert.equal(received.headers.cookie, "mh_session=session-value");
       assert.equal(received.headers["x-csrf-token"], "csrf-value");
@@ -343,6 +344,9 @@ test("streams a file with exact multipart length and preserves query", async () 
       assert.match(received.body.toString("latin1"), /Content-Type: video\/mp4/);
       assert.ok(received.body.includes(payload));
       assert.ok(readChunks > 1);
+      // 海报不参与视频容量保护，也不发送声明头。
+      await client.upload("/api/admin/media/movies/id/poster?version=3", { localPath, fileName: "one.png", byteSize: payload.length });
+      assert.equal(requests[3].headers["x-media-byte-size"], undefined);
     }, { readDelayMs: 1 });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -28,6 +28,14 @@ export function classifyEditorWriteError(cause: Error): EditorWriteError {
       return { kind: "message", message: "删除失败，内容和媒体文件已保留，请检查媒体目录权限后重试。" };
     case "media_replace_failed":
       return { kind: "message", message: "替换失败，原媒体文件已保留，请检查媒体目录权限后重试。" };
+    case "storage_space_low":
+      return { kind: "message", message: "媒体卷空间不足，请释放空间后重试。" };
+    case "storage_capacity_unavailable":
+      return { kind: "message", message: "暂时无法读取媒体卷容量，请稍后重试。" };
+    case "declared_size_invalid":
+      return { kind: "message", message: "视频大小声明无效，请重新选择文件后重试。" };
+    case "declared_size_mismatch":
+      return { kind: "message", message: "收到的视频大小与声明不符，请重新选择文件后重试。" };
     case "media_content_mismatch":
       return { kind: "message", message: "上传失败：文件内容与声明的类型不匹配，请确认文件格式正确且未损坏。" };
     default:
