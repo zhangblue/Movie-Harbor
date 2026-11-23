@@ -53,15 +53,24 @@ impl AttachmentTarget {
     }
 }
 
-/// 待提交附件，供文件保存后和事务切换之间保存上传上下文。
-pub(crate) struct PendingAttachment {
+/// 同一请求的数据库登记信息，供最终事务创建资产和切换槽位。
+struct AttachmentMetadata {
     id: Uuid,
     target: AttachmentTarget,
-    kind: MediaKind,
     original_name: String,
-    stored: StoredFile,
+}
+
+/// 单集暂时只持有分片；海报和电影沿用已完成正式提升的上传结果。
+enum AttachmentFile {
+    EpisodePart(super::storage::ValidatedUpload),
+    Stored(StoredFile),
+}
+
+/// 已通过格式校验的附件及本地锁，待完整 multipart 和最终事务确认后提交。
+pub(crate) struct PendingAttachment {
+    metadata: AttachmentMetadata,
+    file: AttachmentFile,
     storage: LocalMediaStorage,
-    expected_version: i64,
 }
 
 /// 已提交附件结果，供路由返回资产与更新后的版本。
@@ -281,73 +290,102 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
     policy: &UploadPolicy,
     source: S,
 ) -> Result<PendingAttachment, MediaError> {
-    let expected_version = target.expected_version();
-    if expected_version <= 0 {
+    if target.expected_version() <= 0 {
         return Err(MediaError::InvalidVersion);
     }
     let id = Uuid::new_v4();
-    let kind = target.kind();
-    // 替换也先按流式上传策略完整写入新文件；旧引用在后续事务成功前保持不变。
     let storage = session.storage.clone();
-    let stored = session
-        .store(id, kind, original_name, declared_mime, policy, source)
-        .await?;
+    let file = match target {
+        AttachmentTarget::EpisodeVideo { .. } => {
+            // 只验证私有分片，最终事务核对父子版本前不会创建正式目录或发布 v2 凭证。
+            AttachmentFile::EpisodePart(
+                session
+                    .stage_episode(id, original_name, declared_mime, policy, source)
+                    .await?,
+            )
+        }
+        _ => AttachmentFile::Stored(
+            session
+                .store(
+                    id,
+                    target.kind(),
+                    original_name,
+                    declared_mime,
+                    policy,
+                    source,
+                )
+                .await?,
+        ),
+    };
     Ok(PendingAttachment {
-        id,
-        target,
-        kind,
-        original_name: original_name.to_owned(),
-        stored,
+        metadata: AttachmentMetadata {
+            id,
+            target,
+            original_name: original_name.to_owned(),
+        },
+        file,
         storage,
-        expected_version,
     })
 }
 
 /// 在新文件准备后协调锁、事务切换和旧文件清理，区分提交前后失败。
 pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
-    mut pending: PendingAttachment,
+    pending: PendingAttachment,
 ) -> Result<CommittedAttachment, MediaError> {
-    // 数据已写完，本地锁仍由 pending 持有；只在此时重新取得数据库媒体事务锁。
+    // 传输结束后才取数据库咨询锁，本地锁继续覆盖文件准备、事务等待和出错清理。
     let tx = super::transaction::begin(db).await?;
-    // 正文传输期间父子内容都可能变化。在任何 INSERT 或旧文件移动之前重新锁定和校验。
-    let slot = match lock_guarded_episode(&tx, pending.target).await {
-        Ok(slot) => slot,
-        Err(error) => {
-            tx.rollback().await?;
-            // 显式完成未登记新视频的删除和目录同步，之后才能向调用方报告冲突。
-            pending.stored.finish_known_rollback()?;
-            return Err(error);
+    let (mut stored, slot) = match pending.file {
+        AttachmentFile::EpisodePart(part) => {
+            let slot = match lock_target_episode(&tx, pending.metadata.target).await {
+                Ok(slot) => slot,
+                Err(error) => {
+                    tx.rollback().await?;
+                    part.discard()?;
+                    return Err(error);
+                }
+            };
+            // 父、季、集行锁持续到提交；只有此时才创建 v2 证据并提升文件。
+            match part.promote(&pending.storage) {
+                Ok(stored) => (stored, Some(slot)),
+                Err(error) => {
+                    // 提升失败时尚无数据库写入，释放本次事务后才报告已清理的错误。
+                    tx.rollback().await?;
+                    return Err(error);
+                }
+            }
         }
+        AttachmentFile::Stored(stored) => (stored, None),
     };
     // 把本地锁交给旧文件清理流程后才允许首次数据库写入，已核验的单集行锁持续到事务结束。
-    let guard = pending.stored.take_mutation_guard()?;
+    let guard = stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
-    pending.stored.begin_database_write();
-    let result = replace_before_commit(&tx, &pending, &removal, &mut staged, slot).await;
+    stored.begin_database_write();
+    let result =
+        replace_before_commit(&tx, &pending.metadata, &stored, &removal, &mut staged, slot).await;
     let committed = match result {
         Ok(committed) => committed,
         Err(error) => {
             let rolled_back = tx.rollback().await.is_ok();
             if rolled_back {
-                pending.stored.database_failure_is_known();
+                stored.database_failure_is_known();
             }
             let restore_result = staged
                 .take()
                 .map(|staged| staged.restore(&pending.storage))
                 .transpose();
-            pending.stored.return_mutation_guard(removal.into_guard())?;
+            stored.return_mutation_guard(removal.into_guard())?;
             restore_result.map_err(|_| MediaError::ReplacementFailed)?;
             // 只有事务回滚和旧文件恢复均已确认，才把提交前的视频 ENOSPC 报为可重试容量错误。
             if let MediaError::Io(cause) = &error
                 && cause.kind() == std::io::ErrorKind::StorageFull
             {
-                if rolled_back && pending.kind == MediaKind::Video {
-                    pending.stored.finish_known_rollback()?;
+                if rolled_back && pending.metadata.target.kind() == MediaKind::Video {
+                    stored.finish_known_rollback()?;
                     return Err(MediaError::StorageSpaceLow {
                         available_bytes: None,
-                        required_bytes: (pending.stored.byte_size as u64)
+                        required_bytes: (stored.byte_size as u64)
                             .checked_add(super::MEDIA_CAPACITY_RESERVE_BYTES),
                         reserve_bytes: super::MEDIA_CAPACITY_RESERVE_BYTES,
                     });
@@ -357,18 +395,16 @@ pub(crate) async fn commit_attachment(
             return Err(error);
         }
     };
-    if tx.commit().await.is_err() || pending.stored.replacement_commit_acknowledged().is_err() {
+    if tx.commit().await.is_err() || stored.replacement_commit_acknowledged().is_err() {
         // COMMIT 可能已生效；旧文件留在删除清单，新文件保留 pending，启动按实际引用裁定。
         return Err(MediaError::ReplacementOutcomeUnknown);
     }
     // 数据库提交后，注册新资产或清理旧隔离副本的失败均映射为 ReplacementFinalizationFailed，与提交前的 ReplacementFailed 区分。
-    pending
-        .stored
+    stored
         .notify_database_committed()
         .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     tokio::task::yield_now().await;
-    pending
-        .stored
+    stored
         .mark_registered()
         .map_err(|_| MediaError::ReplacementFinalizationFailed)?;
     if let Some(staged) = staged {
@@ -386,7 +422,8 @@ pub(crate) async fn commit_attachment(
 /// 在附件事务提交前登记新资产、切换引用并暂存旧资产。
 async fn replace_before_commit(
     tx: &DatabaseTransaction,
-    pending: &PendingAttachment,
+    metadata: &AttachmentMetadata,
+    stored: &StoredFile,
     removal: &RemovalSession,
     staged: &mut Option<StagedOperation>,
     slot: Option<LockedEpisodeSlot>,
@@ -394,17 +431,17 @@ async fn replace_before_commit(
     // 新资产登记、归属槽位切换和旧资产记录删除共用一个事务，避免媒体资产被多个槽位同时引用。
     let asset = insert_asset(
         tx,
-        pending.id,
-        pending.kind,
-        &pending.original_name,
-        &pending.stored,
+        metadata.id,
+        metadata.target.kind(),
+        &metadata.original_name,
+        stored,
     )
     .await?;
     let outcome = switch_reference(
         tx,
-        pending.target,
+        metadata.target,
         asset.id,
-        pending.expected_version,
+        metadata.target.expected_version(),
         removal,
         staged,
         slot,
@@ -459,7 +496,7 @@ pub(crate) async fn preflight_episode(
         }
     ) {
         let tx = super::transaction::begin(db).await?;
-        let check = lock_guarded_episode(&tx, target).await;
+        let check = lock_target_episode(&tx, target).await;
         // 预检不写入，所有结果均在显式回滚释放咨询锁及行锁后返回，慢请求不占用这些锁。
         tx.rollback().await?;
         check?;
@@ -467,24 +504,24 @@ pub(crate) async fn preflight_episode(
     Ok(())
 }
 
-/// 预检和提交均在各自事务内核对调用方声明的父子版本，提交方可沿用此次锁定的行。
-async fn lock_guarded_episode(
+/// 单集预检和最终提升均在事务中核对归属及单集版本；有父版本声明时一并核对。
+async fn lock_target_episode(
     tx: &DatabaseTransaction,
     target: AttachmentTarget,
-) -> Result<Option<LockedEpisodeSlot>, MediaError> {
+) -> Result<LockedEpisodeSlot, MediaError> {
     let AttachmentTarget::EpisodeVideo {
         id,
         version,
-        series_version: Some(expected),
+        series_version,
     } = target
     else {
-        return Ok(None);
+        return Err(MediaError::InvalidVersion);
     };
     let slot = lock_episode_slot(tx, id, version).await?;
-    if slot.parent.version != expected {
+    if series_version.is_some_and(|expected| slot.parent.version != expected) {
         return Err(MediaError::VersionConflict);
     }
-    Ok(Some(slot))
+    Ok(slot)
 }
 
 /// 按整剧、季、单集的写锁顺序重新核对归属及单集版本，返回的快照只在当前事务有效。

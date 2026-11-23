@@ -663,12 +663,24 @@ fn make_stale(path: &Path) {
 /// 在持久化顺序测试中记录存储事件。
 struct RecordingHooks {
     events: Mutex<Vec<StorageEvent>>,
+    lose_acknowledgement: AtomicBool,
+    fail_published_marker: AtomicBool,
 }
 
 impl StorageHooks for RecordingHooks {
     /// 在存储事件发生时记录事件，供持久化顺序断言使用。
     fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
         self.events.lock().unwrap().push(event.clone());
+        if matches!(event, StorageEvent::FileSynced(name) if name.ends_with(".pending"))
+            && self.fail_published_marker.swap(false, Ordering::SeqCst)
+        {
+            return Err(std::io::ErrorKind::StorageFull.into());
+        }
+        if matches!(event, StorageEvent::ReplacementCommitAcknowledgement)
+            && self.lose_acknowledgement.load(Ordering::SeqCst)
+        {
+            return Err(std::io::Error::other("模拟提交确认丢失"));
+        }
         Ok(())
     }
 }
@@ -4072,25 +4084,44 @@ async fn capacity_router(
     reader: Arc<dyn StorageCapacityReader>,
     hooks: Arc<dyn StorageHooks>,
 ) -> Router {
-    use movie_harbor_api::{auth, media};
     let config = config(root.as_ref());
-    auth::initialize(db, &config).await.unwrap();
+    let storage =
+        LocalMediaStorage::initialize_with_hooks_and_capacity_reader(root.as_ref(), hooks, reader)
+            .await
+            .unwrap();
+    media_test_router(db, &config, storage).await
+}
+
+/// 让真实的认证、内容和媒体路由共用同一个可观察的存储，便于核对并发及持久化边界。
+async fn media_test_router(
+    db: &DatabaseConnection,
+    config: &Config,
+    storage: LocalMediaStorage,
+) -> Router {
+    use movie_harbor_api::{auth, media, movies, series};
+    auth::initialize(db, config).await.unwrap();
     let auth = auth::AuthState {
         db: db.clone(),
         cookie_secure: true,
         origin_policy: auth::csrf::OriginPolicy::new(config.validated_origin().unwrap(), false),
         trust_proxy_headers: false,
         trusted_proxy_secret_digest: None,
-        mcp_api_key_digest: None,
+        mcp_api_key_digest: config.mcp_api_key_digest.clone(),
         limits: Default::default(),
         password_work: Arc::new(tokio::sync::Semaphore::new(2)),
     };
-    let storage =
-        LocalMediaStorage::initialize_with_hooks_and_capacity_reader(root.as_ref(), hooks, reader)
-            .await
-            .unwrap();
     auth::routes::router(auth.clone())
-        .merge(media::routes::router(auth, storage, policy(4096)).unwrap())
+        .merge(movies::routes::router(
+            auth.clone(),
+            storage.clone(),
+            config.allowed_video_mime_types.clone(),
+        ))
+        .merge(series::routes::router(
+            auth.clone(),
+            storage.clone(),
+            config.allowed_video_mime_types.clone(),
+        ))
+        .merge(media::routes::router(auth, storage, policy(config.max_upload_bytes)).unwrap())
 }
 
 /// 在拒绝场景中记录首个正文帧的读取，验证错误码和安全响应。
@@ -5466,7 +5497,11 @@ async fn guarded_episode_replacement_releases_database_locks_and_rechecks_after_
     let mut cfg = config(root.as_ref());
     cfg.mcp_api_key_digest = Some(movie_harbor_api::auth::csrf::digest(KEY));
     cfg.max_upload_bytes = 2 * 1024 * 1024;
-    let app = app::build(db.clone(), &cfg).await.unwrap();
+    let hooks = Arc::new(RecordingHooks::default());
+    let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    let app = media_test_router(&db, &cfg, storage.clone()).await;
     let (cookie, csrf) = credentials(&app).await;
     let (parent, season, target, sibling, genre) = (
         Uuid::new_v4(),
@@ -5544,6 +5579,7 @@ async fn guarded_episode_replacement_releases_database_locks_and_rechecks_after_
     )
     .await
     .unwrap();
+    hooks.events.lock().unwrap().clear();
     let (resume, upload) = pause_episode_replacement(
         &app,
         format!("{base}?version=2&series_version=2"),
@@ -5593,6 +5629,22 @@ async fn guarded_episode_replacement_releases_database_locks_and_rechecks_after_
         StatusCode::CONFLICT,
         "最终提交须重新核对兄弟更新后的父版本"
     );
+    let events = std::mem::take(&mut *hooks.events.lock().unwrap());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, StorageEvent::BeforePromote(_)))
+            .count(),
+        0,
+        "父版本冲突时仍进入了正式文件提升"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, StorageEvent::Promoted(_))
+                || matches!(event, StorageEvent::FileSynced(name) if name.ends_with(".pending"))),
+        "父版本冲突不能写入凭证或正式文件"
+    );
     assert_eq!(
         episode::Entity::find_by_id(target)
             .one(&db)
@@ -5640,6 +5692,185 @@ async fn guarded_episode_replacement_releases_database_locks_and_rechecks_after_
         PNG
     );
     assert_eq!(count_files(root.as_ref()), 2);
+
+    // 最终事务已通过版本检查但发布凭证时卷满，507 前须移除本次分片及已经发布的凭证。
+    hooks.fail_published_marker.store(true, Ordering::SeqCst);
+    let full = multipart_request(
+        format!("{base}?version=2&series_version=3"),
+        Some(&cookie),
+        Some(&csrf),
+        "https://harbor.test",
+    );
+    assert_eq!(
+        app.clone().oneshot(full).await.unwrap().status(),
+        StatusCode::INSUFFICIENT_STORAGE
+    );
+    assert_eq!(
+        count_files(root.as_ref()),
+        2,
+        "凭证发布时卷满遗留了未登记文件"
+    );
+    assert_eq!(
+        episode::Entity::find_by_id(target)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    hooks.events.lock().unwrap().clear();
+    // 匹配的新版本允许一次提升；之后模拟另一次替换已提交但确认丢失，启动应按凭证保留新槽位。
+    let success = multipart_request(
+        format!("{base}?version=2&series_version=3"),
+        Some(&cookie),
+        Some(&csrf),
+        "https://harbor.test",
+    );
+    assert_eq!(
+        app.clone().oneshot(success).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let events = std::mem::take(&mut *hooks.events.lock().unwrap());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, StorageEvent::BeforePromote(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event, StorageEvent::Promoted(_)))
+            .count(),
+        1
+    );
+    hooks.lose_acknowledgement.store(true, Ordering::SeqCst);
+    let unknown = multipart_request(
+        format!("{base}?version=3&series_version=4"),
+        Some(&cookie),
+        Some(&csrf),
+        "https://harbor.test",
+    );
+    let unknown = app.oneshot(unknown).await.unwrap();
+    assert_eq!(unknown.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let unknown: Value =
+        serde_json::from_slice(&unknown.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(unknown["code"], "media_replace_outcome_unknown");
+    let episode = episode::Entity::find_by_id(target)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(episode.version, 4);
+    let key = media_asset::Entity::find_by_id(episode.video_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .storage_key;
+    assert_eq!(count_files(&root.as_ref().join(".incoming")), 1);
+    assert_eq!(count_files(&root.as_ref().join(".quarantine")), 1);
+    assert!(count_files(&root.as_ref().join(".operations")) >= 2);
+    movie_harbor_api::media::prepare_for_serving(&db, &storage)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(root.as_ref().join(key)).unwrap(), valid_mp4());
+    assert_eq!(count_files(root.as_ref()), 2);
+}
+
+/// 在最终事务真正等待时检查磁盘边界，取消只清除自己的分片，同名替代物不得被提升或删除。
+#[tokio::test]
+async fn waiting_episode_upload_owns_only_its_validated_part() {
+    use sea_orm::TransactionTrait;
+    for substitute in [false, true] {
+        let db = database().await;
+        let root = TempRoot::new();
+        let mut cfg = config(root.as_ref());
+        cfg.max_upload_bytes = 2 * 1024 * 1024;
+        let app = app::build(db.clone(), &cfg).await.unwrap();
+        let (cookie, csrf) = credentials(&app).await;
+        let (parent, season, episode) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        db.execute_unprepared(&format!(
+            "INSERT INTO series(id,name) VALUES ('{parent}','父剧');
+             INSERT INTO season(id,series_id,number) VALUES ('{season}','{parent}',1);
+             INSERT INTO episode(id,season_id,number,name) VALUES ('{episode}','{season}',1,'单集')"
+        ))
+        .await
+        .unwrap();
+        let (resume, upload) = pause_episode_replacement(
+            &app,
+            format!("/api/admin/media/episodes/{episode}/video?version=1&series_version=1"),
+            &cookie,
+            &csrf,
+        )
+        .await;
+        let gate = db.begin().await.unwrap();
+        gate.execute_unprepared(
+            "SELECT pg_advisory_xact_lock(1296584018, 'media_asset'::regclass::int)",
+        )
+        .await
+        .unwrap();
+        resume.send(()).unwrap();
+        // 等待上传完成正文验证并请求最终咨询锁后，才检查临时区和正式目录。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let blocked = gate.query_one(Statement::from_string(DatabaseBackend::Postgres,
+                    "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted
+                     AND pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting"
+                )).await.unwrap().unwrap();
+                if blocked.try_get::<bool>("", "waiting").unwrap() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("上传未进入最终事务屏障");
+        let parts: Vec<_> = std::fs::read_dir(root.as_ref().join(".incoming"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].extension().unwrap(), "part");
+        assert!(std::fs::metadata(&parts[0]).unwrap().len() > 1024 * 1024);
+        assert!(!root.as_ref().join("video").exists());
+        assert_eq!(count_files(root.as_ref()), 1);
+        if substitute {
+            std::fs::remove_file(&parts[0]).unwrap();
+            std::fs::write(&parts[0], b"unrelated replacement").unwrap();
+            gate.rollback().await.unwrap();
+            assert_eq!(
+                upload.await.unwrap().status(),
+                StatusCode::INTERNAL_SERVER_ERROR
+            );
+            assert_eq!(
+                std::fs::read(&parts[0]).expect("误删同名外来分片"),
+                b"unrelated replacement"
+            );
+        } else {
+            upload.abort();
+            assert!(upload.await.unwrap_err().is_cancelled());
+            gate.rollback().await.unwrap();
+            assert_eq!(count_files(root.as_ref()), 0);
+        }
+        assert!(
+            media_asset::Entity::find()
+                .all(&db)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            episode::Entity::find_by_id(episode)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+    }
 }
 
 /// 实际复制完整备份到新目录：只在数据库、凭证和正式文件字节全部吻合时结清已提交凭证。

@@ -158,7 +158,7 @@ pub(crate) struct UploadSession<'a> {
 }
 
 impl UploadSession<'_> {
-    /// 持锁并核对 multipart 元数据后写入文件，清理守卫接管锁直到后续数据库登记完成。
+    /// 普通存储入口沿用先准备正式目录、校验分片后立即提升的持久化顺序。
     pub async fn store<S: ChunkSource + Send>(
         self,
         resource_id: Uuid,
@@ -166,52 +166,129 @@ impl UploadSession<'_> {
         original_name: &str,
         declared_mime: &str,
         policy: &UploadPolicy,
-        mut source: S,
+        source: S,
     ) -> Result<StoredFile, MediaError> {
-        // 最终存储边界同样检查声明，避免内部调用误用海报会话写视频。
+        let spec = self.spec(resource_id, kind, original_name, declared_mime, policy)?;
+        let storage = self.storage;
+        self.stage(spec, source, true).await?.promote(storage)
+    }
+
+    /// 单集视频先只写入和验证 .part，保留文件描述符及本地锁交给最终版本检查。
+    pub(crate) async fn stage_episode<S: ChunkSource + Send>(
+        self,
+        resource_id: Uuid,
+        original_name: &str,
+        declared_mime: &str,
+        policy: &UploadPolicy,
+        source: S,
+    ) -> Result<ValidatedUpload, MediaError> {
+        let spec = self.spec(
+            resource_id,
+            MediaKind::Video,
+            original_name,
+            declared_mime,
+            policy,
+        )?;
+        self.stage(spec, source, false).await
+    }
+
+    /// 在接收正文前统一校验上传声明、名称和格式策略，两个入口使用相同的限制。
+    fn spec<'a>(
+        &self,
+        resource_id: Uuid,
+        kind: MediaKind,
+        original_name: &str,
+        declared_mime: &'a str,
+        policy: &UploadPolicy,
+    ) -> Result<StoreSpec<'a>, MediaError> {
         if kind == MediaKind::Video && self.capacity.is_none() {
             return Err(MediaError::DeclaredSizeInvalid);
         }
-        let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
+        Ok(StoreSpec {
+            resource_id,
+            kind,
+            declared_mime,
+            format: validation::validate_metadata(kind, original_name, declared_mime, policy)?,
+            max_bytes: policy.max_bytes(),
+            declared_bytes: self.capacity.map(|requirement| requirement.declared_bytes),
+        })
+    }
+
+    /// 临时文件守卫在首次写入前接管本地锁，直至分片丢弃或正式文件完成登记。
+    async fn stage<S: ChunkSource + Send>(
+        self,
+        spec: StoreSpec<'_>,
+        mut source: S,
+        prepare_directories: bool,
+    ) -> Result<ValidatedUpload, MediaError> {
         let temp_name = format!("{}.part", Uuid::new_v4().simple());
         let mut cleanup = PendingCleanup::new(
             self.storage.incoming_fd.clone(),
             self.storage.quarantine_fd.clone(),
-            temp_name.clone(),
             self.storage.hooks.clone(),
             self.guard,
         );
-        let spec = StoreSpec {
-            resource_id,
-            kind,
-            declared_mime,
-            format,
-            max_bytes: policy.max_bytes(),
-            declared_bytes: self.capacity.map(|requirement| requirement.declared_bytes),
-        };
-        // 锁内采样后其他进程仍可能写满磁盘，将真实 ENOSPC 转成容量错误并清理本次文件。
-        let result = self
-            .storage
-            .write_and_promote(&temp_name, spec, &mut source, &mut cleanup)
-            .await;
-        match (self.capacity, result) {
-            (Some(requirement), Err(MediaError::Io(error)))
-                if error.kind() == io::ErrorKind::StorageFull =>
-            {
-                cleanup
-                    .finish_rollback()
-                    .map_err(|_| MediaError::ReplacementFailed)?;
-                Err(MediaError::StorageSpaceLow {
-                    // ENOSPC 可来自外部占用或配额，错误本身未提供可用字节数。
-                    available_bytes: None,
-                    required_bytes: requirement
-                        .declared_bytes
-                        .checked_add(requirement.reserve_bytes),
-                    reserve_bytes: requirement.reserve_bytes,
-                })
-            }
-            (_, result) => result,
+        let simple = spec.resource_id.simple().to_string();
+        let key = format!(
+            "{}/{}/{}.{}",
+            spec.kind.directory(),
+            &simple[..2],
+            simple,
+            spec.format.extension
+        );
+        let result = async {
+            // 旧入口预先持有目标目录描述符，单集延后至最终行锁校验通过再创建正式目录。
+            let directories = if prepare_directories {
+                Some(self.storage.upload_directories(&key)?)
+            } else {
+                None
+            };
+            let marker = self
+                .storage
+                .write_part(&temp_name, &spec, &mut source, key, &mut cleanup)
+                .await?;
+            Ok((directories, marker))
         }
+        .await;
+        let (directories, marker) = cleanup.capacity_result(self.capacity, result)?;
+        Ok(ValidatedUpload {
+            marker,
+            directories,
+            capacity: self.capacity,
+            cleanup,
+            mime_type: spec.declared_mime.to_owned(),
+            marker_name: format!("{simple}.pending"),
+        })
+    }
+}
+
+/// 完成内容和身份校验的私有分片，其打开的文件和清理守卫跨越后续事务等待。
+pub(crate) struct ValidatedUpload {
+    marker: PendingMarker,
+    marker_name: String,
+    directories: Option<(OwnedFd, Arc<OwnedFd>)>,
+    mime_type: String,
+    capacity: Option<UploadCapacityRequirement>,
+    cleanup: PendingCleanup,
+}
+
+impl ValidatedUpload {
+    /// 最终版本不符时直接同步移除受控分片，保留原槽和正式目录。
+    pub(crate) fn discard(mut self) -> Result<(), MediaError> {
+        self.cleanup.finish_rollback()
+    }
+
+    /// 业务允许写入后才发布恢复凭证并执行正式提升，失败时沿用既有 ENOSPC 回滚语义。
+    pub(crate) fn promote(mut self, storage: &LocalMediaStorage) -> Result<StoredFile, MediaError> {
+        let result = storage.promote_part(&mut self);
+        self.cleanup.capacity_result(self.capacity, result)?;
+        Ok(StoredFile {
+            storage_key: self.marker.storage_key,
+            mime_type: self.mime_type,
+            byte_size: i64::try_from(self.marker.byte_size).map_err(|_| MediaError::TooLarge)?,
+            checksum_sha256: self.marker.checksum_sha256,
+            cleanup: Some(self.cleanup),
+        })
     }
 }
 
@@ -298,7 +375,7 @@ impl StoredFile {
         }
     }
 
-    /// 报告可确定的容量或版本错误前完成未登记文件的回滚，清理失败则保留凭证供启动恢复。
+    /// 已提升文件在事务回滚后同步清理，只有清理成功才报告可重试的容量错误。
     pub(crate) fn finish_known_rollback(&mut self) -> Result<(), MediaError> {
         if let Some(cleanup) = &mut self.cleanup {
             cleanup
@@ -354,11 +431,34 @@ struct FormalCleanup {
     marker: PendingMarker,
 }
 
+/// 以独占创建后保留的描述符识别分片，等待数据库期间同名替换也不会取得所有权。
+#[derive(Debug)]
+struct OwnedPart {
+    name: String,
+    file: std::fs::File,
+}
+
+impl OwnedPart {
+    /// 即将验证、提升或删除分片时核对私有目录项的身份，已消失和被替换分别处理。
+    fn named_stat(&self, incoming: &OwnedFd) -> Result<Option<rustix::fs::Stat>, MediaError> {
+        let named = match statat(incoming, self.name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(stat) => stat,
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
+            Err(error) => return Err(io::Error::from(error).into()),
+        };
+        let held = rustix::fs::fstat(&self.file).map_err(io::Error::from)?;
+        if named.st_dev != held.st_dev || named.st_ino != held.st_ino {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        Ok(Some(named))
+    }
+}
+
 /// 上传期间持有的析构清理状态，随提升和数据库登记阶段切换责任并保持变更锁。
 struct PendingCleanup {
     incoming: Arc<OwnedFd>,
     quarantine: Arc<OwnedFd>,
-    temp_name: Option<String>,
+    part: Option<OwnedPart>,
     marker_name: Option<String>,
     formal: Option<FormalCleanup>,
     hooks: Arc<dyn StorageHooks>,
@@ -371,7 +471,7 @@ impl std::fmt::Debug for PendingCleanup {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("PendingCleanup")
-            .field("temp_name", &self.temp_name)
+            .field("temp_name", &self.part.as_ref().map(|part| &part.name))
             .field("marker_name", &self.marker_name)
             .field(
                 "formal",
@@ -386,14 +486,13 @@ impl PendingCleanup {
     fn new(
         incoming: Arc<OwnedFd>,
         quarantine: Arc<OwnedFd>,
-        temp_name: String,
         hooks: Arc<dyn StorageHooks>,
         mutation_guard: OwnedMutexGuard<()>,
     ) -> Self {
         Self {
             incoming,
             quarantine,
-            temp_name: Some(temp_name),
+            part: None,
             marker_name: None,
             formal: None,
             hooks,
@@ -409,23 +508,51 @@ impl PendingCleanup {
         file_name: String,
         storage_key: String,
         marker: &PendingMarker,
-    ) {
+    ) -> Option<OwnedPart> {
         // 原子移动后清理目标从临时名切换为正式文件，并保留校验时的身份，防止误删同名替代文件。
-        self.temp_name = None;
         self.formal = Some(FormalCleanup {
             directory,
             file_name,
             storage_key,
             marker: marker.clone(),
         });
+        self.part.take()
+    }
+
+    /// 空间写满时先在本地锁内完成本次分片或正式文件回滚，再返回可重试的容量错误。
+    fn capacity_result<T>(
+        &mut self,
+        capacity: Option<UploadCapacityRequirement>,
+        result: Result<T, MediaError>,
+    ) -> Result<T, MediaError> {
+        match (capacity, result) {
+            (Some(requirement), Err(MediaError::Io(error)))
+                if error.kind() == io::ErrorKind::StorageFull =>
+            {
+                self.finish_rollback()
+                    .map_err(|_| MediaError::ReplacementFailed)?;
+                Err(MediaError::StorageSpaceLow {
+                    // ENOSPC 可来自外部占用或配额，错误本身未提供可用字节数。
+                    available_bytes: None,
+                    required_bytes: requirement
+                        .declared_bytes
+                        .checked_add(requirement.reserve_bytes),
+                    reserve_bytes: requirement.reserve_bytes,
+                })
+            }
+            (_, result) => result,
+        }
     }
 
     /// 已知数据库未提交时同步处理正式文件及其凭证，返回恢复是否成功。
     fn finish_rollback(&mut self) -> Result<(), MediaError> {
-        if let Some(temp) = self.temp_name.as_deref() {
-            remove_if_present(&self.incoming, temp)?;
+        if let Some(part) = &self.part {
+            if part.named_stat(&self.incoming)?.is_some() {
+                unlinkat(&self.incoming, part.name.as_str(), AtFlags::empty())
+                    .map_err(io::Error::from)?;
+            }
             sync_fd(&self.incoming)?;
-            self.temp_name = None;
+            self.part = None;
         }
         if let Some(formal) = self.formal.as_ref() {
             if formal.marker.version == 2 {
@@ -722,23 +849,23 @@ impl LocalMediaStorage {
         })
     }
 
-    /// 上传已校验元数据并持锁时写入受控临时文件，校验内容后持久化标记并提升到正式目录。
-    async fn write_and_promote<S: ChunkSource + Send>(
-        &self,
-        temp_name: &str,
-        spec: StoreSpec<'_>,
-        source: &mut S,
-        cleanup: &mut PendingCleanup,
-    ) -> Result<StoredFile, MediaError> {
-        let simple = spec.resource_id.simple().to_string();
-        let kind = spec.kind.directory();
-        let shard = &simple[..2];
-        let file_name = format!("{}.{}", simple, spec.format.extension);
-        let key = format!("{kind}/{shard}/{file_name}");
-        // 先准备按用途和资源 ID 前两位分层的目标目录，新建目录项由辅助函数同步后再使用。
+    /// 打开或创建受控正式目录，已打开的描述符需在改名之前与目录名称重新比对。
+    fn upload_directories(&self, key: &str) -> Result<(OwnedFd, Arc<OwnedFd>), MediaError> {
+        let (kind, shard, _) = parse_storage_key(key)?;
         let kind_fd = self.open_or_create_child(&self.root_fd, kind, "")?;
         let shard_fd = Arc::new(self.open_or_create_child(&kind_fd, shard, kind)?);
+        Ok((kind_fd, shard_fd))
+    }
 
+    /// 从正文写入独占分片并通过格式、字节数、摘要和文件身份校验，本阶段仅保留内存中的凭证数据。
+    async fn write_part<S: ChunkSource + Send>(
+        &self,
+        temp_name: &str,
+        spec: &StoreSpec<'_>,
+        source: &mut S,
+        key: String,
+        cleanup: &mut PendingCleanup,
+    ) -> Result<PendingMarker, MediaError> {
         // 相对暂存目录独占创建文件且拒绝符号链接；名字冲突或打开失败时停止本次上传。
         let temp_fd = openat(
             &self.incoming_fd,
@@ -747,8 +874,11 @@ impl LocalMediaStorage {
             file_mode(),
         )
         .map_err(io::Error::from)?;
-        let std_file = std::fs::File::from(temp_fd);
-        let mut file = tokio::fs::File::from_std(std_file);
+        let owned = cleanup.part.insert(OwnedPart {
+            name: temp_name.to_owned(),
+            file: std::fs::File::from(temp_fd),
+        });
+        let mut file = tokio::fs::File::from_std(owned.file.try_clone()?);
         let mut byte_size = 0_u64;
         let mut digest = Sha256::new();
         // 分块累计大小和摘要，溢出或超限立即退出；数据逐块写入，避免把大视频完整留在内存。
@@ -782,36 +912,57 @@ impl LocalMediaStorage {
         let mut file = file.into_std().await;
         // 已落盘的数据还须通过对应格式解析；失败会由清理守卫收尾，不能进入正式提升。
         validation::validate_content(spec.format, &mut file, byte_size)?;
-        let validated_stat = rustix::fs::fstat(&file).map_err(io::Error::from)?;
+        let validated_stat = owned
+            .named_stat(&self.incoming_fd)?
+            .ok_or(MediaError::InvalidStorageKey)?;
         if rustix::fs::FileType::from_raw_mode(validated_stat.st_mode)
             != rustix::fs::FileType::RegularFile
+            || u64::try_from(validated_stat.st_size).ok() != Some(byte_size)
         {
             return Err(MediaError::InvalidStorageKey);
         }
         let checksum_sha256 = format!("{:x}", digest.finalize());
 
-        // 在提升前持久化标记，使已经移动到正式目录、但尚未登记到数据库的文件可由启动恢复判定。
-        let marker_name = format!("{}.pending", spec.resource_id.simple());
         let marker = PendingMarker {
             version: if spec.kind == MediaKind::Video { 2 } else { 1 },
-            storage_key: key.clone(),
+            storage_key: key,
             device: validated_stat.st_dev as u64,
             inode: validated_stat.st_ino as u64,
             byte_size,
-            checksum_sha256: checksum_sha256.clone(),
+            checksum_sha256,
         };
-        self.write_marker(&marker_name, &marker)?;
-        cleanup.marker_name = Some(marker_name.clone());
+        Ok(marker)
+    }
+
+    /// 临时文件已验证、调用方完成并发检查后，登记恢复凭证、提升文件并同步改名两端的目录。
+    fn promote_part(&self, part: &mut ValidatedUpload) -> Result<(), MediaError> {
+        let marker = &part.marker;
+        let key = &marker.storage_key;
+        let (kind, shard, file_name) = parse_storage_key(key)?;
+        let cleanup = &mut part.cleanup;
+        let source = cleanup.part.as_ref().ok_or(MediaError::InvalidStorageKey)?;
+        let named = source
+            .named_stat(&self.incoming_fd)?
+            .ok_or(MediaError::InvalidStorageKey)?;
+        if u64::try_from(named.st_size).ok() != Some(marker.byte_size) {
+            return Err(MediaError::InvalidStorageKey);
+        }
+        let (kind_fd, shard_fd) = match part.directories.take() {
+            Some(directories) => directories,
+            None => self.upload_directories(key)?,
+        };
+        self.write_marker(&part.marker_name, marker, &mut cleanup.marker_name)?;
         if marker.version == 2 {
-            // 独立持久化同一证明的硬链接，回滚时可覆盖已预留的隔离目录项。
-            video_rollback::reserve(&self.incoming_fd, &self.quarantine_fd, &marker_name)?;
+            // 在正式提升前持久化预留硬链接，支持卷满时安全回滚。
+            video_rollback::reserve(&self.incoming_fd, &self.quarantine_fd, &part.marker_name)?;
         }
         self.hooks
             .on_event(&StorageEvent::BeforePromote(key.clone()))?;
 
         // 钩子可模拟并发替换目录的攻击；提升前重检名称与已打开目录的身份绑定，发现替换即拒绝。
         // 后续修改仍相对已打开的目录描述符执行，配合 O_NOFOLLOW 避免重新解析被替换的路径。
-        if !same_named_directory(&self.root_fd, kind, &kind_fd)?
+        if source.named_stat(&self.incoming_fd)?.is_none()
+            || !same_named_directory(&self.root_fd, kind, &kind_fd)?
             || !same_named_directory(&kind_fd, shard, &shard_fd)?
         {
             return Err(MediaError::InvalidStorageKey);
@@ -819,16 +970,17 @@ impl LocalMediaStorage {
         // 使用已持有的两侧目录描述符移动，NOREPLACE 使同名正式文件存在时失败而非被覆盖。
         renameat_with(
             &self.incoming_fd,
-            temp_name,
+            source.name.as_str(),
             &shard_fd,
-            file_name.as_str(),
+            file_name,
             RenameFlags::NOREPLACE,
         )
         .map_err(io::Error::from)?;
-        cleanup.promoted(shard_fd.clone(), file_name.clone(), key.clone(), &marker);
+        let _promoted_source =
+            cleanup.promoted(shard_fd.clone(), file_name.to_owned(), key.clone(), marker);
         // 移动后再次核对类型、设备、inode 和大小，确认正式名称仍指向刚才验证的文件。
-        let promoted_stat = statat(&shard_fd, file_name.as_str(), AtFlags::SYMLINK_NOFOLLOW)
-            .map_err(io::Error::from)?;
+        let promoted_stat =
+            statat(&shard_fd, file_name, AtFlags::SYMLINK_NOFOLLOW).map_err(io::Error::from)?;
         if rustix::fs::FileType::from_raw_mode(promoted_stat.st_mode)
             != rustix::fs::FileType::RegularFile
             || promoted_stat.st_dev as u64 != marker.device
@@ -837,35 +989,21 @@ impl LocalMediaStorage {
         {
             return Err(MediaError::InvalidStorageKey);
         }
-        drop(file);
         self.hooks.on_event(&StorageEvent::Promoted(key.clone()))?;
         // 重命名成功不等于目录项已持久化；同步目标和来源目录，持久化正式名称及临时名称的消失。
         self.sync_directory(&shard_fd, format!("{kind}/{shard}"))?;
         self.sync_directory(&self.incoming_fd, ".incoming".into())?;
 
-        Ok(StoredFile {
-            storage_key: key,
-            mime_type: spec.declared_mime.to_owned(),
-            byte_size: i64::try_from(byte_size).map_err(|_| MediaError::TooLarge)?,
-            checksum_sha256,
-            cleanup: Some(std::mem::replace(
-                cleanup,
-                PendingCleanup {
-                    incoming: self.incoming_fd.clone(),
-                    quarantine: self.quarantine_fd.clone(),
-                    temp_name: None,
-                    marker_name: None,
-                    formal: None,
-                    hooks: self.hooks.clone(),
-                    destructive: true,
-                    _mutation_guard: None,
-                },
-            )),
-        })
+        Ok(())
     }
 
     /// 文件提升前以临时写入和不可覆盖发布方式持久化恢复标记，失败时尝试清理临时标记。
-    fn write_marker(&self, name: &str, marker: &PendingMarker) -> Result<(), MediaError> {
+    fn write_marker(
+        &self,
+        name: &str,
+        marker: &PendingMarker,
+        owned_name: &mut Option<String>,
+    ) -> Result<(), MediaError> {
         // 先写入并同步独占临时文件，再以不可覆盖的重命名发布标记，避免恢复读取半份 JSON。
         let temporary_name = format!("{}.part", Uuid::new_v4().simple());
         let result = (|| {
@@ -893,6 +1031,8 @@ impl LocalMediaStorage {
                 RenameFlags::NOREPLACE,
             )
             .map_err(io::Error::from)?;
+            // 独占发布已取得该名称的所有权，后续同步失败时也必须由本次上传清理凭证。
+            *owned_name = Some(name.to_owned());
             self.sync_directory(&self.incoming_fd, ".incoming".into())?;
             self.hooks
                 .on_event(&StorageEvent::FileSynced(format!(".incoming/{name}")))?;
