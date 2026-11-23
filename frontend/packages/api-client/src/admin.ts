@@ -1,5 +1,5 @@
 import { ApiError, apiDownload, apiPath, apiRequest, apiUpload, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload, type ApiUploadProgress } from "./http";
-import { isJsonObject } from "./dataTypes";
+import { isJsonObject, type JsonValue } from "./dataTypes";
 import type {
   AdminBulkActionRequest, AdminBulkActionResponse, AdminBulkProblem, AdminContentListQuery, AdminContentPage, AdminSystemOverview, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
@@ -78,27 +78,26 @@ export async function bulkUpdateAdminContent(input: AdminBulkActionRequest): Pro
   ));
 }
 
-// 判断未知值是否为后端定义的内容类别，供 409 详情安全解析。
-function isBulkContentKind(value: unknown): value is "movie" | "series" {
+// 判断 JSON 值是否为后端定义的内容类别，供 409 详情安全解析。
+function isBulkContentKind(value: JsonValue | undefined): value is "movie" | "series" {
   return value === "movie" || value === "series";
 }
 
-// 判断未知对象是否为结构完整的目标或题材问题，避免界面信任任意错误详情。
-function isBulkProblem(value: unknown): value is AdminBulkProblem {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const object = value as Record<string, unknown>;
-  if (object.scope === "target") {
-    return isBulkContentKind(object.kind)
-      && typeof object.id === "string"
-      && ["not_found", "version_conflict", "invalid_state"].includes(String(object.reason));
+// 判断 JSON 对象是否为结构完整的目标或题材问题，避免界面信任任意错误详情。
+function isBulkProblem(value: JsonValue): value is AdminBulkProblem {
+  if (!isJsonObject(value)) return false;
+  if (value.scope === "target") {
+    return isBulkContentKind(value.kind)
+      && typeof value.id === "string"
+      && ["not_found", "version_conflict", "invalid_state"].includes(String(value.reason));
   }
-  return object.scope === "genre"
-    && typeof object.genre_id === "string"
-    && ["not_found", "inactive"].includes(String(object.reason));
+  return value.scope === "genre"
+    && typeof value.genre_id === "string"
+    && ["not_found", "inactive"].includes(String(value.reason));
 }
 
 // 从显式 409 bulk_validation_failed 错误中解析类型安全问题列表，其他错误返回未定义。
-export function bulkActionProblems(error: unknown): AdminBulkProblem[] | undefined {
+export function bulkActionProblems(error: Error): AdminBulkProblem[] | undefined {
   if (!(error instanceof ApiError) || error.status !== 409 || !isJsonObject(error.details)) return undefined;
   const { details } = error;
   if (details.error !== "bulk_validation_failed" || !Array.isArray(details.problems)) return undefined;
