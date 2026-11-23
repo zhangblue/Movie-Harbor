@@ -2,7 +2,11 @@ import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 
 // 供本地媒体工具输入要求不含 NUL 的绝对路径，实际访问仍须校验允许目录。
-const localPath = z.string().refine(path => isAbsolute(path) && !path.includes('\0'), '必须使用不含 NUL 的绝对路径');
+export function isLocalMediaPath(path: string): boolean {
+  return isAbsolute(path) && !path.includes('\0');
+}
+// 本机媒体通用工具在进入文件系统校验前先验证路径语法。
+const localPath = z.string().refine(isLocalMediaPath, '必须使用不含 NUL 的绝对路径');
 // 供视频检查工具严格接收待检查的本地路径。
 export const inspectVideoInput = z.object({ path: localPath }).strict();
 // 供海报验证工具严格接收用户提供的本地路径。

@@ -3115,6 +3115,7 @@ async fn replacement_synchronously_removes_old_assets_for_every_attachment_slot(
             AttachmentTarget::EpisodeVideo {
                 id: episode.id,
                 version: 1,
+                series_version: None,
             },
             "new-episode-video.mp4",
             "video/mp4",
@@ -5246,4 +5247,386 @@ async fn cancelled_replacement_retains_mutex_through_pending_file_cleanup() {
     second.await.unwrap();
     assert_eq!(capacity.reads.load(Ordering::SeqCst), 2);
     assert_eq!(count_files(root.as_ref()), 1);
+}
+
+/// 兄弟单集先提交后，两种单集写入都须在任何文件或记录变化前拒绝陈旧父版本。
+#[tokio::test]
+async fn episode_series_precondition_rejects_interleaved_sibling_before_writes() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let (parent, season_id, first, sibling) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    db.execute_unprepared(&format!(
+        "INSERT INTO series (id,name,status,version) VALUES ('{parent}','兄弟单集','draft',1);
+         INSERT INTO season (id,series_id,number) VALUES ('{season_id}','{parent}',1);
+         INSERT INTO episode (id,season_id,number,name,status,version) VALUES
+         ('{first}','{season_id}',1,'第一集','draft',1),('{sibling}','{season_id}',2,'第二集','draft',1)"
+    )).await.unwrap();
+    let episode_path = format!("/api/admin/series/{parent}/seasons/{season_id}/episodes");
+    let target = format!("{episode_path}/{first}");
+    let video = format!("/api/admin/media/episodes/{first}/video");
+    let file_request = |query: &str| {
+        multipart_request(
+            format!("{video}?{query}"),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        )
+    };
+    // 通过真实的另一个单集写入推进父版本，保持目标版本和文件引用独立不变。
+    let sibling_path = format!("{episode_path}/{sibling}");
+    let edit_sibling = |version| {
+        json_request(
+            &app,
+            "PATCH",
+            &sibling_path,
+            json!({"version":version,"name":"兄弟变更"}),
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://harbor.test"),
+        )
+    };
+    let mut target_version = 1;
+    for sibling_version in 1..=2 {
+        let before = episode::Entity::find_by_id(first)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap();
+        let old_asset = if let Some(id) = before.video_asset_id {
+            media_asset::Entity::find_by_id(id).one(&db).await.unwrap()
+        } else {
+            None
+        };
+        let previous_parent = series::Entity::find_by_id(parent)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version;
+        assert_eq!(edit_sibling(sibling_version).await.status(), StatusCode::OK);
+        let consumed = Arc::new(AtomicBool::new(false));
+        let observed = consumed.clone();
+        let request = file_request(&format!(
+            "version={target_version}&series_version={previous_parent}"
+        ))
+        .map(|body| {
+            Body::new(body.map_frame(move |frame| {
+                observed.store(true, Ordering::SeqCst);
+                frame
+            }))
+        });
+        assert_eq!(
+            app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::CONFLICT
+        );
+        assert!(!consumed.load(Ordering::SeqCst));
+        let lifecycle = json_request(
+            &app,
+            "POST",
+            &format!("{target}/publish"),
+            json!({"version":target_version,"series_version":previous_parent}),
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://harbor.test"),
+        )
+        .await;
+        assert_eq!(lifecycle.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            episode::Entity::find_by_id(first)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap(),
+            before
+        );
+        assert_eq!(
+            series::Entity::find_by_id(parent)
+                .one(&db)
+                .await
+                .unwrap()
+                .unwrap()
+                .version,
+            previous_parent + 1
+        );
+        assert_eq!(
+            media_asset::Entity::find().all(&db).await.unwrap(),
+            old_asset.clone().into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(count_files(root.as_ref()), old_asset.is_some() as usize);
+        if let Some(asset) = old_asset {
+            assert_eq!(
+                std::fs::read(root.as_ref().join(asset.storage_key)).unwrap(),
+                valid_mp4()
+            );
+        }
+
+        let current_parent = previous_parent + 1;
+        let uploaded = app
+            .clone()
+            .oneshot(file_request(&format!(
+                "version={target_version}&series_version={current_parent}"
+            )))
+            .await
+            .unwrap();
+        assert_eq!(uploaded.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&uploaded.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        target_version += 1;
+        assert_eq!(body["version"], target_version);
+        assert_eq!(body["series_version"], current_parent + 1);
+    }
+    // 正确父版本可发布，省略该字段的旧调用者仍可按单集版本归档。
+    let published = json_request(
+        &app,
+        "POST",
+        &format!("{target}/publish"),
+        json!({"version":3,"series_version":5}),
+        Some(&cookie),
+        Some(&csrf),
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(published.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&published.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["series_version"], 6);
+    let archived = json_request(
+        &app,
+        "POST",
+        &format!("{target}/archive"),
+        json!({"version":4}),
+        Some(&cookie),
+        Some(&csrf),
+        Some("https://harbor.test"),
+    )
+    .await;
+    assert_eq!(archived.status(), StatusCode::OK);
+}
+
+/// 实际复制完整备份到新目录：只在数据库、凭证和正式文件字节全部吻合时结清已提交凭证。
+#[tokio::test]
+async fn startup_validates_restored_video_with_new_inode_and_keeps_mismatches() {
+    for (hold_present, corrupt, wrong_db, registered) in [
+        (true, false, false, true),
+        (false, false, false, true),
+        (true, true, false, true),
+        (false, true, false, true),
+        (true, false, true, true),
+        (true, false, false, false),
+    ] {
+        let db = database().await;
+        let original = TempRoot::new();
+        let storage = LocalMediaStorage::initialize(original.as_ref())
+            .await
+            .unwrap();
+        let movie = draft_movie(&db, None).await;
+        let asset = attach_recovery_fixture(&db, &storage, movie.id, 1)
+            .await
+            .unwrap();
+        let (formal, marker, _) =
+            prepare_video_proof(original.as_ref(), asset.id, &asset.storage_key);
+        let backup = TempRoot::new();
+        LocalMediaStorage::initialize(backup.as_ref())
+            .await
+            .unwrap();
+        let copied = backup.as_ref().join(&asset.storage_key);
+        std::fs::create_dir_all(copied.parent().unwrap()).unwrap();
+        std::fs::copy(&formal, &copied).unwrap();
+        assert_ne!(
+            std::fs::metadata(&formal).unwrap().ino(),
+            std::fs::metadata(&copied).unwrap().ino()
+        );
+        let proof = backup
+            .as_ref()
+            .join(".incoming")
+            .join(marker.file_name().unwrap());
+        std::fs::copy(&marker, &proof).unwrap();
+        let held = backup
+            .as_ref()
+            .join(".quarantine")
+            .join(format!("{}.hold", asset.id.simple()));
+        if hold_present {
+            std::fs::hard_link(&proof, &held).unwrap();
+        }
+        let mut bytes = valid_mp4();
+        if corrupt {
+            bytes[0] ^= 1;
+            std::fs::write(&copied, &bytes).unwrap();
+        }
+        if wrong_db {
+            db.execute_unprepared(&format!(
+                "UPDATE media_asset SET checksum_sha256=repeat('a',64) WHERE id='{}'",
+                asset.id
+            ))
+            .await
+            .unwrap();
+        }
+        if !registered {
+            db.execute_unprepared(&format!("UPDATE movie SET video_asset_id=NULL WHERE id='{}'; DELETE FROM media_asset WHERE id='{}'",movie.id,asset.id)).await.unwrap();
+        }
+        let startup = app::build(db.clone(), &config(backup.as_ref())).await;
+        let valid = !corrupt && !wrong_db && registered;
+        assert_eq!(startup.is_ok(), valid);
+        assert_eq!(std::fs::read(&copied).unwrap(), bytes);
+        assert_eq!(proof.exists(), !valid);
+        assert_eq!(held.exists(), !valid && hold_present);
+    }
+}
+
+/// 观察私有目录中的真实硬链接，按需在链接已建立后模拟目录无法同步。
+struct StartupLinkProbe {
+    root: PathBuf,
+    observed: AtomicBool,
+    fail: bool,
+}
+
+impl StorageHooks for StartupLinkProbe {
+    /// 收到隔离目录已同步事件时核对两侧的 inode，随后可注入启动错误检查清理。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::DirectorySynced(label) if label == ".quarantine") {
+            for item in std::fs::read_dir(self.root.join(".quarantine"))? {
+                let item = item?;
+                let source = self.root.join(".incoming").join(item.file_name());
+                if source.exists() && std::fs::metadata(source)?.ino() == item.metadata()?.ino() {
+                    self.observed.store(true, Ordering::SeqCst);
+                    if self.fail {
+                        return Err(std::io::Error::other("injected probe failure"));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 启动成功与失败都只短暂占用真实私有硬链接，失败时必须给出可诊断的前置条件。
+#[tokio::test]
+async fn startup_probes_hard_links_and_cleans_both_private_directories() {
+    let db = database().await;
+    for fail in [false, true] {
+        let root = TempRoot::new();
+        let hooks = Arc::new(StartupLinkProbe {
+            root: root.as_ref().into(),
+            observed: AtomicBool::new(false),
+            fail,
+        });
+        let storage = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+            .await
+            .unwrap();
+        let result = movie_harbor_api::media::prepare_for_serving(&db, &storage).await;
+        assert!(
+            hooks.observed.load(Ordering::SeqCst),
+            "启动时从未建立真实硬链接"
+        );
+        if fail {
+            assert!(result.err().unwrap().to_string().contains("hard-link"));
+        } else {
+            assert!(result.is_ok());
+        }
+        assert_eq!(count_files(root.as_ref()), 0);
+    }
+}
+
+/// 在源探测文件已持久化后占据目标名，模拟真正的 linkat 失败以核对错误与清理范围。
+struct ProbeNameCollision(PathBuf);
+
+impl StorageHooks for ProbeNameCollision {
+    /// 在探测源事件中创建一个无关的独立文件，模拟同名目标已存在。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if let StorageEvent::FileSynced(source) = event {
+            let name = Path::new(source).file_name().unwrap();
+            std::fs::write(self.0.join(".quarantine").join(name), b"existing")?;
+        }
+        Ok(())
+    }
+}
+
+/// linkat 自身失败时，进程启动诊断指明硬链接能力，探测源已清理且未删除碰撞文件。
+#[tokio::test]
+async fn startup_reports_a_real_hard_link_error_without_removing_an_existing_target() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize_with_hooks(
+        root.as_ref(),
+        Arc::new(ProbeNameCollision(root.as_ref().into())),
+    )
+    .await
+    .unwrap();
+    let error = movie_harbor_api::media::prepare_for_serving(&db, &storage)
+        .await
+        .expect_err("启动应因目标碰撞失败");
+    // Rust 的 main 返回错误使用 Debug 输出，运维日志中也应直接说明所需能力。
+    assert!(format!("{error:?}").contains("hard-link"), "{error:?}");
+    assert_eq!(count_files(&root.as_ref().join(".incoming")), 0);
+    let files = std::fs::read_dir(root.as_ref().join(".quarantine"))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(std::fs::read(files[0].path()).unwrap(), b"existing");
+}
+
+/// 模拟磁盘仍被待回滚视频占满时拒绝新的探测项，恢复清单结清后可重新分配。
+struct FullUntilRecovery {
+    marker: PathBuf,
+    probed: AtomicBool,
+}
+
+impl StorageHooks for FullUntilRecovery {
+    /// 只有探测项创建时才注入 ENOSPC，已有预留位置仍可用于回滚。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::FileSynced(name) if name.contains(".hard-link-probe-")) {
+            self.probed.store(true, Ordering::SeqCst);
+            if self.marker.exists() {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 启动时先用预留位置回收未登记视频，已有恢复必须有机会为卷能力探测释放空间。
+#[tokio::test]
+async fn startup_releases_rollback_space_before_allocating_hard_link_probe() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let asset = store_new_asset(
+        &db,
+        &storage,
+        MediaKind::Video,
+        "v.mp4",
+        "video/mp4",
+        &policy(4096),
+        Chunks::bytes(valid_mp4()).0,
+    )
+    .await
+    .unwrap();
+    let (_, marker, _) = prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
+    media_asset::Entity::delete_by_id(asset.id)
+        .exec(&db)
+        .await
+        .unwrap();
+    let hooks = Arc::new(FullUntilRecovery {
+        marker,
+        probed: AtomicBool::new(false),
+    });
+    let reopened = LocalMediaStorage::initialize_with_hooks(root.as_ref(), hooks.clone())
+        .await
+        .unwrap();
+    movie_harbor_api::media::prepare_for_serving(&db, &reopened)
+        .await
+        .expect("启动探测不得阻塞可释放空间的恢复");
+    assert!(hooks.probed.load(Ordering::SeqCst));
+    assert_eq!(count_files(root.as_ref()), 0);
 }

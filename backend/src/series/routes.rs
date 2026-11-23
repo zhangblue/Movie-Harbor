@@ -16,8 +16,8 @@ use sea_orm::DatabaseConnection;
 use super::{
     dto::{
         ChildDeleteImpactResponse, CreateEpisodeRequest, CreateSeasonRequest, CreateSeriesRequest,
-        EpisodeEnvelope, PrivacyRequest, SeriesListQuery, SeriesResponse, UpdateEpisodeRequest,
-        UpdateSeasonRequest, UpdateSeriesRequest, VersionRequest,
+        EpisodeEnvelope, EpisodeVersionRequest, PrivacyRequest, SeriesListQuery, SeriesResponse,
+        UpdateEpisodeRequest, UpdateSeasonRequest, UpdateSeriesRequest, VersionRequest,
     },
     service::{
         self, CreateEpisodeCommand, CreateSeasonCommand, DeleteEpisodeCommand, DeleteSeasonCommand,
@@ -355,7 +355,7 @@ async fn transition_series(
 async fn publish_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
-    Json(input): Json<VersionRequest>,
+    Json(input): Json<EpisodeVersionRequest>,
 ) -> Result<Json<EpisodeEnvelope>, SeriesError> {
     transition_episode(state, ids, input, "published").await
 }
@@ -364,7 +364,7 @@ async fn publish_episode(
 async fn archive_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
-    Json(input): Json<VersionRequest>,
+    Json(input): Json<EpisodeVersionRequest>,
 ) -> Result<Json<EpisodeEnvelope>, SeriesError> {
     transition_episode(state, ids, input, "archived").await
 }
@@ -373,7 +373,7 @@ async fn archive_episode(
 async fn draft_episode(
     State(state): State<SeriesState>,
     Path(ids): Path<(String, String, String)>,
-    Json(input): Json<VersionRequest>,
+    Json(input): Json<EpisodeVersionRequest>,
 ) -> Result<Json<EpisodeEnvelope>, SeriesError> {
     transition_episode(state, ids, input, "draft").await
 }
@@ -382,7 +382,7 @@ async fn draft_episode(
 async fn transition_episode(
     state: SeriesState,
     ids: (String, String, String),
-    input: VersionRequest,
+    input: EpisodeVersionRequest,
     target: &str,
 ) -> Result<Json<EpisodeEnvelope>, SeriesError> {
     Ok(Json(
@@ -395,6 +395,7 @@ async fn transition_episode(
                 season_id: parse_uuid(ids.1, SeriesError::Invalid)?,
                 episode_id: parse_uuid(ids.2, SeriesError::Invalid)?,
                 expected_episode_version: input.version,
+                expected_series_version: input.series_version,
                 target,
             },
         )

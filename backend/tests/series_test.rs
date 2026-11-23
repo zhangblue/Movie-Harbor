@@ -2960,3 +2960,77 @@ async fn admin_series_create_ignores_mcp_metadata_and_episode_duration_is_option
     assert_eq!(result["version"], 4);
     assert!(result["seasons"][0]["episodes"][1]["duration_seconds"].is_null());
 }
+
+/// 读取单集后新增兄弟集会推进父版本，携带旧父版本的归档不能生效。
+#[tokio::test]
+async fn episode_series_precondition_prevents_archive_after_sibling_creation() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let created = create_series(&app, &cookie, &csrf, "并发归档").await;
+    let series_id = created["id"].as_str().unwrap();
+    let hierarchy = body(add_season(&app, &cookie, &csrf, series_id, 1, 1).await).await;
+    let season_id = hierarchy["seasons"][0]["id"].as_str().unwrap();
+    let hierarchy =
+        body(add_episode(&app, &cookie, &csrf, (series_id, season_id), 2, 1, "原集").await).await;
+    let episode_id = hierarchy["seasons"][0]["episodes"][0]["id"]
+        .as_str()
+        .unwrap();
+    let video = create_asset(&db, root.as_ref(), "video", "video/mp4").await;
+    attach_episode_video(&db, episode_id.parse().unwrap(), video.id).await;
+    let path = format!("/api/admin/series/{series_id}/seasons/{season_id}/episodes/{episode_id}");
+    let published = body(
+        write(
+            &app,
+            "POST",
+            &format!("{path}/publish"),
+            json!({"version":1}),
+            &cookie,
+            &csrf,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(published["series_version"], 4);
+    assert_eq!(
+        add_episode(&app, &cookie, &csrf, (series_id, season_id), 4, 2, "兄弟集")
+            .await
+            .status(),
+        StatusCode::CREATED
+    );
+    assert_eq!(
+        write(
+            &app,
+            "POST",
+            &format!("{path}/archive"),
+            json!({"version":2,"series_version":4}),
+            &cookie,
+            &csrf
+        )
+        .await
+        .status(),
+        StatusCode::CONFLICT
+    );
+    let current =
+        body(request(&app, "GET", &path, Value::Null, Some(&cookie), None, None).await).await;
+    assert_eq!(current["episode"], published["episode"]);
+    assert_eq!(current["series_version"], 5);
+    let archived = body(
+        write(
+            &app,
+            "POST",
+            &format!("{path}/archive"),
+            json!({"version":2,"series_version":5}),
+            &cookie,
+            &csrf,
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(archived["episode"]["status"], "archived");
+    assert_eq!(archived["episode"]["version"], 3);
+    assert_eq!(archived["series_version"], 6);
+}

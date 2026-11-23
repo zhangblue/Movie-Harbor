@@ -47,6 +47,13 @@ pub struct VersionRequest {
     pub version: i64,
 }
 
+/// 单集状态或视频写入的乐观版本；读取过父剧快照的客户端可同时约束父版本。
+#[derive(Debug, Deserialize)]
+pub struct EpisodeVersionRequest {
+    pub version: i64,
+    pub series_version: Option<i64>,
+}
+
 #[derive(Debug, Serialize)]
 /// 子级删除影响响应，供删除季或单集前展示统计。
 pub struct ChildDeleteImpactResponse {

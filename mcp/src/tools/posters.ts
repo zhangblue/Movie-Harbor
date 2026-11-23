@@ -6,7 +6,7 @@ import {
   setContentPosterInput,
   setContentPosterOutput,
 } from '../schemas/admin-maintenance.js';
-import { parseApi, toolResult, writeAnnotations } from '../schemas/common.js';
+import { parseApi, toolResult, destructiveAnnotations } from '../schemas/common.js';
 import { serializeIdentity, validatePoster } from '../services/media-inspector.js';
 import { MovieHarborClientError, type MovieHarborClient } from '../services/movie-harbor-client.js';
 import { inspectAllowedFile } from '../services/path-policy.js';
@@ -188,6 +188,6 @@ export function registerPosterTools(server: McpServer, dependencies: PosterToolD
     description: '经用户明确确认后，为电影或整剧草稿补传或替换本地海报。替换会永久移除旧海报。此工具不允许删除海报。非草稿先显式调用 transition_content_lifecycle 转草稿。',
     inputSchema: setContentPosterInput,
     outputSchema: setContentPosterOutput,
-    annotations: { ...writeAnnotations, destructiveHint: true },
+    annotations: destructiveAnnotations,
   }, input => posterResult(input, dependencies));
 }

@@ -139,7 +139,7 @@ Codex 会先执行只读检查：验证视频和海报、查询 Movie Harbor 中
 3. 单独确认补传或永久替换后，调用 `set_content_poster`，传入 `content_type`、`content_id`、刚返回的 `version`、已验证的 `path` 和 `confirmed: true`。结果中的 `action` 为 `added` 或 `replaced`，同时返回 `media_id`、格式、字节数和新的内容版本。
 4. 需要重新上线时，再确认以新版本调用 `transition_content_lifecycle`，将 `target_status` 设为 `"published"`。发布电影或单集需要有效视频，发布整剧须先发布至少一个单集。单集调用传 `content_type: "episode"`，`content_id` 填单集 UUID，并提供 `series_id` 和 `season_id`。结果另含 `series_version`，供独立确认发布父剧时使用。
 
-目标状态还可设为 `"archived"`。当前状态与目标相同时，工具核对版本后直接返回。草稿不能直接归档。遇到 `partial_transition` 时，`last_confirmed_status` 表示最后确认成功的状态。先按 UUID 查明实际状态和版本，再决定后续操作。写请求中断返回 `write_result_unknown` 时也应先回查。海报写入结果存疑时核对新旧海报 ID 和版本，再决定是否重新上传。
+目标状态还可设为 `"archived"`。当前状态与目标相同时，工具核对版本后直接返回。草稿不能直接归档。遇到 `partial_transition` 时，`last_confirmed_status` 表示最后确认成功的状态。可见性或生命周期写入的回执存疑时，工具按原 UUID 只读回查一次，并停止后续写入。用 `current_status` 或 `current_visibility` 和 `current_version` 查看最新快照，单集还返回父版本。回查失败时最新值为 `null`，最近已确认的版本在 `last_confirmed_version`。即使读到目标值，`commit_status: "unknown"` 仍表示本次写入的归属未确定。第二步被明确拒绝时，`partial_transition` 同时提供拒绝码和该步的 `not_committed` 状态。请按实际快照决定并独立确认后续操作。海报写入结果存疑时核对新旧海报 ID 和版本，再决定是否重新上传。
 
 ### 修改访问范围和查找缺视频条目
 
@@ -153,7 +153,7 @@ Codex 会先执行只读检查：验证视频和海报、查询 Movie Harbor 中
 
 电影和单集的四个上传与替换工具在核对本地文件后、查询目标前，按“新文件大小 + 10 GiB 预留”检查卷 0 的可用量。等于门槛可以继续。替换时按整个新文件计算，旧视频仍占空间。MCP 与管理前端都会通过 `X-Media-Byte-Size` 声明文件自身的字节数。服务端在媒体变更锁内复核实际容量，并在流式写入时核对声明和实际字节数。预检通过后仍可能遇到其他上传占用空间。
 
-- `storage_space_low` 表示空间不足。按返回的字节数及缺口释放空间，再重新查询概览。
+- `storage_space_low` 表示空间不足。按返回的字节数及缺口释放空间。服务端返回 HTTP 507 且缺少容量数字时，重新调用 `get_system_overview` 查看卷 0 的可用量和预留量。
 - `storage_capacity_unavailable` 表示容量暂不可读。恢复采样后再上传。
 - `declared_size_invalid` 或 `declared_size_mismatch` 表示声明无效或与实收大小不符。重新检查本地文件及客户端版本后再试。
 - 上传失败时普通源文件保留，转换生成的视频按返回提示保留供重试。结果未知时先检查目标版本及视频槽位。

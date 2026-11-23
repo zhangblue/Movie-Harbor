@@ -171,6 +171,7 @@ pub struct TransitionEpisodeCommand<'a> {
     pub season_id: Uuid,
     pub episode_id: Uuid,
     pub expected_episode_version: i64,
+    pub expected_series_version: Option<i64>,
     pub target: &'a str,
 }
 
@@ -671,6 +672,7 @@ pub async fn transition_episode(
         season_id,
         episode_id,
         expected_episode_version: expected_version,
+        expected_series_version,
         target,
     } = command;
     require_positive_i64(expected_version)?;
@@ -679,6 +681,10 @@ pub async fn transition_episode(
     let series = repository::find_locked(&tx, series_id).await?;
     repository::season_locked(&tx, series_id, season_id).await?;
     let mut episode = repository::episode_locked(&tx, season_id, episode_id).await?;
+    // 持有父行锁后检查调用方预读的版本，过期时连幂等转换也不确认，更不会写入。
+    if let Some(expected) = expected_series_version {
+        require_version(series.version, expected)?;
+    }
     // 单集状态独立于父剧集；重复目标状态直接成功，公开查询则同时要求父剧集和单集都已发布。
     if target.matches(&episode.status) {
         let result = episode_envelope(&tx, series.version, episode).await?;

@@ -1,7 +1,7 @@
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { isAbsolute, relative, sep } from 'node:path';
 import { z } from 'zod';
-import { id, confirmed, parseApi, positiveInt, toolResult, version, writeAnnotations } from '../schemas/common.js';
+import { id, confirmed, parseApi, positiveInt, toolResult, version, writeAnnotations, destructiveAnnotations } from '../schemas/common.js';
 import { getSystemOverviewOutput } from '../schemas/admin-maintenance.js';
 import { apiEpisodeEnvelope, apiMovie } from '../schemas/content.js';
 import { deleteGeneratedFile } from '../services/generated-files.js';
@@ -184,7 +184,7 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   assertDraftTarget(episode, parsed.version);
   if (!replace && episode.video) throw new Error('目标已有视频，请改用 replace_episode_video 并明确确认替换');
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');
-  const result = await uploadFile(checked, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
+  const result = await uploadFile(checked, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}&series_version=${envelope.series_version}`,
     dependencies, (value, checked) => {
       // 单集替换也会创建新媒体。新旧 UUID、媒体元数据或两级版本异常时保留生成文件。
       const response = parseApi(apiEpisodeUpload, value);
@@ -223,9 +223,9 @@ export function registerUploadTools(server: McpServer, dependencies: UploadDepen
   // 注册 upload_movie_video：携带入库确认 confirmed: true 后向空电影视频槽流式上传兼容文件；发布仍需独立确认。
   server.registerTool('upload_movie_video', { description:'携带入库确认 confirmed: true 后向空电影视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input => uploadResult(uploadMovieVideo(input, dependencies)));
   // 注册 replace_movie_video：携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。
-  server.registerTool('replace_movie_video', { description:'携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceMovieVideoInput,outputSchema:movieUploadOutput,annotations:writeAnnotations }, input => uploadResult(uploadMovieVideo(input, dependencies, true)));
+  server.registerTool('replace_movie_video', { description:'携带入库确认 confirmed: true 后流式替换电影视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceMovieVideoInput,outputSchema:movieUploadOutput,annotations:destructiveAnnotations }, input => uploadResult(uploadMovieVideo(input, dependencies, true)));
   // 注册 upload_episode_video：携带入库确认 confirmed: true 后向空单集视频槽流式上传兼容文件；发布仍需独立确认。
   server.registerTool('upload_episode_video', { description:'携带入库确认 confirmed: true 后向空单集视频槽流式上传兼容文件；发布仍需独立确认。',inputSchema:uploadEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input => uploadResult(uploadEpisodeVideo(input, dependencies)));
   // 注册 replace_episode_video：携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。
-  server.registerTool('replace_episode_video', { description:'携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:writeAnnotations }, input => uploadResult(uploadEpisodeVideo(input, dependencies, true)));
+  server.registerTool('replace_episode_video', { description:'携带入库确认 confirmed: true 后流式替换单集视频，入库计划必须列明替换副作用；发布仍需独立确认。',inputSchema:replaceEpisodeVideoInput,outputSchema:episodeUploadOutput,annotations:destructiveAnnotations }, input => uploadResult(uploadEpisodeVideo(input, dependencies, true)));
 }

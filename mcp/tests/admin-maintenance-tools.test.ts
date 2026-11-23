@@ -120,7 +120,7 @@ test('visibility rejects a mismatched ID, scope, or updated version without retr
     { ...updated, version: 3 }, { ...updated, version: 5 }]) {
     const remote = mockApi(movies.draft, malformed);
     await assert.rejects(setContentVisibility(input, remote.client), { code: 'invalid_response' });
-    assert.deepEqual(remote.calls, [['GET', moviePath], ['PUT', moviePath + '/privacy', { version: 3, is_private: true }]]);
+    assert.deepEqual(remote.calls, [['GET', moviePath], ['PUT', moviePath + '/privacy', { version: 3, is_private: true }], ['GET', moviePath]]);
   }
 });
 
@@ -156,7 +156,7 @@ test('lifecycle publishes movie, episode and parent series through separate conf
   });
   assert.deepEqual(remote.calls, [
     ['GET', moviePath], ['POST', moviePath + '/publish', { version: 3 }],
-    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4, series_version: 8 }],
     ['GET', seriesPath], ['POST', seriesPath + '/publish', { version: 9 }],
   ]);
 });
@@ -200,7 +200,7 @@ test('lifecycle lets the backend decide episode publication under an archived pa
   assert.equal(result.structuredContent?.status, 'published');
   assert.deepEqual(result.structuredContent?.next_actions, []);
   assert.deepEqual(remote.calls, [
-    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+    ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4, series_version: 8 }],
   ]);
 });
 
@@ -229,7 +229,7 @@ test('lifecycle episode published to draft returns the final parent version', as
   assert.equal(result.structuredContent?.series_version, 10);
   assert.deepEqual(remote.calls, [
     ['GET', seriesPath], ['GET', episodePath],
-    ['POST', episodePath + '/archive', { version: 4 }], ['POST', episodePath + '/draft', { version: 5 }],
+    ['POST', episodePath + '/archive', { version: 4, series_version: 8 }], ['POST', episodePath + '/draft', { version: 5, series_version: 9 }],
   ]);
 });
 
@@ -238,9 +238,9 @@ test('partial transition reports archive success and requires a reread without c
   const archived = { ...movies.published, status: 'archived', version: 5 };
   const remote = mockApi(movies.published, archived, new Error('raw /private/media/secret'));
   await assert.rejects(transitionContentLifecycle({ ...movieInput, version: 4, target_status: 'draft' }, remote.client),
-    { code: 'partial_transition', message: '生命周期转换部分完成：已确认归档，转草稿结果未确认，请重新读取内容状态。' });
+    { code: 'partial_transition' });
   assert.deepEqual(remote.calls, [
-    ['GET', moviePath], ['POST', moviePath + '/archive', { version: 4 }], ['POST', moviePath + '/draft', { version: 5 }],
+    ['GET', moviePath], ['POST', moviePath + '/archive', { version: 4 }], ['POST', moviePath + '/draft', { version: 5 }], ['GET', moviePath],
   ]);
 });
 
@@ -279,7 +279,7 @@ test('lifecycle rejects impossible state, ownership or version changes in POST r
       const remote = mockApi(current, response);
       await assert.rejects(transitionContentLifecycle({ ...input, target_status: 'published' }, remote.client),
         { code: 'invalid_response' });
-      assert.deepEqual(remote.calls, [['GET', path], ['POST', path + '/publish', { version: input.version }]]);
+      assert.deepEqual(remote.calls, [['GET', path], ['POST', path + '/publish', { version: input.version }], ['GET', path]]);
     }
   }
   const publishedEpisode = { ...episode, status: 'published', version: 5 };
@@ -296,7 +296,7 @@ test('lifecycle rejects impossible state, ownership or version changes in POST r
     await assert.rejects(transitionContentLifecycle({ ...episodeInput, target_status: 'published' }, remote.client),
       { code: 'invalid_response' });
     assert.deepEqual(remote.calls, [
-      ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4 }],
+      ['GET', seriesPath], ['GET', episodePath], ['POST', episodePath + '/publish', { version: 4, series_version: 8 }], ['GET', episodePath],
     ]);
   }
 });

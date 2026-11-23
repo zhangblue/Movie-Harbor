@@ -14,10 +14,23 @@ use uuid::Uuid;
 #[derive(Clone, Copy, Debug)]
 /// 附件目标槽位，供上传流程选择内容类型及版本校验。
 pub enum AttachmentTarget {
-    MoviePoster { id: Uuid, version: i64 },
-    MovieVideo { id: Uuid, version: i64 },
-    SeriesPoster { id: Uuid, version: i64 },
-    EpisodeVideo { id: Uuid, version: i64 },
+    MoviePoster {
+        id: Uuid,
+        version: i64,
+    },
+    MovieVideo {
+        id: Uuid,
+        version: i64,
+    },
+    SeriesPoster {
+        id: Uuid,
+        version: i64,
+    },
+    EpisodeVideo {
+        id: Uuid,
+        version: i64,
+        series_version: Option<i64>,
+    },
 }
 
 impl AttachmentTarget {
@@ -242,10 +255,13 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
     policy: &UploadPolicy,
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
+    let session = storage
+        .begin_typed_upload(target.kind(), source.declared_byte_size())
+        .await?;
+    // 内部入口沿用路由的锁序和早期父版本检查，拒绝时源数据还未读取。
+    let checked_episode = begin_guarded_episode(db, target).await?;
     let pending = prepare_attachment(
-        storage
-            .begin_typed_upload(target.kind(), source.declared_byte_size())
-            .await?,
+        session,
         target,
         original_name,
         declared_mime,
@@ -253,7 +269,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
         source,
     )
     .await?;
-    Ok(commit_attachment(db, pending).await?.asset)
+    Ok(commit_attachment(db, pending, checked_episode).await?.asset)
 }
 
 /// 在槽位切换前验证版本并流式保存新文件，保留旧引用。
@@ -291,15 +307,19 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
 pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
+    checked_episode: Option<GuardedEpisodeUpload>,
 ) -> Result<CommittedAttachment, MediaError> {
-    // 等待数据库锁时，正式文件仍归 pending 析构回滚；锁必须留在同一对象中直到清理完成。
-    let tx = super::transaction::begin(db).await?;
+    // 带父版本的单集沿用读正文前取得的事务；其他上传等待锁时由 pending 持有文件与析构保护。
+    let (tx, slot) = match checked_episode {
+        Some(guard) => (guard.tx, Some(guard.slot)),
+        None => (super::transaction::begin(db).await?, None),
+    };
     // 取得数据库锁后同步交接本地锁并进入事务阶段，中间没有可取消的等待点。
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
     pending.stored.begin_database_write();
-    let result = replace_before_commit(&tx, &pending, &removal, &mut staged).await;
+    let result = replace_before_commit(&tx, &pending, &removal, &mut staged, slot).await;
     let committed = match result {
         Ok(committed) => committed,
         Err(error) => {
@@ -363,6 +383,7 @@ async fn replace_before_commit(
     pending: &PendingAttachment,
     removal: &RemovalSession,
     staged: &mut Option<StagedOperation>,
+    slot: Option<LockedEpisodeSlot>,
 ) -> Result<CommittedAttachment, MediaError> {
     // 新资产登记、归属槽位切换和旧资产记录删除共用一个事务，避免媒体资产被多个槽位同时引用。
     let asset = insert_asset(
@@ -380,6 +401,7 @@ async fn replace_before_commit(
         pending.expected_version,
         removal,
         staged,
+        slot,
     )
     .await?;
     let committed = CommittedAttachment {
@@ -412,6 +434,87 @@ async fn insert_asset<C: sea_orm::ConnectionTrait>(
     .await?)
 }
 
+/// 记录在同一事务中锁定且通过单集版本与草稿检查的目标和父剧。
+struct LockedEpisodeSlot {
+    parent: series::Model,
+    episode: episode::Model,
+}
+
+/// 单集上传预检成功后持有事务至最终提交，防止读正文期间另一集改变父版本。
+pub(crate) struct GuardedEpisodeUpload {
+    tx: DatabaseTransaction,
+    slot: LockedEpisodeSlot,
+}
+
+/// 已取得媒体文件锁后，对提供父版本的单集写入检查两级版本；旧调用方仍在提交时检查单集。
+pub(crate) async fn begin_guarded_episode(
+    db: &DatabaseConnection,
+    target: AttachmentTarget,
+) -> Result<Option<GuardedEpisodeUpload>, MediaError> {
+    let AttachmentTarget::EpisodeVideo {
+        id,
+        version,
+        series_version: Some(expected),
+    } = target
+    else {
+        return Ok(None);
+    };
+    let tx = super::transaction::begin(db).await?;
+    let slot = lock_episode_slot(&tx, id, version).await?;
+    if slot.parent.version != expected {
+        tx.rollback().await?;
+        return Err(MediaError::VersionConflict);
+    }
+    Ok(Some(GuardedEpisodeUpload { tx, slot }))
+}
+
+/// 按整剧、季、单集的写锁顺序重新核对归属及单集版本，返回的快照只在当前事务有效。
+async fn lock_episode_slot(
+    tx: &DatabaseTransaction,
+    id: Uuid,
+    version: i64,
+) -> Result<LockedEpisodeSlot, MediaError> {
+    // 先读取不可变祖先，再按全局顺序锁住全部内容记录：series -> season -> episode。
+    // 加锁后重新核对每条父子关系，避免并发移动或删除使先前读取的层级失效。
+    let episode_hint = episode::Entity::find_by_id(id)
+        .one(tx)
+        .await?
+        .ok_or(MediaError::TargetNotFound)?;
+    let season_hint = season::Entity::find_by_id(episode_hint.season_id)
+        .one(tx)
+        .await?
+        .ok_or(MediaError::TargetNotFound)?;
+    let parent = series::Entity::find_by_id(season_hint.series_id)
+        .lock_exclusive()
+        .one(tx)
+        .await?
+        .ok_or(MediaError::TargetNotFound)?;
+    let season = season::Entity::find()
+        .filter(season::Column::Id.eq(season_hint.id))
+        .filter(season::Column::SeriesId.eq(parent.id))
+        .lock_exclusive()
+        .one(tx)
+        .await?
+        .ok_or(MediaError::TargetNotFound)?;
+    let model = episode::Entity::find()
+        .filter(episode::Column::Id.eq(id))
+        .filter(episode::Column::SeasonId.eq(season.id))
+        .lock_exclusive()
+        .one(tx)
+        .await?
+        .ok_or(MediaError::TargetNotFound)?;
+    if model.status != "draft" {
+        return Err(MediaError::ReadOnly);
+    }
+    if model.version != version {
+        return Err(MediaError::VersionConflict);
+    }
+    Ok(LockedEpisodeSlot {
+        parent,
+        episode: model,
+    })
+}
+
 /// 在替换事务中锁定目标并检查版本，再切换槽位和删除旧资产记录。
 async fn switch_reference(
     tx: &DatabaseTransaction,
@@ -420,6 +523,7 @@ async fn switch_reference(
     expected_version: i64,
     removal: &RemovalSession,
     staged: &mut Option<StagedOperation>,
+    checked_slot: Option<LockedEpisodeSlot>,
 ) -> Result<SwitchOutcome, MediaError> {
     // 每个槽位先锁定其归属对象并重检版本；单集路径额外锁定祖先以维持层级写入顺序。
     match target {
@@ -522,42 +626,14 @@ async fn switch_reference(
                 series_version: None,
             })
         }
-        AttachmentTarget::EpisodeVideo { id, version } => {
-            // 先读取不可变祖先，再按全局顺序锁住全部内容记录：series -> season -> episode。
-            // 加锁后重新核对每条父子关系，避免并发移动或删除使先前读取的层级失效。
-            let episode_hint = episode::Entity::find_by_id(id)
-                .one(tx)
-                .await?
-                .ok_or(MediaError::TargetNotFound)?;
-            let season_hint = season::Entity::find_by_id(episode_hint.season_id)
-                .one(tx)
-                .await?
-                .ok_or(MediaError::TargetNotFound)?;
-            let parent = series::Entity::find_by_id(season_hint.series_id)
-                .lock_exclusive()
-                .one(tx)
-                .await?
-                .ok_or(MediaError::TargetNotFound)?;
-            let season = season::Entity::find()
-                .filter(season::Column::Id.eq(season_hint.id))
-                .filter(season::Column::SeriesId.eq(parent.id))
-                .lock_exclusive()
-                .one(tx)
-                .await?
-                .ok_or(MediaError::TargetNotFound)?;
-            let model = episode::Entity::find()
-                .filter(episode::Column::Id.eq(id))
-                .filter(episode::Column::SeasonId.eq(season.id))
-                .lock_exclusive()
-                .one(tx)
-                .await?
-                .ok_or(MediaError::TargetNotFound)?;
-            if model.status != "draft" {
-                return Err(MediaError::ReadOnly);
-            }
-            if model.version != version {
-                return Err(MediaError::VersionConflict);
-            }
+        AttachmentTarget::EpisodeVideo { id, version, .. } => {
+            let LockedEpisodeSlot {
+                parent,
+                episode: model,
+            } = match checked_slot {
+                Some(slot) => slot,
+                None => lock_episode_slot(tx, id, version).await?,
+            };
             let old = model.video_asset_id;
             let old_to_delete = stage_old_asset(tx, removal, staged, old).await?;
             // 单集视频替换同时推进单集与整剧版本；任一写入失败均返回外层恢复暂存状态。

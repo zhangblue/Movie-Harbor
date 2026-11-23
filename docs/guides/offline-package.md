@@ -62,6 +62,8 @@ docker compose up -d --no-build --wait
 
 `DATABASE_HOST_DIR` 映射到 PostgreSQL 的 `/var/lib/postgresql/data`，`MEDIA_HOST_DIR` 映射到 API 的 `/media` 和 Caddy 的只读 `/srv/media`。默认分别为解压目录下的 `./data/postgres` 和 `./data/media`；建议改为固定的宿主机绝对路径，以便升级时复用同一套数据。初始化容器会设置媒体目录的属主和权限。
 
+升级时先停止旧 API。同一媒体卷同时只允许一个活动 API 实例。新版本需要同卷 POSIX 硬链接、原子 rename 和目录 fsync。启动失败且日志指出硬链接探测错误时，先检查实际挂载的文件系统和 API 的写权限。
+
 升级前停止写入，并将数据库和媒体目录作为同一个一致性备份集保存；新包导入后，复用原有数据目录、部署项目名和经过核对的环境配置，再执行启动命令。包不包含真实 `.env`、密码、数据库、媒体数据、源码或开发依赖；备份与秘密须由部署者单独保管。停止本部署使用 `docker compose down`，不要删除仍需保留的数据目录。
 
 升级前检查[媒体与备份指南](media-and-backup.md)中的迁移要求，并按其中的一致备份与恢复流程保护数据。

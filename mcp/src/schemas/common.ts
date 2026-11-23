@@ -2,7 +2,9 @@ import { z } from 'zod';
 import { MovieHarborClientError } from '../services/error-mapper.js';
 
 // 供内容和媒体 schema 校验标准 UUID 文本，也兼容旧数据的零版本位。
-export const id = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+export const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// 内容与媒体 schema 使用统一的 UUID 语法读取接口标识。
+export const id = z.string().regex(uuidPattern);
 // 供版本、序号及时长等 schema 限制正安全整数。
 export const positiveInt = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 // 供读写内容工具校验并发版本，使用正安全整数。
@@ -31,6 +33,8 @@ export const nextActions = z.array(z.string());
 export const readOnlyAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true };
 // 供写工具注册声明非只读、非破坏且默认非幂等属性。
 export const writeAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false };
+// 供可能下线内容、更改访问范围或永久替换文件的工具声明破坏性影响。
+export const destructiveAnnotations = { ...writeAnnotations, destructiveHint: true };
 // 供电影和剧集写工具返回内容标识、版本、状态及后续操作。
 export const contentResult = z.object({ id, version, status, next_actions: nextActions });
 

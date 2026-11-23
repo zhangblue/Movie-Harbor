@@ -589,6 +589,7 @@ impl LocalMediaStorage {
             Err(error) => return Err(error.into()),
         };
         verify_exclusive_directory(&operations_fd, true)?;
+        verify_exclusive_directory(&incoming_fd, false)?;
         // 实例对外提供服务前，先恢复隔离区中身份可证明且原位置空缺的文件；此阶段不查询数据库。
         recover_quarantine_claims(&root_fd, &quarantine_fd)?;
         sync_fd(&root_fd)?;
@@ -603,6 +604,15 @@ impl LocalMediaStorage {
             hooks,
             capacity_reader,
         })
+    }
+
+    /// 在启动恢复和暂存清理已完成、请求仍未开始时探测实际视频预留目录的能力。
+    pub(super) fn verify_hard_links(&self) -> Result<(), MediaError> {
+        video_rollback::probe_hard_links(&self.incoming_fd, &self.quarantine_fd, &self.hooks)
+            .map_err(|cause| MediaError::StorageCapability {
+                requirement: "media volume hard-link probe failed: POSIX hard links and directory fsync are required between .incoming and .quarantine",
+                cause,
+            })
     }
 
     /// 上层需要存储根路径时返回初始化阶段得到的规范路径。
@@ -1342,12 +1352,21 @@ impl LocalMediaStorage {
     ) -> Result<(), MediaError> {
         use crate::entities::media_asset;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-        let registered = media_asset::Entity::find()
+        let asset = media_asset::Entity::find()
             .filter(media_asset::Column::StorageKey.eq(&marker.storage_key))
             .one(tx)
-            .await?
-            .is_some();
+            .await?;
+        let registered = asset.is_some();
         if marker.version == 2 {
+            // 即使文件内容吻合，数据库记录也必须属于该凭证并提供相同的长度和摘要。
+            if let Some(asset) = asset
+                && (name != format!("{}.pending", asset.id.simple())
+                    || asset.purpose != "video"
+                    || u64::try_from(asset.byte_size).ok() != Some(marker.byte_size)
+                    || asset.checksum_sha256.as_ref() != Some(&marker.checksum_sha256))
+            {
+                return Err(MediaError::InvalidStorageKey);
+            }
             let (kind, shard, _) = parse_storage_key(&marker.storage_key)?;
             let directory = open_directory(&self.root_fd, OsStr::new(kind))?;
             let leaf = open_directory(&directory, OsStr::new(shard))?;

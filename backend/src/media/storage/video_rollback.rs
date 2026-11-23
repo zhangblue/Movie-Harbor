@@ -2,6 +2,49 @@
 use super::*;
 use rustix::fs::{linkat, renameat};
 
+/// 初始化期间以实际上传使用的两个目录描述符探测硬链接，结束时持久化两侧清理。
+pub(super) fn probe_hard_links(
+    incoming: &OwnedFd,
+    quarantine: &OwnedFd,
+    hooks: &Arc<dyn StorageHooks>,
+) -> io::Result<()> {
+    let name = format!(".hard-link-probe-{}", Uuid::new_v4().simple());
+    let name = name.as_str();
+    let source = openat(
+        incoming,
+        name,
+        OFlags::CREATE | OFlags::EXCL | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        file_mode(),
+    )?;
+    let mut linked = false;
+    let probe = (|| -> io::Result<()> {
+        sync_fd(&source)?;
+        hooks.on_event(&StorageEvent::FileSynced(format!(".incoming/{name}")))?;
+        linkat(incoming, name, quarantine, name, AtFlags::empty())?;
+        linked = true;
+        let src = rustix::fs::fstat(&source)?;
+        let dst = statat(quarantine, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        if (src.st_dev, src.st_ino) != (dst.st_dev, dst.st_ino) {
+            return Err(io::Error::other("hard-link identity mismatch"));
+        }
+        sync_fd(quarantine)?;
+        hooks.on_event(&StorageEvent::DirectorySynced(".quarantine".into()))
+    })();
+    // 两侧都尝试清理并同步。链接碰撞不取得目标所有权，未知身份的同名条目保持原样。
+    let clean = |dir: &OwnedFd| -> io::Result<()> {
+        let named = statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        let held = rustix::fs::fstat(&source)?;
+        if (named.st_dev, named.st_ino) != (held.st_dev, held.st_ino) {
+            return Err(io::Error::other("hard-link probe name changed"));
+        }
+        unlinkat(dir, name, AtFlags::empty())?;
+        sync_fd(dir)
+    };
+    let target_cleanup = if linked { clean(quarantine) } else { Ok(()) };
+    let source_cleanup = clean(incoming);
+    target_cleanup.and(source_cleanup).and(probe)
+}
+
 /// 从已经校验的 pending 名取得对应私有隔离名称。
 fn hold_name(marker_name: &str) -> Result<String, MediaError> {
     marker_name
@@ -75,13 +118,17 @@ pub(super) fn release_reservation(
     Ok(())
 }
 
-/// 在正式文件或已隔离文件上核对设备、inode、字节数及内容摘要。
-fn owns(marker: &PendingMarker, file: &mut std::fs::File) -> Result<bool, MediaError> {
+/// 核对凭证内容；只有只读保留已登记正式文件时允许从备份复制导致的 inode 改变。
+fn matches_video(
+    marker: &PendingMarker,
+    file: &mut std::fs::File,
+    keep_registered_formal: bool,
+) -> Result<bool, MediaError> {
     let stat = rustix::fs::fstat(&*file).map_err(io::Error::from)?;
     Ok(
         rustix::fs::FileType::from_raw_mode(stat.st_mode) == rustix::fs::FileType::RegularFile
-            && stat.st_dev as u64 == marker.device
-            && stat.st_ino as u64 == marker.inode
+            && (keep_registered_formal
+                || (stat.st_dev as u64 == marker.device && stat.st_ino as u64 == marker.inode))
             && stat.st_size as u64 == marker.byte_size
             && hash_opened_file(file)? == marker.checksum_sha256,
     )
@@ -128,7 +175,7 @@ pub(super) fn resolve(
                 Ok(())
             }
             Some(mut formal) if registered => {
-                if owns(marker, &mut formal)? {
+                if matches_video(marker, &mut formal, true)? {
                     sync_restored_directories(leaf, quarantine, &marker.storage_key, hooks)
                 } else {
                     Err(MediaError::InvalidStorageKey)
@@ -145,10 +192,12 @@ pub(super) fn resolve(
                 release_reservation(incoming, quarantine, &name)
             };
         };
-        if !owns(marker, &mut original)? {
+        if !matches_video(marker, &mut original, registered)? {
             return Err(MediaError::InvalidStorageKey);
         }
         if registered {
+            // 只读保留正式文件。先同步卷上两侧，再删除仍与凭证同 inode 的预留链接。
+            sync_restored_directories(leaf, quarantine, &marker.storage_key, hooks)?;
             return release_reservation(incoming, quarantine, &name);
         }
         // 原子覆盖自己预留的隔离项；持有原文件描述符跨越移动，避免 inode 被复用。
@@ -161,7 +210,7 @@ pub(super) fn resolve(
         }
         renameat(leaf, file_name, quarantine, target.as_str()).map_err(io::Error::from)?;
         held = open_optional(quarantine, &target)?.ok_or(MediaError::InvalidStorageKey)?;
-        if !owns(marker, &mut held)? {
+        if !matches_video(marker, &mut held, false)? {
             // 名称被替换时只尝试原子放回，不覆盖同名正式项、不删除捕获的替代文件。
             renameat_with(
                 quarantine,
@@ -175,7 +224,7 @@ pub(super) fn resolve(
             sync_fd(quarantine)?;
             return Err(MediaError::InvalidStorageKey);
         }
-    } else if !owns(marker, &mut held)? {
+    } else if !matches_video(marker, &mut held, false)? {
         return Err(MediaError::InvalidStorageKey);
     }
     // 先持久化隔离状态，再按数据库决策恢复已登记文件或删除确定未登记的视频。

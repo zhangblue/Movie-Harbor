@@ -84,9 +84,9 @@ async function registeredTools(client: any, dependencies: any) {
 test('upload and replace tools register independently with strict write annotations', async t => {
   const f = await fixture(t); const c = fakeClient([]); const tools = await registeredTools(c.client, f);
   assert.deepEqual([...tools.registrations.keys()], ['upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video']);
-  for (const { schema } of tools.registrations.values()) {
+  for (const [name, { schema }] of tools.registrations) {
     assert.ok(schema.inputSchema); assert.ok(schema.outputSchema);
-    assert.deepEqual(schema.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false });
+    assert.deepEqual(schema.annotations, { readOnlyHint: false, destructiveHint: name.startsWith('replace_'), idempotentHint: false });
   }
   await assert.rejects(tools.call('replace_movie_video', { movie_id:movieId,version:3,path:f.path,confirmed:false }));
   assert.equal(c.calls.length, 0);
@@ -182,7 +182,7 @@ test('episode upload validates hierarchy and returns episode and parent versions
   assert.deepEqual(c.calls.map(call => call.path), [
     '/api/admin/system/overview',
     `/api/admin/series/${seriesId}/seasons/${seasonId}/episodes/${episodeId}`,
-    `/api/admin/media/episodes/${episodeId}/video?version=4`,
+    `/api/admin/media/episodes/${episodeId}/video?version=4&series_version=8`,
   ]);
   const wrong = fakeClient([{series_version:8,episode:{...episode,id:movieId}}]);
   await assert.rejects((await registeredTools(wrong.client,f)).call('upload_episode_video',input), /数据格式无效/);

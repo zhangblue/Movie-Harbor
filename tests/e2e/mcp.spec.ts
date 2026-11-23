@@ -185,8 +185,8 @@ test("MCP creates, uploads and independently publishes private movie and series"
   // 单集清单须给出完整归属，使调用方能准确填写后续上传所需的三个标识。
   const missingEpisodes = await call("list_missing_videos", { content_type: "series", page: 1 });
   expect(missingEpisodes.items).toContainEqual(expect.objectContaining({
-    series_id: series.id, season_id: season.season_id, episode_id: episode.id,
-    episode_name: "Pilot", episode_version: episode.version,
+    series_id: series.id, series_name: seriesName, season_id: season.season_id, season_number: 1,
+    episode_id: episode.id, episode_number: 1, episode_name: "Pilot", episode_version: episode.version,
   }));
   const episodeUpload = await call("upload_episode_video", {
     series_id: series.id, season_id: season.season_id, episode_id: episode.id,

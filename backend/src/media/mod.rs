@@ -23,6 +23,26 @@ pub use storage::{
 /// 系统概览和视频上传共用的媒体卷安全保留字节数。
 pub const MEDIA_CAPACITY_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// 在 API 路由可用前恢复持久化操作并探测媒体卷，满卷时先用预留位置回收未登记视频。
+pub async fn prepare_for_serving(
+    db: &sea_orm::DatabaseConnection,
+    storage: &LocalMediaStorage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 先按删除清单恢复已登记正式文件，随后处理上传凭证和过期海报。
+    removal::recover(db, storage).await?;
+    upload::recover_stale_uploads(db, storage, std::time::Duration::from_secs(3600)).await?;
+    staged_poster::cleanup_expired(
+        db,
+        storage,
+        chrono::Utc::now().fixed_offset(),
+        staged_poster::STARTUP_CLEANUP_LIMIT,
+    )
+    .await?;
+    // 恢复完成后再为探测分配新的目录项，失败仍阻止服务进入监听状态。
+    storage.verify_hard_links()?;
+    Ok(())
+}
+
 /// 视频上传取得变更锁后用于容量复核与流式计数的声明。
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UploadCapacityRequirement {
@@ -90,6 +110,11 @@ pub enum MediaError {
     /// COMMIT 结果未知时通过稳定响应提示客户端重新读取已保存的槽位。
     ReplacementOutcomeUnknown,
     ReplacementFinalizationFailed,
+    /// 启动探测无法安全创建、核对或同步清理同卷硬链接。
+    StorageCapability {
+        requirement: &'static str,
+        cause: io::Error,
+    },
     Io(io::Error),
     Database(sea_orm::DbErr),
     Multipart(String),
@@ -118,6 +143,7 @@ impl fmt::Display for MediaError {
             Self::ReplacementFailed => "media replacement failed",
             Self::ReplacementOutcomeUnknown => "media replacement result unknown",
             Self::ReplacementFinalizationFailed => "media replacement finalization failed",
+            Self::StorageCapability { requirement, .. } => requirement,
             Self::Io(_) => "media filesystem operation failed",
             Self::Database(_) => "media database operation failed",
             Self::Multipart(_) => "invalid multipart upload",
@@ -130,7 +156,7 @@ impl std::error::Error for MediaError {
     /// 在检查错误链时返回底层错误。
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Io(error) => Some(error),
+            Self::Io(cause) | Self::StorageCapability { cause, .. } => Some(cause),
             Self::Database(error) => Some(error),
             _ => None,
         }
@@ -172,6 +198,7 @@ impl IntoResponse for MediaError {
             | Self::ReplacementFailed
             | Self::ReplacementOutcomeUnknown
             | Self::ReplacementFinalizationFailed
+            | Self::StorageCapability { .. }
             | Self::Io(_)
             | Self::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };

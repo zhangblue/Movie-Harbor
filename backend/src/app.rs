@@ -1,6 +1,5 @@
 use axum::{Json, Router, routing::get};
 use serde::Serialize;
-use std::time::Duration;
 
 // 健康检查响应的序列化结构，由健康检查路由返回。
 #[derive(Serialize)]
@@ -48,16 +47,8 @@ pub async fn build(
         config.max_upload_bytes,
         config.allowed_video_mime_types.iter(),
     )?;
-    // 先按删除清单恢复仍被引用的正式文件，再让上传凭证核验其身份；两者均完成后才监听。
-    crate::media::removal::recover(&db, &storage).await?;
-    crate::media::upload::recover_stale_uploads(&db, &storage, Duration::from_secs(3600)).await?;
-    crate::media::staged_poster::cleanup_expired(
-        &db,
-        &storage,
-        chrono::Utc::now().fixed_offset(),
-        crate::media::staged_poster::STARTUP_CLEANUP_LIMIT,
-    )
-    .await?;
+    // 先恢复旧清单以释放中断写入占用的空间，再在监听端口前确认媒体卷能力。
+    crate::media::prepare_for_serving(&db, &storage).await?;
     // 所有媒体路由复用同一受控存储实例，确保文件恢复、上传和删除遵循同一所有权边界。
     Ok(router()
         .merge(crate::catalog::routes::router(db))

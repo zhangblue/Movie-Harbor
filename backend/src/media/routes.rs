@@ -5,6 +5,7 @@ use crate::{
     auth::{self, AuthState},
     entities::media_asset,
     route_params::parse_uuid,
+    series::dto::EpisodeVersionRequest,
 };
 use axum::{
     Extension, Json, Router,
@@ -178,7 +179,7 @@ async fn series_poster(
 async fn episode_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
-    Query(version): Query<VersionQuery>,
+    Query(version): Query<EpisodeVersionRequest>,
     request: Request,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     upload_video(
@@ -186,6 +187,7 @@ async fn episode_video(
         AttachmentTarget::EpisodeVideo {
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
+            series_version: version.series_version,
         },
         request,
     )
@@ -224,6 +226,8 @@ async fn upload(
         Some((capacity, _)) => Some(state.storage.begin_upload(Some(capacity)).await?),
         None => None,
     };
+    // 已拿到视频的文件锁。带父版本的请求在读正文及落盘前锁定目标，事务持续到槽位提交。
+    let checked_episode = super::upload::begin_guarded_episode(&state.db, target).await?;
     // 仅接收一个名为 file 的字段；文件名限制为 255 字节，声明 MIME 由上传策略进一步校验。
     let field = multipart
         .next_field()
@@ -272,7 +276,7 @@ async fn upload(
             "exactly one file field is required".into(),
         ));
     }
-    let committed = super::upload::commit_attachment(&state.db, pending).await?;
+    let committed = super::upload::commit_attachment(&state.db, pending, checked_episode).await?;
     Ok(Json(MediaAssetResponse::new(
         committed.asset,
         committed.version,

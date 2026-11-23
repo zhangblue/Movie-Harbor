@@ -41,6 +41,7 @@ test("MCP guide explains every registered tool and README only links to the guid
 // 防止维护流程继续推荐旧工具，或省略独立确认和视频容量的服务端复核。
 test("MCP guide documents maintenance confirmations and video capacity", () => {
   const guide = readFileSync(path.join(projectRoot, "docs/guides/codex-mcp.md"), "utf8");
+  assert.match(guide, /507[^。\n]*get_system_overview/);
   assert.doesNotMatch(guide, /\bpublish_(?:movie|episode|series)\b/);
   for (const tool of [
     "set_content_visibility", "transition_content_lifecycle", "set_content_poster",
@@ -189,4 +190,12 @@ test("offline guide documents the installed local ARM64 toolchain and Linux-only
   assert.match(guide, /macOS Apple Silicon[\s\S]*Linux ARM64/);
   assert.match(guide, /rustup target add aarch64-unknown-linux-musl/);
   assert.doesNotMatch(guide, /ARM64[^\n]*普通 Cargo|aarch64-unknown-linux-gnu/);
+});
+
+// 部署、升级和恢复都需要提前识别支持的媒体卷与单写入实例约束。
+test("deployment, upgrade and backup guides describe the required media filesystem", () => {
+  for (const name of ["deployment.md", "offline-package.md", "media-and-backup.md"]) {
+    const guide = readFileSync(path.join(projectRoot, "docs/guides", name), "utf8");
+    for (const term of [/硬链接/, /rename/, /fsync/, /一个活动 API/]) assert.match(guide, term, name);
+  }
 });

@@ -61,6 +61,8 @@ docker compose -p movie-harbor up -d --build --wait
 
 `docker compose down` 不会删除当前通过 bind mount 保存的数据库和媒体目录；真正的数据边界是 `DATABASE_HOST_DIR` 与 `MEDIA_HOST_DIR` 指向的宿主机路径。不要在未完成一致备份时删除、清空或改指这两个目录。
 
+首次部署和升级均要求媒体卷支持同一文件系统内的 POSIX 硬链接、原子重命名（rename）和目录 fsync。每个媒体卷同时只运行一个活动 API 实例。API 在监听端口前会在私有目录间实际创建硬链接并同步清理。若日志报告硬链接探测失败，检查挂载类型、卷是否可写、目录权限和可用空间，再启动 API。
+
 ## 启用影片助手
 
 1. 将 DeepSeek API 密钥写入部署目录的 `.env`（`DEEPSEEK_API_KEY`），确保 API 容器可以通过 HTTPS 访问 `api.deepseek.com`。
