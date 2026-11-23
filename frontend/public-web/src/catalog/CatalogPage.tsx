@@ -4,13 +4,14 @@ import { listCatalog, type CatalogKind } from "@movie-harbor/api-client";
 import { Brand } from "../app/Brand";
 import { Loading, RequestError } from "../app/RequestState";
 import { usePublicRequest } from "../app/usePublicRequest";
+import { ContinueWatching } from "./ContinueWatching";
 import { CatalogGrid } from "./CatalogGrid";
 import { CatalogPagination } from "./CatalogPagination";
 import { CatalogToolbar } from "./CatalogToolbar";
 
 // 由应用首页渲染目录，协调筛选、请求、分页和焦点。
 export function CatalogPage({ search, navigate, account }: { search: string; navigate: (href: string, replace?: boolean) => void; account?: ReactNode }) {
-  const { authenticated, discoveryPending } = useViewer();
+  const { authenticated, discoveryPending, viewerId, revision } = useViewer();
   const params = new URLSearchParams(search);
   const rawKind = params.get("kind");
   const kind: CatalogKind = rawKind === "movie" || rawKind === "series" ? rawKind : "all";
@@ -76,6 +77,8 @@ export function CatalogPage({ search, navigate, account }: { search: string; nav
         onQueryChange={(value) => update({ q: value }, true)} />
       {account}
     </header>
+    {authenticated && viewerId && kind === "all" && !query && !privateOnly && page === 1
+      && <ContinueWatching key={`${viewerId}:${revision}`} viewerId={viewerId} />}
     <section aria-labelledby="catalog-title" aria-busy={loading}>
       <div className="section-heading">
         <div><p className="eyebrow">LIBRARY</p><h1 id="catalog-title" ref={titleRef} tabIndex={-1}>{title}</h1></div>

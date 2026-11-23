@@ -4,6 +4,7 @@ import { createContext, useContext } from "react";
 export const ViewerContext = createContext({
   revision: 0,
   authenticated: false,
+  viewerId: undefined as string | undefined,
   discoveryPending: false,
   // 默认匿名上下文无需校验会话，允许公开请求继续。
   validate: async () => true,

@@ -286,7 +286,7 @@ it("logs viewers in through their own route and acquires CSRF before the next wr
   setCsrfToken("stale-admin-csrf");
   const requests = recordRequests([
     jsonResponse({ username: "Summer" }),
-    jsonResponse({ username: "Summer", csrf_token: "viewer-csrf" }),
+    jsonResponse({ viewer_id: "summer-id", username: "Summer", csrf_token: "viewer-csrf" }),
     new Response(null, { status: 204 }),
   ]);
 
@@ -304,11 +304,11 @@ it("logs viewers in through their own route and acquires CSRF before the next wr
 // 验证：恢复普通用户会话并在本人改密成功后清除令牌。
 it("restores viewer session and clears CSRF after successful self password change", async () => {
   const requests = recordRequests([
-    jsonResponse({ username: "Summer", csrf_token: "viewer-csrf" }),
+    jsonResponse({ viewer_id: "summer-id", username: "Summer", csrf_token: "viewer-csrf" }),
     new Response(null, { status: 204 }),
     new Response(null, { status: 204 }),
   ]);
-  await expect(client.getViewerSession()).resolves.toEqual({ username: "Summer", csrf_token: "viewer-csrf" });
+  await expect(client.getViewerSession()).resolves.toEqual({ viewer_id: "summer-id", username: "Summer", csrf_token: "viewer-csrf" });
   await client.changeViewerPassword({ current_password: "old-password", new_password: "new-password" });
   await apiRequest("/api/viewer/logout", { method: "POST" });
 
@@ -320,7 +320,7 @@ it("restores viewer session and clears CSRF after successful self password chang
 it("does not overwrite current CSRF when a viewer session is rejected by its identity owner", async () => {
   setCsrfToken("winter-csrf");
   const requests = recordRequests([
-    jsonResponse({ username: "Summer", csrf_token: "summer-csrf" }),
+    jsonResponse({ viewer_id: "summer-id", username: "Summer", csrf_token: "summer-csrf" }),
     new Response(null, { status: 204 }),
   ]);
   await client.getViewerSession(() => false);
@@ -331,7 +331,7 @@ it("does not overwrite current CSRF when a viewer session is rejected by its ide
 // 验证：本人改密被拒绝时保留普通用户令牌。
 it("preserves viewer CSRF when a self password change is rejected", async () => {
   const requests = recordRequests([
-    jsonResponse({ username: "Summer", csrf_token: "still-valid" }),
+    jsonResponse({ viewer_id: "summer-id", username: "Summer", csrf_token: "still-valid" }),
     jsonResponse({ error: "当前密码不正确" }, 400),
     new Response(null, { status: 204 }),
   ]);
@@ -433,7 +433,7 @@ it.each([false, true])("creates movie and series with explicit is_private=%s", a
 
 // 验证：共享包导出普通用户及访问范围所需的数据契约。
 it("exports required viewer and privacy DTO contracts from the package", () => {
-  expectTypeOf<ViewerSessionResponse>().toEqualTypeOf<{ username: string; csrf_token: string }>();
+  expectTypeOf<ViewerSessionResponse>().toEqualTypeOf<{ viewer_id: string; username: string; csrf_token: string }>();
   expectTypeOf<ViewerUserSummary>().toEqualTypeOf<{
     id: string; username: string; version: number; created_at: string;
     last_login_at: string | null; has_active_session: boolean;

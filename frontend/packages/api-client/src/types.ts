@@ -73,7 +73,7 @@ export interface ViewerLoginRequest { username: string; password: string }
 // 普通用户登录成功返回的用户名；会话令牌需另行获取。
 export interface ViewerLoginResponse { username: string }
 // 普通用户会话恢复返回的用户名和 CSRF 令牌。
-export interface ViewerSessionResponse { username: string; csrf_token: string }
+export interface ViewerSessionResponse { viewer_id: string; username: string; csrf_token: string }
 // 管理用户列表中单个普通用户的版本和会话摘要。
 export interface ViewerUserSummary {
   id: string; username: string; version: number; created_at: string;

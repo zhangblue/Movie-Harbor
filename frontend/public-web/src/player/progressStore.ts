@@ -12,6 +12,7 @@ export interface PlaybackProgress {
   position: number;
   duration: number;
   updatedAt: number;
+  seriesId?: string;
 }
 
 // 版本化本地状态，分别存放各内容进度和各剧集最近单集。
@@ -39,12 +40,17 @@ function isJsonObject(value: JsonValue): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 根据已确认的账号选择进度键，匿名继续使用原有键。
+function storageKey(viewerId?: string) {
+  return viewerId ? `${PROGRESS_STORAGE_KEY}:viewer:${viewerId}` : PROGRESS_STORAGE_KEY;
+}
+
 // 读取并校验本地播放记录，存储不可用或数据损坏时回退为空状态。
-function readState(storage?: Storage): ProgressState {
+function readState(storage?: Storage, viewerId?: string): ProgressState {
   const target = resolveStorage(storage);
   if (!target) return emptyState();
   try {
-    const raw = target.getItem(PROGRESS_STORAGE_KEY);
+    const raw = target.getItem(storageKey(viewerId));
     if (raw === null) return emptyState();
     const value = JSON.parse(raw) as JsonValue;
     if (!isJsonObject(value)) return emptyState();
@@ -62,7 +68,8 @@ function readState(storage?: Storage): ProgressState {
         || typeof item.position !== "number" || !Number.isFinite(item.position) || item.position < 0
         || typeof item.duration !== "number" || !Number.isFinite(item.duration) || item.duration <= 0
         || typeof item.updatedAt !== "number" || !Number.isFinite(item.updatedAt)) return emptyState();
-      progress[key] = { position: item.position, duration: item.duration, updatedAt: item.updatedAt };
+      progress[key] = { position: item.position, duration: item.duration, updatedAt: item.updatedAt,
+        ...(typeof item.seriesId === "string" ? { seriesId: item.seriesId } : {}) };
     }
     const recentEpisodes: Record<string, string> = {};
     for (const [key, episodeId] of Object.entries(storedRecentEpisodes)) {
@@ -76,49 +83,75 @@ function readState(storage?: Storage): ProgressState {
 }
 
 // 保存播放状态，浏览器拒绝存储时仍允许播放继续。
-function writeState(state: ProgressState, storage?: Storage) {
+function writeState(state: ProgressState, storage?: Storage, viewerId?: string) {
   const target = resolveStorage(storage);
   if (!target) return;
   try {
-    target.setItem(PROGRESS_STORAGE_KEY, JSON.stringify(state));
+    target.setItem(storageKey(viewerId), JSON.stringify(state));
   } catch {
     // 浏览器可能拒绝存储或空间已满；忽略持久化失败，保证播放仍能继续。
   }
 }
 
 // 在播放器初始化时读取指定内容的播放进度。
-export function getProgress(key: PlaybackContentKey, storage?: Storage): PlaybackProgress | null {
-  return readState(storage).progress[key] ?? null;
+export function getProgress(key: PlaybackContentKey, storage?: Storage, viewerId?: string): PlaybackProgress | null {
+  return readState(storage, viewerId).progress[key] ?? null;
 }
 
 // 播放期间保存有效进度，开头或接近结尾时清除恢复记录。
-export function saveProgress(key: PlaybackContentKey, position: number, duration: number, storage?: Storage) {
+export function saveProgress(key: PlaybackContentKey, position: number, duration: number, storage?: Storage, viewerId?: string, seriesId?: string) {
   if (!Number.isFinite(position) || !Number.isFinite(duration) || position < 0 || duration <= 0) return;
   if (position === 0 || duration - position < 30) {
-    clearProgress(key, storage);
+    clearProgress(key, storage, viewerId);
     return;
   }
-  const state = readState(storage);
-  state.progress[key] = { position, duration, updatedAt: Date.now() };
-  writeState(state, storage);
+  const state = readState(storage, viewerId);
+  state.progress[key] = { position, duration, updatedAt: Date.now(), ...(seriesId ? { seriesId } : {}) };
+  writeState(state, storage, viewerId);
 }
 
 // 播放结束或从头播放时删除指定内容的进度。
-export function clearProgress(key: PlaybackContentKey, storage?: Storage) {
-  const state = readState(storage);
+export function clearProgress(key: PlaybackContentKey, storage?: Storage, viewerId?: string) {
+  const state = readState(storage, viewerId);
   delete state.progress[key];
-  writeState(state, storage);
+  writeState(state, storage, viewerId);
 }
 
 // 进入剧集播放页时读取最近观看的单集。
-export function getRecentEpisode(key: SeriesProgressKey, storage?: Storage): string | null {
-  return readState(storage).recentEpisodes[key] ?? null;
+export function getRecentEpisode(key: SeriesProgressKey, storage?: Storage, viewerId?: string): string | null {
+  return readState(storage, viewerId).recentEpisodes[key] ?? null;
 }
 
 // 选择单集或进入播放器时更新最近观看记录。
-export function setRecentEpisode(key: SeriesProgressKey, episodeId: string | null, storage?: Storage) {
-  const state = readState(storage);
+export function setRecentEpisode(key: SeriesProgressKey, episodeId: string | null, storage?: Storage, viewerId?: string) {
+  const state = readState(storage, viewerId);
   if (episodeId) state.recentEpisodes[key] = episodeId;
   else delete state.recentEpisodes[key];
-  writeState(state, storage);
+  writeState(state, storage, viewerId);
+}
+
+// 保存首页候选的影片标识、单集标识及可恢复进度。
+export interface ContinueWatchingEntry {
+  kind: "movie" | "series";
+  id: string;
+  episodeId?: string;
+  progress: PlaybackProgress;
+}
+
+// 首页加载时按最近的有效播放记录生成候选，每部剧集只取一集。
+export function listContinueWatching(viewerId: string, storage?: Storage): ContinueWatchingEntry[] {
+  const records = Object.entries(readState(storage, viewerId).progress)
+    .sort(([, left], [, right]) => right.updatedAt - left.updatedAt);
+  const seenSeries = new Set<string>();
+  const entries: ContinueWatchingEntry[] = [];
+  for (const [key, progress] of records) {
+    if (progress.position <= 0 || progress.duration - progress.position < 30) continue;
+    if (key.startsWith("movie:")) {
+      entries.push({ kind: "movie", id: key.slice(6), progress });
+    } else if (key.startsWith("episode:") && progress.seriesId && !seenSeries.has(progress.seriesId)) {
+      seenSeries.add(progress.seriesId);
+      entries.push({ kind: "series", id: progress.seriesId, episodeId: key.slice(8), progress });
+    }
+  }
+  return entries;
 }

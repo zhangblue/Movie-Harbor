@@ -185,3 +185,50 @@ for (const operation of ["logout", "password"] as const) {
     } finally { release(); await api.dispose(); }
   });
 }
+
+// 验证账号首页续播公开电影和私密剧集，并在实际退出后隐藏记录。
+test("signed-in home resumes a public movie and a private episode", async ({ page, playwright }) => {
+  const api = await AdminApi.login(playwright);
+  try {
+    const stamp = Date.now();
+    const user = await api.createUser(`resume-${stamp}`);
+    const movie = await createPublishableMovie(api, `Resume Movie ${stamp}`);
+    const series = await api.setPrivacy("series", await createPublishableSeries(api, `Resume Series ${stamp}`), true);
+    const episode = series.seasons[0]!.episodes[0]!;
+    await page.goto("/");
+    await page.getByRole("button", { name: "登录", exact: true }).click();
+    const login = page.getByRole("dialog");
+    await login.getByLabel("用户名").fill(user.username);
+    await login.getByLabel("密码", { exact: true }).fill("viewer-initial-password");
+    await login.getByRole("button", { name: "登录", exact: true }).click();
+    await expect(page.getByRole("button", { name: "退出登录" })).toBeVisible();
+    // 写入已观看记录，使短媒体测试素材能覆盖剩余时长规则。
+    await page.evaluate(({ viewerId, movieId, seriesId, episodeId }) => {
+      const updatedAt = Date.now();
+      localStorage.setItem(`movie-harbor:playback:v1:viewer:${viewerId}`, JSON.stringify({
+        version: 1,
+        recentEpisodes: {},
+        progress: {
+          [`movie:${movieId}`]: { position: 0.2, duration: 120, updatedAt },
+          [`episode:${episodeId}`]: { position: 0.2, duration: 120, updatedAt, seriesId },
+        },
+      }));
+    }, { viewerId: user.id, movieId: movie.id, seriesId: series.id, episodeId: episode.id });
+    await page.reload();
+    const section = page.getByRole("region", { name: "继续观看" });
+    await expect(section.getByRole("link", { name: new RegExp(movie.name) })).toBeVisible();
+    await section.getByRole("link", { name: new RegExp(series.name) }).click();
+    await expect(page).toHaveURL(new RegExp(`/series/${series.id}/play/${episode.id}\\?resume=1$`));
+    await expect(page.getByTestId("native-video")).toBeVisible();
+    await page.goto("/");
+    await section.getByRole("link", { name: new RegExp(movie.name) }).click();
+    await expect(page).toHaveURL(new RegExp(`/movies/${movie.id}/play\\?resume=1$`));
+    await expect(page.getByTestId("native-video")).toBeVisible();
+    await page.goto("/");
+    await page.getByRole("button", { name: "退出登录" }).click();
+    await expect(page.getByRole("button", { name: "登录", exact: true })).toBeVisible();
+    await expect(section).toHaveCount(0);
+  } finally {
+    await api.dispose();
+  }
+});

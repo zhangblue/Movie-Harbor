@@ -222,6 +222,7 @@ async fn viewer_cookie_login_is_normalized_opaque_and_independent_of_admin() {
     let cookie = response_cookie(&response);
     assert_eq!(body(response).await, json!({"username":"Summer"}));
     let session = body(read(&app, Some(&cookie)).await).await;
+    assert_eq!(session["viewer_id"], json!(user.id));
     let raw = cookie.split_once('=').unwrap().1;
     let stored = viewer_session::Entity::find()
         .one(&*db)

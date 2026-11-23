@@ -2,17 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { clearProgress, getProgress, saveProgress, type PlaybackContentKey } from "./progressStore";
 
 // 由电影或剧集播放页渲染视频，协调播放状态与本地进度。
-export function VideoPlayer({ contentKey, src, title }: {
+export function VideoPlayer({ contentKey, src, title, viewerId, seriesId, resume }: {
   contentKey: PlaybackContentKey;
   src: string;
   title: string;
+  viewerId?: string;
+  seriesId?: string;
+  resume?: boolean;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const lastSavedAt = useRef(Date.now());
-  const savedProgress = useRef(getProgress(contentKey));
+  const savedProgress = useRef(getProgress(contentKey, undefined, viewerId));
   const canPersist = useRef(savedProgress.current === null);
+  const autoplayPending = useRef(Boolean(viewerId && resume && savedProgress.current));
   const [resumeChoice, setResumeChoice] = useState<"pending" | "continue" | "start">(
-    savedProgress.current ? "pending" : "start",
+    savedProgress.current ? (viewerId && resume ? "continue" : "pending") : "start",
   );
   const [playbackState, setPlaybackState] = useState<"checking" | "ready" | "error">("checking");
 
@@ -20,7 +24,7 @@ export function VideoPlayer({ contentKey, src, title }: {
   const persist = (video = videoRef.current) => {
     if (!canPersist.current) return;
     if (!video) return;
-    saveProgress(contentKey, video.currentTime, video.duration);
+    saveProgress(contentKey, video.currentTime, video.duration, undefined, viewerId, seriesId);
     lastSavedAt.current = Date.now();
   };
 
@@ -52,7 +56,7 @@ export function VideoPlayer({ contentKey, src, title }: {
   // 用户选择从头播放时清除旧进度并将播放位置归零。
   const chooseStart = () => {
     canPersist.current = true;
-    clearProgress(contentKey);
+    clearProgress(contentKey, undefined, viewerId);
     savedProgress.current = null;
     setResumeChoice("start");
     if (videoRef.current) videoRef.current.currentTime = 0;
@@ -78,13 +82,19 @@ export function VideoPlayer({ contentKey, src, title }: {
         // 元数据给出真实时长后才恢复位置；用户未选择继续时保留默认播放起点。
         if (resumeChoice !== "continue" || !savedProgress.current) return;
         restoreSavedPosition(event.currentTarget);
+        // 首页续播定位完成后尝试播放；浏览器拦截时仍可手动开始。
+        if (autoplayPending.current) {
+          autoplayPending.current = false;
+          canPersist.current = true;
+          void event.currentTarget.play().catch(() => {});
+        }
       }}
       onTimeUpdate={() => {
         // 播放过程中最多每五秒写一次本地进度，暂停和离页仍由各自事件立即保存。
         if (Date.now() - lastSavedAt.current >= 5_000) persist();
       }}
       onPause={() => persist()}
-      onEnded={() => clearProgress(contentKey)}
+      onEnded={() => clearProgress(contentKey, undefined, viewerId)}
       onCanPlay={() => setPlaybackState("ready")}
       onError={() => setPlaybackState("error")}
     />

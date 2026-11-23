@@ -107,3 +107,13 @@ describe("playback progress storage", () => {
     expect(getRecentEpisode("series:two")).toBe("ep-2");
   });
 });
+
+// 验证登录用户之间的播放进度隔离，匿名仍能恢复原有播放进度。
+it("separates viewer playback progress from other viewers and anonymous progress", () => {
+  const storage = new MemoryStorage();
+  saveProgress("movie:m", 10, 100, storage);
+  saveProgress("movie:m", 20, 100, storage, "viewer-a");
+  expect(getProgress("movie:m", storage, "viewer-b")).toBeNull();
+  expect(getProgress("movie:m", storage, "viewer-a")?.position).toBe(20);
+  expect(getProgress("movie:m", storage)?.position).toBe(10);
+});

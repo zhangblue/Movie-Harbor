@@ -153,6 +153,7 @@ async fn login(
 // 返回当前普通用户会话，供会话查询请求调用。
 async fn read_session(Extension(current): Extension<session::CurrentSession>) -> Response {
     Json(SessionResponse {
+        viewer_id: current.viewer.id,
         username: current.viewer.username,
         csrf_token: current.csrf_token,
     })

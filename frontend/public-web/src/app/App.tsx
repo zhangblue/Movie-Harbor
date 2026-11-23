@@ -16,7 +16,7 @@ const currentLocation = () => window.location.pathname + window.location.search;
 // 提取电影或剧集路径，在导航时判断是否离开当前内容。
 const contentPath = (path: string) => /^\/(movies|series)\/[^/]+/.exec(path)?.[0];
 // 公开站当前身份的加载、匿名、已认证或错误状态及可选用户名。
-type ViewerState = { status: "loading" | "anonymous" | "authenticated" | "error"; username?: string };
+type ViewerState = { status: "loading" | "anonymous" | "authenticated" | "error"; username?: string; viewerId?: string };
 
 // 作为公开站根组件管理路由、普通用户身份和页面切换。
 export function App() {
@@ -84,8 +84,8 @@ export function App() {
   // 只接受当前身份代次的会话结果，防止过期请求覆盖新身份。
   const acceptSession = useCallback((session: ViewerSessionResponse, generation: number) => {
     if (generation !== identity.current) return false;
-    if (viewerRef.current.status !== "authenticated" || viewerRef.current.username !== session.username) {
-      transitionViewer({ status: "authenticated", username: session.username });
+    if (viewerRef.current.status !== "authenticated" || viewerRef.current.viewerId !== session.viewer_id || viewerRef.current.username !== session.username) {
+      transitionViewer({ status: "authenticated", username: session.username, viewerId: session.viewer_id });
     } else setMessage("");
     return true;
   }, [transitionViewer]);
@@ -181,8 +181,8 @@ export function App() {
       {url.pathname === "/" ? <CatalogPage search={url.search} navigate={navigate} account={account} /> : (
         <>
           <header className="public-header"><Brand />{account}</header>
-          {moviePlayerMatch && id ? <MoviePlayerPage key={`movie-player:${id}`} id={id} />
-            : seriesPlayerMatch && id ? <SeriesPlayerPage key={`series-player:${id}`} id={id} episodeId={episodeId} navigate={navigate} />
+          {moviePlayerMatch && id ? <MoviePlayerPage key={`movie-player:${id}`} id={id} resume={url.searchParams.get("resume") === "1"} />
+            : seriesPlayerMatch && id ? <SeriesPlayerPage key={`series-player:${id}`} id={id} episodeId={episodeId} navigate={navigate} resume={url.searchParams.get("resume") === "1"} />
             : detailsMatch && id ? detailsMatch[1] === "movies"
             ? <MovieDetails key={url.pathname} id={id} />
             : <SeriesDetails key={url.pathname} id={id} />
@@ -194,7 +194,7 @@ export function App() {
 
   const loginGeneration = identity.current;
   return (
-    <ViewerContext.Provider value={{ revision, authenticated, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
+    <ViewerContext.Provider value={{ revision, authenticated, viewerId: viewer.viewerId, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
     <AgentLauncher enabled={authenticated} sessionKey={identity.current} role="viewer" onExpired={expire} renderTrigger={renderSite} />
     {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
     {dialog === "password" && <ViewerPasswordDialog isCurrent={() => loginGeneration === identity.current} onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}

@@ -48,6 +48,8 @@ pub struct LoginRequest {
 #[derive(Serialize)]
 // 承载普通用户会话信息，供登录和会话路由返回。
 pub struct SessionResponse {
+    // 用于在浏览器中隔离不同账号的本机观看进度。
+    pub viewer_id: uuid::Uuid,
     pub username: String,
     pub csrf_token: String,
 }

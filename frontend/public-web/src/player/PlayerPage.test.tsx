@@ -266,3 +266,22 @@ it("shows explicit readiness and playback error messages", async () => {
   fireEvent.error(video);
   expect(screen.getByRole("alert")).toHaveTextContent("浏览器无法播放此视频格式");
 });
+
+// 验证首页续播链接恢复该账号的位置，自动播放被拒绝仍能手动播放。
+it("resumes the signed-in account from the home link even if autoplay is blocked", async () => {
+  window.history.replaceState(null, "", "/movies/movie-1/play?resume=1");
+  saveProgress("movie:movie-1", 25, 200, undefined, "viewer");
+  const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockRejectedValue(new DOMException("blocked", "NotAllowedError"));
+  // 会话与详情分别由现有 API 路径返回。
+  vi.stubGlobal("fetch", (input: string) => Promise.resolve(input.endsWith("/api/viewer/session")
+    ? json({ viewer_id: "viewer", username: "Summer", csrf_token: "csrf" }) : json(movie)));
+  render(<App />);
+  const video = await screen.findByTestId<HTMLVideoElement>("native-video");
+  setMediaTime(video, 0, 200);
+  fireEvent.loadedMetadata(video);
+  expect(video.currentTime).toBe(25);
+  fireEvent.loadedMetadata(video);
+  expect(play).toHaveBeenCalledOnce();
+  expect(video.controls).toBe(true);
+  expect(screen.queryByRole("button", { name: "继续播放" })).toBeNull();
+});
