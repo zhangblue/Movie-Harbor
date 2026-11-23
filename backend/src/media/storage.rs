@@ -1328,13 +1328,23 @@ impl LocalMediaStorage {
             Err(MediaError::Io(err)) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             _ => return Err(MediaError::InvalidStorageKey),
         }
-        // 等待锁期间数据库可能确认登记；必须在同一锁内读取当前结果再决定是否删除。
+        let tx = super::transaction::begin_recovery(db).await?;
+        let result = self.resolve_pending_upload(&tx, name, marker).await;
+        super::transaction::finish_recovery(tx, result).await
+    }
+
+    /// 在持有文件锁和数据库恢复锁时，依据新的登记快照处理上传凭证。
+    async fn resolve_pending_upload(
+        &self,
+        tx: &sea_orm::DatabaseTransaction,
+        name: &str,
+        marker: &PendingMarker,
+    ) -> Result<(), MediaError> {
         use crate::entities::media_asset;
         use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
-        let tx = super::transaction::begin(db).await?;
         let registered = media_asset::Entity::find()
             .filter(media_asset::Column::StorageKey.eq(&marker.storage_key))
-            .one(&tx)
+            .one(tx)
             .await?
             .is_some();
         if marker.version == 2 {
@@ -1366,7 +1376,6 @@ impl LocalMediaStorage {
         }
         remove_if_present(&self.incoming_fd, name)?;
         self.sync_directory(&self.incoming_fd, ".incoming".into())?;
-        tx.commit().await?;
         Ok(())
     }
 

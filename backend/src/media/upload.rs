@@ -292,17 +292,12 @@ pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
 ) -> Result<CommittedAttachment, MediaError> {
-    // 新文件携带的全局媒体变更锁覆盖数据库切换、旧文件暂存和提交后注册，避免并发操作打破槽位独占。
+    // 等待数据库锁时，正式文件仍归 pending 析构回滚；锁必须留在同一对象中直到清理完成。
+    let tx = super::transaction::begin(db).await?;
+    // 取得数据库锁后同步交接本地锁并进入事务阶段，中间没有可取消的等待点。
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
-    let tx = match super::transaction::begin(db).await {
-        Ok(tx) => tx,
-        Err(error) => {
-            pending.stored.return_mutation_guard(removal.into_guard())?;
-            return Err(error.into());
-        }
-    };
     pending.stored.begin_database_write();
     let result = replace_before_commit(&tx, &pending, &removal, &mut staged).await;
     let committed = match result {

@@ -5016,6 +5016,17 @@ async fn restart_retries_both_directories_before_retiring_removal_manifest() {
 /// 模拟前一个 API 已退出，PostgreSQL 仍持有修改资产登记或槽位的旧事务。
 #[tokio::test]
 async fn restart_waits_for_unresolved_media_transaction_before_file_decision() {
+    assert_final_files_after_pending_transaction(false).await;
+}
+
+/// 首次升级遇到没有 advisory 锁的旧版写事务，也须等它提交或回滚后才能恢复。
+#[tokio::test]
+async fn upgrade_waits_for_unresolved_legacy_media_writes() {
+    assert_final_files_after_pending_transaction(true).await;
+}
+
+/// 根据旧版或新版协议建立真实未决写入，分别从上传凭证与删除清单验证最终文件。
+async fn assert_final_files_after_pending_transaction(legacy: bool) {
     use movie_harbor_api::media::{
         removal::{self, OwnedMedia},
         upload::recover_stale_uploads,
@@ -5056,12 +5067,14 @@ async fn restart_waits_for_unresolved_media_transaction_before_file_decision() {
                 prepare_video_proof(root.as_ref(), asset.id, &asset.storage_key);
             }
             let old = db.begin().await.unwrap();
-            // 使用与媒体事务约定相同的项目命名空间和表 OID，保持旧连接直至确认有恢复者等待。
-            old.execute_unprepared(
-                "SELECT pg_advisory_xact_lock(1296584018, 'media_asset'::regclass::int)",
-            )
-            .await
-            .unwrap();
+            // 旧版本仅通过写语句持有关系锁，新版本还在修改资产前持有 advisory 锁。
+            if !legacy {
+                old.execute_unprepared(
+                    "SELECT pg_advisory_xact_lock(1296584018, 'media_asset'::regclass::int)",
+                )
+                .await
+                .unwrap();
+            }
             if deletion {
                 movie::Entity::delete_by_id(movie.id)
                     .exec(&old)
@@ -5092,9 +5105,13 @@ async fn restart_waits_for_unresolved_media_transaction_before_file_decision() {
             tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     assert!(!recovery.is_finished(), "旧事务未决时恢复提前完成");
-                    let waiting = old.query_one(Statement::from_string(DatabaseBackend::Postgres,
+                    let query = if legacy {
+                        "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='relation' AND NOT granted AND mode='ShareLock' AND relation='media_asset'::regclass AND pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting"
+                    } else {
                         "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted AND classid=1296584018 AND objid='media_asset'::regclass::oid AND objsubid=2) AS waiting"
-                    )).await.unwrap().unwrap().try_get::<bool>("", "waiting").unwrap();
+                    };
+                    let waiting = old.query_one(Statement::from_string(DatabaseBackend::Postgres, query))
+                        .await.unwrap().unwrap().try_get::<bool>("", "waiting").unwrap();
                     if waiting { break }
                     tokio::task::yield_now().await;
                 }
@@ -5144,4 +5161,89 @@ async fn media_writes_hold_recovery_lock_on_their_database_transaction() {
         .await
         .unwrap();
     assert_eq!(count_files(root.as_ref()), 0);
+}
+
+/// 在被取消的上传执行正式文件回滚时暂停，仅测试线程能够解除暂停。
+struct PauseCancelledUploadCleanup {
+    entered: tokio::sync::Notify,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl StorageHooks for PauseCancelledUploadCleanup {
+    /// 通知测试回滚已进入删除阶段，并等待它对下一次上传进行一次真实轮询。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if matches!(event, StorageEvent::BeforeUnlink(_)) {
+            self.entered.notify_one();
+            self.release
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+}
+
+/// 等待数据库锁期间取消替换时，析构完成前下一次上传必须仍在等待文件锁。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_replacement_retains_mutex_through_pending_file_cleanup() {
+    use sea_orm::TransactionTrait;
+    let db = database().await;
+    let root = TempRoot::new();
+    let (release, receiver) = std::sync::mpsc::channel();
+    let hooks = Arc::new(PauseCancelledUploadCleanup {
+        entered: tokio::sync::Notify::new(),
+        release: Mutex::new(receiver),
+    });
+    let capacity = Arc::new(UploadCapacityProbe {
+        available: 20 << 30,
+        promoted: AtomicBool::new(false),
+        reads: AtomicUsize::new(0),
+    });
+    let storage = LocalMediaStorage::initialize_with_hooks_and_capacity_reader(
+        root.as_ref(),
+        hooks.clone(),
+        capacity.clone(),
+    )
+    .await
+    .unwrap();
+    let movie = draft_movie(&db, None).await;
+    let old = db.begin().await.unwrap();
+    old.execute_unprepared(
+        "SELECT pg_advisory_xact_lock(1296584018, 'media_asset'::regclass::int)",
+    )
+    .await
+    .unwrap();
+    let first_db = db.clone();
+    let first_storage = storage.clone();
+    let first = tokio::spawn(async move {
+        attach_recovery_fixture(&first_db, &first_storage, movie.id, 1).await
+    });
+    // 先观察首个请求已完成提升并在 PostgreSQL 等待，再取消它，保证命中锁交接窗口。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let waiting = old.query_one(Statement::from_string(DatabaseBackend::Postgres,
+                "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='advisory' AND NOT granted AND classid=1296584018 AND objid='media_asset'::regclass::oid AND objsubid=2 AND pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting"
+            )).await.unwrap().unwrap().try_get::<bool>("", "waiting").unwrap();
+            if waiting {break}
+            tokio::task::yield_now().await;
+        }
+    }).await.unwrap();
+    first.abort();
+    tokio::time::timeout(Duration::from_secs(5), hooks.entered.notified())
+        .await
+        .unwrap();
+    let mut second = std::pin::pin!(attach_recovery_fixture(&db, &storage, movie.id, 1));
+    // 单次主动轮询足以区分等待本地锁与已采样，测试结果不依赖任务调度速度。
+    let pending = futures_util::poll!(second.as_mut()).is_pending();
+    let reads_during_cleanup = capacity.reads.load(Ordering::SeqCst);
+    release.send(()).unwrap();
+    assert!(first.await.unwrap_err().is_cancelled());
+    assert!(pending);
+    assert_eq!(reads_during_cleanup, 1, "清理完成前第二个上传已经采样");
+    assert_eq!(count_files(root.as_ref()), 0);
+    old.rollback().await.unwrap();
+    second.await.unwrap();
+    assert_eq!(capacity.reads.load(Ordering::SeqCst), 2);
+    assert_eq!(count_files(root.as_ref()), 1);
 }

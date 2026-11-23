@@ -1,4 +1,5 @@
 //! 媒体写事务与启动恢复共用的 PostgreSQL 事务锁。
+use super::MediaError;
 use sea_orm::{
     ConnectionTrait, DatabaseBackend, DatabaseConnection, DatabaseTransaction, DbErr,
     IsolationLevel, Statement, TransactionTrait,
@@ -23,4 +24,29 @@ pub(crate) async fn begin(db: &DatabaseConnection) -> Result<DatabaseTransaction
     ))
     .await?;
     Ok(tx)
+}
+
+/// 启动恢复先取得新版事务锁，再等待升级前已写过资产表的旧事务结束。
+pub(crate) async fn begin_recovery(db: &DatabaseConnection) -> Result<DatabaseTransaction, DbErr> {
+    let tx = begin(db).await?;
+    // 旧版未申请 advisory 锁，但在写 media_asset 时已取得 ROW EXCLUSIVE；
+    // 同一连接上的 SHARE 锁返回后，恢复查询的新快照才能反映这些事务的最终结果。
+    // 表名固定取自后端实体映射，与上方 regclass 使用同一 search_path。
+    tx.execute_unprepared(r#"LOCK TABLE "media_asset" IN SHARE MODE"#)
+        .await?;
+    Ok(tx)
+}
+
+/// 交还恢复结果前显式结束数据库事务，文件或凭证校验失败时也须等表锁释放。
+pub(crate) async fn finish_recovery(
+    tx: DatabaseTransaction,
+    result: Result<(), MediaError>,
+) -> Result<(), MediaError> {
+    match result {
+        Ok(()) => Ok(tx.commit().await?),
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
 }

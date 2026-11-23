@@ -176,7 +176,16 @@ pub async fn recover(
 ) -> Result<(), MediaError> {
     // 启动恢复只检查持久清单明确登记的中断操作，不扫描或清理普通孤儿文件。
     let _session = acquire(storage).await?;
-    let tx = super::transaction::begin(db).await?;
+    let tx = super::transaction::begin_recovery(db).await?;
+    let result = recover_operations(&tx, storage).await;
+    super::transaction::finish_recovery(tx, result).await
+}
+
+/// 两道数据库锁均已取得后，按最终引用还原或清理每份删除清单。
+async fn recover_operations(
+    tx: &DatabaseTransaction,
+    storage: &LocalMediaStorage,
+) -> Result<(), MediaError> {
     for persisted in storage.persisted_removal_operations()? {
         let manifest: Manifest = serde_json::from_slice(&persisted.manifest)
             .map_err(|_| MediaError::InvalidStorageKey)?;
@@ -195,7 +204,7 @@ pub async fn recover(
         }
         for entry in &manifest.entries {
             // 数据库仍引用该资产则恢复原位置；引用已切换或删除后才完成隔离副本的物理清理。
-            if is_referenced(&tx, entry.asset_id, &entry.storage_key).await? {
+            if is_referenced(tx, entry.asset_id, &entry.storage_key).await? {
                 storage.restore_persisted_removal(
                     &persisted.operation,
                     &entry.storage_key,
@@ -207,7 +216,6 @@ pub async fn recover(
         }
         storage.close_removal_operation(&persisted.operation)?;
     }
-    tx.commit().await?;
     Ok(())
 }
 
