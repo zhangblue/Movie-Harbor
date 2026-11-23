@@ -25,6 +25,36 @@ function ByteValue({ value }: { value: number }) {
   return <span aria-label={`${value} 字节`} title={`${value} 字节`}>{formatBytes(value)}</span>;
 }
 
+// 根据文件系统总量与当前可用量计算已使用容量和整数百分比，异常采样返回未知。
+function volumeUsage(volume: AdminSystemVolume): { usedBytes: number; percent: number } | null {
+  const totalBytes = volume.total_bytes;
+  const availableBytes = volume.available_bytes;
+  if (totalBytes === null || availableBytes === null || !Number.isFinite(totalBytes) || !Number.isFinite(availableBytes)
+    || totalBytes <= 0 || availableBytes < 0 || availableBytes > totalBytes) return null;
+  const usedBytes = totalBytes - availableBytes;
+  return { usedBytes, percent: Math.round((usedBytes / totalBytes) * 100) };
+}
+
+// 渲染媒体卷文件系统使用率；容量未知或异常时只展示未知状态，不伪造进度。
+function VolumeUsage({ volume }: { volume: AdminSystemVolume }) {
+  const usage = volumeUsage(volume);
+  if (!usage || volume.total_bytes === null || volume.available_bytes === null) {
+    return <section className="system-usage system-usage--unknown" aria-label="硬盘使用情况">
+      <div className="system-usage-heading"><strong>硬盘使用量</strong><span>未知</span></div>
+    </section>;
+  }
+  const valueText = `已使用 ${formatBytes(usage.usedBytes)}，共 ${formatBytes(volume.total_bytes)}，使用率 ${usage.percent}%`;
+  return <section className="system-usage" aria-label="硬盘使用情况">
+    <div className="system-usage-heading"><strong>硬盘使用量</strong><span>{usage.percent}%</span></div>
+    <p>已使用 <ByteValue value={usage.usedBytes} />，共 <ByteValue value={volume.total_bytes} /></p>
+    <div className="system-usage-progress" role="progressbar" aria-label="硬盘使用量" aria-valuemin={0} aria-valuemax={100}
+      aria-valuenow={usage.percent} aria-valuetext={valueText}>
+      <span className="system-usage-progress-fill" style={{ width: `${usage.percent}%` }} />
+    </div>
+    <div className="system-usage-legend"><span>已使用 <ByteValue value={usage.usedBytes} /></span><span>当前可用 <ByteValue value={volume.available_bytes} /></span></div>
+  </section>;
+}
+
 // 返回后端系统总状态对应的中文文字，不重新推断健康状态。
 function overviewStatusLabel(status: AdminSystemOverview["status"]): string {
   return status === "healthy" ? "正常" : "需注意";
@@ -56,6 +86,7 @@ function VolumeCard({ volume }: { volume: AdminSystemVolume }) {
     <div className="system-panel-heading"><div><p className="eyebrow">MEDIA VOLUME</p><h2>卷 {volume.number}</h2></div>
       <span className="system-status" role="status" aria-label={`卷 ${volume.number} 状态：${label}`}>{label}</span>
     </div>
+    <VolumeUsage volume={volume} />
     <dl className="system-facts">
       <div><dt>总容量</dt><dd>{volume.total_bytes === null ? "未知" : <ByteValue value={volume.total_bytes} />}</dd></div>
       <div><dt>当前可用</dt><dd>{volume.available_bytes === null ? "未知" : <ByteValue value={volume.available_bytes} />}</dd></div>

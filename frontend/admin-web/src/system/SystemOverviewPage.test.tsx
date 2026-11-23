@@ -69,6 +69,29 @@ it("loads and renders the readable system summary with accessible status and bac
   expect(screen.queryByRole("button", { name: /备份|恢复|清理|检查更新|迁移|重启/ })).not.toBeInTheDocument();
 });
 
+// 使用率必须由总容量减当前可用容量独立计算，避免把数据库记录字节误当成真实磁盘占用。
+// 验证正常媒体卷展示已用容量、百分比和完整 progressbar 语义。
+it("renders the filesystem usage with an accessible progress bar", async () => {
+  server((request) => request.url === "/api/admin/system/overview" ? response(overview({
+    volumes: [{
+      ...overview().volumes[0]!,
+      total_bytes: 2_147_483_648,
+      available_bytes: 536_870_912,
+      writable_bytes: 268_435_456,
+    }],
+  })) : undefined);
+  render(<SystemOverviewPage onExpired={() => {}} />);
+
+  const volume = await screen.findByRole("region", { name: "媒体卷 0" });
+  const progress = within(volume).getByRole("progressbar", { name: "硬盘使用量" });
+  expect(progress).toHaveAttribute("aria-valuemin", "0");
+  expect(progress).toHaveAttribute("aria-valuemax", "100");
+  expect(progress).toHaveAttribute("aria-valuenow", "75");
+  expect(progress).toHaveAttribute("aria-valuetext", "已使用 1.5 GiB，共 2 GiB，使用率 75%");
+  expect(volume).toHaveTextContent("硬盘使用量75%");
+  expect(volume).toHaveTextContent("已使用 1.5 GiB，共 2 GiB");
+});
+
 // 容量不足与无法采样都必须由文字说明影响，不能只依靠颜色或伪造零容量。
 // 验证低空间和容量未知状态保留后端判定及可上传影响。
 it.each([
@@ -92,8 +115,37 @@ it.each([
   const volume = await screen.findByRole("region", { name: "媒体卷 0" });
   expect(within(volume).getByRole("status", { name: `卷 0 状态：${label}` })).toBeInTheDocument();
   expect(volume).toHaveTextContent(detail);
-  if (totalBytes === null) expect(volume).toHaveTextContent("总容量未知");
+  if (totalBytes === null) {
+    expect(volume).toHaveTextContent("总容量未知");
+    expect(volume).toHaveTextContent("硬盘使用量未知");
+    expect(within(volume).queryByRole("progressbar", { name: "硬盘使用量" })).not.toBeInTheDocument();
+  } else {
+    expect(within(volume).getByRole("progressbar", { name: "硬盘使用量" })).toHaveAttribute("aria-valuenow", "0");
+  }
   expect(screen.getByRole("alert")).toHaveTextContent("卷状态需要关注");
+});
+
+// 缺失或相互矛盾的容量不能用于百分比，否则页面会暴露无效数值或伪造使用率。
+// 验证各类可由 JSON API 表达的异常容量都降级为未知且不渲染进度条。
+it.each([
+  ["available capacity is missing", 100, null],
+  ["total capacity is zero", 0, 0],
+  ["available capacity is negative", 100, -1],
+  ["available capacity exceeds the total", 100, 101],
+] as const)("does not invent a usage percentage when %s", async (_scenario, totalBytes, availableBytes) => {
+  server((request) => request.url === "/api/admin/system/overview" ? response(overview({
+    volumes: [{
+      ...overview().volumes[0]!,
+      total_bytes: totalBytes,
+      available_bytes: availableBytes,
+      writable_bytes: 0,
+    }],
+  })) : undefined);
+  render(<SystemOverviewPage onExpired={() => {}} />);
+
+  const volume = await screen.findByRole("region", { name: "媒体卷 0" });
+  expect(volume).toHaveTextContent("硬盘使用量未知");
+  expect(within(volume).queryByRole("progressbar", { name: "硬盘使用量" })).not.toBeInTheDocument();
 });
 
 // 刷新失败后保留旧徽标会让管理员误信过期状态，重试必须从空错误页重新采样。
