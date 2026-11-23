@@ -1,8 +1,9 @@
 import { mergeViewerProgress } from "@movie-harbor/api-client";
 import {
   applyViewerProgressSnapshot,
+  acknowledgeAnonymousProgress,
+  acknowledgeViewerProgress,
   clearAnonymousProgress,
-  discardProgressTarget,
   readProgressSnapshot,
   toMergeRequest,
 } from "./progressStore";
@@ -13,16 +14,19 @@ export async function synchronizeViewerProgress(
   isCurrent: () => boolean,
   storage?: Storage,
 ): Promise<boolean> {
-  const request = toMergeRequest(readProgressSnapshot(viewerId, storage));
   try {
-    const snapshot = await mergeViewerProgress(request);
-    if (!isCurrent()) return false;
-    for (const result of snapshot.results) {
-      if (result.status === "rejected" && result.reason === "not_found") {
-        discardProgressTarget(result.operation, result.id, viewerId, storage);
-      }
+    let first = true;
+    while (first || pendingCount(toMergeRequest(readProgressSnapshot(viewerId, storage))) > 0) {
+      first = false;
+      const request = toMergeRequest(readProgressSnapshot(viewerId, storage));
+      const snapshot = await mergeViewerProgress(request);
+      if (!isCurrent()) return false;
+      acknowledgeViewerProgress(request, snapshot, viewerId, storage);
+      applyViewerProgressSnapshot(snapshot, viewerId, storage);
+      // 非法或不完整回执若没有推进队列则停止本轮，避免页面被无限同步阻塞。
+      if (pendingCount(request) > 0
+        && pendingCount(toMergeRequest(readProgressSnapshot(viewerId, storage))) >= pendingCount(request)) return false;
     }
-    applyViewerProgressSnapshot(snapshot, viewerId, storage);
     return true;
   } catch {
     // 网络或进度服务故障只保留离线队列，不能影响内容页面和播放器。
@@ -36,15 +40,25 @@ export async function mergeAnonymousProgress(
   isCurrent: () => boolean,
   storage?: Storage,
 ): Promise<boolean> {
-  const request = toMergeRequest(readProgressSnapshot(undefined, storage));
   try {
-    const snapshot = await mergeViewerProgress(request);
+    while (true) {
+      const request = toMergeRequest(readProgressSnapshot(undefined, storage));
+      if (pendingCount(request) === 0) break;
+      const snapshot = await mergeViewerProgress(request);
+      if (!isCurrent()) return false;
+      applyViewerProgressSnapshot(snapshot, viewerId, storage);
+      acknowledgeAnonymousProgress(request, storage);
+    }
     if (!isCurrent()) return false;
-    applyViewerProgressSnapshot(snapshot, viewerId, storage);
-    if (snapshot.results.every((result) => result.status !== "rejected")) clearAnonymousProgress(storage);
+    clearAnonymousProgress(storage);
     return true;
   } catch {
     // 匿名数据必须保留到服务端确认，失败时让用户下次登录重试。
     return false;
   }
+}
+
+// 统计批量协议中的实际操作数，供多批同步判断队列是否耗尽。
+function pendingCount(request: ReturnType<typeof toMergeRequest>) {
+  return request.progress.length + request.cursors.length + request.removals.length;
 }

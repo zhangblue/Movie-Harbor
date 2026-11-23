@@ -387,6 +387,18 @@ async fn viewer_progress_partially_rejects_stale_targets_and_validates_bounds() 
             .iter()
             .any(|item| item["status"] == "rejected" && item["reason"] == "not_found")
     );
+    let hidden_removal = request(
+        &app,
+        "POST",
+        "/api/viewer/progress/merge",
+        json!({"progress":[],"cursors":[],"removals":[{"kind":"movie","id":"10000000-0000-0000-0000-000000000001","removed_at":"2026-11-23T03:00:00Z"}]}),
+        Some(&cookie),
+        Some(&csrf),
+    )
+    .await;
+    let hidden_removal = body(hidden_removal).await;
+    assert_eq!(hidden_removal["results"][0]["status"], "rejected");
+    assert_eq!(hidden_removal["results"][0]["reason"], "not_found");
     assert!(
         response["progress"]
             .as_array()

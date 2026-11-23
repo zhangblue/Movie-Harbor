@@ -156,6 +156,8 @@ it("keeps near-end progress and marks the content completed on ended", async () 
   expect(getProgress("movie:movie-1")?.position).toBe(571);
   fireEvent.ended(video);
   expect(getProgress("movie:movie-1")).toMatchObject({ position: 571, completed: true });
+  cleanup();
+  expect(getProgress("movie:movie-1")).toMatchObject({ position: 571, completed: true });
 });
 
 // 验证：完成单集后游标指向下一集，最后一集只保持完成且不自动跳转。

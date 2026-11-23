@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { ApiError, getMovieDetail, getSeriesDetail } from "@movie-harbor/api-client";
 import { useViewer } from "../auth/ViewerContext";
-import { listContinueWatching, markProgressRemoved, readProgressSnapshot, writeProgressSnapshot, type ContinueWatchingEntry } from "../player/progressStore";
+import { listContinueWatching, markProgressRemoved, type ContinueWatchingEntry } from "../player/progressStore";
 import { orderedPlayableEpisodes } from "../series/ordering";
 
 // 保存已通过详情接口确认的首页卡片及其播放目标。
@@ -83,12 +83,10 @@ export function ContinueWatching({ viewerId }: { viewerId: string }) {
 
   // 用户移除卡片时先写本地墓碑并同步；失败则恢复原快照以便重试。
   const remove = async (card: ResumeCard) => {
-    const before = readProgressSnapshot(viewerId);
     setRemoving(card.href); setError("");
     markProgressRemoved(card.targetKind, card.targetId, undefined, viewerId);
     if (await syncProgress()) setCards((current) => current.filter((item) => item.href !== card.href));
     else {
-      writeProgressSnapshot(before, viewerId);
       setError(`移除“${card.name}”失败，请重试。`);
     }
     setRemoving(undefined);

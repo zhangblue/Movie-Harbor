@@ -142,6 +142,14 @@ describe("playback progress storage", () => {
     expect(getRecentEpisode("series:s", undefined, "viewer")).toBeNull();
     expect(Object.keys(readProgressSnapshot("viewer").removals).sort()).toEqual(["episode:e1", "movie:m", "series:s"]);
   });
+
+  // 验证：整剧离线墓碑在之后选择新单集时仍保留原始时间，供服务端清理旧集。
+  it("keeps an unsynchronized series removal when a newer episode is selected", () => {
+    vi.spyOn(Date, "now").mockReturnValueOnce(100).mockReturnValueOnce(200);
+    markProgressRemoved("series", "s", undefined, "viewer");
+    setRecentEpisode("series:s", "new-episode", undefined, "viewer");
+    expect(readProgressSnapshot("viewer").removals["series:s"]).toBe(100);
+  });
 });
 
 // 验证登录用户之间的播放进度隔离，匿名仍能恢复原有播放进度。

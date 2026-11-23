@@ -171,7 +171,8 @@ async fn merge(
         }
     }
     for cursor in input.cursors {
-        let id = cursor.episode_id;
+        // 回执使用剧集 ID，与客户端游标键保持一致，才能精确清理失效游标。
+        let id = cursor.series_id;
         match service::put_cursor(&tx, current.viewer.id, cursor).await {
             Ok(status) => results.push(service::result("cursor", id, status)),
             Err(service::ServiceError::NotFound) => results.push(service::rejected("cursor", id)),

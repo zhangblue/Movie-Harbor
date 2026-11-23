@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { completeProgress, getProgress, saveProgress } from "../player/progressStore";
 import { catalog, deferred, json, movie, series } from "../test/fixtures";
+import type { JsonValue, ViewerProgressMergeRequest } from "@movie-harbor/api-client";
 
 // 在每个测试中安装独立的浏览器存储替身。
 beforeEach(() => {
@@ -26,7 +27,7 @@ it.each([true, false])("shows the account's available items only when signed in 
   saveProgress("movie:movie-1", 20, 100, undefined, "viewer");
   saveProgress("episode:ep-2", 30, 200, undefined, "viewer", "series-1");
   // 按请求路径模拟独立的会话、目录与详情接口。
-  vi.stubGlobal("fetch", (input: string) => {
+  vi.stubGlobal("fetch", (input: string, init?: RequestInit) => {
     switch (new URL(input, "http://localhost").pathname) {
       case "/api/viewer/session": return Promise.resolve(signedIn
         ? json({ viewer_id: "viewer", username: "Summer", csrf_token: "csrf" })
@@ -34,7 +35,15 @@ it.each([true, false])("shows the account's available items only when signed in 
       case "/api/catalog": return Promise.resolve(catalog([]));
       case "/api/catalog/movies/movie-1": return Promise.resolve(json(movie));
       case "/api/catalog/series/series-1": return Promise.resolve(json({ ...series, is_private: true }));
-      case "/api/viewer/progress/merge": return Promise.resolve(json({ progress: [], cursors: [], results: [] }));
+      case "/api/viewer/progress/merge": {
+        const body = JSON.parse(String(init?.body)) as ViewerProgressMergeRequest;
+        const payload = { progress: body.progress.map((item) => item.kind === "episode" ? { ...item, series_id: "series-1" } : item), cursors: body.cursors, results: [
+          ...body.progress.map((item) => ({ operation: "progress", id: item.id, status: "accepted" })),
+          ...body.cursors.map((item) => ({ operation: "cursor", id: item.series_id, status: "accepted" })),
+          ...body.removals.map((item) => ({ operation: "removal", id: item.id, status: "accepted" })),
+        ] };
+        return Promise.resolve(json(JSON.parse(JSON.stringify(payload)) as JsonValue));
+      }
       default: return Promise.resolve(json({}, 404));
     }
   });

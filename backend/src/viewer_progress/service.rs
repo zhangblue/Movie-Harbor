@@ -72,21 +72,27 @@ async fn playable_movie<C: ConnectionTrait>(
     row.try_get("", "playable")
 }
 
-/// 查询内容是否存在，供删除重试在生命周期变化后仍保持幂等语义。
-async fn target_exists<C: ConnectionTrait>(
+/// 判断删除目标是否仍是普通用户可见的有效发布内容，避免泄露隐藏目标存在性。
+async fn removable_target<C: ConnectionTrait>(
     db: &C,
     kind: RemovalTargetKind,
     id: Uuid,
 ) -> Result<bool, sea_orm::DbErr> {
-    let table = match kind {
-        RemovalTargetKind::Movie => "movie",
-        RemovalTargetKind::Episode => "episode",
-        RemovalTargetKind::Series => "series",
-    };
+    if kind == RemovalTargetKind::Movie {
+        return playable_movie(db, id).await;
+    }
+    if kind == RemovalTargetKind::Episode {
+        return Ok(playable_episode(db, id).await?.is_some());
+    }
     let row = db
         .query_one(Statement::from_sql_and_values(
             sea_orm::DbBackend::Postgres,
-            format!("SELECT EXISTS (SELECT 1 FROM {table} WHERE id=$1) AS present"),
+            r#"SELECT EXISTS (
+SELECT 1 FROM series s
+JOIN season se ON se.series_id=s.id
+JOIN episode e ON e.season_id=se.id
+WHERE s.id=$1 AND s.status='published' AND e.status='published' AND e.video_asset_id IS NOT NULL
+) AS present"#,
             [id.into()],
         ))
         .await?
@@ -258,7 +264,7 @@ pub async fn remove<C: ConnectionTrait>(
     if input.removed_at > (Utc::now() + chrono::Duration::hours(24)).fixed_offset() {
         return Err(ServiceError::Invalid);
     }
-    if !target_exists(db, input.kind, input.id).await? {
+    if !removable_target(db, input.kind, input.id).await? {
         return Err(ServiceError::NotFound);
     }
     let target_column = match input.kind {

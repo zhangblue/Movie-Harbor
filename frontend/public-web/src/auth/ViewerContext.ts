@@ -14,6 +14,8 @@ export const ViewerContext = createContext({
   recordScope: (_private: boolean) => {},
   // 默认匿名上下文没有服务端同步目标。
   syncProgress: async () => false,
+  // 匿名默认无需等待服务端进度；登录 Provider 会在首次同步完成后置为 true。
+  progressReady: true,
 });
 
 // 在公开站组件渲染时读取共享的普通用户会话上下文。

@@ -83,4 +83,36 @@ describe("viewer progress synchronization", () => {
     expect(hasAnonymousProgress(storage)).toBe(false);
     expect(readProgressSnapshot("viewer", storage).version).toBe(2);
   });
+
+  // 验证：服务端墓碑忽略旧播放后，本机旧卡片也从规范缓存移除。
+  it("removes a stale local item that the canonical snapshot excludes", async () => {
+    saveProgress("movie:stale", 10, 100, storage, "viewer");
+    api.mockResolvedValue({ progress: [], cursors: [], results: [{ operation: "progress", id: "stale", status: "ignored" }] });
+    await synchronizeViewerProgress("viewer", () => true, storage);
+    expect(getProgress("movie:stale", storage, "viewer")).toBeNull();
+  });
+
+  // 验证：超过 500 项时连续排空队列，不让第 501 项永久饥饿。
+  it("drains progress changes across multiple batches", async () => {
+    for (let index = 0; index < 501; index += 1) saveProgress(`movie:m-${index}`, 10, 100, storage, "viewer");
+    api.mockImplementation(async (request) => ({
+      progress: request.progress.map((item) => ({ ...item })), cursors: [],
+      results: request.progress.map((item) => ({ operation: "progress" as const, id: item.id, status: "accepted" as const })),
+    }));
+    await synchronizeViewerProgress("viewer", () => true, storage);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(api.mock.calls[1]?.[0].progress).toHaveLength(1);
+  });
+
+  // 验证：匿名超过 500 项时全部批次确认后才清空，未发送项不会丢失。
+  it("merges every anonymous batch before clearing local data", async () => {
+    for (let index = 0; index < 501; index += 1) saveProgress(`movie:a-${index}`, 10, 100, storage);
+    api.mockImplementation(async (request) => ({
+      progress: request.progress.map((item) => ({ ...item })), cursors: [],
+      results: request.progress.map((item) => ({ operation: "progress" as const, id: item.id, status: "accepted" as const })),
+    }));
+    await mergeAnonymousProgress("viewer", () => true, storage);
+    expect(api).toHaveBeenCalledTimes(2);
+    expect(hasAnonymousProgress(storage)).toBe(false);
+  });
 });

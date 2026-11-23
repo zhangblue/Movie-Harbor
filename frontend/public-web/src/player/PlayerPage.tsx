@@ -13,10 +13,11 @@ type Navigate = (href: string, replace?: boolean) => void;
 
 // 由电影播放路由渲染，加载详情并在存在视频时启动播放器。
 export function MoviePlayerPage({ id, resume }: { id: string; resume?: boolean }) {
-  const { viewerId } = useViewer();
+  const { viewerId, progressReady } = useViewer();
   // 播放路由变化时读取电影视频地址，失败时交给请求状态界面处理。
   const load = useCallback(() => getMovieDetail(id), [id]);
   const { state, retry } = usePublicRequest(load);
+  if (viewerId && !progressReady) return <Loading />;
   if (state.status === "loading") return <Loading />;
   if (state.status === "error") return <RequestError error={state.error} retry={retry} />;
   if (!state.data.video_url) return <NotFound />;
@@ -38,9 +39,11 @@ export function SeriesPlayerPage({ id, episodeId, navigate, resume }: {
   navigate: Navigate;
   resume?: boolean;
 }) {
+  const { viewerId, progressReady } = useViewer();
   // 播放路由变化时读取剧集和单集，供后续选择有效播放目标。
   const load = useCallback(() => getSeriesDetail(id), [id]);
   const { state, retry } = usePublicRequest(load);
+  if (viewerId && !progressReady) return <Loading />;
   if (state.status === "loading") return <Loading />;
   if (state.status === "error") return <RequestError error={state.error} retry={retry} />;
   return <LoadedSeriesPlayer detail={state.data} episodeId={episodeId} navigate={navigate} resume={resume} />;

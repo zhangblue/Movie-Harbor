@@ -31,6 +31,7 @@ export function App() {
   const [message, setMessage] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
   const [mergePrompt, setMergePrompt] = useState(false);
+  const [progressReady, setProgressReady] = useState(true);
   const identity = useRef(0);
   const privateContent = useRef(false);
   const viewerRef = useRef(viewer);
@@ -77,6 +78,7 @@ export function App() {
     validation.current = undefined;
     clearCsrfToken();
     viewerRef.current = next;
+    setProgressReady(next.status !== "authenticated");
     setViewer(viewerRef.current);
     setLoggingOut(false);
     setDialog(undefined); setMessage(notice);
@@ -142,7 +144,10 @@ export function App() {
   useEffect(() => {
     if (viewer.status !== "authenticated" || !viewer.viewerId) { setMergePrompt(false); return; }
     const startedAt = identity.current;
-    void synchronizeViewerProgress(viewer.viewerId, () => startedAt === identity.current);
+    // 播放器在首次规范快照完成前保持加载态，避免空缓存固化为错误起点或覆盖旧游标。
+    void synchronizeViewerProgress(viewer.viewerId, () => startedAt === identity.current).finally(() => {
+      if (startedAt === identity.current) setProgressReady(true);
+    });
     if (promptedIdentity.current !== startedAt && hasAnonymousProgress()) {
       promptedIdentity.current = startedAt;
       setMergePrompt(true);
@@ -215,7 +220,7 @@ export function App() {
 
   const loginGeneration = identity.current;
   return (
-    <ViewerContext.Provider value={{ revision, authenticated, viewerId: viewer.viewerId, discoveryPending: viewer.status === "loading", validate, expire, recordScope, syncProgress }}>
+    <ViewerContext.Provider value={{ revision, authenticated, viewerId: viewer.viewerId, discoveryPending: viewer.status === "loading", validate, expire, recordScope, syncProgress, progressReady }}>
     <AgentLauncher enabled={authenticated} sessionKey={identity.current} role="viewer" onExpired={expire} renderTrigger={renderSite} />
     {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
     {dialog === "password" && <ViewerPasswordDialog isCurrent={() => loginGeneration === identity.current} onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}

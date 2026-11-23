@@ -18,6 +18,7 @@ export function VideoPlayer({ contentKey, src, title, viewerId, seriesId, resume
   const savedProgress = useRef(getProgress(contentKey, undefined, viewerId));
   const canPersist = useRef(savedProgress.current === null);
   const autoplayPending = useRef(Boolean(viewerId && resume && savedProgress.current));
+  const completed = useRef(false);
   const [resumeChoice, setResumeChoice] = useState<"pending" | "continue" | "start">(
     savedProgress.current ? (viewerId && resume ? "continue" : "pending") : "start",
   );
@@ -25,7 +26,7 @@ export function VideoPlayer({ contentKey, src, title, viewerId, seriesId, resume
 
   // 在播放暂停、定期更新或离页时保存进度；用户尚未选择恢复方式时保留旧记录。
   const persist = (video = videoRef.current) => {
-    if (!canPersist.current) return;
+    if (!canPersist.current || completed.current) return;
     if (!video) return;
     const savedAt = saveProgress(contentKey, video.currentTime, video.duration, undefined, viewerId, seriesId);
     if (savedAt !== null && viewerId) void syncProgress();
@@ -99,8 +100,10 @@ export function VideoPlayer({ contentKey, src, title, viewerId, seriesId, resume
         if (Date.now() - lastSavedAt.current >= 5_000) persist();
       }}
       onPause={() => persist()}
+      onPlay={() => { completed.current = false; }}
       onEnded={(event) => {
         // 只有浏览器确认 ended 时标记完成；随后让剧集页把游标推进到下一集。
+        completed.current = true;
         completeProgress(contentKey, event.currentTarget.currentTime, event.currentTarget.duration, undefined, viewerId, seriesId);
         if (viewerId) void syncProgress();
         onComplete?.();
