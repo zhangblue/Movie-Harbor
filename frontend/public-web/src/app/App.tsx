@@ -1,7 +1,6 @@
 import { AgentLauncher } from "@movie-harbor/ui";
 import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react";
 import { BrowsePage } from "../catalog/BrowsePage";
-import { HomePage } from "../catalog/HomePage";
 import { MovieDetails } from "../details/MovieDetails";
 import { SeriesDetails } from "../details/SeriesDetails";
 import { NotFound } from "./RequestState";
@@ -205,8 +204,8 @@ export function App() {
     const account = renderAccount(assistant);
     return <main className="site-shell" ref={mainRef} tabIndex={-1} onClick={followLink} onErrorCapture={() => { void validate(); }}>
       {message && <p className="viewer-notice" role="status">{message}</p>}
-      {url.pathname === "/" ? <HomePage navigate={navigate} account={account} />
-        : url.pathname === "/browse" ? <BrowsePage search={url.search} navigate={navigate} account={account} /> : (
+      {url.pathname === "/" || url.pathname === "/browse"
+        ? <BrowsePage search={url.search} navigate={navigate} account={account} basePath={url.pathname} /> : (
         <>
           <header className="public-header"><Brand />{account}</header>
           {moviePlayerMatch && id ? <MoviePlayerPage key={`movie-player:${id}`} id={id} resume={url.searchParams.get("resume") === "1"} />

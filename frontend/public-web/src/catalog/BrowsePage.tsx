@@ -25,10 +25,11 @@ interface FacetsRequestState {
 }
 
 // 渲染 URL 驱动的完整浏览页，协调独立 facets、目录请求、分页和焦点。
-export function BrowsePage({ search, navigate, account }: {
+export function BrowsePage({ search, navigate, account, basePath = "/browse" }: {
   search: string;
   navigate: (href: string, replace?: boolean) => void;
   account?: ReactNode;
+  basePath?: "/" | "/browse";
 }) {
   const { authenticated, discoveryPending, revision, validate, expire } = useViewer();
   const [catalog, setCatalog] = useState<CatalogRequestState>({ loading: true });
@@ -43,8 +44,8 @@ export function BrowsePage({ search, navigate, account }: {
     [facets.data],
   );
   const state = parseBrowseUrl(search, authenticated, availableGenres);
-  const canonicalHref = buildBrowseUrl(state, {});
-  const rawHref = search ? `/browse${search.startsWith("?") ? search : `?${search}`}` : "/browse";
+  const canonicalHref = buildBrowseUrl(state, {}, basePath);
+  const rawHref = search ? `${basePath}${search.startsWith("?") ? search : `?${search}`}` : basePath;
   const pendingPrivateDiscovery = discoveryPending && new URLSearchParams(search).get("privacy") === "private";
 
   // 身份或 facets 确认后以 replace 清理非法、重复、无权限和不存在的 URL 条件。
@@ -57,7 +58,7 @@ export function BrowsePage({ search, navigate, account }: {
     const authenticationLost = wasAuthenticated.current && !authenticated;
     wasAuthenticated.current = authenticated;
     if (!discoveryPending && authenticationLost) {
-      navigate(buildBrowseUrl(state, { privateOnly: false }), true);
+      navigate(buildBrowseUrl(state, { privateOnly: false }, basePath), true);
     }
   }, [authenticated, discoveryPending, navigate, state]);
 
@@ -110,7 +111,7 @@ export function BrowsePage({ search, navigate, account }: {
     if (!catalog.data || catalog.loading || catalog.key !== canonicalHref) return;
     const totalPages = Math.max(1, Math.ceil(catalog.data.total / catalog.data.size));
     if (state.page > totalPages) {
-      navigate(buildBrowseUrl(state, { page: totalPages }), true);
+      navigate(buildBrowseUrl(state, { page: totalPages }, basePath), true);
       return;
     }
     if (focusAfterPage.current && catalog.data.page === state.page) {
@@ -124,10 +125,10 @@ export function BrowsePage({ search, navigate, account }: {
     if (Object.keys(changes).length === 1 && changes.page !== undefined && changes.page !== state.page) {
       focusAfterPage.current = true;
     }
-    navigate(buildBrowseUrl(state, changes));
+    navigate(buildBrowseUrl(state, changes, basePath));
   };
   // 清除全部目录条件但保留当前身份，供标签区和空状态复用。
-  const clear = () => navigate("/browse");
+  const clear = () => navigate(basePath);
   const filtered = state.kind !== "all" || Boolean(state.query) || state.genres.length > 0
     || state.year !== undefined || state.privateOnly || state.sort !== "recent";
   const genreNames = new Map(facets.data?.genres.map((genre) => [genre.id, genre.name]) ?? []);

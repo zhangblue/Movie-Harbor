@@ -278,8 +278,8 @@ it("shows explicit readiness and playback error messages", async () => {
   expect(screen.getByRole("alert")).toHaveTextContent("浏览器无法播放此视频格式");
 });
 
-// 验证首页续播链接恢复该账号的位置，自动播放被拒绝仍能手动播放。
-it("resumes the signed-in account from the home link even if autoplay is blocked", async () => {
+// 验证续播链接恢复该账号的位置，自动播放被拒绝仍能手动播放。
+it("resumes the signed-in account from a resume link even if autoplay is blocked", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play?resume=1");
   saveProgress("movie:movie-1", 25, 200, undefined, "viewer");
   const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockRejectedValue(new DOMException("blocked", "NotAllowedError"));

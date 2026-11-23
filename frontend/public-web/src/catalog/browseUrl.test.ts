@@ -27,4 +27,5 @@ it("resets pages for filter changes and preserves filters for pagination", () =>
   const state = parseBrowseUrl(`?kind=series&q=%E6%98%9F&sort=name_asc&page=4`, true);
   expect(buildBrowseUrl(state, { sort: "year_desc" })).toBe("/browse?kind=series&q=%E6%98%9F&sort=year_desc");
   expect(buildBrowseUrl(state, { page: 5 })).toBe("/browse?kind=series&q=%E6%98%9F&sort=name_asc&page=5");
+  expect(buildBrowseUrl(state, { kind: "movie" }, "/")).toBe("/?kind=movie&q=%E6%98%9F&sort=name_asc");
 });

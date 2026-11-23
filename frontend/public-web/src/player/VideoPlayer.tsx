@@ -88,7 +88,7 @@ export function VideoPlayer({ contentKey, src, title, viewerId, seriesId, resume
         // 元数据给出真实时长后才恢复位置；用户未选择继续时保留默认播放起点。
         if (resumeChoice !== "continue" || !savedProgress.current) return;
         restoreSavedPosition(event.currentTarget);
-        // 首页续播定位完成后尝试播放；浏览器拦截时仍可手动开始。
+        // 携带 resume=1 的续播入口定位完成后尝试播放；浏览器拦截时仍可手动开始。
         if (autoplayPending.current) {
           autoplayPending.current = false;
           canPersist.current = true;

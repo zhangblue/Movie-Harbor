@@ -51,8 +51,12 @@ export function parseBrowseUrl(
   };
 }
 
-// 将浏览状态与一次交互合成为规范 URL；只有单独翻页会保留目标页码。
-export function buildBrowseUrl(state: BrowseState, changes: Partial<BrowseState>): string {
+// 将浏览状态与一次交互合成为指定入口的规范 URL；只有单独翻页会保留目标页码。
+export function buildBrowseUrl(
+  state: BrowseState,
+  changes: Partial<BrowseState>,
+  basePath: "/" | "/browse" = "/browse",
+): string {
   const changedFilters = Object.keys(changes).some((key) => key !== "page");
   const next: BrowseState = {
     ...state,
@@ -68,5 +72,5 @@ export function buildBrowseUrl(state: BrowseState, changes: Partial<BrowseState>
   if (next.sort !== "recent") params.set("sort", next.sort);
   if (next.page !== 1) params.set("page", String(next.page));
   const encoded = params.toString();
-  return encoded ? `/browse?${encoded}` : "/browse";
+  return encoded ? `${basePath}?${encoded}` : basePath;
 }

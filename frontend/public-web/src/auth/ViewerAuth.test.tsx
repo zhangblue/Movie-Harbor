@@ -507,15 +507,20 @@ it("filters the authenticated catalog to private content and restores it from th
   expect(await screen.findByRole("link", { name: "查看远方来信详情" })).toBeInTheDocument();
 });
 
-// 验证：身份变化时清除私密筛选与页码并保留搜索词。
-it.each(["logout", "password", "expired"] as const)("clears private filtering and page but preserves the query after %s", async (operation) => {
-  window.history.replaceState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private");
+// 验证：身份变化时清除私密筛选与页码并保留搜索词；根路径额外覆盖首页入口。
+it.each([
+  ["/browse", "logout"],
+  ["/browse", "password"],
+  ["/browse", "expired"],
+  ["/", "logout"],
+] as const)("clears private filtering and page at %s after %s", async (basePath, operation) => {
+  window.history.replaceState(null, "", `${basePath}?kind=series&q=%E6%98%9F&privacy=private`);
   const state = server(true); const user = userEvent.setup(); render(<App />);
   await screen.findByText("Summer"); await screen.findByText("私密");
   await waitFor(() => expect(new URLSearchParams(location.search).get("page")).toBeNull());
   state.catalogResponse = deferred<Response>().promise;
   act(() => {
-    window.history.pushState(null, "", "/browse?kind=series&q=%E6%98%9F&privacy=private&page=2");
+    window.history.pushState(null, "", `${basePath}?kind=series&q=%E6%98%9F&privacy=private&page=2`);
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   await waitFor(() => expect(state.requests.filter(({ url }) => url.pathname === "/api/catalog").at(-1)?.url.searchParams.get("page")).toBe("2"));
@@ -531,6 +536,7 @@ it.each(["logout", "password", "expired"] as const)("clears private filtering an
   expect(new URLSearchParams(location.search).get("page")).toBeNull();
   expect(new URLSearchParams(location.search).get("kind")).toBe("series");
   expect(new URLSearchParams(location.search).get("q")).toBe("星");
+  expect(location.pathname).toBe(basePath);
   expect(screen.queryByRole("checkbox", { name: "只看私密" })).not.toBeInTheDocument();
 });
 
