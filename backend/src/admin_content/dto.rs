@@ -1,7 +1,195 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashSet;
+use uuid::Uuid;
 
 pub const ADMIN_CONTENT_PAGE_SIZE: u64 = 20;
 pub const MAX_ADMIN_CONTENT_PAGE: u64 = 1_000_000;
+pub const MAX_BULK_TARGETS: usize = 20;
+pub const MAX_BULK_GENRES: usize = 20;
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+// 表示批量操作支持的内容形态，供目标校验、锁定排序和响应使用。
+pub enum BulkContentKind {
+    Movie,
+    Series,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+// 表示一个带乐观锁版本的批量目标，供事务校验当前内容。
+pub struct BulkTarget {
+    pub kind: BulkContentKind,
+    pub id: Uuid,
+    pub version: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+// 表示题材关联调整方向，供服务区分添加与移除规则。
+pub enum BulkGenreMode {
+    Add,
+    Remove,
+}
+
+#[derive(Clone, Debug)]
+// 表示经过结构、数量和唯一性校验的一次批量动作。
+pub enum BulkActionRequest {
+    SetPrivacy {
+        is_private: bool,
+        targets: Vec<BulkTarget>,
+    },
+    UpdateGenres {
+        mode: BulkGenreMode,
+        genre_ids: Vec<Uuid>,
+        targets: Vec<BulkTarget>,
+    },
+    Archive {
+        targets: Vec<BulkTarget>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+// 承载尚未完成集合校验的批量请求，供 JSON 判别字段解析使用。
+enum BulkActionWire {
+    SetPrivacy {
+        is_private: bool,
+        targets: Vec<BulkTarget>,
+    },
+    UpdateGenres {
+        mode: BulkGenreMode,
+        genre_ids: Vec<Uuid>,
+        targets: Vec<BulkTarget>,
+    },
+    Archive {
+        targets: Vec<BulkTarget>,
+    },
+}
+
+impl BulkActionRequest {
+    // 从任意 JSON 值解析并完成批量数量、正版本及唯一性校验，供路由返回统一 400。
+    pub fn from_value(value: Value) -> Result<Self, ()> {
+        let wire: BulkActionWire = serde_json::from_value(value).map_err(|_| ())?;
+        let request = match wire {
+            BulkActionWire::SetPrivacy {
+                is_private,
+                targets,
+            } => Self::SetPrivacy {
+                is_private,
+                targets,
+            },
+            BulkActionWire::UpdateGenres {
+                mode,
+                genre_ids,
+                targets,
+            } => {
+                validate_genres(&genre_ids)?;
+                Self::UpdateGenres {
+                    mode,
+                    genre_ids,
+                    targets,
+                }
+            }
+            BulkActionWire::Archive { targets } => Self::Archive { targets },
+        };
+        validate_targets(request.targets())?;
+        Ok(request)
+    }
+
+    // 返回当前动作目标切片，供路由、服务和公共校验共享同一目标集合。
+    pub fn targets(&self) -> &[BulkTarget] {
+        match self {
+            Self::SetPrivacy { targets, .. }
+            | Self::UpdateGenres { targets, .. }
+            | Self::Archive { targets } => targets,
+        }
+    }
+}
+
+// 校验一至二十个正版本且 kind+id 唯一的目标，供所有动作解析时调用。
+fn validate_targets(targets: &[BulkTarget]) -> Result<(), ()> {
+    if targets.is_empty() || targets.len() > MAX_BULK_TARGETS {
+        return Err(());
+    }
+    let mut unique = HashSet::with_capacity(targets.len());
+    if targets
+        .iter()
+        .any(|target| target.version <= 0 || !unique.insert((target.kind, target.id)))
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
+// 校验一至二十个唯一题材标识，供题材动作进入事务前调用。
+fn validate_genres(genre_ids: &[Uuid]) -> Result<(), ()> {
+    if genre_ids.is_empty() || genre_ids.len() > MAX_BULK_GENRES {
+        return Err(());
+    }
+    let unique = genre_ids.iter().copied().collect::<HashSet<_>>();
+    if unique.len() != genre_ids.len() {
+        return Err(());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+// 表示批量目标失败原因，供 409 响应提供稳定机器码。
+pub enum BulkTargetProblemReason {
+    NotFound,
+    VersionConflict,
+    InvalidState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+// 表示批量题材失败原因，供 409 响应区分不存在与停用。
+pub enum BulkGenreProblemReason {
+    NotFound,
+    Inactive,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+// 表示批量事务发现的一个领域问题，供路由一次返回完整集合。
+pub enum BulkProblem {
+    Target {
+        kind: BulkContentKind,
+        id: Uuid,
+        reason: BulkTargetProblemReason,
+    },
+    Genre {
+        genre_id: Uuid,
+        reason: BulkGenreProblemReason,
+    },
+}
+
+#[derive(Clone, Debug, Serialize)]
+// 表示成功响应中的题材摘要，供管理界面核对最终关联。
+pub struct BulkGenreSummary {
+    pub id: Uuid,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+// 表示一个批量目标提交后的新版本与内容摘要。
+pub struct BulkActionResult {
+    pub kind: BulkContentKind,
+    pub id: Uuid,
+    pub version: i64,
+    pub status: String,
+    pub is_private: bool,
+    pub genres: Vec<BulkGenreSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+// 表示原子批量操作全部成功后的响应。
+pub struct BulkActionResponse {
+    pub results: Vec<BulkActionResult>,
+}
 
 #[derive(Debug, Default, Deserialize)]
 // 承载管理内容列表查询参数，供路由解析请求。
