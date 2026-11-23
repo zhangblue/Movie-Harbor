@@ -11,6 +11,7 @@ import { GenrePage } from "../genres/GenrePage";
 import { AgentAuditPage } from "../agent/AgentAuditPage";
 import { AgentPage } from "../agent/AgentPage";
 import { UserPage } from "../users/UserPage";
+import { SystemOverviewPage } from "../system/SystemOverviewPage";
 import { useMounted } from "./useMounted";
 import "@movie-harbor/ui/theme.css";
 import "../styles.css";
@@ -125,7 +126,7 @@ export function App() {
           setCreating(false);
           if (row.kind === "movie") setMoviePage({ id: row.id, deleting: action === "delete" });
           else setSeriesPage({ id: row.id, deleting: action === "delete" });
-        }} /> : section === "用户管理" ? <UserPage onExpired={onExpired} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : section === "助手对话记录" ? <AgentAuditPage onExpired={onExpired} /> : <section><h1>{section}</h1><p>此页面尚未开放。</p></section>}
+        }} /> : section === "用户管理" ? <UserPage onExpired={onExpired} /> : section === "题材配置" ? <GenrePage onExpired={onExpired} /> : section === "助手对话记录" ? <AgentAuditPage onExpired={onExpired} /> : <SystemOverviewPage onExpired={onExpired} />}
       </main></div>
     </div>
     {busy && <p className="session-state" role="status">正在退出登录…</p>}
