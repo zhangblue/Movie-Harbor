@@ -5413,6 +5413,235 @@ async fn episode_series_precondition_rejects_interleaved_sibling_before_writes()
     assert_eq!(archived.status(), StatusCode::OK);
 }
 
+/// 交付大视频的前一块并暂停下一块，在真实 HTTP 正文边界建立并发屏障。
+async fn pause_episode_replacement(
+    app: &Router,
+    path: String,
+    cookie: &str,
+    csrf: &str,
+) -> (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<Response>,
+) {
+    use futures_util::StreamExt;
+    let mut video = valid_mp4();
+    video.extend(atom(b"free", &vec![0; 1024 * 1024]));
+    let request = multipart_file_request(
+        path,
+        Some(cookie),
+        Some(csrf),
+        "https://harbor.test",
+        "large.mp4",
+        "video/mp4",
+        video,
+    );
+    let (parts, body) = request.into_parts();
+    let mut bytes = body.collect().await.unwrap().to_bytes();
+    let first = bytes.split_to(128 * 1024);
+    let (reached, pause) = tokio::sync::oneshot::channel();
+    let (resume, wait) = tokio::sync::oneshot::channel();
+    let frames = futures_util::stream::iter([Ok::<_, std::io::Error>(first)]).chain(
+        futures_util::stream::once(async move {
+            reached.send(()).unwrap();
+            wait.await.map_err(std::io::Error::other)?;
+            Ok(bytes)
+        }),
+    );
+    let request = Request::from_parts(parts, Body::from_stream(frames));
+    let router = app.clone();
+    let upload = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), pause)
+        .await
+        .expect("未读取视频首块")
+        .unwrap();
+    (resume, upload)
+}
+
+/// 传输过程中 MCP 创建可正常提交，兄弟更新会使上传最终 409，且不会登记资产、改变原槽或遗留文件。
+#[tokio::test]
+async fn guarded_episode_replacement_releases_database_locks_and_rechecks_after_body() {
+    const KEY: &str = "episode-upload-concurrency-test";
+    let db = database().await;
+    let root = TempRoot::new();
+    let mut cfg = config(root.as_ref());
+    cfg.mcp_api_key_digest = Some(movie_harbor_api::auth::csrf::digest(KEY));
+    cfg.max_upload_bytes = 2 * 1024 * 1024;
+    let app = app::build(db.clone(), &cfg).await.unwrap();
+    let (cookie, csrf) = credentials(&app).await;
+    let (parent, season, target, sibling, genre) = (
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+    );
+    db.execute_unprepared(&format!(
+        "INSERT INTO genre (id,name) VALUES ('{genre}','并发题材');
+         INSERT INTO series (id,name,version) VALUES ('{parent}','目标剧',1);
+         INSERT INTO season (id,series_id,number) VALUES ('{season}','{parent}',1);
+         INSERT INTO episode (id,season_id,number,name) VALUES
+           ('{target}','{season}',1,'原视频'),('{sibling}','{season}',2,'兄弟集')"
+    ))
+    .await
+    .unwrap();
+    let base = format!("/api/admin/media/episodes/{target}/video");
+    let original = multipart_request(
+        format!("{base}?version=1"),
+        Some(&cookie),
+        Some(&csrf),
+        "https://harbor.test",
+    );
+    assert_eq!(
+        app.clone().oneshot(original).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let before = episode::Entity::find_by_id(target)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let old_video = media_asset::Entity::find_by_id(before.video_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    // 先通过真实路由暂存可消费海报，确保并发创建会走数据库媒体锁及原子消费事务。
+    let mut poster = multipart_file_request(
+        "/api/admin/media/posters/stage".into(),
+        None,
+        None,
+        "https://harbor.test",
+        "poster.png",
+        "image/png",
+        PNG.to_vec(),
+    );
+    poster
+        .headers_mut()
+        .insert("authorization", format!("Bearer {KEY}").parse().unwrap());
+    let staged = app.clone().oneshot(poster).await.unwrap();
+    assert_eq!(staged.status(), StatusCode::CREATED);
+    let staged: Value =
+        serde_json::from_slice(&staged.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let create = Request::builder()
+        .method("POST")
+        .uri("/api/admin/movies")
+        .header("host", "harbor.test")
+        .header("authorization", format!("Bearer {KEY}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            json!({"name":"并发电影","is_private":true,"year":2024,"synopsis":"简介",
+            "duration_seconds":60,"genre_ids":[genre],"staged_poster_token":staged["token"]})
+            .to_string(),
+        ))
+        .unwrap();
+    // 序列不随事务回滚，能检出先尝试 INSERT 再发现版本冲突的实现。
+    db.execute_unprepared(
+        "CREATE SEQUENCE attempted_video_insert;
+         CREATE FUNCTION note_video_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+           BEGIN PERFORM nextval('attempted_video_insert'); RETURN NEW; END $$;
+         CREATE TRIGGER note_video_insert BEFORE INSERT ON media_asset FOR EACH ROW
+           WHEN (NEW.purpose='video') EXECUTE FUNCTION note_video_insert()",
+    )
+    .await
+    .unwrap();
+    let (resume, upload) = pause_episode_replacement(
+        &app,
+        format!("{base}?version=2&series_version=2"),
+        &cookie,
+        &csrf,
+    )
+    .await;
+    let created = tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(create)).await;
+    if created.is_err() {
+        resume.send(()).unwrap();
+        let _ = upload.await;
+        panic!("单集上传暂停期间，需取得媒体咨询锁的 MCP 电影创建未完成");
+    }
+    let created = created.unwrap().unwrap();
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value =
+        serde_json::from_slice(&created.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let movie_id: Uuid = created["id"].as_str().unwrap().parse().unwrap();
+    let created_movie = movie::Entity::find_by_id(movie_id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let poster_asset = media_asset::Entity::find_by_id(created_movie.poster_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    let edited = tokio::time::timeout(
+        Duration::from_secs(5),
+        json_request(
+            &app,
+            "PATCH",
+            &format!("/api/admin/series/{parent}/seasons/{season}/episodes/{sibling}"),
+            json!({"version":1,"name":"传输期间修改"}),
+            Some(&cookie),
+            Some(&csrf),
+            Some("https://harbor.test"),
+        ),
+    )
+    .await
+    .expect("单集上传在传输期间仍持父行锁");
+    assert_eq!(edited.status(), StatusCode::OK);
+    resume.send(()).unwrap();
+    assert_eq!(
+        upload.await.unwrap().status(),
+        StatusCode::CONFLICT,
+        "最终提交须重新核对兄弟更新后的父版本"
+    );
+    assert_eq!(
+        episode::Entity::find_by_id(target)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        series::Entity::find_by_id(parent)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap()
+            .version,
+        3
+    );
+    assert_eq!(media_asset::Entity::find().all(&db).await.unwrap().len(), 2);
+    let attempted = db
+        .query_one(Statement::from_string(
+            DatabaseBackend::Postgres,
+            "SELECT is_called FROM attempted_video_insert",
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !attempted.try_get::<bool>("", "is_called").unwrap(),
+        "过期的请求先写了媒体资产"
+    );
+    assert_eq!(
+        media_asset::Entity::find_by_id(old_video.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        old_video
+    );
+    assert_eq!(
+        std::fs::read(root.as_ref().join(old_video.storage_key)).unwrap(),
+        valid_mp4()
+    );
+    assert_eq!(
+        std::fs::read(root.as_ref().join(poster_asset.storage_key)).unwrap(),
+        PNG
+    );
+    assert_eq!(count_files(root.as_ref()), 2);
+}
+
 /// 实际复制完整备份到新目录：只在数据库、凭证和正式文件字节全部吻合时结清已提交凭证。
 #[tokio::test]
 async fn startup_validates_restored_video_with_new_inode_and_keeps_mismatches() {

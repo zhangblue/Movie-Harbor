@@ -259,7 +259,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
         .begin_typed_upload(target.kind(), source.declared_byte_size())
         .await?;
     // 内部入口沿用路由的锁序和早期父版本检查，拒绝时源数据还未读取。
-    let checked_episode = begin_guarded_episode(db, target).await?;
+    preflight_episode(db, target).await?;
     let pending = prepare_attachment(
         session,
         target,
@@ -269,7 +269,7 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
         source,
     )
     .await?;
-    Ok(commit_attachment(db, pending, checked_episode).await?.asset)
+    Ok(commit_attachment(db, pending).await?.asset)
 }
 
 /// 在槽位切换前验证版本并流式保存新文件，保留旧引用。
@@ -307,14 +307,20 @@ pub(crate) async fn prepare_attachment<S: ChunkSource + Send>(
 pub(crate) async fn commit_attachment(
     db: &DatabaseConnection,
     mut pending: PendingAttachment,
-    checked_episode: Option<GuardedEpisodeUpload>,
 ) -> Result<CommittedAttachment, MediaError> {
-    // 带父版本的单集沿用读正文前取得的事务；其他上传等待锁时由 pending 持有文件与析构保护。
-    let (tx, slot) = match checked_episode {
-        Some(guard) => (guard.tx, Some(guard.slot)),
-        None => (super::transaction::begin(db).await?, None),
+    // 数据已写完，本地锁仍由 pending 持有；只在此时重新取得数据库媒体事务锁。
+    let tx = super::transaction::begin(db).await?;
+    // 正文传输期间父子内容都可能变化。在任何 INSERT 或旧文件移动之前重新锁定和校验。
+    let slot = match lock_guarded_episode(&tx, pending.target).await {
+        Ok(slot) => slot,
+        Err(error) => {
+            tx.rollback().await?;
+            // 显式完成未登记新视频的删除和目录同步，之后才能向调用方报告冲突。
+            pending.stored.finish_known_rollback()?;
+            return Err(error);
+        }
     };
-    // 取得数据库锁后同步交接本地锁并进入事务阶段，中间没有可取消的等待点。
+    // 把本地锁交给旧文件清理流程后才允许首次数据库写入，已核验的单集行锁持续到事务结束。
     let guard = pending.stored.take_mutation_guard()?;
     let removal = removal::continue_with_guard(&pending.storage, guard);
     let mut staged = None;
@@ -338,7 +344,7 @@ pub(crate) async fn commit_attachment(
                 && cause.kind() == std::io::ErrorKind::StorageFull
             {
                 if rolled_back && pending.kind == MediaKind::Video {
-                    pending.stored.finish_capacity_rollback()?;
+                    pending.stored.finish_known_rollback()?;
                     return Err(MediaError::StorageSpaceLow {
                         available_bytes: None,
                         required_bytes: (pending.stored.byte_size as u64)
@@ -440,17 +446,32 @@ struct LockedEpisodeSlot {
     episode: episode::Model,
 }
 
-/// 单集上传预检成功后持有事务至最终提交，防止读正文期间另一集改变父版本。
-pub(crate) struct GuardedEpisodeUpload {
-    tx: DatabaseTransaction,
-    slot: LockedEpisodeSlot,
-}
-
-/// 已取得媒体文件锁后，对提供父版本的单集写入检查两级版本；旧调用方仍在提交时检查单集。
-pub(crate) async fn begin_guarded_episode(
+/// 已持有本地文件锁时用短事务检查父子版本，旧调用方仍按单集版本在提交时检查。
+pub(crate) async fn preflight_episode(
     db: &DatabaseConnection,
     target: AttachmentTarget,
-) -> Result<Option<GuardedEpisodeUpload>, MediaError> {
+) -> Result<(), MediaError> {
+    if matches!(
+        target,
+        AttachmentTarget::EpisodeVideo {
+            series_version: Some(_),
+            ..
+        }
+    ) {
+        let tx = super::transaction::begin(db).await?;
+        let check = lock_guarded_episode(&tx, target).await;
+        // 预检不写入，所有结果均在显式回滚释放咨询锁及行锁后返回，慢请求不占用这些锁。
+        tx.rollback().await?;
+        check?;
+    }
+    Ok(())
+}
+
+/// 预检和提交均在各自事务内核对调用方声明的父子版本，提交方可沿用此次锁定的行。
+async fn lock_guarded_episode(
+    tx: &DatabaseTransaction,
+    target: AttachmentTarget,
+) -> Result<Option<LockedEpisodeSlot>, MediaError> {
     let AttachmentTarget::EpisodeVideo {
         id,
         version,
@@ -459,13 +480,11 @@ pub(crate) async fn begin_guarded_episode(
     else {
         return Ok(None);
     };
-    let tx = super::transaction::begin(db).await?;
-    let slot = lock_episode_slot(&tx, id, version).await?;
+    let slot = lock_episode_slot(tx, id, version).await?;
     if slot.parent.version != expected {
-        tx.rollback().await?;
         return Err(MediaError::VersionConflict);
     }
-    Ok(Some(GuardedEpisodeUpload { tx, slot }))
+    Ok(Some(slot))
 }
 
 /// 按整剧、季、单集的写锁顺序重新核对归属及单集版本，返回的快照只在当前事务有效。

@@ -298,8 +298,8 @@ impl StoredFile {
         }
     }
 
-    /// 报告容量错误前明确完成已知回滚；清理失败则保留凭证供启动恢复。
-    pub(crate) fn finish_capacity_rollback(&mut self) -> Result<(), MediaError> {
+    /// 报告可确定的容量或版本错误前完成未登记文件的回滚，清理失败则保留凭证供启动恢复。
+    pub(crate) fn finish_known_rollback(&mut self) -> Result<(), MediaError> {
         if let Some(cleanup) = &mut self.cleanup {
             cleanup
                 .finish_rollback()

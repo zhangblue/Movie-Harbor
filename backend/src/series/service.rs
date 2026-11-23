@@ -568,27 +568,36 @@ async fn create_episode_with_policy(
     Ok(result)
 }
 
-/// 在单集详情请求中验证所属层级并组装响应。
+/// 单集详情在同一只读快照中核对层级，返回实际共存的父子版本及槽位媒体。
 pub async fn episode_detail(
     db: &DatabaseConnection,
     series_id: Uuid,
     season_id: Uuid,
     episode_id: Uuid,
 ) -> Result<EpisodeEnvelope, SeriesError> {
-    let series = repository::find(db, series_id).await?;
+    // 父版本、单集及其媒体由不同查询加载，固定首次读取的快照以排除随后提交的更新。
+    let tx = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let series = repository::find(&tx, series_id).await?;
     let season = season::Entity::find()
         .filter(season::Column::Id.eq(season_id))
         .filter(season::Column::SeriesId.eq(series_id))
-        .one(db)
+        .one(&tx)
         .await?
         .ok_or(SeriesError::NotFound)?;
     let episode = episode::Entity::find()
         .filter(episode::Column::Id.eq(episode_id))
         .filter(episode::Column::SeasonId.eq(season.id))
-        .one(db)
+        .one(&tx)
         .await?
         .ok_or(SeriesError::NotFound)?;
-    episode_envelope(db, series.version, episode).await
+    let result = episode_envelope(&tx, series.version, episode).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// 在编辑单集请求中检查草稿状态及版本后保存。

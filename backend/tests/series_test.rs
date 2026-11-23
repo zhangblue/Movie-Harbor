@@ -14,8 +14,8 @@ use movie_harbor_api::{
     series::service as series_service,
 };
 use sea_orm::{
-    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection,
-    EntityTrait, PaginatorTrait, QueryFilter, Set,
+    ActiveModelTrait, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseBackend,
+    DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, Set, Statement, TransactionTrait,
 };
 use sea_orm_migration::MigratorTrait;
 use serde_json::{Value, json};
@@ -3033,4 +3033,78 @@ async fn episode_series_precondition_prevents_archive_after_sibling_creation() {
     assert_eq!(archived["episode"]["status"], "archived");
     assert_eq!(archived["episode"]["version"], 3);
     assert_eq!(archived["series_version"], 6);
+}
+
+/// 在父详情已读取、季表仍受阻时原子更新父子，单集回查只能返回实际共存的一组版本和名称。
+#[tokio::test]
+async fn episode_detail_reads_one_snapshot_across_concurrent_parent_and_child_changes() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let app = app::build(db.clone(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    let (cookie, _) = credentials(&app).await;
+    let (parent, season, episode) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    sql(&db, &format!(
+        "INSERT INTO series (id,name,version) VALUES ('{parent}','父剧',3);
+         INSERT INTO season (id,series_id,number) VALUES ('{season}','{parent}',1);
+         INSERT INTO episode (id,season_id,number,name,version) VALUES ('{episode}','{season}',1,'修改前',1)"
+    )).await;
+    let path = format!("/api/admin/series/{parent}/seasons/{season}/episodes/{episode}");
+    let writer = db.begin().await.unwrap();
+    writer
+        .execute_unprepared("LOCK TABLE season IN ACCESS EXCLUSIVE MODE")
+        .await
+        .unwrap();
+    let app_read = app.clone();
+    let read_cookie = cookie.clone();
+    let read_path = path.clone();
+    let read = tokio::spawn(async move {
+        request(
+            &app_read,
+            "GET",
+            &read_path,
+            Value::Null,
+            Some(&read_cookie),
+            None,
+            None,
+        )
+        .await
+    });
+    // 在当前写事务上观察读请求确实等待本事务的季表锁，再提交两张表的更新。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let row = writer.query_one(Statement::from_string(DatabaseBackend::Postgres,
+                "SELECT EXISTS (SELECT FROM pg_locks WHERE locktype='relation' AND NOT granted
+                 AND relation='season'::regclass AND pg_backend_pid()=ANY(pg_blocking_pids(pid))) AS waiting"
+            )).await.unwrap().unwrap();
+            if row.try_get::<bool>("", "waiting").unwrap() { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("单集详情未到达季表读取屏障");
+    writer
+        .execute_unprepared(&format!(
+            "UPDATE series SET version=4 WHERE id='{parent}';
+         UPDATE episode SET version=2,name='修改后' WHERE id='{episode}'"
+        ))
+        .await
+        .unwrap();
+    writer.commit().await.unwrap();
+    let response = read.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let observed = body(response).await;
+    let versions = json!([
+        observed["series_version"],
+        observed["episode"]["version"],
+        observed["episode"]["name"]
+    ]);
+    assert!(
+        [json!([3, 1, "修改前"]), json!([4, 2, "修改后"])].contains(&versions),
+        "回查拼接了从未共存的父子版本和名称：{versions}"
+    );
+    let fresh =
+        body(request(&app, "GET", &path, Value::Null, Some(&cookie), None, None).await).await;
+    assert_eq!(fresh["series_version"], 4);
+    assert_eq!(fresh["episode"]["version"], 2);
+    assert_eq!(fresh["episode"]["name"], "修改后");
 }
