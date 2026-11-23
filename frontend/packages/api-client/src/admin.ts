@@ -1,7 +1,7 @@
 import { ApiError, apiDownload, apiPath, apiRequest, apiUpload, clearCsrfToken, requiredResponse, setCsrfToken, type ApiDownload, type ApiUploadProgress } from "./http";
 import { isJsonObject } from "./dataTypes";
 import type {
-  AdminContentListQuery, AdminContentPage, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
+  AdminContentListQuery, AdminContentPage, AdminSystemOverview, ChangePasswordRequest, ContentStatus, EpisodeEnvelope, GenreResponse, LoginRequest, LoginResponse,
   ChildDeleteImpactResponse, DeleteImpactResponse, DeleteResultResponse, MediaAssetResponse, MovieResponse, ReorderGenre, SeriesResponse, SessionResponse,
   UpdateEpisodeRequest, UpdateMovieRequest, UpdateSeriesRequest,
   ChangeViewerUserPasswordRequest, CreateMovieRequest, CreateSeriesRequest, CreateViewerUserRequest,
@@ -69,6 +69,10 @@ export async function listGenres(): Promise<GenreResponse[]> {
 export async function listAdminContent(query: AdminContentListQuery = {}): Promise<AdminContentPage> {
   const params = { kind: query.kind, status: query.status, privacy: query.privacy, name: query.name, page: query.page };
   return requiredResponse(await apiRequest<AdminContentPage>("/api/admin/contents", { query: params }));
+}
+// 系统设置页面加载或手动刷新时读取一次只读系统概览快照。
+export async function getAdminSystemOverview(): Promise<AdminSystemOverview> {
+  return requiredResponse(await apiRequest<AdminSystemOverview>("/api/admin/system/overview"));
 }
 // 管理员导出全部内容时下载后端生成的 JSON 文件。
 export function downloadAdminContentExport(): Promise<ApiDownload> {

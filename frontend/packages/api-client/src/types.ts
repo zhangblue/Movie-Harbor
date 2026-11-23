@@ -33,6 +33,56 @@ export interface AdminContentPage {
   total: number;
   items: AdminContentListItem[];
 }
+// 系统概览总状态只表示当前是否存在需要管理员关注的稳定告警。
+export type AdminSystemStatus = "healthy" | "attention";
+// 媒体卷状态由后端结合容量采样和保留空间规则确定，前端不得重新推断。
+export type AdminSystemVolumeStatus = "healthy" | "space_low" | "unavailable";
+// 首期系统概览只公开容量不可用和空间不足两个稳定告警码。
+export type AdminSystemWarningCode = "storage_capacity_unavailable" | "storage_space_low";
+// 一类内容按草稿、已发布和已归档生命周期拆分的数量。
+export interface AdminSystemLifecycleCounts { draft: number; published: number; archived: number }
+// 一类媒体资产在数据库中的数量和声明字节数。
+export interface AdminSystemAssetCounts { count: number; bytes: number }
+// 系统概览一次一致性快照中的内容、账号和媒体摘要。
+export interface AdminSystemCounts {
+  movies: AdminSystemLifecycleCounts;
+  series: AdminSystemLifecycleCounts;
+  episodes: AdminSystemLifecycleCounts;
+  viewer_users: number;
+  active_viewer_users: number;
+  posters: AdminSystemAssetCounts;
+  videos: AdminSystemAssetCounts;
+}
+// 单个媒体卷的容量采样、保留空间、上传接受状态和数据库资产摘要。
+export interface AdminSystemVolume {
+  number: number;
+  status: AdminSystemVolumeStatus;
+  total_bytes: number | null;
+  available_bytes: number | null;
+  reserve_bytes: number;
+  writable_bytes: number | null;
+  accepts_uploads: boolean;
+  asset_count: number;
+  recorded_asset_bytes: number;
+}
+// 系统概览返回的稳定、非敏感告警。
+export interface AdminSystemWarning {
+  code: AdminSystemWarningCode;
+  scope: string;
+  message: string;
+}
+// 应用无法验证外部备份时返回的固定事实边界。
+export interface AdminSystemBackup { status: "unverifiable" }
+// 管理员系统概览的完整只读响应。
+export interface AdminSystemOverview {
+  sampled_at: string;
+  application_version: string;
+  status: AdminSystemStatus;
+  counts: AdminSystemCounts;
+  volumes: AdminSystemVolume[];
+  backup: AdminSystemBackup;
+  warnings: AdminSystemWarning[];
+}
 // 管理统一列表支持的访问范围、类别、状态、名称和页码筛选。
 export interface AdminContentListQuery {
   privacy?: "public" | "private";

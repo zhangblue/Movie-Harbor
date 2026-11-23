@@ -409,6 +409,48 @@ it.each(["public", "private"] as const)("forwards the %s admin content privacy f
   expect(requests[0]?.url).toBe(`/api/admin/contents?privacy=${privacy}&page=1`);
 });
 
+// 验证：系统概览使用只读管理路径，并原样保留容量不可用时的空值。
+it("reads the administrator system overview and preserves nullable capacity facts", async () => {
+  const overview = {
+    sampled_at: "2026-11-23T10:00:00+08:00",
+    application_version: "0.1.0",
+    status: "attention",
+    counts: {
+      movies: { draft: 1, published: 2, archived: 3 },
+      series: { draft: 4, published: 5, archived: 6 },
+      episodes: { draft: 7, published: 8, archived: 9 },
+      viewer_users: 4,
+      active_viewer_users: 2,
+      posters: { count: 1, bytes: 100 },
+      videos: { count: 2, bytes: 900 },
+    },
+    volumes: [{
+      number: 0,
+      status: "unavailable",
+      total_bytes: null,
+      available_bytes: null,
+      reserve_bytes: 10_737_418_240,
+      writable_bytes: null,
+      accepts_uploads: false,
+      asset_count: 3,
+      recorded_asset_bytes: 1_000,
+    }],
+    backup: { status: "unverifiable" },
+    warnings: [{
+      code: "storage_capacity_unavailable",
+      scope: "volume:0",
+      message: "无法读取媒体卷容量",
+    }],
+  };
+  const requests = recordRequests([jsonResponse(overview)]);
+
+  const result = await client.getAdminSystemOverview();
+
+  expect(result).toEqual(overview);
+  expect(result.volumes[0]?.total_bytes).toBeNull();
+  expect(requests[0]).toMatchObject({ url: "/api/admin/system/overview", method: "GET", csrf: null });
+});
+
 // 验证：使用带版本的专用接口切换电影和剧集访问范围。
 it("switches movie and series privacy through dedicated versioned PUT endpoints", async () => {
   const requests = recordRequests([jsonResponse(movie), jsonResponse(series)]);
