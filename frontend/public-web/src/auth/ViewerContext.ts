@@ -12,6 +12,8 @@ export const ViewerContext = createContext({
   expire: () => {},
   // 默认上下文不维护页面范围，由根组件 Provider 接管实际记录。
   recordScope: (_private: boolean) => {},
+  // 默认匿名上下文没有服务端同步目标。
+  syncProgress: async () => false,
 });
 
 // 在公开站组件渲染时读取共享的普通用户会话上下文。

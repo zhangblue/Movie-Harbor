@@ -10,6 +10,9 @@ import { ApiError, clearCsrfToken, getViewerSession, viewerLogout, type CaughtVa
 import { ViewerContext } from "../auth/ViewerContext";
 import { ViewerLoginDialog } from "../auth/ViewerLoginDialog";
 import { ViewerPasswordDialog } from "../auth/ViewerPasswordDialog";
+import { ProgressMergeDialog } from "../auth/ProgressMergeDialog";
+import { hasAnonymousProgress } from "../player/progressStore";
+import { synchronizeViewerProgress } from "../player/progressSync";
 
 // 读取当前路径和查询参数，在初始化及浏览器历史变化时同步界面。
 const currentLocation = () => window.location.pathname + window.location.search;
@@ -27,10 +30,12 @@ export function App() {
   const [dialog, setDialog] = useState<"login" | "password">();
   const [message, setMessage] = useState("");
   const [loggingOut, setLoggingOut] = useState(false);
+  const [mergePrompt, setMergePrompt] = useState(false);
   const identity = useRef(0);
   const privateContent = useRef(false);
   const viewerRef = useRef(viewer);
   const validation = useRef<Promise<boolean> | undefined>(undefined);
+  const promptedIdentity = useRef(-1);
   const url = new URL(location, window.location.origin);
   const detailsMatch = /^\/(movies|series)\/([^/]+)\/?$/.exec(url.pathname);
   const moviePlayerMatch = /^\/movies\/([^/]+)\/play\/?$/.exec(url.pathname);
@@ -93,6 +98,13 @@ export function App() {
   const expire = useCallback(() => becomeAnonymous("登录已失效，请重新登录。"), [becomeAnonymous]);
   // 记录当前内容是否私密，供身份切换时决定是否离开页面。
   const recordScope = useCallback((isPrivate: boolean) => { privateContent.current = isPrivate; }, []);
+  // 播放器写入本地进度后通过当前身份代次尽力同步，失败不传播到播放流程。
+  const syncProgress = useCallback(async () => {
+    const current = viewerRef.current;
+    if (current.status !== "authenticated" || !current.viewerId) return false;
+    const startedAt = identity.current;
+    return synchronizeViewerProgress(current.viewerId, () => startedAt === identity.current);
+  }, []);
   // 在访问受保护数据或页面重新可见时复用会话校验，失效则退出登录。
   const validate = useCallback((discoverAnonymous = false) => {
     const startedStatus = viewerRef.current.status;
@@ -127,6 +139,15 @@ export function App() {
     });
     return () => { ignore = true; };
   }, [acceptSession, transitionViewer]);
+  useEffect(() => {
+    if (viewer.status !== "authenticated" || !viewer.viewerId) { setMergePrompt(false); return; }
+    const startedAt = identity.current;
+    void synchronizeViewerProgress(viewer.viewerId, () => startedAt === identity.current);
+    if (promptedIdentity.current !== startedAt && hasAnonymousProgress()) {
+      promptedIdentity.current = startedAt;
+      setMergePrompt(true);
+    }
+  }, [viewer]);
   useEffect(() => {
     // 窗口重新获得焦点时检查普通用户会话。
     const onFocus = () => { void validate(true); };
@@ -194,10 +215,11 @@ export function App() {
 
   const loginGeneration = identity.current;
   return (
-    <ViewerContext.Provider value={{ revision, authenticated, viewerId: viewer.viewerId, discoveryPending: viewer.status === "loading", validate, expire, recordScope }}>
+    <ViewerContext.Provider value={{ revision, authenticated, viewerId: viewer.viewerId, discoveryPending: viewer.status === "loading", validate, expire, recordScope, syncProgress }}>
     <AgentLauncher enabled={authenticated} sessionKey={identity.current} role="viewer" onExpired={expire} renderTrigger={renderSite} />
     {dialog === "login" && <ViewerLoginDialog onClose={() => setDialog(undefined)} onLogin={(session) => acceptSession(session, loginGeneration)} />}
     {dialog === "password" && <ViewerPasswordDialog isCurrent={() => loginGeneration === identity.current} onClose={() => setDialog(undefined)} onChanged={() => becomeAnonymous("密码已修改，请重新登录")} />}
+    {mergePrompt && viewer.status === "authenticated" && viewer.viewerId && <ProgressMergeDialog viewerId={viewer.viewerId} isCurrent={() => loginGeneration === identity.current} onClose={() => setMergePrompt(false)} />}
     </ViewerContext.Provider>
   );
 }

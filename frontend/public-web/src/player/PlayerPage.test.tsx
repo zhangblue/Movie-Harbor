@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { App } from "../app/App";
 import { json, movie, series, serve } from "../test/fixtures";
-import { getProgress, saveProgress, setRecentEpisode } from "./progressStore";
+import { getProgress, getRecentEpisode, saveProgress, setRecentEpisode } from "./progressStore";
 
 // 播放器测试中设置媒体时间和时长，模拟浏览器播放状态。
 function setMediaTime(video: HTMLVideoElement, currentTime: number, duration = 600) {
@@ -145,18 +145,27 @@ it("throttles timeupdate writes to five seconds and flushes on pause and pagehid
   expect(getProgress("movie:movie-1")?.position).toBe(95);
 });
 
-// 验证：接近结尾及播放结束时清除进度。
-it("clears progress near the end and on ended", async () => {
+// 验证：接近结尾仍保存位置，播放结束时保留完成状态。
+it("keeps near-end progress and marks the content completed on ended", async () => {
   window.history.replaceState(null, "", "/movies/movie-1/play");
   serve(() => json(movie));
   render(<App />);
   const video = await screen.findByTestId<HTMLVideoElement>("native-video");
   setMediaTime(video, 571, 600);
   fireEvent.pause(video);
-  expect(getProgress("movie:movie-1")).toBeNull();
-  saveProgress("movie:movie-1", 300, 600);
+  expect(getProgress("movie:movie-1")?.position).toBe(571);
   fireEvent.ended(video);
-  expect(getProgress("movie:movie-1")).toBeNull();
+  expect(getProgress("movie:movie-1")).toMatchObject({ position: 571, completed: true });
+});
+
+// 验证：完成单集后游标指向下一集，最后一集只保持完成且不自动跳转。
+it("moves the series cursor to the next episode after completion without autoplay", async () => {
+  window.history.replaceState(null, "", "/series/series-1/play/ep-2");
+  serve(() => json(series)); render(<App />);
+  const video = await screen.findByTestId<HTMLVideoElement>("native-video");
+  setMediaTime(video, 500, 500); fireEvent.ended(video);
+  expect(getRecentEpisode("series:series-1")).toBe("ep-3");
+  expect(window.location.pathname).toBe("/series/series-1/play/ep-2");
 });
 
 // 验证：定位最近单集、隔离单集进度并按顺序和历史导航。

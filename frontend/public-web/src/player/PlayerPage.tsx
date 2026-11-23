@@ -53,7 +53,7 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate, resume }: {
   navigate: Navigate;
   resume?: boolean;
 }) {
-  const { viewerId } = useViewer();
+  const { viewerId, syncProgress } = useViewer();
   const episodes = orderedPlayableEpisodes(detail.seasons);
   const recentId = getRecentEpisode(`series:${detail.id}`, undefined, viewerId);
   const selected = episodeId
@@ -66,8 +66,11 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate, resume }: {
   }, [detail.id, episodeId, navigate, selected?.id]);
   useEffect(() => {
     // 选集确定后记录最近观看，下一次进入剧集时可恢复该单集。
-    if (selected) setRecentEpisode(`series:${detail.id}`, selected.id, undefined, viewerId);
-  }, [detail.id, selected?.id, viewerId]);
+    if (selected) {
+      setRecentEpisode(`series:${detail.id}`, selected.id, undefined, viewerId);
+      if (viewerId) void syncProgress();
+    }
+  }, [detail.id, selected?.id, viewerId, syncProgress]);
 
   if (!selected?.video_url) return <NotFound />;
   const currentIndex = episodes.findIndex((episode) => episode.id === selected.id);
@@ -79,6 +82,7 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate, resume }: {
   // 选择单集时先保存最近观看记录，再导航到对应播放地址。
   const choose = (episode: OrderedEpisode) => {
     setRecentEpisode(`series:${detail.id}`, episode.id, undefined, viewerId);
+    if (viewerId) void syncProgress();
     navigate(seriesPlaybackPath(detail.id, episode.id));
   };
   return <section className="player-page">
@@ -86,6 +90,13 @@ function LoadedSeriesPlayer({ detail, episodeId, navigate, resume }: {
     <div className="player-layout">
       <div>
         <VideoPlayer key={`${viewerId ?? "anonymous"}:${selected.id}`} viewerId={viewerId} seriesId={detail.id} resume={resume} contentKey={`episode:${selected.id}`} src={selected.video_url}
+          onComplete={() => {
+            // 完成当前集后只推进下次进入时的游标，不主动播放或改变当前路由。
+            if (next) {
+              setRecentEpisode(`series:${detail.id}`, next.id, undefined, viewerId);
+              if (viewerId) void syncProgress();
+            }
+          }}
           title={`播放 ${detail.name} 第 ${selected.number} 集 ${selected.name}`} />
         <p className="eyebrow">{detail.name} · 第 {selected.seasonNumber} 季</p>
         <h1>第 {selected.number} 集 · {selected.name}</h1>

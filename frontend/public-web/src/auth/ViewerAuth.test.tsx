@@ -5,6 +5,24 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { clearCsrfToken } from "@movie-harbor/api-client";
 import { App } from "../app/App";
 import { deferred, json, movie, movieCard, series, seriesCard } from "../test/fixtures";
+import { hasAnonymousProgress, saveProgress } from "../player/progressStore";
+
+// 匿名合并测试使用内存存储，避免依赖测试运行器的文件型 localStorage。
+class ProgressStorage implements Storage {
+  #items = new Map<string, string>();
+  // 返回条目数量。
+  get length() { return this.#items.size; }
+  // 清空全部条目。
+  clear() { this.#items.clear(); }
+  // 读取指定条目。
+  getItem(key: string) { return this.#items.get(key) ?? null; }
+  // 按索引读取键。
+  key(index: number) { return [...this.#items.keys()][index] ?? null; }
+  // 删除指定条目。
+  removeItem(key: string) { this.#items.delete(key); }
+  // 写入指定条目。
+  setItem(key: string, value: string) { this.#items.set(key, value); }
+}
 
 // 身份测试开始前替换媒体方法，使离开私密播放器的清理可在测试环境执行。
 beforeEach(() => {
@@ -32,7 +50,7 @@ function server(initial = false) {
     if (url.pathname === "/api/viewer/session") {
       if (state.sessionResponse) return state.sessionResponse;
       if (state.sessionNetworkError) throw new TypeError("network unavailable");
-      return state.authenticated ? json({ username: state.username, csrf_token: state.csrfToken }) : json({ error: "未登录" }, 401);
+      return state.authenticated ? json({ viewer_id: "viewer-1", username: state.username, csrf_token: state.csrfToken }) : json({ error: "未登录" }, 401);
     }
     if (url.pathname === "/api/viewer/login") {
       if (state.loginStatus !== 200) return json({ error: "account missing internal details" }, state.loginStatus);
@@ -53,6 +71,7 @@ function server(initial = false) {
       state.authenticated = false;
       return new Response(null, { status: 204 });
     }
+    if (url.pathname === "/api/viewer/progress/merge") return json({ progress: [], cursors: [], results: [] });
     if (url.pathname === "/api/catalog") {
       const privateOnly = url.searchParams.get("privacy") === "private";
       const authenticatedItems = privateOnly ? [{ ...seriesCard, is_private: true }] : [movieCard, { ...seriesCard, is_private: true }];
@@ -67,6 +86,17 @@ function server(initial = false) {
   });
   return state;
 }
+
+// 验证：登录后提示可选合并匿名进度，暂不合并保留数据，确认后才清空。
+it("offers an optional anonymous progress merge after login", async () => {
+  vi.stubGlobal("localStorage", new ProgressStorage());
+  saveProgress("movie:movie-1", 30, 100);
+  server(); render(<App />); const user = await login();
+  const dialog = await screen.findByRole("dialog", { name: "合并观看进度" });
+  await user.click(within(dialog).getByRole("button", { name: "暂不合并" }));
+  expect(hasAnonymousProgress()).toBe(true);
+  expect(screen.queryByRole("dialog", { name: "合并观看进度" })).toBeNull();
+});
 
 // 在认证测试中填写并提交普通用户登录表单，返回模拟用户供后续操作。
 async function login(username = "Summer") {
@@ -320,7 +350,7 @@ it.each(["/movies/movie-1", "/series/series-1", "/movies/movie-1/play", "/series
     await act(async () => {});
     expect(screen.queryByRole("heading", { level: 1 })).not.toBeInTheDocument();
     expect(screen.queryByTestId("native-video")).not.toBeInTheDocument();
-    state.sessionResponse = undefined; await act(async () => pending.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
+    state.sessionResponse = undefined; await act(async () => pending.resolve(json({ viewer_id: "viewer-1", username: "Summer", csrf_token: "viewer-csrf" })));
     expect(await screen.findByRole("heading", { level: 1 })).toBeInTheDocument();
   },
 );
@@ -345,7 +375,7 @@ it("reuses an in-flight session check when focus and visibility events arrive to
   act(() => { window.dispatchEvent(new Event("focus")); document.dispatchEvent(new Event("visibilitychange")); window.dispatchEvent(new Event("focus")); });
   expect(state.requests.filter(({ url }) => url.pathname === "/api/viewer/session")).toHaveLength(before + 1);
   state.sessionResponse = undefined;
-  await act(async () => pending.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
+  await act(async () => pending.resolve(json({ viewer_id: "viewer-1", username: "Summer", csrf_token: "viewer-csrf" })));
 });
 
 // 验证：退出失败后恢复令牌以允许重试。
@@ -432,7 +462,7 @@ it("does not let a previous viewer session response replace the new viewer's CSR
   await changePassword(); await screen.findByRole("button", { name: "登录" });
   state.csrfToken = "winter-csrf"; await login("Winter");
   await screen.findByText("Winter"); await screen.findByText("私密");
-  await act(async () => old.resolve(json({ username: "Summer", csrf_token: "summer-csrf" })));
+  await act(async () => old.resolve(json({ viewer_id: "viewer-1", username: "Summer", csrf_token: "summer-csrf" })));
   expect(screen.getByText("Winter")).toBeInTheDocument();
   await changePassword();
   const writes = state.requests.filter(({ url }) => url.pathname === "/api/viewer/password");
@@ -524,7 +554,7 @@ it("keeps a private filter deep link loading until session discovery finishes", 
   expect(screen.queryByText("没有找到私密内容")).not.toBeInTheDocument();
   state.sessionResponse = undefined;
   state.catalogResponse = Promise.resolve(json({ items: [], total: 0, page: 1, size: 20 }));
-  await act(async () => session.resolve(json({ username: "Summer", csrf_token: "viewer-csrf" })));
+  await act(async () => session.resolve(json({ viewer_id: "viewer-1", username: "Summer", csrf_token: "viewer-csrf" })));
   expect(await screen.findByText("没有找到私密内容")).toBeInTheDocument();
 });
 
