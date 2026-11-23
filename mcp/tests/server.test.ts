@@ -36,7 +36,7 @@ test('server registers the complete atomic tool schemas and exposes its workflow
       'search_movies','search_series','get_series_structure','list_genres','create_genre','stage_poster',
       'create_movie','create_series','create_season','create_episode','update_movie_metadata','update_series_metadata','update_episode_metadata',
       'update_content_synopsis',
-      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle','set_content_poster',
+      'upload_movie_video','replace_movie_video','upload_episode_video','replace_episode_video','set_content_visibility','transition_content_lifecycle','set_content_poster','list_missing_videos',
     ].sort());
     assert.ok(listed.tools.every(tool=>tool.inputSchema&&Object.keys(tool.inputSchema).length>0));
     assert.ok(listed.tools.every(tool=>tool.outputSchema));
@@ -64,6 +64,13 @@ test('server registers the complete atomic tool schemas and exposes its workflow
     assert.match(poster.description ?? '', /补传.*替换.*永久移除旧海报.*删除.*transition_content_lifecycle/);
     assert.match(instructions, /补传.*替换.*海报.*transition_content_lifecycle/);
     assert.doesNotMatch(JSON.stringify(poster.outputSchema), /"remove"|"deleted"/);
+    const missingVideos = listed.tools.find(tool => tool.name === 'list_missing_videos');
+    assert.ok(missingVideos);
+    assert.deepEqual(Object.keys(missingVideos.inputSchema.properties ?? {}).sort(), ['content_type', 'page']);
+    assert.deepEqual(missingVideos.inputSchema.required, ['content_type']);
+    assert.equal(missingVideos.inputSchema.additionalProperties, false);
+    assert.deepEqual(missingVideos.annotations, { readOnlyHint: true, destructiveHint: false, idempotentHint: true });
+    assert.match(missingVideos.description ?? '', /电影.*单集/);
     const lifecycle = listed.tools.find(tool => tool.name === 'transition_content_lifecycle');
     assert.ok(lifecycle);
     assert.equal(lifecycle.inputSchema.type, 'object');

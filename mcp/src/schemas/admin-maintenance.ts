@@ -3,7 +3,7 @@ import { confirmed, id, nextActions, positiveInt, status, version } from './comm
 import { apiEpisodeEnvelope, apiMovie, apiSeries } from './content.js';
 import { validatePosterInput, validatePosterOutput } from './media.js';
 
-// 限定访问范围和海报操作可使用的顶层内容类型。
+// 限定访问范围、海报和缺视频查询的顶层内容类型。
 const topLevelContentType = z.enum(['movie', 'series']);
 // 限定访问范围操作必须显式指定公开或私密。
 const visibility = z.enum(['public', 'private']);
@@ -94,4 +94,61 @@ export const transitionContentLifecycleOutput = z.discriminatedUnion('content_ty
   z.strictObject({ ...lifecycleResultFields, content_type: z.literal('movie') }),
   z.strictObject({ ...lifecycleResultFields, content_type: z.literal('series') }),
   z.strictObject({ ...lifecycleResultFields, content_type: z.literal('episode'), series_version: version }),
+]);
+
+// 沿用管理内容 API 页码上限，供缺视频请求和响应校验。
+const missingVideoPageNumber = positiveInt.max(1_000_000);
+// 固定页大小与管理内容 API 保持一致，供页大小和条目数量校验。
+const missingVideoPageSize = 20;
+
+// 缺视频查询须明确选定电影或剧集，可省略第一页页码。
+export const listMissingVideosInput = z.strictObject({
+  content_type: topLevelContentType,
+  page: missingVideoPageNumber.optional(),
+});
+
+// 缺视频电影条目提供槽位所属电影的标识、名称、状态、版本和访问范围。
+const missingMovieItem = z.strictObject({
+  movie_id: id,
+  movie_name: z.string().min(1),
+  status,
+  version,
+  is_private: z.boolean(),
+});
+
+// 缺视频单集条目提供完整剧季集定位，访问范围沿用整剧。
+const missingEpisodeItem = z.strictObject({
+  series_id: id,
+  series_name: z.string().min(1),
+  series_status: status,
+  series_version: version,
+  season_id: id,
+  season_number: positiveInt,
+  episode_id: id,
+  episode_number: positiveInt,
+  episode_name: z.string().min(1),
+  episode_status: status,
+  episode_version: version,
+  is_private: z.boolean(),
+});
+
+// 约束两种分页分支共用的页码、固定页大小和无符号总数。
+const missingVideoPageFields = {
+  page: missingVideoPageNumber,
+  size: z.literal(missingVideoPageSize),
+  total: z.int().nonnegative(),
+};
+
+// 校验后端分页与 MCP 成功结果，确保类型和条目对应且没有额外媒体字段。
+export const listMissingVideosOutput = z.discriminatedUnion('content_type', [
+  z.strictObject({
+    ...missingVideoPageFields,
+    content_type: z.literal('movie'),
+    items: z.array(missingMovieItem).max(missingVideoPageSize),
+  }),
+  z.strictObject({
+    ...missingVideoPageFields,
+    content_type: z.literal('series'),
+    items: z.array(missingEpisodeItem).max(missingVideoPageSize),
+  }),
 ]);

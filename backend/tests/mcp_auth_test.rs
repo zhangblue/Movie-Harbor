@@ -587,3 +587,58 @@ async fn administrator_cookie_retains_session_and_csrf_including_bearer_fallback
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+/// 验证缺视频查询只允许精确 GET 路径，方法或路径变化后仍需要管理员会话。
+fn missing_videos_bearer_allowlist_is_exact() {
+    let path = "/api/admin/contents/missing-videos";
+    assert!(mcp::route_allowed(&Method::GET, path));
+    for method in [
+        Method::HEAD,
+        Method::OPTIONS,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+    ] {
+        assert!(!mcp::route_allowed(&method, path), "{method} {path}");
+    }
+    for neighbor in [
+        "/api/admin/contents/missing-videos/",
+        "/api/admin/contents/missing-videos/extra",
+        "/api/admin/contents/missing-video",
+        "/api/admin/contents/export",
+        "/api/admin/series/missing-videos",
+    ] {
+        assert!(
+            !mcp::route_allowed(&Method::GET, neighbor),
+            "GET {neighbor}"
+        );
+    }
+}
+
+#[tokio::test]
+/// 验证 Bearer 主体能读取单页结果，同时相邻的管理员导出和 HEAD 请求仍被拒绝。
+async fn missing_videos_bearer_reaches_only_the_get_handler() {
+    let (_db, app, root) = setup(true).await;
+    let bearer = format!("Bearer {KEY}");
+    let headers = [("host", "harbor.test"), ("authorization", bearer.as_str())];
+    let path = "/api/admin/contents/missing-videos?content_type=series&page=2";
+    let response = send(&app, "GET", path, json!(null), &headers).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(
+        body(response).await,
+        json!({"content_type": "series", "page": 2, "size": 20, "total": 0, "items": []})
+    );
+    for (method, uri) in [("HEAD", path), ("GET", "/api/admin/contents/export")] {
+        assert_eq!(
+            send(&app, method, uri, json!(null), &headers)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri}"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

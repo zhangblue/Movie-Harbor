@@ -1,3 +1,4 @@
+use sea_orm::FromQueryResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -247,14 +248,7 @@ impl TryFrom<AdminContentRequest> for AdminContentFilter {
             .map(|name| name.trim().to_owned())
             .filter(|name| !name.is_empty())
             .map(|name| format!("%{}%", escape_like(&name)));
-        let page = value.page.unwrap_or(1);
-        if page == 0 || page > MAX_ADMIN_CONTENT_PAGE {
-            return Err(());
-        }
-        let offset = page
-            .checked_sub(1)
-            .and_then(|page| page.checked_mul(ADMIN_CONTENT_PAGE_SIZE))
-            .ok_or(())?;
+        let (page, offset) = admin_content_pagination(value.page)?;
         Ok(Self {
             kind,
             status,
@@ -299,4 +293,97 @@ pub struct AdminContentPage {
     pub size: u64,
     pub total: u64,
     pub items: Vec<AdminContentItem>,
+}
+
+// 校验管理内容查询的页码并计算偏移，供普通列表与缺视频列表共同使用。
+fn admin_content_pagination(page: Option<u64>) -> Result<(u64, u64), ()> {
+    let page = page.unwrap_or(1);
+    if !(1..=MAX_ADMIN_CONTENT_PAGE).contains(&page) {
+        return Err(());
+    }
+    let offset = (page - 1).checked_mul(ADMIN_CONTENT_PAGE_SIZE).ok_or(())?;
+    Ok((page, offset))
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+// 指定缺视频查询目标为电影或剧集下的已有单集，供请求与数据库查询选择分支。
+pub enum MissingVideoContentType {
+    Movie,
+    Series,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+// 承载缺视频列表的显式内容类型与可选管理页码，供路由解析查询字符串。
+pub struct MissingVideoRequest {
+    pub content_type: MissingVideoContentType,
+    pub page: Option<u64>,
+}
+
+// 保存已经校验的缺视频查询类型、页码和数据库偏移，供只读查询使用。
+pub struct MissingVideoFilter {
+    pub content_type: MissingVideoContentType,
+    pub page: u64,
+    pub offset: u64,
+}
+
+impl TryFrom<MissingVideoRequest> for MissingVideoFilter {
+    // 供路由把无效页码转换成无详情的 400 响应。
+    type Error = ();
+
+    // 在查询前沿用管理列表分页边界，并保留必须显式选择的内容类型。
+    fn try_from(request: MissingVideoRequest) -> Result<Self, Self::Error> {
+        let (page, offset) = admin_content_pagination(request.page)?;
+        Ok(Self {
+            content_type: request.content_type,
+            page,
+            offset,
+        })
+    }
+}
+
+#[derive(Debug, FromQueryResult, Serialize)]
+// 从数据库直接映射缺视频电影的维护字段，供电影分页响应序列化。
+pub struct MissingMovieItem {
+    pub movie_id: Uuid,
+    pub movie_name: String,
+    pub status: String,
+    pub version: i64,
+    pub is_private: bool,
+}
+
+#[derive(Debug, FromQueryResult, Serialize)]
+// 从数据库映射缺视频单集的层级、状态、版本和整剧隐私，供单集分页响应序列化。
+pub struct MissingEpisodeItem {
+    pub series_id: Uuid,
+    pub series_name: String,
+    pub series_status: String,
+    pub series_version: i64,
+    pub season_id: Uuid,
+    pub season_number: i32,
+    pub episode_id: Uuid,
+    pub episode_number: i32,
+    pub episode_name: String,
+    pub episode_status: String,
+    pub episode_version: i64,
+    pub is_private: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "content_type", rename_all = "snake_case")]
+// 使用内容类型区分分页结果，令调用方按电影或具体单集字段读取整页。
+pub enum MissingVideoPage {
+    Movie {
+        page: u64,
+        size: u64,
+        total: u64,
+        items: Vec<MissingMovieItem>,
+    },
+    Series {
+        page: u64,
+        size: u64,
+        total: u64,
+        items: Vec<MissingEpisodeItem>,
+    },
 }

@@ -1,9 +1,14 @@
-use super::dto::{ADMIN_CONTENT_PAGE_SIZE, AdminContentFilter, AdminContentItem, AdminContentPage};
-use crate::entities::{media_asset, movie, series};
+use super::dto::{
+    ADMIN_CONTENT_PAGE_SIZE, AdminContentFilter, AdminContentItem, AdminContentPage,
+    MissingEpisodeItem, MissingMovieItem, MissingVideoContentType, MissingVideoFilter,
+    MissingVideoPage,
+};
+use crate::entities::{episode, media_asset, movie, season, series};
 use chrono::{DateTime, FixedOffset};
 use sea_orm::{
-    AccessMode, ConnectionTrait, DatabaseConnection, DbErr, FromQueryResult, IsolationLevel,
-    TransactionTrait,
+    AccessMode, ColumnTrait, ConnectionTrait, DatabaseConnection, DbErr, EntityTrait,
+    FromQueryResult, IsolationLevel, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect,
+    RelationTrait, TransactionTrait,
     sea_query::{
         Alias, Asterisk, BinOper, Expr, Func, IntoTableRef, JoinType, Order, Query,
         SelectStatement, UnionType,
@@ -167,4 +172,94 @@ pub async fn list(
         total,
         items,
     })
+}
+
+// 在只读快照中读取选定类型的空视频槽位，供管理查询接口返回固定大小的页面。
+pub async fn list_missing_videos(
+    db: &DatabaseConnection,
+    filter: MissingVideoFilter,
+) -> Result<MissingVideoPage, DbErr> {
+    // 先建立一致性快照，使并发上传或修改层级不会造成总数与条目错配。
+    let transaction = db
+        .begin_with_config(
+            Some(IsolationLevel::RepeatableRead),
+            Some(AccessMode::ReadOnly),
+        )
+        .await?;
+    let page = filter.page;
+    let size = ADMIN_CONTENT_PAGE_SIZE;
+    let offset = filter.offset;
+
+    let result = match filter.content_type {
+        MissingVideoContentType::Movie => {
+            let candidates = movie::Entity::find().filter(movie::Column::VideoAssetId.is_null());
+            // 使用同一候选集合统计总数和选择项目，响应只投影维护所需字段。
+            let total = candidates.clone().count(&transaction).await?;
+            let items = candidates
+                .select_only()
+                .column_as(movie::Column::Id, "movie_id")
+                .column_as(movie::Column::Name, "movie_name")
+                .columns([
+                    movie::Column::Status,
+                    movie::Column::Version,
+                    movie::Column::IsPrivate,
+                ])
+                .order_by_desc(movie::Column::CreatedAt)
+                .order_by_asc(movie::Column::Id)
+                .limit(size)
+                .offset(offset)
+                .into_model::<MissingMovieItem>()
+                .all(&transaction)
+                .await?;
+            MissingVideoPage::Movie {
+                page,
+                size,
+                total,
+                items,
+            }
+        }
+        MissingVideoContentType::Series => {
+            // 从实际单集向上连接季和整剧，空剧集与仅有空季的剧集均不会产生条目。
+            let candidates = episode::Entity::find()
+                .join(JoinType::InnerJoin, episode::Relation::Season.def())
+                .join(JoinType::InnerJoin, season::Relation::Series.def())
+                .filter(episode::Column::VideoAssetId.is_null());
+            let total = candidates.clone().count(&transaction).await?;
+            // 集号仅在季内唯一，按整剧和季分别打破同名、同号的跨层级排序平局。
+            let items = candidates
+                .select_only()
+                .column_as(series::Column::Id, "series_id")
+                .column_as(series::Column::Name, "series_name")
+                .column_as(series::Column::Status, "series_status")
+                .column_as(series::Column::Version, "series_version")
+                .column_as(season::Column::Id, "season_id")
+                .column_as(season::Column::Number, "season_number")
+                .column_as(episode::Column::Id, "episode_id")
+                .column_as(episode::Column::Number, "episode_number")
+                .column_as(episode::Column::Name, "episode_name")
+                .column_as(episode::Column::Status, "episode_status")
+                .column_as(episode::Column::Version, "episode_version")
+                .column(series::Column::IsPrivate)
+                .order_by_asc(series::Column::Name)
+                .order_by_asc(series::Column::Id)
+                .order_by_asc(season::Column::Number)
+                .order_by_asc(season::Column::Id)
+                .order_by_asc(episode::Column::Number)
+                .order_by_asc(episode::Column::Id)
+                .limit(size)
+                .offset(offset)
+                .into_model::<MissingEpisodeItem>()
+                .all(&transaction)
+                .await?;
+            MissingVideoPage::Series {
+                page,
+                size,
+                total,
+                items,
+            }
+        }
+    };
+    // 查询结束后释放快照；在事务成功结束前不将部分结果返回给调用方。
+    transaction.commit().await?;
+    Ok(result)
 }

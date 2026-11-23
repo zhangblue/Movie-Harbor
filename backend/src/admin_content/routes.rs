@@ -1,14 +1,14 @@
 use super::{
     dto::{
         AdminContentFilter, AdminContentPage, AdminContentRequest, BulkActionRequest,
-        BulkActionResponse,
+        BulkActionResponse, MissingVideoFilter, MissingVideoPage, MissingVideoRequest,
     },
     query, service,
 };
 use crate::auth::{self, AuthState};
 use axum::{
     Json, Router,
-    extract::{Query, State},
+    extract::{Query, State, rejection::QueryRejection},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
@@ -64,6 +64,10 @@ impl IntoResponse for AdminContentError {
 pub fn router(auth_state: AuthState) -> Router {
     Router::new()
         .route("/api/admin/contents", get(list))
+        .route(
+            "/api/admin/contents/missing-videos",
+            get(list_missing_videos),
+        )
         .route("/api/admin/contents/bulk-actions", post(bulk_action))
         .route_layer(middleware::from_fn_with_state(
             auth_state.clone(),
@@ -96,4 +100,16 @@ async fn list(
     let filter =
         AdminContentFilter::try_from(request).map_err(|_| AdminContentError::InvalidList)?;
     Ok(Json(query::list(&state.db, filter).await?))
+}
+
+// 解析缺视频查询的显式类型和页码，再返回管理端当前页的只读结果。
+async fn list_missing_videos(
+    State(state): State<AuthState>,
+    request: Result<Query<MissingVideoRequest>, QueryRejection>,
+) -> Result<Json<MissingVideoPage>, AdminContentError> {
+    // 统一处理解析与范围校验错误，避免把请求参数原文或解析细节返回给调用方。
+    let Query(request) = request.map_err(|_| AdminContentError::InvalidList)?;
+    let filter =
+        MissingVideoFilter::try_from(request).map_err(|_| AdminContentError::InvalidList)?;
+    Ok(Json(query::list_missing_videos(&state.db, filter).await?))
 }

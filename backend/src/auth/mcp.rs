@@ -36,7 +36,7 @@ pub fn route_allowed(method: &Method, path: &str) -> bool {
     let uuid = |value: &str| Uuid::parse_str(value).is_ok();
     match *method {
         Method::GET => match segments.as_slice() {
-            ["contents" | "genres" | "movies" | "series"] => true,
+            ["contents" | "genres" | "movies" | "series"] | ["contents", "missing-videos"] => true,
             ["movies" | "series", id] => uuid(id),
             ["series", series, "seasons", season, "episodes", episode] => {
                 uuid(series) && uuid(season) && uuid(episode)

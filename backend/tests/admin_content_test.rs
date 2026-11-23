@@ -528,3 +528,181 @@ async fn private_admin_content_filter_applies_to_both_kinds_and_totals() {
         StatusCode::BAD_REQUEST
     );
 }
+
+/// 单独准备含有视频引用、同名剧集和空季的数据库，供缺视频接口测试使用。
+async fn missing_videos_app() -> (TestDatabase, TempRoot, Router) {
+    let db = TestDatabase::migrated("admin_missing_videos").await;
+    db.execute_unprepared(
+        r#"
+INSERT INTO media_asset (id, storage_key, original_name, mime_type, byte_size, purpose) VALUES
+('30000000-0000-0000-0000-000000000001', 'video/aa/movie.mp4', 'movie.mp4', 'video/mp4', 1, 'video'),
+('30000000-0000-0000-0000-000000000002', 'video/bb/episode.mp4', 'episode.mp4', 'video/mp4', 1, 'video');
+
+INSERT INTO movie (id, name, status, version, is_private, created_at, video_asset_id) VALUES
+('10000000-0000-0000-0000-000000000001', 'Older', 'published', 3, false, '2026-01-01T00:00:00Z', NULL),
+('10000000-0000-0000-0000-000000000003', 'Same creation time', 'archived', 4, false, '2026-01-02T00:00:00Z', NULL),
+('10000000-0000-0000-0000-000000000002', 'Missing video', 'draft', 5, true, '2026-01-02T00:00:00Z', NULL),
+('10000000-0000-0000-0000-000000000004', 'Existing video slot', 'draft', 6, true, '2026-01-03T00:00:00Z',
+ '30000000-0000-0000-0000-000000000001');
+
+INSERT INTO series (id, name, status, version, is_private) VALUES
+('20000000-0000-0000-0000-000000000012', 'Same title', 'archived', 6, false),
+('20000000-0000-0000-0000-000000000011', 'Same title', 'published', 7, true),
+('20000000-0000-0000-0000-000000000001', 'Z title', 'draft', 8, false),
+('20000000-0000-0000-0000-000000000013', 'Empty series', 'draft', 1, false),
+('20000000-0000-0000-0000-000000000014', 'Series with an empty season', 'draft', 1, false);
+
+INSERT INTO season (id, series_id, number) VALUES
+('40000000-0000-0000-0000-000000000021', '20000000-0000-0000-0000-000000000011', 2),
+('40000000-0000-0000-0000-000000000022', '20000000-0000-0000-0000-000000000011', 1),
+('40000000-0000-0000-0000-000000000023', '20000000-0000-0000-0000-000000000012', 1),
+('40000000-0000-0000-0000-000000000024', '20000000-0000-0000-0000-000000000001', 1),
+('40000000-0000-0000-0000-000000000025', '20000000-0000-0000-0000-000000000014', 1);
+
+INSERT INTO episode (id, season_id, number, name, status, version, video_asset_id) VALUES
+('50000000-0000-0000-0000-000000000031', '40000000-0000-0000-0000-000000000021', 1, 'S2 E1', 'archived', 22, NULL),
+('50000000-0000-0000-0000-000000000032', '40000000-0000-0000-0000-000000000023', 1, 'Same series name E1', 'draft', 23, NULL),
+('50000000-0000-0000-0000-000000000033', '40000000-0000-0000-0000-000000000024', 1, 'Z series E1', 'draft', 24, NULL),
+('50000000-0000-0000-0000-000000000034', '40000000-0000-0000-0000-000000000022', 20, 'Existing episode video slot',
+ 'published', 25, '30000000-0000-0000-0000-000000000002');
+
+INSERT INTO episode (id, season_id, number, name, version)
+SELECT ('50000000-0000-0000-0000-' || lpad((20 - n)::text, 12, '0'))::uuid,
+       '40000000-0000-0000-0000-000000000022', n, 'S1 E' || n, 2
+FROM generate_series(1, 19) AS n;
+"#,
+    )
+    .await
+    .unwrap();
+    let root = TempRoot::new();
+    let app = app::build(db.connection(), &config(root.as_ref()))
+        .await
+        .unwrap();
+    (db, root, app)
+}
+
+/// 缺视频接口测试在断言前通过管理会话读取一页完整 JSON。
+async fn missing_videos_page(app: &Router, cookie: &str, query: &str) -> Value {
+    let response = request(
+        app,
+        &format!("/api/admin/contents/missing-videos{query}"),
+        Some(cookie),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK, "{query}");
+    body(response).await
+}
+
+#[tokio::test]
+/// 验证只返回视频槽位为空的电影，创建时间相同则以 ID 决定先后。
+async fn missing_videos_movie_slots_use_stable_creation_order() {
+    let (_db, _root, app) = missing_videos_app().await;
+    let cookie = credentials(&app).await;
+    assert_eq!(
+        missing_videos_page(&app, &cookie, "?content_type=movie").await,
+        json!({
+            "content_type": "movie", "page": 1, "size": 20, "total": 3,
+            "items": [
+                {"movie_id": "10000000-0000-0000-0000-000000000002", "movie_name": "Missing video", "status": "draft", "version": 5, "is_private": true},
+                {"movie_id": "10000000-0000-0000-0000-000000000003", "movie_name": "Same creation time", "status": "archived", "version": 4, "is_private": false},
+                {"movie_id": "10000000-0000-0000-0000-000000000001", "movie_name": "Older", "status": "published", "version": 3, "is_private": false}
+            ]
+        })
+    );
+    assert_eq!(
+        missing_videos_page(&app, &cookie, "?content_type=movie&page=1000000").await,
+        json!({"content_type": "movie", "page": 1000000, "size": 20, "total": 3, "items": []})
+    );
+}
+
+#[tokio::test]
+/// 验证跨页只返回真实的缺视频单集，按剧名、同名剧 ID、季号和集号稳定排列。
+async fn missing_videos_series_preserves_episode_identity_across_pages() {
+    let (_db, _root, app) = missing_videos_app().await;
+    let cookie = credentials(&app).await;
+    let first = missing_videos_page(&app, &cookie, "?content_type=series").await;
+    let second = missing_videos_page(&app, &cookie, "?content_type=series&page=2").await;
+
+    let mut first_items: Vec<Value> = (1..=19)
+        .map(|n| {
+            json!({
+                "series_id": "20000000-0000-0000-0000-000000000011",
+                "series_name": "Same title", "series_status": "published", "series_version": 7,
+                "season_id": "40000000-0000-0000-0000-000000000022", "season_number": 1,
+                "episode_id": format!("50000000-0000-0000-0000-{:012}", 20 - n),
+                "episode_number": n, "episode_name": format!("S1 E{n}"),
+                "episode_status": "draft", "episode_version": 2, "is_private": true
+            })
+        })
+        .collect();
+    first_items.push(json!({
+        "series_id": "20000000-0000-0000-0000-000000000011",
+        "series_name": "Same title", "series_status": "published", "series_version": 7,
+        "season_id": "40000000-0000-0000-0000-000000000021", "season_number": 2,
+        "episode_id": "50000000-0000-0000-0000-000000000031",
+        "episode_number": 1, "episode_name": "S2 E1", "episode_status": "archived",
+        "episode_version": 22, "is_private": true
+    }));
+    assert_eq!(
+        first,
+        json!({"content_type": "series", "page": 1, "size": 20, "total": 22, "items": first_items})
+    );
+    assert_eq!(
+        second,
+        json!({
+            "content_type": "series", "page": 2, "size": 20, "total": 22,
+            "items": [
+                {
+                    "series_id": "20000000-0000-0000-0000-000000000012",
+                    "series_name": "Same title", "series_status": "archived", "series_version": 6,
+                    "season_id": "40000000-0000-0000-0000-000000000023", "season_number": 1,
+                    "episode_id": "50000000-0000-0000-0000-000000000032",
+                    "episode_number": 1, "episode_name": "Same series name E1",
+                    "episode_status": "draft", "episode_version": 23, "is_private": false
+                },
+                {
+                    "series_id": "20000000-0000-0000-0000-000000000001",
+                    "series_name": "Z title", "series_status": "draft", "series_version": 8,
+                    "season_id": "40000000-0000-0000-0000-000000000024", "season_number": 1,
+                    "episode_id": "50000000-0000-0000-0000-000000000033",
+                    "episode_number": 1, "episode_name": "Z series E1",
+                    "episode_status": "draft", "episode_version": 24, "is_private": false
+                }
+            ]
+        })
+    );
+}
+
+#[tokio::test]
+/// 验证缺视频接口要求认证、显式类型及管理列表约定的页码范围。
+async fn missing_videos_requires_authentication_and_valid_parameters() {
+    let (_db, _root, app) = missing_videos_app().await;
+    let cookie = credentials(&app).await;
+    let path = "/api/admin/contents/missing-videos";
+    assert_eq!(
+        request(&app, &format!("{path}?content_type=series"), None)
+            .await
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for query in [
+        "",
+        "?page=1",
+        "?content_type=all",
+        "?content_type=episode",
+        "?content_type=movie&page=0",
+        "?content_type=movie&page=-1",
+        "?content_type=movie&page=1.5",
+        "?content_type=movie&page=1000001",
+        "?content_type=movie&page=18446744073709551616",
+        "?content_type=movie&content_type=series",
+        "?content_type=movie&path=/srv/media/private",
+    ] {
+        let response = request(&app, &format!("{path}{query}"), Some(&cookie)).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(
+            body(response).await,
+            json!({"error": "invalid content list request"})
+        );
+    }
+}

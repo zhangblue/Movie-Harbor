@@ -574,3 +574,90 @@ test('content poster keeps pre-send file changes distinct from ambiguous uploads
     ['GET', moviePath], ['upload', '/api/admin/media/movies/' + movieId + '/poster?version=3', f.path, 'image/png', 68],
   ]);
 });
+
+// 提供完整的电影和单集缺视频响应，供真实 MCP 请求验证后端契约。
+const missingMovie = { movie_id: movieId, movie_name: '无视频电影', status: 'draft', version: 3, is_private: true };
+const missingEpisode = {
+  series_id: seriesId, series_name: '剧集名称', series_status: 'published', series_version: 8,
+  season_id: seasonId, season_number: 2, episode_id: episodeId, episode_name: '单集名称',
+  episode_number: 4, episode_status: 'archived', episode_version: 3, is_private: true,
+};
+
+// 通过内存 MCP 连接执行工具，仅替代远程管理接口以验证实际请求数量和路径。
+async function callMissingVideos(input: Record<string, unknown>, response?: unknown) {
+  const config = {
+    baseUrl: new URL('http://localhost/'), apiKey: 'mhmcp_secret', credentialDirectory: '/tmp/credentials',
+    allowedRoots: [], generatedRoot: '/tmp/generated', requestTimeoutMs: 1000,
+  };
+  const remote = mockApi(response);
+  const server = buildServer({ config, credentialDirectory: config.credentialDirectory, client: remote.client });
+  const client = new Client({ name: 'movie-harbor-query-test', version: '1.0.0' });
+  const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverEnd);
+  await client.connect(clientEnd);
+  try {
+    return { result: await client.callTool({ name: 'list_missing_videos', arguments: input }), calls: remote.calls };
+  } finally {
+    await client.close();
+    await server.close();
+  }
+}
+
+// 验证电影和单集分别只发出一次分页查询，完整保留后端分支和层级字段。
+test('missing videos reads one requested page and preserves the movie or episode fields', async () => {
+  const path = '/api/admin/contents/missing-videos';
+  const moviePage = { content_type: 'movie', page: 1, size: 20, total: 1, items: [missingMovie] };
+  const movie = await callMissingVideos({ content_type: 'movie' }, moviePage);
+  assert.equal(movie.result.isError, undefined);
+  assert.deepEqual(movie.result.structuredContent, moviePage);
+  assert.deepEqual(movie.calls, [['GET', path + '?content_type=movie']]);
+
+  const seriesPage = { content_type: 'series', page: 2, size: 20, total: 21, items: [missingEpisode] };
+  const series = await callMissingVideos({ content_type: 'series', page: 2 }, seriesPage);
+  assert.equal(series.result.isError, undefined);
+  assert.deepEqual(series.result.structuredContent, seriesPage);
+  assert.deepEqual(series.calls, [['GET', path + '?content_type=series&page=2']]);
+
+  const emptyPage = { content_type: 'series', page: 1000000, size: 20, total: 21, items: [] };
+  const empty = await callMissingVideos({ content_type: 'series', page: 1000000 }, emptyPage);
+  assert.equal(empty.result.isError, undefined);
+  assert.deepEqual(empty.result.structuredContent, emptyPage);
+  assert.deepEqual(empty.calls, [['GET', path + '?content_type=series&page=1000000']]);
+});
+
+// 验证明示查询类型和页码边界，无效参数不会发出管理请求。
+test('missing videos rejects implicit types, mixed queries and invalid page numbers before reading', async () => {
+  for (const input of [
+    {}, { page: 1 }, { content_type: 'episode' }, { content_type: 'all' },
+    { content_type: 'movie', page: 0 }, { content_type: 'movie', page: -1 },
+    { content_type: 'movie', page: 1.5 }, { content_type: 'movie', page: '1' },
+    { content_type: 'movie', page: 1000001 }, { content_type: 'movie', path: '/srv/media' },
+  ]) {
+    const { result, calls } = await callMissingVideos(input);
+    assert.equal(result.isError, true, JSON.stringify(input));
+    assert.deepEqual(calls, []);
+  }
+});
+
+// 验证服务端错误分支、分页错配和额外路径字段不进入工具结果。
+test('missing videos rejects malformed or mismatched pages without leaking backend paths', async () => {
+  const page = { content_type: 'series', page: 1, size: 20, total: 1, items: [missingEpisode] };
+  for (const malformed of [
+    { ...page, content_type: 'movie', items: [missingMovie] },
+    { ...page, page: 2, total: 21 },
+    { ...page, size: 10 },
+    { ...page, total: -1 },
+    { ...page, total: 2 },
+    { ...page, items: [missingMovie] },
+    { ...page, items: [{ ...missingEpisode, season_number: 0 }] },
+    { ...page, items: [{ ...missingEpisode, episode_id: '/srv/media/episode.mp4' }] },
+    { ...page, items: [{ ...missingEpisode, local_path: '/srv/media/episode.mp4' }] },
+    { ...page, storage_key: '/srv/media/internal' },
+  ]) {
+    const { result, calls } = await callMissingVideos({ content_type: 'series' }, malformed);
+    assert.equal(result.isError, true);
+    assert.match(JSON.stringify(result.content), /服务端返回的数据格式无效/);
+    assert.doesNotMatch(JSON.stringify(result), /\/srv\/media|storage_key|local_path/);
+    assert.deepEqual(calls, [['GET', '/api/admin/contents/missing-videos?content_type=series']]);
+  }
+});
