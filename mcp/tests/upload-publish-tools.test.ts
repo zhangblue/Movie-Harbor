@@ -3,6 +3,8 @@ import { mkdtemp, mkdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
+import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
+import { buildServer } from '../src/server.js';
 import { healthyOverview, unavailableOverview } from './overview-fixture.js';
 import { mapHttpError, MovieHarborClientError } from '../src/services/error-mapper.js';
 import { inspectAllowedFile } from '../src/services/path-policy.js';
@@ -13,7 +15,7 @@ const seriesId = '22222222-2222-4222-8222-222222222222';
 const seasonId = '33333333-3333-4333-8333-333333333333';
 const episodeId = '44444444-4444-4444-8444-444444444444';
 const mediaId = '55555555-5555-4555-8555-555555555555';
-const media = { id: mediaId, local_path: 'SECRET' };
+const media = { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', local_path: 'SECRET' };
 const movie = { id: movieId, name: 'Alien', year: 1979, duration_seconds: 7000, status: 'draft', version: 3,
   is_private: true, poster: media, video: null, genres: [], synopsis: '', created_at: '', updated_at: '' };
 const episode = { id: episodeId, season_id: seasonId, number: 1, name: 'Pilot', duration_seconds: 500,
@@ -359,4 +361,68 @@ test('local video identity failure avoids disclosing paths or requesting capacit
     return true;
   });
   assert.equal(remote.calls.length, 0);
+});
+
+// 替换响应即使推进了版本，同一个媒体 UUID 的大小写差异也不能证明上传成功。
+test('video replacement rejects an unchanged media UUID before cleaning the generated file', async t => {
+  const f = await fixture(t);
+  await prepareGeneratedRoot(f.config);
+  const source = await inspectAllowedFile(f.path, f.config.allowedRoots);
+  const returnedId = media.id.toUpperCase();
+  for (const [name, args, target, response] of [
+    ['replace_movie_video', { movie_id: movieId, version: 3 }, { ...movie, video: media },
+      { ...uploadResponse, id: returnedId }],
+    ['replace_episode_video', { series_id: seriesId, season_id: seasonId, episode_id: episodeId, version: 4 },
+      { ...episodeEnvelope, episode: { ...episode, video: media } },
+      { ...uploadResponse, id: returnedId, version: 5, series_version: 9 }],
+  ] as const) {
+    await t.test(name, async () => {
+      const path = join(f.config.generatedRoot, name + '.mp4');
+      await writeFile(path, 'video!');
+      await recordGeneratedFile(path, source, f.config, f.credentials);
+      const remote = fakeClient([target, response]);
+      const tools = await registeredTools(remote.client, f);
+      const result = await tools.registrations.get(name).handler({ ...args, path, confirmed: true });
+      assert.equal(remote.calls.filter(call => call.kind === 'upload').length, 1);
+      assert.equal(result.isError, true);
+      assert.deepEqual(result.structuredContent, { code: 'invalid_response' });
+      assert.match(result.content[0].text, /重新查询目标视频和版本/);
+      assert.equal((await stat(path)).size, 6);
+    });
+  }
+});
+
+// 通过真实 MCP 内存连接核对前置拒绝的机器码、脱敏文本及实际请求顺序。
+test('video preflight exposes safe error codes over the MCP protocol', async t => {
+  const f = await fixture(t);
+  const moviePath = '/api/admin/movies/' + movieId;
+  const overviewPath = '/api/admin/system/overview';
+  const payload = { error: 'Authorization: Bearer mhmcp_secret /srv/media/private', fields: ['private_field'] };
+  for (const [code, overview, responses, path, expectedPaths] of [
+    ['auth_required', mapHttpError(401, payload, f.config.apiKey), [], f.path, [overviewPath]],
+    ['forbidden', mapHttpError(403, payload, f.config.apiKey), [], f.path, [overviewPath]],
+    ['rate_limited', mapHttpError(429, payload, f.config.apiKey), [], f.path, [overviewPath]],
+    ['version_conflict', healthyOverview, [{ ...movie, version: 8 }], f.path, [overviewPath, moviePath]],
+    ['file_changed', healthyOverview, [], join(f.allowed, 'missing-video.mp4'), []],
+  ] as const) {
+    await t.test(code, async () => {
+      const remote = fakeClient([...responses], overview);
+      const server = buildServer({ ...f, client: remote.client as any });
+      const client = new Client({ name: 'video-preflight-test', version: '1.0.0' });
+      const [clientEnd, serverEnd] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverEnd);
+      await client.connect(clientEnd);
+      try {
+        const result = await client.callTool({ name: 'upload_movie_video',
+          arguments: { movie_id: movieId, version: 3, confirmed: true, path } });
+        assert.equal(result.isError, true);
+        assert.deepEqual(result.structuredContent, { code });
+        assert.doesNotMatch(JSON.stringify(result), /Bearer|Authorization|mhmcp_|private_field|mh-upload-tools-|\/srv\/media/);
+        assert.deepEqual(remote.calls.map(call => call.path), expectedPaths);
+      } finally {
+        await client.close();
+        await server.close();
+      }
+    });
+  }
 });

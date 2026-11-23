@@ -29,7 +29,7 @@ export const movieUploadOutput = z.object(uploadFields);
 // 单集上传还返回父剧集新版本，避免后续层级操作沿用旧版本。
 export const episodeUploadOutput = z.object({ ...uploadFields, series_version: version });
 // 校验管理 API 原子上传返回的媒体身份、格式、大小及内容版本。
-const apiMovieUpload = z.object({ id, mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(), version: positiveInt });
+const apiMovieUpload = z.object({ id: id.toLowerCase(), mime_type: z.enum(['video/mp4', 'video/webm']), byte_size: z.number().int().nonnegative(), version: positiveInt });
 // 单集原子上传响应必须另外包含父级版本。
 const apiEpisodeUpload = apiMovieUpload.extend({ series_version: version });
 
@@ -156,9 +156,9 @@ export async function uploadMovieVideo(input: unknown, dependencies: UploadDepen
   if (replace && !movie.video) throw new Error('目标没有视频，请改用 upload_movie_video');
   const result = await uploadFile(checked, `/api/admin/media/movies/${parsed.movie_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
-      // 上传响应必须对应本次文件且只推进一个版本，否则不允许清理本地生成文件。
+      // 电影替换会创建新媒体。核对规范 UUID、文件和版本后才允许清理生成文件。
       const response = parseApi(apiMovieUpload, value);
-      if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
+      if (response.id === movie.video?.id.toLowerCase() || response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
         || response.version !== parsed.version + 1) throw new MovieHarborClientError('invalid_response');
       return response;
     });
@@ -186,9 +186,9 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');
   const result = await uploadFile(checked, `/api/admin/media/episodes/${parsed.episode_id}/video?version=${parsed.version}`,
     dependencies, (value, checked) => {
-      // 同时核对媒体元数据、单集和父剧集的版本增量，任何不一致都保留生成文件。
+      // 单集替换也会创建新媒体。新旧 UUID、媒体元数据或两级版本异常时保留生成文件。
       const response = parseApi(apiEpisodeUpload, value);
-      if (response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
+      if (response.id === episode.video?.id.toLowerCase() || response.mime_type !== checked.mimeType || response.byte_size !== checked.file.identity.size
         || response.version !== parsed.version + 1 || response.series_version !== envelope.series_version + 1) {
         throw new MovieHarborClientError('invalid_response');
       }
@@ -209,7 +209,11 @@ async function uploadResult(operation: Promise<ReturnType<typeof toolResult>>): 
     if (error instanceof VideoUploadError) {
       return { isError: true, content: [{ type: 'text', text: error.message }], structuredContent: error.details };
     }
-    if (error instanceof Error && 'syscall' in error) throw new MovieHarborClientError('file_changed');
+    // 文件系统异常含本地路径，先替换为固定错误；协议只暴露可信中文说明和机器码。
+    const failure = error instanceof Error && 'syscall' in error ? new MovieHarborClientError('file_changed') : error;
+    if (failure instanceof MovieHarborClientError) {
+      return { isError: true, content: [{ type: 'text', text: failure.message }], structuredContent: { code: failure.code } };
+    }
     throw error;
   }
 }
