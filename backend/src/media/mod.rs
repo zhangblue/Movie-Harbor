@@ -6,6 +6,7 @@ pub mod staged_poster;
 pub mod storage;
 pub mod upload;
 pub mod validation;
+mod video_body;
 
 use axum::{
     Json,
@@ -23,9 +24,19 @@ pub const MEDIA_CAPACITY_RESERVE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// 视频上传取得变更锁后用于容量复核与流式计数的声明。
 #[derive(Clone, Copy, Debug)]
-pub struct UploadCapacityRequirement {
-    pub declared_bytes: u64,
-    pub reserve_bytes: u64,
+pub(crate) struct UploadCapacityRequirement {
+    declared_bytes: u64,
+    reserve_bytes: u64,
+}
+
+impl UploadCapacityRequirement {
+    /// 视频声明完成后统一附加固定保留量，所有调用方共用相同门槛。
+    fn video(declared_bytes: u64) -> Self {
+        Self {
+            declared_bytes,
+            reserve_bytes: MEDIA_CAPACITY_RESERVE_BYTES,
+        }
+    }
 }
 
 pub use upload::{AttachmentTarget, replace_attachment, store_new_asset};
@@ -67,6 +78,7 @@ pub enum MediaError {
     },
     DeclaredSizeInvalid,
     DeclaredSizeMismatch,
+    UploadIdle,
     Empty,
     TargetNotFound,
     ReadOnly,
@@ -93,6 +105,7 @@ impl fmt::Display for MediaError {
             Self::StorageSpaceLow { .. } => "insufficient media storage space",
             Self::DeclaredSizeInvalid => "invalid declared video size",
             Self::DeclaredSizeMismatch => "video size differs from declared size",
+            Self::UploadIdle => "video upload timed out",
             Self::Empty => "upload is empty",
             Self::TargetNotFound => "media attachment target not found",
             Self::ReadOnly => "only draft content can replace media",
@@ -145,6 +158,7 @@ impl IntoResponse for MediaError {
             | Self::Empty
             | Self::Multipart(_) => StatusCode::BAD_REQUEST,
             Self::StorageCapacityUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::UploadIdle => StatusCode::REQUEST_TIMEOUT,
             Self::StorageSpaceLow { .. } => StatusCode::INSUFFICIENT_STORAGE,
             Self::UnsupportedType | Self::ContentMismatch => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::TooLarge => StatusCode::PAYLOAD_TOO_LARGE,

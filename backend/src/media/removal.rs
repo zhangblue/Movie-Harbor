@@ -307,6 +307,16 @@ impl RemovalSession {
     }
 }
 
+/// 暂存回退未完成时保留错误种类；空间耗尽不能当作已安全回滚的可重试容量拒绝。
+fn restore_error(error: MediaError) -> MediaError {
+    match error {
+        MediaError::Io(ref cause) if cause.kind() == std::io::ErrorKind::StorageFull => {
+            MediaError::Io(std::io::Error::other("media restore incomplete"))
+        }
+        other => other,
+    }
+}
+
 /// 在删除会话中持久化清单并隔离目标文件，失败时恢复已暂存项。
 fn stage_operation(
     storage: &LocalMediaStorage,
@@ -352,9 +362,13 @@ fn stage_operation(
         {
             // 任一文件暂存失败即按相反顺序恢复已移动文件，并移除本次操作清单。
             for entry in entries.iter().rev() {
-                storage.restore_removal_source(&operation, &entry.source, &entry.staged_name)?;
+                storage
+                    .restore_removal_source(&operation, &entry.source, &entry.staged_name)
+                    .map_err(restore_error)?;
             }
-            storage.close_removal_operation(&operation)?;
+            storage
+                .close_removal_operation(&operation)
+                .map_err(restore_error)?;
             return Err(error);
         }
     }

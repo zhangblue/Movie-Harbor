@@ -347,6 +347,7 @@ impl Drop for TempRoot {
 
 /// 在流式上传测试中按块提供数据并记录读取次数。
 struct Chunks {
+    declaration_override: Option<u64>,
     chunks: Vec<Bytes>,
     index: usize,
     polls: Arc<AtomicUsize>,
@@ -359,6 +360,7 @@ impl Chunks {
         let polls = Arc::new(AtomicUsize::new(0));
         (
             Self {
+                declaration_override: None,
                 chunks: chunks.into_iter().map(Bytes::from_static).collect(),
                 index: 0,
                 polls: polls.clone(),
@@ -373,6 +375,7 @@ impl Chunks {
         let polls = Arc::new(AtomicUsize::new(0));
         (
             Self {
+                declaration_override: None,
                 chunks: vec![Bytes::from(bytes)],
                 index: 0,
                 polls: polls.clone(),
@@ -390,6 +393,12 @@ impl Chunks {
 }
 
 impl ChunkSource for Chunks {
+    /// 测试源使用实际样本大小声明，声明不符的用例可单独覆盖。
+    fn declared_byte_size(&self) -> Option<u64> {
+        self.declaration_override
+            .or_else(|| Some(self.chunks.iter().map(|chunk| chunk.len() as u64).sum()))
+    }
+
     /// 在读取时提供下一块，并按需检查上一块已写入临时文件。
     fn next_chunk(
         &mut self,
@@ -4362,24 +4371,18 @@ async fn capacity_stream_aborts_on_first_excess_chunk() {
         Arc::new(RecordingHooks::default()),
         Arc::new(FixedCapacityReader {
             capacity: StorageCapacity {
-                total_bytes: 100,
-                available_bytes: 100,
+                total_bytes: 20 * 1024 * 1024 * 1024,
+                available_bytes: 20 * 1024 * 1024 * 1024,
             },
             fail: false,
         }),
     )
     .await
     .unwrap();
-    let (source, polls) = Chunks::new([&b"a"[..], &b"bc"[..], &b"never"[..]]);
+    let (mut source, polls) = Chunks::new([&b"a"[..], &b"bc"[..], &b"never"[..]]);
     // 允许首块落盘，第二块使累计大小超过声明；第三块若被读取说明拒绝过晚。
-    let session = storage
-        .begin_upload(Some(movie_harbor_api::media::UploadCapacityRequirement {
-            declared_bytes: 2,
-            reserve_bytes: 1,
-        }))
-        .await
-        .unwrap();
-    let result = session
+    source.declaration_override = Some(2);
+    let result = storage
         .store(
             Uuid::new_v4(),
             MediaKind::Video,
@@ -4392,4 +4395,334 @@ async fn capacity_stream_aborts_on_first_excess_chunk() {
     assert!(matches!(result, Err(MediaError::DeclaredSizeMismatch)));
     assert_eq!(polls.load(Ordering::SeqCst), 2);
     assert_eq!(count_files(root.as_ref()), 0);
+}
+
+/// 验证内部视频存储、独立登记和替换入口对无声明的数据源也在读取前拒绝。
+#[tokio::test]
+async fn capacity_internal_video_requires_size() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    let movie = draft_movie(&db, None).await;
+    for call in 0..3 {
+        let source = UndeclaredChunks(Chunks::bytes(valid_mp4()).0);
+        let polls = source.0.polls.clone();
+        let p = policy(4096);
+        let result = match call {
+            0 => storage
+                .store(
+                    Uuid::new_v4(),
+                    MediaKind::Video,
+                    "v.mp4",
+                    "video/mp4",
+                    &p,
+                    source,
+                )
+                .await
+                .map(drop),
+            1 => store_new_asset(
+                &db,
+                &storage,
+                MediaKind::Video,
+                "v.mp4",
+                "video/mp4",
+                &p,
+                source,
+            )
+            .await
+            .map(drop),
+            _ => replace_attachment(
+                &db,
+                &storage,
+                AttachmentTarget::MovieVideo {
+                    id: movie.id,
+                    version: 1,
+                },
+                "v.mp4",
+                "video/mp4",
+                &p,
+                source,
+            )
+            .await
+            .map(drop),
+        };
+        assert!(matches!(result, Err(MediaError::DeclaredSizeInvalid)));
+        assert_eq!(polls.load(Ordering::SeqCst), 0);
+    }
+}
+
+/// 只提供流的旧调用方，用于检查缺少已知文件大小的内部入口。
+struct UndeclaredChunks(Chunks);
+impl ChunkSource for UndeclaredChunks {
+    /// 存储如尝试读取，则实际产生数据并计入轮询。
+    fn next_chunk(
+        &mut self,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Bytes>, MediaError>> + Send + '_>> {
+        self.0.next_chunk()
+    }
+}
+
+/// 在创建替换清单时模拟空间耗尽，确认数据库回滚后再返回容量错误。
+#[tokio::test]
+async fn capacity_old_asset_manifest_full_keeps_original() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(ManifestFullHook(AtomicBool::new(false)));
+    let app = capacity_router(
+        &db,
+        &root,
+        Arc::new(FixedCapacityReader {
+            capacity: StorageCapacity {
+                total_bytes: 20 << 30,
+                available_bytes: 20 << 30,
+            },
+            fail: false,
+        }),
+        hooks.clone(),
+    )
+    .await;
+    let (cookie, csrf) = credentials(&app).await;
+    let movie = draft_movie(&db, None).await;
+    let request = |version| {
+        multipart_request(
+            format!(
+                "/api/admin/media/movies/{}/video?version={version}",
+                movie.id
+            ),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        )
+    };
+    assert_eq!(
+        app.clone().oneshot(request(1)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let saved = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    hooks.0.store(true, Ordering::SeqCst);
+    capacity_rejection(
+        &app,
+        request(2),
+        "storage_space_low",
+        StatusCode::INSUFFICIENT_STORAGE,
+        true,
+    )
+    .await;
+    let asset = media_asset::Entity::find_by_id(saved.video_asset_id.unwrap())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    assert_eq!(
+        std::fs::read(root.as_ref().join(asset.storage_key)).unwrap(),
+        valid_mp4()
+    );
+    assert_eq!(count_files(root.as_ref()), 1);
+}
+
+/// 为旧媒体暂存阶段注入独立的无空间错误。
+struct ManifestFullHook(AtomicBool);
+impl StorageHooks for ManifestFullHook {
+    /// 清单操作阶段写满磁盘并返回真实的系统错误种类。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if self.0.load(Ordering::SeqCst) && matches!(event, StorageEvent::BeforeRemovalManifest) {
+            return Err(std::io::Error::from(rustix::io::Errno::NOSPC));
+        }
+        Ok(())
+    }
+}
+
+/// 在正式视频提升时模拟容量耗尽，并记录该时刻已持久化的回滚目标。
+struct FullAfterPromotion {
+    promoted: AtomicBool,
+    deny_cleanup: AtomicBool,
+    root: PathBuf,
+    fail: AtomicBool,
+    reserved: AtomicBool,
+}
+impl StorageHooks for FullAfterPromotion {
+    /// 正式文件首次落盘后确认隔离位置已存在，再返回系统空间耗尽错误。
+    fn on_event(&self, event: &StorageEvent) -> std::io::Result<()> {
+        if let StorageEvent::Promoted(key) = event
+            && self.fail.load(Ordering::SeqCst)
+        {
+            let stem = Path::new(key).file_stem().unwrap().to_str().unwrap();
+            self.reserved.store(
+                self.root
+                    .join(".quarantine")
+                    .join(format!("{stem}.hold"))
+                    .is_file(),
+                Ordering::SeqCst,
+            );
+            self.promoted.store(true, Ordering::SeqCst);
+        }
+        if matches!(event, StorageEvent::BeforeDirectorySync(label) if label.starts_with("video/"))
+            && self.promoted.swap(false, Ordering::SeqCst)
+        {
+            return Err(std::io::Error::from(rustix::io::Errno::NOSPC));
+        }
+        if self.fail.load(Ordering::SeqCst) && matches!(event, StorageEvent::BeforeQuarantineClaim)
+        {
+            return Err(std::io::Error::from(rustix::io::Errno::NOSPC));
+        }
+        // 持续拒绝隔离移动时只能报告可恢复失败；凭证与视频必须仍可由新实例恢复。
+        if self.deny_cleanup.load(Ordering::SeqCst)
+            && matches!(event, StorageEvent::BeforeUnlink(_))
+        {
+            return Err(std::io::Error::from(rustix::io::Errno::NOSPC));
+        }
+        Ok(())
+    }
+}
+
+/// 验证新视频提升后遇到 ENOSPC 时使用预留隔离位置回滚，旧槽位保持原样。
+#[tokio::test]
+async fn capacity_post_promotion_full_uses_prepared_rollback_slot() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let hooks = Arc::new(FullAfterPromotion {
+        promoted: AtomicBool::new(false),
+        deny_cleanup: AtomicBool::new(false),
+        root: root.as_ref().into(),
+        fail: AtomicBool::new(false),
+        reserved: AtomicBool::new(false),
+    });
+    let app = capacity_router(
+        &db,
+        &root,
+        Arc::new(FixedCapacityReader {
+            capacity: StorageCapacity {
+                total_bytes: 20 << 30,
+                available_bytes: 20 << 30,
+            },
+            fail: false,
+        }),
+        hooks.clone(),
+    )
+    .await;
+    let (cookie, csrf) = credentials(&app).await;
+    let movie = draft_movie(&db, None).await;
+    let request = |version| {
+        multipart_request(
+            format!(
+                "/api/admin/media/movies/{}/video?version={version}",
+                movie.id
+            ),
+            Some(&cookie),
+            Some(&csrf),
+            "https://harbor.test",
+        )
+    };
+    assert_eq!(
+        app.clone().oneshot(request(1)).await.unwrap().status(),
+        StatusCode::OK
+    );
+    let saved = movie::Entity::find_by_id(movie.id)
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    hooks.fail.store(true, Ordering::SeqCst);
+    capacity_rejection(
+        &app,
+        request(2),
+        "storage_space_low",
+        StatusCode::INSUFFICIENT_STORAGE,
+        true,
+    )
+    .await;
+    assert!(hooks.reserved.load(Ordering::SeqCst));
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+    assert_eq!(count_files(root.as_ref()), 1);
+    hooks.deny_cleanup.store(true, Ordering::SeqCst);
+    capacity_rejection(
+        &app,
+        request(2),
+        "media_replace_failed",
+        StatusCode::INTERNAL_SERVER_ERROR,
+        true,
+    )
+    .await;
+    assert!(count_files(root.as_ref()) > 1);
+    // 独立启动实例在磁盘恢复正常后收拢未注册的视频与凭证。
+    let recovered = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    movie_harbor_api::media::upload::recover_stale_uploads(&db, &recovered, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(count_files(root.as_ref()), 1);
+    assert_eq!(
+        movie::Entity::find_by_id(movie.id)
+            .one(&db)
+            .await
+            .unwrap()
+            .unwrap(),
+        saved
+    );
+}
+
+/// 重启时根据持久凭证、预备/隔离状态和真实数据库结果恢复视频。
+#[tokio::test]
+async fn capacity_recovery_handles_prepared_and_isolated_video_slots() {
+    let db = database().await;
+    let root = TempRoot::new();
+    let storage = LocalMediaStorage::initialize(root.as_ref()).await.unwrap();
+    for (registered, isolated) in [(true, false), (true, true), (false, false), (false, true)] {
+        let asset = store_new_asset(
+            &db,
+            &storage,
+            MediaKind::Video,
+            "v.mp4",
+            "video/mp4",
+            &policy(4096),
+            Chunks::bytes(valid_mp4()).0,
+        )
+        .await
+        .unwrap();
+        let formal = root.as_ref().join(&asset.storage_key);
+        let marker = write_pending_marker(root.as_ref(), asset.id, &asset.storage_key, &formal);
+        let mut proof: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+        proof["version"] = 2.into();
+        std::fs::write(&marker, proof.to_string()).unwrap();
+        let hold = root
+            .as_ref()
+            .join(".quarantine")
+            .join(format!("{}.hold", asset.id.simple()));
+        std::fs::hard_link(&marker, &hold).unwrap();
+        if isolated {
+            std::fs::rename(&formal, &hold).unwrap();
+        }
+        if !registered {
+            media_asset::Entity::delete_by_id(asset.id)
+                .exec(&db)
+                .await
+                .unwrap();
+        }
+        movie_harbor_api::media::upload::recover_stale_uploads(&db, &storage, Duration::ZERO)
+            .await
+            .unwrap();
+        assert!(!hold.exists() && !marker.exists());
+        assert_eq!(formal.exists(), registered);
+        if registered {
+            assert_eq!(std::fs::read(formal).unwrap(), valid_mp4());
+        }
+    }
 }

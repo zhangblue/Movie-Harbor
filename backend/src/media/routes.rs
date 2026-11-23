@@ -1,6 +1,5 @@
 use super::{
-    AttachmentTarget, LocalMediaStorage, MEDIA_CAPACITY_RESERVE_BYTES, MediaError,
-    UploadCapacityRequirement, UploadPolicy,
+    AttachmentTarget, LocalMediaStorage, MediaError, UploadCapacityRequirement, UploadPolicy,
 };
 use crate::{
     auth::{self, AuthState},
@@ -9,7 +8,7 @@ use crate::{
 };
 use axum::{
     Extension, Json, Router,
-    extract::{DefaultBodyLimit, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State},
     http::HeaderMap,
     middleware,
     routing::{get, post},
@@ -114,10 +113,9 @@ fn video_capacity(headers: &HeaderMap) -> Result<UploadCapacityRequirement, Medi
     {
         return Err(MediaError::DeclaredSizeInvalid);
     }
-    Ok(UploadCapacityRequirement {
-        declared_bytes: text.parse().map_err(|_| MediaError::DeclaredSizeInvalid)?,
-        reserve_bytes: MEDIA_CAPACITY_RESERVE_BYTES,
-    })
+    Ok(UploadCapacityRequirement::video(
+        text.parse().map_err(|_| MediaError::DeclaredSizeInvalid)?,
+    ))
 }
 
 /// 在电影海报上传请求中选择对应媒体槽位并执行上传。
@@ -144,17 +142,15 @@ async fn movie_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload(
+    upload_video(
         state,
         AttachmentTarget::MovieVideo {
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
-        Some(video_capacity(&headers)?),
-        multipart,
+        request,
     )
     .await
 }
@@ -183,31 +179,49 @@ async fn episode_video(
     State(state): State<MediaState>,
     Path(id): Path<String>,
     Query(version): Query<VersionQuery>,
-    headers: HeaderMap,
-    multipart: Multipart,
+    request: Request,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
-    upload(
+    upload_video(
         state,
         AttachmentTarget::EpisodeVideo {
             id: parse_uuid(id, MediaError::TargetNotFound)?,
             version: version.version,
         },
-        Some(video_capacity(&headers)?),
-        multipart,
+        request,
     )
     .await
+}
+
+/// 视频请求先解析声明并限定原始流，容量不足时仍在任何帧读取之前返回。
+async fn upload_video(
+    state: MediaState,
+    target: AttachmentTarget,
+    request: Request,
+) -> Result<Json<MediaAssetResponse>, MediaError> {
+    let capacity = video_capacity(request.headers())?;
+    let (request, progress) = super::video_body::guard(
+        request,
+        capacity.declared_bytes,
+        MULTIPART_OVERHEAD_BYTES as u64,
+    );
+    let multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|_| MediaError::Multipart("invalid multipart boundary".into()))?;
+    upload(state, target, Some((capacity, &progress)), multipart)
+        .await
+        .map_err(|err| progress.classify(err))
 }
 
 /// 在媒体上传请求中解析表单并协调文件准备和槽位切换。
 async fn upload(
     state: MediaState,
     target: AttachmentTarget,
-    requirement: Option<UploadCapacityRequirement>,
+    requirement: Option<(UploadCapacityRequirement, &super::video_body::Progress)>,
     mut multipart: Multipart,
 ) -> Result<Json<MediaAssetResponse>, MediaError> {
     // 视频必须先在锁内复核容量，避免 next_field 为解析首字段而预读视频正文。
     let video_session = match requirement {
-        Some(capacity) => Some(state.storage.begin_upload(Some(capacity)).await?),
+        Some((capacity, _)) => Some(state.storage.begin_upload(Some(capacity)).await?),
         None => None,
     };
     // 仅接收一个名为 file 的字段；文件名限制为 255 字节，声明 MIME 由上传策略进一步校验。
@@ -216,6 +230,9 @@ async fn upload(
         .await
         .map_err(map_multipart_error)?
         .ok_or(MediaError::InvalidFileName)?;
+    if let Some((_, progress)) = requirement {
+        progress.field_ready();
+    }
     if field.name() != Some("file") {
         return Err(MediaError::InvalidFileName);
     }

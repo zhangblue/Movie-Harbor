@@ -1319,6 +1319,7 @@ dependencies = [
  "argon2",
  "axum",
  "chrono",
+ "futures-util",
  "h264-reader",
  "http-body-util",
  "image",

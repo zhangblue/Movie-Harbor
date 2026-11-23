@@ -214,7 +214,7 @@ export function createAdminClient(target, { timeoutMs = 30_000, createReadStream
     catch { throw new ImportRequestError("invalid upload media", { category: "content" }); }
     const { result } = await request("POST", path, {
       // 视频路由按本地文件字节数复核容量，海报仅使用 multipart 自身的长度。
-      headers: mimeType.startsWith("video/") ? { ...multipart.headers, "x-media-byte-size": String(byteSize) } : multipart.headers,
+      headers: requestPath(origin, path).pathname.endsWith("/video") ? { ...multipart.headers, "x-media-byte-size": String(byteSize) } : multipart.headers,
       // 将 multipart 正文写入请求，并登记文件流以便失败时关闭。
       writeBody(req, setFile, progress) {
         return multipart.writeTo(req, { createStream: createReadStream, onStream: setFile, onProgress: progress });

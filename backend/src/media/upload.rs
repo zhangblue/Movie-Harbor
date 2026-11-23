@@ -224,6 +224,13 @@ pub async fn recover_stale_uploads(
                     continue;
                 }
             };
+            if marker.version == 2 {
+                // 二版标记同时描述预留和已隔离阶段，成功恢复后由存储层同步移除凭证。
+                storage
+                    .recover_prepared_video(db, &entry.name, &marker)
+                    .await?;
+                continue;
+            }
             let registered = media_asset::Entity::find()
                 .filter(media_asset::Column::StorageKey.eq(marker.storage_key.clone()))
                 .one(db)
@@ -257,7 +264,9 @@ pub async fn replace_attachment<S: ChunkSource + Send>(
     source: S,
 ) -> Result<media_asset::Model, MediaError> {
     let pending = prepare_attachment(
-        storage.begin_upload(None).await?,
+        storage
+            .begin_typed_upload(target.kind(), source.declared_byte_size())
+            .await?,
         target,
         original_name,
         declared_mime,
@@ -320,7 +329,8 @@ pub(crate) async fn commit_attachment(
     let committed = match result {
         Ok(committed) => committed,
         Err(error) => {
-            if tx.rollback().await.is_ok() {
+            let rolled_back = tx.rollback().await.is_ok();
+            if rolled_back {
                 pending.stored.database_failure_is_known();
             }
             let restore_result = staged
@@ -329,6 +339,21 @@ pub(crate) async fn commit_attachment(
                 .transpose();
             pending.stored.return_mutation_guard(removal.into_guard())?;
             restore_result.map_err(|_| MediaError::ReplacementFailed)?;
+            // 只有事务回滚和旧文件恢复均已确认，才把提交前的视频 ENOSPC 报为可重试容量错误。
+            if let MediaError::Io(cause) = &error
+                && cause.kind() == std::io::ErrorKind::StorageFull
+            {
+                if rolled_back && pending.kind == MediaKind::Video {
+                    pending.stored.finish_capacity_rollback()?;
+                    return Err(MediaError::StorageSpaceLow {
+                        available_bytes: None,
+                        required_bytes: (pending.stored.byte_size as u64)
+                            .checked_add(super::MEDIA_CAPACITY_RESERVE_BYTES),
+                        reserve_bytes: super::MEDIA_CAPACITY_RESERVE_BYTES,
+                    });
+                }
+                return Err(MediaError::ReplacementFailed);
+            }
             return Err(error);
         }
     };
@@ -632,7 +657,12 @@ async fn stage_old_asset(
                     storage_key: old.storage_key,
                 }],
             )
-            .map_err(|_| MediaError::ReplacementFailed)?,
+            .map_err(|error| match error {
+                MediaError::Io(ref cause) if cause.kind() == std::io::ErrorKind::StorageFull => {
+                    error
+                }
+                _ => MediaError::ReplacementFailed,
+            })?,
     );
     Ok(Some(old_id))
 }

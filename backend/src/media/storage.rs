@@ -1,3 +1,4 @@
+mod video_rollback;
 use super::{
     MediaError, UploadCapacityRequirement,
     validation::{self, MediaKind, UploadPolicy},
@@ -26,6 +27,11 @@ use uuid::Uuid;
 
 /// 上传写入阶段使用的分块来源接口，让存储层逐块消费请求体或测试数据。
 pub trait ChunkSource {
+    /// 内部上传有已知文件长度时显式声明；未知长度的视频在消费前拒绝。
+    fn declared_byte_size(&self) -> Option<u64> {
+        None
+    }
+
     /// 存储循环需要更多数据时返回下一块；None 表示结束，错误使本次上传退出。
     fn next_chunk(
         &mut self,
@@ -59,6 +65,8 @@ pub enum StorageEvent {
     Promoted(String),
     BeforeRemovalLock,
     BeforeStage(String),
+    BeforeRemovalManifest,
+    BeforeQuarantineClaim,
     AfterStageRename(String),
     BeforeUnlink(String),
     Unlinked(String),
@@ -141,7 +149,7 @@ pub struct LocalMediaStorage {
 }
 
 /// 容量检查后继续持有同一把媒体锁，直到上传提交或失败收尾。
-pub struct UploadSession<'a> {
+pub(crate) struct UploadSession<'a> {
     pub(crate) storage: &'a LocalMediaStorage,
     guard: OwnedMutexGuard<()>,
     capacity: Option<UploadCapacityRequirement>,
@@ -158,6 +166,10 @@ impl UploadSession<'_> {
         policy: &UploadPolicy,
         mut source: S,
     ) -> Result<StoredFile, MediaError> {
+        // 最终存储边界同样检查声明，避免内部调用误用海报会话写视频。
+        if kind == MediaKind::Video && self.capacity.is_none() {
+            return Err(MediaError::DeclaredSizeInvalid);
+        }
         let format = validation::validate_metadata(kind, original_name, declared_mime, policy)?;
         let temp_name = format!("{}.part", Uuid::new_v4().simple());
         let mut cleanup = PendingCleanup::new(
@@ -184,6 +196,9 @@ impl UploadSession<'_> {
             (Some(requirement), Err(MediaError::Io(error)))
                 if error.kind() == io::ErrorKind::StorageFull =>
             {
+                cleanup
+                    .finish_rollback()
+                    .map_err(|_| MediaError::ReplacementFailed)?;
                 Err(MediaError::StorageSpaceLow {
                     // ENOSPC 可来自外部占用或配额，错误本身未提供可用字节数。
                     available_bytes: None,
@@ -281,6 +296,16 @@ impl StoredFile {
         }
     }
 
+    /// 报告容量错误前明确完成已知回滚；清理失败则保留凭证供启动恢复。
+    pub(crate) fn finish_capacity_rollback(&mut self) -> Result<(), MediaError> {
+        if let Some(cleanup) = &mut self.cleanup {
+            cleanup
+                .finish_rollback()
+                .map_err(|_| MediaError::ReplacementFailed)?;
+        }
+        Ok(())
+    }
+
     /// 数据库提交已确认后通知存储钩子；通知错误返回调用方，不撤销已发生的提交。
     pub(crate) fn notify_database_committed(&self) -> Result<(), MediaError> {
         if let Some(cleanup) = &self.cleanup {
@@ -314,10 +339,7 @@ struct FormalCleanup {
     directory: Arc<OwnedFd>,
     file_name: String,
     storage_key: String,
-    device: u64,
-    inode: u64,
-    byte_size: u64,
-    checksum_sha256: String,
+    marker: PendingMarker,
 }
 
 /// 上传期间持有的析构清理状态，随提升和数据库登记阶段切换责任并保持变更锁。
@@ -382,20 +404,57 @@ impl PendingCleanup {
             directory,
             file_name,
             storage_key,
-            device: marker.device,
-            inode: marker.inode,
-            byte_size: marker.byte_size,
-            checksum_sha256: marker.checksum_sha256.clone(),
+            marker: marker.clone(),
         });
+    }
+
+    /// 已知数据库未提交时同步处理正式文件及其凭证，返回恢复是否成功。
+    fn finish_rollback(&mut self) -> Result<(), MediaError> {
+        if let Some(temp) = self.temp_name.as_deref() {
+            remove_if_present(&self.incoming, temp)?;
+            sync_fd(&self.incoming)?;
+            self.temp_name = None;
+        }
+        if let Some(formal) = self.formal.as_ref() {
+            if formal.marker.version == 2 {
+                video_rollback::resolve(
+                    &self.incoming,
+                    &self.quarantine,
+                    &formal.directory,
+                    &formal.marker,
+                    false,
+                    &self.hooks,
+                )?
+            } else {
+                remove_owned_from_leaf(
+                    &formal.directory,
+                    &formal.file_name,
+                    &formal.storage_key,
+                    DeletionIdentity {
+                        device: Some(formal.marker.device),
+                        inode: Some(formal.marker.inode),
+                        byte_size: formal.marker.byte_size,
+                        checksum_sha256: &formal.marker.checksum_sha256,
+                    },
+                    &self.quarantine,
+                    &self.hooks,
+                )?
+            }
+        }
+        self.formal = None;
+        self.remove_marker()
     }
 
     /// 上传收尾允许撤除恢复依据时移除标记并同步暂存目录，失败交给调用方处理。
     fn remove_marker(&mut self) -> Result<(), MediaError> {
-        if let Some(name) = self.marker_name.take() {
-            remove_if_present(&self.incoming, &name)?;
+        if let Some(name) = self.marker_name.as_deref() {
+            // 成功登记或提升前失败时仅释放与现有标记同 inode 的预留项。
+            video_rollback::release_reservation(&self.incoming, &self.quarantine, name)?;
+            remove_if_present(&self.incoming, name)?;
             sync_fd(&self.incoming)?;
             self.hooks
                 .on_event(&StorageEvent::DirectorySynced(".incoming".into()))?;
+            self.marker_name = None;
         }
         Ok(())
     }
@@ -405,34 +464,8 @@ impl Drop for PendingCleanup {
     /// 上传清理守卫离开作用域时尽力删除临时项，并按数据库结果是否明确决定正式文件清理。
     fn drop(&mut self) {
         // 析构只能尽力收尾，不能向调用方返回错误或改写数据库结果；正式文件清理还取决于结果是否明确。
-        if let Some(name) = self.temp_name.take() {
-            let _ = remove_if_present(&self.incoming, &name);
-            let _ = sync_fd(&self.incoming);
-        }
-        let formal_removed = if !self.destructive {
-            false
-        } else if let Some(formal) = self.formal.take() {
-            remove_owned_from_leaf(
-                &formal.directory,
-                &formal.file_name,
-                &formal.storage_key,
-                DeletionIdentity {
-                    device: Some(formal.device),
-                    inode: Some(formal.inode),
-                    byte_size: formal.byte_size,
-                    checksum_sha256: &formal.checksum_sha256,
-                },
-                &self.quarantine,
-                &self.hooks,
-            )
-            .is_ok()
-        } else {
-            true
-        };
-        // 正式文件删除或同步失败时刻意保留标记，交给启动恢复重试，避免静默遗留文件。
-        // 数据库结果未知时也保留标记，待恢复流程查询数据库后再决定是否删除。
-        if formal_removed {
-            let _ = self.remove_marker();
+        if self.destructive {
+            let _ = self.finish_rollback();
         }
     }
 }
@@ -450,7 +483,7 @@ struct StoreSpec<'a> {
 /// 正式提升前持久化的上传恢复标记，恢复时结合数据库登记和文件身份决定是否清理。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct PendingMarker {
-    version: u8,
+    pub(super) version: u8,
     pub storage_key: String,
     device: u64,
     inode: u64,
@@ -608,7 +641,7 @@ impl LocalMediaStorage {
         policy: &UploadPolicy,
         source: S,
     ) -> Result<StoredFile, MediaError> {
-        self.begin_upload(None)
+        self.begin_typed_upload(kind, source.declared_byte_size())
             .await?
             .store(
                 resource_id,
@@ -621,8 +654,23 @@ impl LocalMediaStorage {
             .await
     }
 
+    /// 内部上传入口按槽位要求视频声明，海报沿用既有字节上限。
+    pub(crate) async fn begin_typed_upload(
+        &self,
+        kind: MediaKind,
+        declared_bytes: Option<u64>,
+    ) -> Result<UploadSession<'_>, MediaError> {
+        let capacity = match kind {
+            MediaKind::Poster => None,
+            MediaKind::Video => Some(UploadCapacityRequirement::video(
+                declared_bytes.ok_or(MediaError::DeclaredSizeInvalid)?,
+            )),
+        };
+        self.begin_upload(capacity).await
+    }
+
     /// 解析视频正文前先取得全局锁并读取当前卷容量，失败时直接释放锁。
-    pub async fn begin_upload(
+    pub(crate) async fn begin_upload(
         &self,
         capacity: Option<UploadCapacityRequirement>,
     ) -> Result<UploadSession<'_>, MediaError> {
@@ -723,7 +771,7 @@ impl LocalMediaStorage {
         // 在提升前持久化标记，使已经移动到正式目录、但尚未登记到数据库的文件可由启动恢复判定。
         let marker_name = format!("{}.pending", spec.resource_id.simple());
         let marker = PendingMarker {
-            version: 1,
+            version: if spec.kind == MediaKind::Video { 2 } else { 1 },
             storage_key: key.clone(),
             device: validated_stat.st_dev as u64,
             inode: validated_stat.st_ino as u64,
@@ -731,7 +779,11 @@ impl LocalMediaStorage {
             checksum_sha256: checksum_sha256.clone(),
         };
         self.write_marker(&marker_name, &marker)?;
-        cleanup.marker_name = Some(marker_name);
+        cleanup.marker_name = Some(marker_name.clone());
+        if marker.version == 2 {
+            // 独立持久化同一证明的硬链接，回滚时可覆盖已预留的隔离目录项。
+            video_rollback::reserve(&self.incoming_fd, &self.quarantine_fd, &marker_name)?;
+        }
         self.hooks
             .on_event(&StorageEvent::BeforePromote(key.clone()))?;
 
@@ -914,30 +966,50 @@ impl LocalMediaStorage {
         // 操作目录先持久化，再同步清单内容并原子发布 manifest.json；调用方拿到结果后才开始暂存。
         let name = operation_id.simple().to_string();
         mkdirat(&self.operations_fd, name.as_str(), directory_mode()).map_err(io::Error::from)?;
-        sync_fd(&self.operations_fd)?;
-        let directory = Arc::new(open_directory(&self.operations_fd, OsStr::new(&name))?);
+        let operation = RemovalOperation {
+            directory: Arc::new(open_directory(&self.operations_fd, OsStr::new(&name))?),
+            name,
+        };
+        let directory = &operation.directory;
         let temporary = "manifest.part";
-        let fd = openat(
-            &directory,
-            temporary,
-            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            file_mode(),
-        )
-        .map_err(io::Error::from)?;
-        let mut file = std::fs::File::from(fd);
-        use std::io::Write;
-        file.write_all(manifest)?;
-        file.sync_all()?;
-        renameat_with(
-            &directory,
-            temporary,
-            &directory,
-            "manifest.json",
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(io::Error::from)?;
-        sync_fd(&directory)?;
-        Ok(RemovalOperation { name, directory })
+        let mut published = false;
+        let result = (|| -> Result<(), MediaError> {
+            sync_fd(&self.operations_fd)?;
+            let fd = openat(
+                directory,
+                temporary,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                file_mode(),
+            )
+            .map_err(io::Error::from)?;
+            let mut file = std::fs::File::from(fd);
+            use std::io::Write;
+            self.hooks.on_event(&StorageEvent::BeforeRemovalManifest)?;
+            file.write_all(manifest)?;
+            file.sync_all()?;
+            renameat_with(
+                directory,
+                temporary,
+                directory,
+                "manifest.json",
+                RenameFlags::NOREPLACE,
+            )
+            .map_err(io::Error::from)?;
+            published = true;
+            sync_fd(directory)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            // 尚未有旧文件移动。按清单发布进度清理自己的操作目录，未知项必须保留。
+            let cleanup = if published {
+                self.close_removal_operation(&operation)
+            } else {
+                self.clean_unpublished_removal_operation(&operation.name, directory)
+            };
+            cleanup.map_err(|_| MediaError::ReplacementFailed)?;
+            return Err(error);
+        }
+        Ok(operation)
     }
 
     /// 操作清单已发布后把预检文件移入操作目录，校验身份并同步两侧目录。
@@ -1232,6 +1304,43 @@ impl LocalMediaStorage {
         }
     }
 
+    /// 二版凭证恢复时在锁内复验原标记，再按数据库结果清理或恢复已隔离的视频。
+    pub(crate) async fn recover_prepared_video(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+        name: &str,
+        marker: &PendingMarker,
+    ) -> Result<(), MediaError> {
+        let _guard = self.mutations.lock().await;
+        match self.read_pending_marker(name) {
+            Ok(current) if current == *marker => (),
+            Err(MediaError::Io(err)) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+            _ => return Err(MediaError::InvalidStorageKey),
+        }
+        // 等待锁期间数据库可能确认登记；必须在同一锁内读取当前结果再决定是否删除。
+        use crate::entities::media_asset;
+        use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+        let registered = media_asset::Entity::find()
+            .filter(media_asset::Column::StorageKey.eq(&marker.storage_key))
+            .one(db)
+            .await?
+            .is_some();
+        let (kind, shard, _) = parse_storage_key(&marker.storage_key)?;
+        let directory = open_directory(&self.root_fd, OsStr::new(kind))?;
+        let leaf = open_directory(&directory, OsStr::new(shard))?;
+        video_rollback::resolve(
+            &self.incoming_fd,
+            &self.quarantine_fd,
+            &leaf,
+            marker,
+            registered,
+            &self.hooks,
+        )?;
+        remove_if_present(&self.incoming_fd, name)?;
+        sync_fd(&self.incoming_fd)?;
+        Ok(())
+    }
+
     /// 上传恢复确认没有数据库登记后重读标记，仅对仍匹配的标记执行按身份清理。
     pub(crate) async fn remove_pending_owned(
         &self,
@@ -1335,7 +1444,10 @@ impl LocalMediaStorage {
         }
         let marker: PendingMarker =
             serde_json::from_slice(&encoded).map_err(|_| MediaError::InvalidStorageKey)?;
-        if marker.version != 1 || !valid_sha256(&marker.checksum_sha256) {
+        if !matches!(marker.version, 1 | 2)
+            || !valid_sha256(&marker.checksum_sha256)
+            || (marker.version == 2 && !marker.storage_key.starts_with("video/"))
+        {
             return Err(MediaError::InvalidStorageKey);
         }
         let (_, _, file_name) = parse_storage_key(&marker.storage_key)?;
@@ -1611,6 +1723,7 @@ fn remove_owned_from_leaf<F: AsFd>(
     let quarantine_base = Uuid::new_v4().simple().to_string();
     let quarantine_name = format!("{quarantine_base}.data");
     let claim_name = format!("{quarantine_base}.claim");
+    hooks.on_event(&StorageEvent::BeforeQuarantineClaim)?;
     write_quarantine_claim(
         quarantine,
         &claim_name,

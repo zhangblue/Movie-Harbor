@@ -347,6 +347,11 @@ test("streams a file with exact multipart length and preserves query", async () 
       // 海报不参与视频容量保护，也不发送声明头。
       await client.upload("/api/admin/media/movies/id/poster?version=3", { localPath, fileName: "one.png", byteSize: payload.length });
       assert.equal(requests[3].headers["x-media-byte-size"], undefined);
+      // 即使文件扩展名选错，视频槽位也先满足传输契约，由服务端判断格式。
+      await client.upload("/api/admin/media/episodes/id/video?version=3", { localPath, fileName: "one.png", byteSize: payload.length });
+      assert.equal(requests[4].headers["x-media-byte-size"], String(payload.length));
+      await client.upload("/api/admin/media/movies/id/poster?version=3", { localPath, byteSize: payload.length });
+      assert.equal(requests[5].headers["x-media-byte-size"], undefined);
     }, { readDelayMs: 1 });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
