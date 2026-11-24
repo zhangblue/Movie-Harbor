@@ -218,6 +218,57 @@ pub async fn ensure_associable(tx: &DatabaseTransaction, ids: &[Uuid]) -> Result
     Ok(())
 }
 
+// 描述一次内容题材替换的最终关联与新增关联，供公共替换准备逻辑区分校验范围。
+struct GenreReplacementPlan {
+    ids: Vec<Uuid>,
+    newly_added: Vec<Uuid>,
+}
+
+// 计算题材替换计划，供电影和剧集更新共同保留历史停用题材并识别新增关联。
+fn plan_replacement(
+    existing: &[genre::Model],
+    requested: Option<Vec<Uuid>>,
+) -> Option<GenreReplacementPlan> {
+    let mut requested = requested?;
+    let existing_ids = existing
+        .iter()
+        .map(|genre| genre.id)
+        .collect::<HashSet<_>>();
+    let newly_added = requested
+        .iter()
+        .copied()
+        .filter(|id| !existing_ids.contains(id))
+        .collect::<Vec<_>>();
+    for genre in existing.iter().filter(|genre| !genre.enabled) {
+        if !requested.contains(&genre.id) {
+            requested.push(genre.id);
+        }
+    }
+    Some(GenreReplacementPlan {
+        ids: requested,
+        newly_added,
+    })
+}
+
+/// 在内容更新事务中准备题材替换，供电影和剧集共享新增题材校验与停用题材保留规则。
+///
+/// `requested` 必须先完成 UUID 解析和去重；`existing` 必须在内容行锁定后通过同一事务读取，
+/// 返回的关联标识也必须在该事务提交前写入，才能保持题材停用与内容更新的原子顺序。
+pub async fn prepare_replacement(
+    tx: &DatabaseTransaction,
+    existing: &[genre::Model],
+    requested: Option<Vec<Uuid>>,
+) -> Result<Option<Vec<Uuid>>, GenreError> {
+    let Some(plan) = plan_replacement(existing, requested) else {
+        return Ok(None);
+    };
+    // 只校验本次新增的关联；历史停用题材允许继续保留，但不能重新添加到其他内容。
+    if !plan.newly_added.is_empty() {
+        ensure_associable(tx, &plan.newly_added).await?;
+    }
+    Ok(Some(plan.ids))
+}
+
 // 规范化并校验题材名称，供创建和重命名前调用。
 fn normalized_name(name: String) -> Result<String, GenreError> {
     let name = name.trim();
@@ -225,5 +276,47 @@ fn normalized_name(name: String) -> Result<String, GenreError> {
         Err(GenreError::Invalid)
     } else {
         Ok(name.to_owned())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_replacement;
+    use crate::entities::genre;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    // 构造真实题材模型，供题材替换计划测试覆盖启用状态和标识归类。
+    fn genre(id: Uuid, enabled: bool) -> genre::Model {
+        let now = Utc::now().fixed_offset();
+        genre::Model {
+            id,
+            name: id.to_string(),
+            sort_order: 1,
+            enabled,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    // 验证替换计划只校验新增题材，并保留未被请求显式选择的历史停用题材。
+    #[test]
+    fn replacement_plan_preserves_inactive_existing_genres_and_identifies_additions() {
+        let active_existing = Uuid::from_u128(1);
+        let inactive_existing = Uuid::from_u128(2);
+        let requested_new = Uuid::from_u128(3);
+        let existing = [
+            genre(active_existing, true),
+            genre(inactive_existing, false),
+        ];
+
+        let plan = plan_replacement(&existing, Some(vec![active_existing, requested_new]))
+            .expect("显式提交题材时应生成替换计划");
+
+        assert_eq!(plan.newly_added, vec![requested_new]);
+        assert_eq!(
+            plan.ids,
+            vec![active_existing, requested_new, inactive_existing]
+        );
     }
 }

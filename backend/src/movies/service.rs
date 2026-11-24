@@ -275,28 +275,8 @@ pub async fn update(
 
     let genre_ids = input.genre_ids.map(parse_unique_uuids).transpose()?;
     let existing_genres = repository::genres(&tx, id).await?;
-    let existing_ids = existing_genres
-        .iter()
-        .map(|genre| genre.id)
-        .collect::<HashSet<_>>();
-    let genre_ids = if let Some(mut requested) = genre_ids {
-        let newly_added = requested
-            .iter()
-            .copied()
-            .filter(|id| !existing_ids.contains(id))
-            .collect::<Vec<_>>();
-        if !newly_added.is_empty() {
-            genres::service::ensure_associable(&tx, &newly_added).await?;
-        }
-        for genre in existing_genres.iter().filter(|genre| !genre.enabled) {
-            if !requested.contains(&genre.id) {
-                requested.push(genre.id);
-            }
-        }
-        Some(requested)
-    } else {
-        None
-    };
+    // 电影与剧集共享同一题材替换规则，避免两处对新增校验和历史停用题材的处理发生漂移。
+    let genre_ids = genres::service::prepare_replacement(&tx, &existing_genres, genre_ids).await?;
     let updated = repository::persist(&tx, &model, input.version).await?;
     if let Some(ids) = genre_ids {
         repository::replace_genres(&tx, id, &ids).await?;
