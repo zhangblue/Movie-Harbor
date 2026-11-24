@@ -1,3 +1,4 @@
+import { assertEpisodeIdentity } from '../schemas/episode-identity.js';
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import type { z } from 'zod';
 import {
@@ -160,11 +161,9 @@ function readLifecycleResponse(input: LifecycleInput, response: unknown): Lifecy
   if (input.content_type === 'episode') {
     const { episode, series_id, series_version } = parseApi(apiLifecycleEpisode, response);
     // 单集封装现有必填 season_id，若响应包含 series_id，也必须与完整路由一致。
-    if (episode.id !== input.content_id || episode.season_id !== input.season_id
-      || (series_id !== undefined && series_id !== input.series_id)
-      || (episode.series_id !== undefined && episode.series_id !== input.series_id)) {
-      throw new MovieHarborClientError('invalid_response');
-    }
+    assertEpisodeIdentity({ episode, series_id }, {
+      episode_id: input.content_id, season_id: input.season_id, series_id: input.series_id,
+    });
     return { id: episode.id, version: episode.version, status: episode.status, series_version };
   }
 

@@ -1,8 +1,8 @@
 import type { McpServer } from '@modelcontextprotocol/server';
 import type { MovieHarborClient } from '../services/movie-harbor-client.js';
 import { MovieHarborClientError } from '../services/error-mapper.js';
-import { validatePoster, serializeIdentity } from '../services/media-inspector.js';
-import { inspectAllowedFile } from '../services/path-policy.js';
+import { validatePoster } from '../services/media-inspector.js';
+import { inspectUnchangedMediaFile } from '../services/media-file-identity.js';
 import { parseApi, writeAnnotations, toolResult, contentResult, durationSecondsFromMinutes } from '../schemas/common.js';
 import { stagePosterInput, stagePosterOutput, apiStagedPoster, createMovieInput, createMovieOutput, updateMovieInput, apiMovie } from '../schemas/content.js';
 
@@ -13,11 +13,7 @@ export async function stagePoster(input: unknown, dependencies: MovieToolDepende
   const { path, confirmed: _confirmed } = stagePosterInput.parse(input);
   // 本地格式检查通过后再次读取身份；文件变化时不上传，暂存 token 仅供后续显式创建使用。
   const checkedPoster = await validatePoster(path, dependencies.allowedRoots);
-  const file = await inspectAllowedFile(path, dependencies.allowedRoots);
-  const currentIdentity = serializeIdentity(file);
-  for (const field of ['dev', 'ino', 'size', 'mtime_ms'] as const) {
-    if (currentIdentity[field] !== checkedPoster.identity[field]) throw new MovieHarborClientError('file_changed');
-  }
+  const file = await inspectUnchangedMediaFile(path, dependencies.allowedRoots, checkedPoster.identity);
   const staged = parseApi(apiStagedPoster, await dependencies.client.upload('/api/admin/media/posters/stage', file, checkedPoster.mime_type));
   return toolResult(stagePosterOutput, { staged_poster_token: staged.token, format: staged.format, byte_size: staged.byte_size, expires_at: staged.expires_at,
     next_actions: ['create_movie', 'create_series'] }, '海报已暂存，请在有效期内显式创建内容。');

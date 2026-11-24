@@ -5,27 +5,38 @@ import { MovieHarborClientError } from '../services/error-mapper.js';
 import { normalizedName, parseApi, readOnlyAnnotations, toolResult, durationMinutesFromSeconds } from '../schemas/common.js';
 import { searchMoviesInput, searchSeriesInput, getSeriesStructureInput, searchMoviesOutput, searchSeriesOutput, getSeriesStructureOutput, apiMovie, apiSeries } from '../schemas/content.js';
 
+// 名称搜索候选必须含名称；各领域继续决定自己的输出字段和下一步操作。
+type NamedCandidate = { name: string };
+
+// 电影和剧集查询收到已验证列表后统一执行名称匹配、精确标记和歧义统计。
+function matchNamedCandidates<T extends NamedCandidate>(name: string, candidates: T[]) {
+  const normalized_name = normalizedName(name);
+  const matches = candidates
+    .filter(candidate => normalizedName(candidate.name).includes(normalized_name))
+    .map(candidate => ({ ...candidate, exact: normalizedName(candidate.name) === normalized_name }));
+  const exact_match_count = matches.filter(candidate => candidate.exact).length;
+  return { normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1 };
+}
+
 // 按名称查询电影候选并标记精确匹配。
 export async function searchMovies(input: unknown, client: MovieHarborClient) {
   const { name } = searchMoviesInput.parse(input);
   const candidates = parseApi(z.array(apiMovie), await client.json('GET', '/api/admin/movies'));
-  const normalized_name = normalizedName(name);
-  const matches = candidates.filter(movie => normalizedName(movie.name).includes(normalized_name)).map(movie => ({ id: movie.id, name: movie.name, year: movie.year, duration_minutes: durationMinutesFromSeconds(movie.duration_seconds),
-    status: movie.status, version: movie.version, is_private: movie.is_private, has_poster: movie.poster !== null, has_video: movie.video !== null, exact: normalizedName(movie.name) === normalized_name }));
-  const exact_match_count = matches.filter(match => match.exact).length;
-  return toolResult(searchMoviesOutput, { query: name, normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1,
+  const matched = matchNamedCandidates(name, candidates);
+  const matches = matched.matches.map(movie => ({ id: movie.id, name: movie.name, year: movie.year, duration_minutes: durationMinutesFromSeconds(movie.duration_seconds),
+    status: movie.status, version: movie.version, is_private: movie.is_private, has_poster: movie.poster !== null, has_video: movie.video !== null, exact: movie.exact }));
+  return toolResult(searchMoviesOutput, { query: name, ...matched, matches,
     next_actions: matches.length ? ['update_movie_metadata'] : ['create_movie'] }, matches.length ? `找到 ${matches.length} 个电影候选，请明确选择后再操作。` : '未找到电影候选，可显式创建电影草稿。');
 }
 // 按名称查询剧集候选并标记精确匹配。
 export async function searchSeries(input: unknown, client: MovieHarborClient) {
   const { name } = searchSeriesInput.parse(input);
   const candidates = parseApi(z.array(apiSeries), await client.json('GET', '/api/admin/series'));
-  const normalized_name = normalizedName(name);
-  const matches = candidates.filter(series => normalizedName(series.name).includes(normalized_name)).map(series => ({ id: series.id, name: series.name, year: series.year, status: series.status, version: series.version,
+  const matched = matchNamedCandidates(name, candidates);
+  const matches = matched.matches.map(series => ({ id: series.id, name: series.name, year: series.year, status: series.status, version: series.version,
     is_private: series.is_private, has_poster: series.poster !== null, season_count: series.seasons.length,
-    episode_count: series.seasons.reduce((count, season) => count + season.episodes.length, 0), exact: normalizedName(series.name) === normalized_name }));
-  const exact_match_count = matches.filter(match => match.exact).length;
-  return toolResult(searchSeriesOutput, { query: name, normalized_name, matches, exact_match_count, requires_selection: exact_match_count > 1,
+    episode_count: series.seasons.reduce((count, season) => count + season.episodes.length, 0), exact: series.exact }));
+  return toolResult(searchSeriesOutput, { query: name, ...matched, matches,
     next_actions: matches.length ? ['get_series_structure', 'update_series_metadata'] : ['create_series'] }, matches.length ? `找到 ${matches.length} 个剧集候选，请明确选择后再操作。` : '未找到剧集候选，可显式创建剧集草稿。');
 }
 // 读取指定剧集结构并给出后续操作。

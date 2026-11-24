@@ -7,9 +7,9 @@ import {
   setContentPosterOutput,
 } from '../schemas/admin-maintenance.js';
 import { parseApi, toolResult, destructiveAnnotations } from '../schemas/common.js';
-import { serializeIdentity, validatePoster } from '../services/media-inspector.js';
+import { validatePoster } from '../services/media-inspector.js';
 import { MovieHarborClientError, type MovieHarborClient } from '../services/movie-harbor-client.js';
-import { inspectAllowedFile } from '../services/path-policy.js';
+import { inspectUnchangedMediaFile } from '../services/media-file-identity.js';
 import { UploadFileChangedAfterSendError } from '../services/upload-stream.js';
 
 // 描述海报工具的管理 API 客户端和允许读取用户海报的目录。
@@ -55,11 +55,7 @@ class PosterWriteOutcomeError extends Error {
 async function checkedPoster(path: string, roots: string[]) {
   try {
     const poster = await validatePoster(path, roots);
-    const file = await inspectAllowedFile(path, roots);
-    const identity = serializeIdentity(file);
-    for (const field of ['dev', 'ino', 'size', 'mtime_ms'] as const) {
-      if (identity[field] !== poster.identity[field]) throw new MovieHarborClientError('file_changed');
-    }
+    const file = await inspectUnchangedMediaFile(path, roots, poster.identity);
     return { poster, file };
   } catch (error) {
     // 文件系统异常可能包含本机路径，以稳定错误替换原始诊断。

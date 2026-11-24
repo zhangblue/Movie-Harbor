@@ -1,3 +1,4 @@
+import { assertEpisodeIdentity } from '../schemas/episode-identity.js';
 import type { CallToolResult, McpServer } from '@modelcontextprotocol/server';
 import { isAbsolute, relative, sep } from 'node:path';
 import { z } from 'zod';
@@ -5,9 +6,9 @@ import { id, confirmed, parseApi, positiveInt, toolResult, version, writeAnnotat
 import { getSystemOverviewOutput } from '../schemas/admin-maintenance.js';
 import { apiEpisodeEnvelope, apiMovie } from '../schemas/content.js';
 import { deleteGeneratedFile } from '../services/generated-files.js';
-import { inspectVideo, serializeIdentity } from '../services/media-inspector.js';
+import { inspectVideo } from '../services/media-inspector.js';
 import { MovieHarborClientError, type MovieHarborClient } from '../services/movie-harbor-client.js';
-import { inspectAllowedFile } from '../services/path-policy.js';
+import { inspectUnchangedMediaFile } from '../services/media-file-identity.js';
 import { UploadFileChangedAfterSendError } from '../services/upload-stream.js';
 import type { LocalMediaDependencies } from './local-media.js';
 
@@ -50,11 +51,7 @@ async function checkedVideo(path: string, dependencies: UploadDependencies) {
   if (!inspected.compatibility.accepted || !['mp4', 'webm'].includes(inspected.container)) {
     throw new Error('视频格式不符合网站要求，请先调用 convert_video 并单独确认转换');
   }
-  const file = await inspectAllowedFile(path, roots);
-  const identity = serializeIdentity(file);
-  for (const field of ['dev', 'ino', 'size', 'mtime_ms'] as const) {
-    if (identity[field] !== inspected.identity[field]) throw new MovieHarborClientError('file_changed');
-  }
+  const file = await inspectUnchangedMediaFile(path, roots, inspected.identity);
   return { file, generated, mimeType: inspected.container === 'mp4' ? 'video/mp4' as const : 'video/webm' as const };
 }
 
@@ -178,9 +175,7 @@ export async function uploadEpisodeVideo(input: unknown, dependencies: UploadDep
   const detailPath = `/api/admin/series/${parsed.series_id}/seasons/${parsed.season_id}/episodes/${parsed.episode_id}`;
   const envelope = parseApi(apiEpisodeEnvelope, await dependencies.client.json('GET', detailPath));
   const episode = envelope.episode;
-  if (episode.id !== parsed.episode_id || episode.season_id !== parsed.season_id
-    || (envelope.series_id !== undefined && envelope.series_id !== parsed.series_id)
-    || (episode.series_id !== undefined && episode.series_id !== parsed.series_id)) throw new MovieHarborClientError('invalid_response');
+  assertEpisodeIdentity(envelope, parsed);
   assertDraftTarget(episode, parsed.version);
   if (!replace && episode.video) throw new Error('目标已有视频，请改用 replace_episode_video 并明确确认替换');
   if (replace && !episode.video) throw new Error('目标没有视频，请改用 upload_episode_video');

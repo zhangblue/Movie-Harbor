@@ -1,3 +1,4 @@
+import { assertEpisodeIdentity } from '../schemas/episode-identity.js';
 import type { McpServer } from '@modelcontextprotocol/server';
 import type { MovieHarborClient } from '../services/movie-harbor-client.js';
 import { MovieHarborClientError } from '../services/error-mapper.js';
@@ -51,9 +52,7 @@ export async function updateEpisodeMetadata(input: unknown, client: MovieHarborC
   // 在完整层级路径下按单集版本更新；响应层级必须一致，后续操作才能使用返回版本。
   const response = parseApi(apiEpisodeEnvelope, await client.json('PATCH', `/api/admin/series/${series_id}/seasons/${season_id}/episodes/${episode_id}`, patch));
   const episode = response.episode;
-  if (episode.id !== episode_id || episode.season_id !== season_id
-    || (response.series_id !== undefined && response.series_id !== series_id)
-    || (episode.series_id !== undefined && episode.series_id !== series_id)) throw new MovieHarborClientError('invalid_response');
+  assertEpisodeIdentity(response, { episode_id, season_id, series_id });
   return toolResult(episodeOutput, { id: episode.id, version: episode.version, status: episode.status, series_version: response.series_version,
     next_actions: episode.video ? ['replace_episode_video', 'transition_content_lifecycle'] : ['upload_episode_video'] }, '已更新单集元数据。');
 }
